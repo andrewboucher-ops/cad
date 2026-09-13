@@ -917,7 +917,13 @@ bus.on('ptt.granted', async ({ listeners }) => {
   el('#jaView').onclick = () => showJob(j);
   log(`NEW JOB ${j.reference} ${j.priority} — ${j.location}`);
 })
-.on('job.status_changed', (j) => { if (currentJob && j.id === currentJob.id) currentJob = j; })
+.on('job.status_changed', (j) => {
+  if (!currentJob || j.id !== currentJob.id) return;
+  currentJob = j.resources.some((r) => r.radio === radio.issi) ? j : null;
+})
+.on('job.stood_down', (j) => {
+  if (currentJob && j.id === currentJob.id) { currentJob = null; el('#alertHost').innerHTML = ''; log(`STOOD DOWN FROM JOB ${j.reference}`); }
+})
 .on('radio.ptt_started', (p) => {
   if (!radio || p.talkgroup !== radio.talkgroup) return;
   const mine = p.issi === radio.issi;

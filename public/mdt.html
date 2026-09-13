@@ -399,7 +399,18 @@ bus.on('mdt.attached', async (m) => {
   log(`NEW JOB ${j.reference} (${j.priority})`);
   showView('cad');
 })
-.on('job.status_changed', (j) => { if (job && j.id === job.id) { job = j; paintJob(); } })
+.on('job.status_changed', (j) => {
+  if (!job || j.id !== job.id) return;
+  const stillMine = j.resources.some((r) => r.mdt === mdt.mdt_code);
+  job = stillMine ? j : null;
+  if (job) localStorage.setItem('cccs.mdt.job', JSON.stringify(job)); else localStorage.removeItem('cccs.mdt.job');
+  paintJob();
+})
+.on('job.stood_down', (j) => {
+  if (!job || j.id !== job.id) return;
+  job = null; localStorage.removeItem('cccs.mdt.job'); paintJob();
+  log(`STOOD DOWN FROM JOB ${j.reference}`);
+})
 .on('job.acknowledged', ({ job: j }) => { if (job && j.id === job.id) { job = j; paintJob(); } })
 .on('message.received', (m) => { if (mdt && m.to_mdt_id === mdt.id) log(`MSG ${m.from_label}: ${m.body}`); })
 .on('error', (e) => log(`ERROR: ${e.message}`));

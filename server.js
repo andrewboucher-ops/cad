@@ -86,6 +86,14 @@ const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
 
 const RADIO_STATUSES = ['OFFLINE', 'AVAILABLE', 'BUSY', 'ON_TASK', 'EN_ROUTE', 'ON_SCENE', 'EMERGENCY', 'OUT_OF_SERVICE'];
 const JOB_STATES = ['CREATED', 'DISPATCHED', 'ACKNOWLEDGED', 'EN_ROUTE', 'ON_SCENE', 'TRANSPORTING', 'COMPLETED', 'CANCELLED'];
+// First time a job reaches each of these, stamp it — this is what "time
+// en route" / "time on scene" is computed from client-side, with no separate
+// tracking mechanism to keep in sync.
+const JOB_STATUS_TS_FIELD = { DISPATCHED: 'dispatched_at', ACKNOWLEDGED: 'acknowledged_at', EN_ROUTE: 'en_route_at', ON_SCENE: 'on_scene_at', TRANSPORTING: 'transporting_at', COMPLETED: 'completed_at', CANCELLED: 'cancelled_at' };
+function stampJobStatus(j, status) {
+  const field = JOB_STATUS_TS_FIELD[status];
+  if (field && !j[field]) j[field] = new Date().toISOString();
+}
 const PRIORITIES = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
 const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'RADIO_USER', 'MDT_USER'];
 
@@ -1284,6 +1292,7 @@ route('POST', '/api/jobs/:id/assign', CONTROL, ({ params, body }) => {
     }
   }
   j.status = 'DISPATCHED'; j.updated_at = new Date().toISOString();
+  stampJobStatus(j, 'DISPATCHED');
   const payload = publicJob(j);
   broadcast('job.dispatched', payload);
   broadcast('job.assigned_to_you', payload, { radioIds, mdtIds });
@@ -1304,6 +1313,7 @@ route('POST', '/api/jobs/:id/ack', ALL, ({ params, user, body }) => {
   if (!assignment) throw httpError(404, 'no assignment for this resource');
   assignment.acknowledged = true; assignment.acknowledged_at = new Date().toISOString();
   if (j.status === 'DISPATCHED') { j.status = 'ACKNOWLEDGED'; j.updated_at = assignment.acknowledged_at; }
+  stampJobStatus(j, 'ACKNOWLEDGED');
   const who = assignment.radio_id ? callsignOf(db.radios.find((r) => r.id === assignment.radio_id)) : (db.mdts.find((m) => m.id === assignment.mdt_id) || {}).mdt_code;
   broadcast('job.acknowledged', { job: publicJob(j), by: who });
   logEvent('job.acknowledged', `${who} ACKNOWLEDGED JOB ${j.reference}`, { job_id: j.id });
@@ -1321,6 +1331,7 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
       if (!mine) throw httpError(403, 'job not assigned to you');
     }
     j.status = s;
+    stampJobStatus(j, s);
     if (['COMPLETED', 'CANCELLED'].includes(s)) {
       for (const a of db.job_assignments.filter((x) => x.job_id === j.id)) {
         if (a.radio_id) { const r = db.radios.find((x) => x.id === a.radio_id); if (r) { r.job_id = null; if (r.connected && !r.emergency) setRadioStatus(r, 'AVAILABLE', 'job closed'); } }
@@ -1333,6 +1344,24 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   broadcast('job.status_changed', publicJob(j));
   logEvent('job.status_changed', `JOB ${j.reference} → ${j.status}`, { job_id: j.id });
   return publicJob(j);
+});
+route('POST', '/api/jobs/:id/stand-down', CONTROL, ({ params, body }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  const r = body.radio ? findRadio(body.radio) : null;
+  const m = body.mdt ? findMdt(body.mdt) : null;
+  if (!r && !m) throw httpError(400, 'radio or mdt required');
+  const a = db.job_assignments.find((x) => x.job_id === j.id && ((r && x.radio_id === r.id) || (m && x.mdt_id === m.id)));
+  if (!a) throw httpError(404, 'that resource is not assigned to this job');
+  db.job_assignments = db.job_assignments.filter((x) => x.id !== a.id);
+  const who = r ? callsignOf(r) : m.mdt_code;
+  if (r) { r.job_id = null; if (r.connected && !r.emergency) setRadioStatus(r, 'AVAILABLE', 'stood down'); }
+  if (m) { m.job_id = null; broadcast('mdt.status_changed', publicMdt(m)); }
+  j.updated_at = new Date().toISOString();
+  const payload = publicJob(j);
+  broadcast('job.status_changed', payload);
+  broadcast('job.stood_down', payload, { radioIds: r ? [r.id] : [], mdtIds: m ? [m.id] : [] });
+  logEvent('job.stood_down', `${who} STOOD DOWN FROM JOB ${j.reference}`, { job_id: j.id });
+  return payload;
 });
 
 // Emergency

@@ -140,7 +140,7 @@
   <button class="btn ok" id="btnPtt">Hold to transmit</button>
   <span class="tg-pill" id="floor"></span>
   <button class="btn danger" id="audioBlocked" hidden title="The browser blocked incoming audio from playing — click to enable it">🔇 Click to enable audio</button>
-  <span class="tg-pill" id="callBar" hidden style="display:inline-flex;align-items:center;gap:6px">
+  <span class="tg-pill" id="callBar" hidden style="align-items:center;gap:6px">
     📞 <span id="callBarNames"></span> <span id="callBarState" class="dim"></span>
     <button class="btn danger" id="callBarEnd" style="padding:0 8px;font-size:11px">End call</button>
   </span>
@@ -451,8 +451,9 @@ function paintCallBar() {
   const bar = el('#callBar');
   if (!bar) return;
   const live = [...state.calls.values()].filter((c) => !['ENDED', 'REJECTED'].includes(c.state)).pop();
-  if (!live) { bar.hidden = true; return; }
+  if (!live) { bar.hidden = true; bar.style.display = ''; return; }
   bar.hidden = false;
+  bar.style.display = 'inline-flex';
   el('#callBarNames').textContent = live.participants.map((p) => p.callsign || p.issi).join(', ') || `#${live.id}`;
   el('#callBarState').textContent = live.state === 'RINGING' ? 'ringing…' : 'connected';
   el('#callBarEnd').onclick = async () => { await api('POST', `/api/calls/${live.id}/end`); };
@@ -542,8 +543,25 @@ function openNewJobModal() {
 });
 }
 
+/* "12m" / "1h 04m" — good enough for a status timeline, no need for a
+ * date library over two units. */
+function fmtElapsed(fromIso, toIso) {
+  const ms = (toIso ? Date.parse(toIso) : Date.now()) - Date.parse(fromIso);
+  if (!(ms >= 0)) return '—';
+  const mins = Math.floor(ms / 60000);
+  return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
+}
+
 function jobModal(j) {
   if (!j) return;
+  const timeline = [
+    ['Dispatched', j.dispatched_at],
+    ['Acknowledged', j.acknowledged_at, j.dispatched_at],
+    ['En route', j.en_route_at, j.acknowledged_at || j.dispatched_at],
+    ['On scene', j.on_scene_at, j.en_route_at],
+    ['Transporting', j.transporting_at, j.on_scene_at],
+    ['Completed', j.completed_at, j.transporting_at || j.on_scene_at],
+  ].filter(([, at]) => at);
   modal(`Job ${j.reference}`, `
     <dl class="kv">
       <dt>Priority</dt><dd><span class="pri pri-${j.priority}">${j.priority}</span></dd>
@@ -553,9 +571,20 @@ function jobModal(j) {
       ${j.what3words ? `<dt>What3Words</dt><dd class="mono">///${esc(j.what3words)}</dd>` : ''}
       <dt>Caller</dt><dd>${esc(j.caller || '—')}</dd>
       <dt>Detail</dt><dd>${esc(j.description || '—')}</dd>
-      <dt>Resources</dt><dd>${j.resources.map((r) => `${esc(r.callsign || r.radio || r.mdt)}${r.acknowledged ? ' ✓' : ''}`).join('<br>') || '—'}</dd>
+      <dt>Resources</dt><dd>${j.resources.length ? j.resources.map((r) => `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+          <span style="flex:1">${esc(r.callsign || r.radio || r.mdt)}${r.acknowledged ? ' ✓' : ''}</span>
+          <button class="btn danger" style="padding:0 6px;font-size:11px" data-standdown="${esc(r.radio ? 'r:' + r.radio : 'm:' + r.mdt)}">Stand down</button>
+        </div>`).join('') : '—'}</dd>
+      ${timeline.length ? `<dt>Timeline</dt><dd>${timeline.map(([label, at, since]) =>
+        `${label} <span class="dim">${new Date(at).toLocaleTimeString()}${since ? ` (+${fmtElapsed(since, at)})` : ''}</span>`
+      ).join('<br>')}${!['COMPLETED', 'CANCELLED'].includes(j.status) && timeline.length ? `<br>${esc(j.status.replace('_', ' '))} for <span class="dim" id="jElapsed">${fmtElapsed(timeline[timeline.length - 1][1])}</span>` : ''}</dd>` : ''}
     </dl>
-    <label for="jAdd">Assign more resources</label>
+    <label for="jNotes">Notes — visible to every assigned call sign</label>
+    <textarea id="jNotes" rows="3" style="width:100%;resize:vertical">${esc(j.notes || '')}</textarea>
+    <div class="btn-row" style="margin-top:6px"><button class="btn" id="jSaveNotes">Save notes</button></div>
+
+    <label for="jAdd" style="margin-top:12px;display:block">Assign more resources</label>
     <select id="jAdd" multiple size="4">${state.radios.map((r) => `<option value="${r.callsign || r.issi}">${esc(r.callsign || r.issi)}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
     <div class="btn-row" style="margin-top:12px">
       <button class="btn primary" id="jAssign">Dispatch</button>
@@ -569,6 +598,16 @@ function jobModal(j) {
     };
     el('#jDone').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }); closeModal(); };
     el('#jCancel').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }); closeModal(); };
+    el('#jSaveNotes').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }); closeModal(); };
+    CCCS.els('[data-standdown]').forEach((b) => (b.onclick = async () => {
+      const [kind, id] = b.dataset.standdown.split(':');
+      if (!confirm(`Stand down ${id} from this job?`)) return;
+      await api('POST', `/api/jobs/${j.id}/stand-down`, kind === 'r' ? { radio: id } : { mdt: id });
+      closeModal();
+    }));
+    if (el('#jElapsed')) {
+      const tick = setInterval(() => { const n = el('#jElapsed'); if (!n) return clearInterval(tick); n.textContent = fmtElapsed(timeline[timeline.length - 1][1]); }, 30000);
+    }
   });
 }
 
