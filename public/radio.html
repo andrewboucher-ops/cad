@@ -94,7 +94,7 @@
     <button class="btn" id="bRpt">Rpt</button>
     <button class="btn" id="bText">Text</button>
     <button class="btn" id="bChan">Chan</button>
-    <button class="btn" id="bAvl">AVL</button>
+    <button class="btn" id="bAvl">AVL<div id="bAvlStatus" style="font-size:10px;font-weight:500;letter-spacing:.03em;opacity:.85;margin-top:2px"></div></button>
   </div>
 
   <div class="r-channel" id="tg">no talkgroup</div>
@@ -159,6 +159,7 @@ function paint() {
   const avl = el('#bAvl');
   avl.style.background = AVL_COLOUR[radio.status] || '';
   avl.classList.toggle('pulsing', !['OFFLINE', 'OUT_OF_SERVICE'].includes(radio.status));
+  el('#bAvlStatus').textContent = radio.emergency ? 'EMERGENCY' : (radio.status || '').replace('_', ' ');
 }
 
 function modal(title, html, onMount) {
