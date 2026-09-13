@@ -6,10 +6,10 @@ name: Android APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:        # lets you build on demand from the Actions tab
 
 jobs:
