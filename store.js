@@ -128,9 +128,20 @@ function createStore(db, seq, opts = {}) {
       for (const r of db.radios) { r.connected = false; if (r.status !== 'OUT_OF_SERVICE') r.status = 'OFFLINE'; }
       for (const m of db.mdts) { m.connected = false; m.status = 'OFFLINE'; }
       for (const t of db.talkgroups) { t.floor_holder_radio_id = null; t.floor_console_user_id = null; t.floor_since = null; }
-      // Calls cannot survive a restart either; close them out honestly.
+      // Calls cannot survive a restart either; close them out honestly. This
+      // must also clear their participants — a radio's "busy" check looks at
+      // communication_participants, not at the call record, so leaving a
+      // RINGING/CONNECTED participant behind locks that radio out of every
+      // future call until someone notices and fixes the row by hand.
+      const endedNow = new Set();
       for (const c of db.communications) {
-        if (c.state !== 'ENDED') { c.state = 'ENDED'; c.end_reason = 'SERVER_RESTART'; c.ended_at = new Date().toISOString(); }
+        if (c.state !== 'ENDED') {
+          c.state = 'ENDED'; c.end_reason = 'SERVER_RESTART'; c.ended_at = new Date().toISOString();
+          endedNow.add(c.id);
+        }
+      }
+      for (const p of db.communication_participants) {
+        if (endedNow.has(p.communication_id) && p.state !== 'REJECTED') p.state = 'ENDED';
       }
     }
     return restored;
