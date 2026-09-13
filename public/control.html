@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CCCS — control room</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Control">
+<meta name="mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
@@ -113,6 +118,7 @@
   <span class="link-net" id="net">link down</span>
   <span class="spacer"></span>
   <span class="dim" id="who"></span>
+  <button class="btn" id="btnNotify" title="Get emergency and job alerts on this device even when it's in the background" style="padding:2px 8px;font-size:11px">🔔 Notifications</button>
   <button class="btn" id="resetLayout" title="Restore the default panel arrangement" style="padding:2px 8px;font-size:11px">Reset layout</button>
   <span class="clock" id="clock">--:--:--</span>
   <button class="btn" id="signout">Sign out</button>
@@ -765,6 +771,32 @@ el('#resetLayout').onclick = () => {
   if (!confirm('Restore the default panel arrangement? Any custom sizing or rearranging you’ve done will be lost.')) return;
   localStorage.removeItem('cccs.layout');
   location.reload();
+};
+
+el('#btnNotify').onclick = () => {
+  modal('Notifications', `
+    <p class="dim">Get an alert on this device for emergencies and welfare alarms even when this tab is in the background. On iPhone this only works after adding this page to your Home Screen (Share → Add to Home Screen) — a plain Safari tab can't receive it while backgrounded.</p>
+    <div class="btn-row">
+      <button class="btn primary" id="pushEnable">Enable notifications</button>
+      <button class="btn" id="pushDisable" hidden>Turn off</button>
+    </div>
+    <p class="dim" id="pushStatus" style="font-size:12px"></p>`, async () => {
+    async function paint() {
+      const s = await CCCS.push.status();
+      const enableBtn = el('#pushEnable'), disableBtn = el('#pushDisable'), status = el('#pushStatus');
+      if (s === 'unsupported') { status.textContent = 'Not supported in this browser.'; enableBtn.hidden = true; disableBtn.hidden = true; return; }
+      if (s === 'denied') { status.textContent = 'Blocked — allow notifications for this site in your phone/browser settings.'; enableBtn.hidden = true; disableBtn.hidden = true; return; }
+      enableBtn.hidden = s === 'subscribed';
+      disableBtn.hidden = s !== 'subscribed';
+      status.textContent = s === 'subscribed' ? 'Notifications are on.' : '';
+    }
+    paint();
+    el('#pushEnable').onclick = async () => {
+      try { await CCCS.push.enable(); } catch (e) { el('#pushStatus').textContent = e.message; }
+      paint();
+    };
+    el('#pushDisable').onclick = async () => { await CCCS.push.disable(); paint(); };
+  });
 };
 }
 

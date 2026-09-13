@@ -28,6 +28,8 @@ const MS_CLIENT_SECRET = process.env.MS_CLIENT_SECRET || '';
 const MS_REDIRECT_URI = process.env.MS_REDIRECT_URI || '';
 const MS_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && MS_REDIRECT_URI);
 const { verifyMicrosoftIdToken } = require('./msauth.js');
+const webpush = require('./webpush.js');
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@echeloncic.com';
 
 let SECRET = process.env.AUTH_SECRET;
 if (!SECRET) {
@@ -77,6 +79,7 @@ const db = {
   talkgroups: [], talkgroup_members: [], jobs: [], job_assignments: [],
   communications: [], communication_participants: [], messages: [], call_requests: [],
   locations: [], radio_status_history: [], emergency_events: [], audit_logs: [],
+  push_subscriptions: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -88,6 +91,23 @@ const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'RADIO_USER', 'MDT_US
 
 const { createStore } = require('./store.js');
 const store = createStore(db, seq);
+webpush.init(store, VAPID_SUBJECT);
+
+/** Fire-and-forget push to a set of users' subscribed devices. Never throws —
+ * a push failing must not break the REST call or WS broadcast it rides along
+ * with. A 404/410 means the browser dropped the subscription; stop using it. */
+function pushToUsers(userIds, payload) {
+  if (!userIds.length) return;
+  const subs = db.push_subscriptions.filter((s) => userIds.includes(s.user_id));
+  for (const s of subs) {
+    webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload)
+      .then((r) => { if (r.expired) db.push_subscriptions = db.push_subscriptions.filter((x) => x.id !== s.id); })
+      .catch((e) => console.warn('[webpush] send failed:', e.message));
+  }
+}
+function pushToRoles(roles, payload) {
+  pushToUsers(db.users.filter((u) => roles.includes(u.role)).map((u) => u.id), payload);
+}
 
 const findRadio = (idOrIssi) =>
   db.radios.find((r) => r.id === Number(idOrIssi) || r.issi === String(idOrIssi)) || null;
@@ -884,6 +904,23 @@ route('PUT', '/api/me/settings', ALL, ({ user, body }) => {
 
 route('GET', '/api/me', ALL, ({ user }) => publicUser(user));
 
+// Web Push — lets a phone with the console added to its home screen get
+// emergency, call and job alerts while it isn't open. See webpush.js.
+route('GET', '/api/push/vapid-public-key', ALL, () => ({ key: webpush.getPublicKeyBase64Url() }));
+route('POST', '/api/push/subscribe', ALL, ({ body, user }) => {
+  const sub = body.subscription || body;
+  const { endpoint, keys } = sub;
+  if (!endpoint || !keys || !keys.p256dh || !keys.auth) throw httpError(400, 'invalid push subscription');
+  const existing = db.push_subscriptions.find((s) => s.endpoint === endpoint);
+  if (existing) { existing.user_id = user.id; existing.p256dh = keys.p256dh; existing.auth = keys.auth; }
+  else db.push_subscriptions.push({ id: nextId('push_subscriptions'), user_id: user.id, endpoint, p256dh: keys.p256dh, auth: keys.auth, created_at: new Date().toISOString() });
+  return { ok: true };
+});
+route('DELETE', '/api/push/subscribe', ALL, ({ body, user }) => {
+  db.push_subscriptions = db.push_subscriptions.filter((s) => !(s.endpoint === body.endpoint && s.user_id === user.id));
+  return { ok: true };
+});
+
 // Radios
 route('GET', '/api/radios', ALL, () => db.radios.map(publicRadio));
 route('GET', '/api/radios/:id', ALL, ({ params }) => {
@@ -1104,6 +1141,8 @@ function startCall(kind, fromLabel, fromRadio, targets, initiatorUser) {
   for (const t of targets) db.communication_participants.push({ id: nextId('communication_participants'), communication_id: call.id, radio_id: t.id, role: 'CALLEE', state: 'RINGING' });
   const targetIds = targets.map((t) => t.id);
   broadcast('call.incoming', publicCall(call), { radioIds: targetIds });
+  pushToUsers(db.users.filter((u) => u.radio_id && targetIds.includes(u.radio_id)).map((u) => u.id),
+    { title: 'Incoming call', body: `${fromLabel || 'Control'} is calling`, url: '/radio.html', tag: 'cccs-call' });
   // Calling the officer answers whatever they were asking for.
   for (const t of targets) {
     const pending = db.call_requests.find((r) => r.radio_id === t.id && r.state === 'PENDING');
@@ -1228,6 +1267,8 @@ route('POST', '/api/jobs/:id/assign', CONTROL, ({ params, body }) => {
   const payload = publicJob(j);
   broadcast('job.dispatched', payload);
   broadcast('job.assigned_to_you', payload, { radioIds, mdtIds });
+  pushToUsers(db.users.filter((u) => (u.radio_id && radioIds.includes(u.radio_id)) || (u.mdt_id && mdtIds.includes(u.mdt_id))).map((u) => u.id),
+    { title: `Job ${j.reference}`, body: `${j.priority} — ${j.location}`, url: '/radio.html', tag: 'cccs-job' });
   logEvent('job.dispatched', `JOB ${j.reference} DISPATCHED → ${payload.resources.map((r) => r.callsign || r.radio || r.mdt).join(', ')}`, { job_id: j.id });
   return payload;
 });
@@ -1285,6 +1326,7 @@ route('POST', '/api/emergency', ALL, ({ body, user }) => {
   const ev = { id: nextId('emergency_events'), kind: 'EMERGENCY', radio_id: radio.id, issi: radio.issi, callsign: callsignOf(radio), lat: radio.lat, lon: radio.lon, state: 'ACTIVE', activated_at: new Date().toISOString(), acknowledged_at: null, acknowledged_by: null, resolved_at: null };
   db.emergency_events.push(ev);
   broadcast('emergency.activated', ev);
+  pushToRoles(CONTROL, { title: 'EMERGENCY', body: `${ev.callsign} (${ev.issi})`, url: '/control.html', tag: 'cccs-emergency' });
   store.flushNow();
   logEvent('emergency.activated', `!!! EMERGENCY — ${ev.callsign} (${ev.issi})`, { emergency_id: ev.id, radio_id: radio.id });
   return { __status: 201, __body: ev };
@@ -1630,6 +1672,7 @@ function welfareTick() {
       db.emergency_events.push(ev);
       broadcast('welfare.overdue', ev);
       broadcast('emergency.activated', ev);
+      pushToRoles(CONTROL, { title: 'Welfare alarm', body: `${ev.callsign} (${ev.issi}) — no check-in`, url: '/control.html', tag: 'cccs-emergency' });
       logEvent('welfare.overdue', `!!! WELFARE OVERDUE — ${ev.callsign} (${ev.issi}) NO CHECK-IN`, { emergency_id: ev.id, radio_id: radio.id });
       store.flushNow();
     } else if (!radio.welfare_warned && due - now <= WELFARE_WARN_S * 1000) {

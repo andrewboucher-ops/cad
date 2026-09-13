@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CCCS — radio terminal</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Radio">
+<meta name="mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
@@ -588,6 +593,15 @@ function openSettings() {
       <button class="btn" id="qFlush">Retry now</button>
       <button class="btn danger" id="qClear">Discard queue</button>
     </div>
+
+    <label style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px;display:block">Notifications</label>
+    <p class="dim" style="font-size:12px">Get call and job alerts on this device even when it's locked or the app isn't open. On iPhone this only works after adding the console to your Home Screen (Share → Add to Home Screen) — a plain Safari tab can't receive it.</p>
+    <div class="btn-row">
+      <button class="btn primary" id="pushEnable">Enable notifications</button>
+      <button class="btn" id="pushDisable" hidden>Turn off</button>
+    </div>
+    <p class="dim" id="pushStatus" style="font-size:12px"></p>
+
     <div class="btn-row" style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
       <button class="btn danger" id="stSignOut">Sign out</button>
     </div>`, () => {
@@ -640,6 +654,22 @@ function openSettings() {
     el('#actHold').onchange = () => { keys.setActionHold(Number(el('#actHold').value)); pushBindings(); };
     el('#qFlush').onclick = async () => { await CCCS.outbox.flush(); paintQueue(); };
     el('#qClear').onclick = () => { if (confirm('Discard everything waiting to send? It will not reach control.')) { CCCS.outbox.clear(); paintQueue(); } };
+
+    async function paintPush() {
+      const s = await CCCS.push.status();
+      const enableBtn = el('#pushEnable'), disableBtn = el('#pushDisable'), status = el('#pushStatus');
+      if (s === 'unsupported') { status.textContent = 'Not supported in this browser.'; enableBtn.hidden = true; disableBtn.hidden = true; return; }
+      if (s === 'denied') { status.textContent = 'Blocked — allow notifications for this site in your phone/browser settings.'; enableBtn.hidden = true; disableBtn.hidden = true; return; }
+      enableBtn.hidden = s === 'subscribed';
+      disableBtn.hidden = s !== 'subscribed';
+      status.textContent = s === 'subscribed' ? 'Notifications are on.' : '';
+    }
+    paintPush();
+    el('#pushEnable').onclick = async () => {
+      try { await CCCS.push.enable(); } catch (e) { el('#pushStatus').textContent = e.message; }
+      paintPush();
+    };
+    el('#pushDisable').onclick = async () => { await CCCS.push.disable(); paintPush(); };
   });
 }
 

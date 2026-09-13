@@ -33,6 +33,7 @@ const TABLES = [
   'talkgroups', 'talkgroup_members', 'jobs', 'job_assignments',
   'communications', 'communication_participants', 'messages', 'call_requests',
   'locations', 'radio_status_history', 'emergency_events', 'audit_logs',
+  'push_subscriptions',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */
@@ -44,7 +45,7 @@ function createStore(db, seq, opts = {}) {
 
   if (!enabled) {
     if (!DatabaseSync) console.warn('[store] node:sqlite unavailable — running in memory only, state is lost on restart');
-    return { load: () => false, flushNow: () => {}, close: () => {}, enabled: false, file: null };
+    return { load: () => false, flushNow: () => {}, close: () => {}, enabled: false, file: null, getMeta: () => null, setMeta: () => {} };
   }
 
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -72,7 +73,7 @@ function createStore(db, seq, opts = {}) {
   const putCounter = sql.prepare('INSERT INTO counters(name,value) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value');
   const allCounters = sql.prepare('SELECT name, value FROM counters');
   const putMeta = sql.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
-  const getMeta = sql.prepare('SELECT value FROM meta WHERE key = ?');
+  const getMetaStmt = sql.prepare('SELECT value FROM meta WHERE key = ?');
 
   const lastWritten = new Map();
   let timer = null;
@@ -102,7 +103,7 @@ function createStore(db, seq, opts = {}) {
 
   /** @returns true if existing state was restored (so the caller should skip seeding). */
   function load() {
-    const stamp = getMeta.get('schema_version');
+    const stamp = getMetaStmt.get('schema_version');
     if (!stamp) putMeta.run('schema_version', '1');
 
     let restored = false;
@@ -149,11 +150,22 @@ function createStore(db, seq, opts = {}) {
     try { sql.close(); } catch {}
   }
 
+  /** Small durable key/value slots for things that aren't a row collection —
+   * the VAPID push keypair, for one, which must survive a restart or every
+   * push subscription taken out before the restart silently stops working. */
+  function getMeta(key) {
+    const row = getMetaStmt.get(key);
+    return row ? row.value : null;
+  }
+  function setMeta(key, value) {
+    putMeta.run(key, value);
+  }
+
   start();
   process.once('SIGINT', () => { close(); process.exit(0); });
   process.once('SIGTERM', () => { close(); process.exit(0); });
 
-  return { load, flushNow, close, enabled: true, file };
+  return { load, flushNow, close, enabled: true, file, getMeta, setMeta };
 }
 
 module.exports = { createStore, TABLES, CAPS };

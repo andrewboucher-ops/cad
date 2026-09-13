@@ -601,5 +601,46 @@ const CCCS = (() => {
     };
   }
 
-  return { api, send, outbox, keybinds, login, getSession, setSession, clearSession, bus, audio, makeMap, hhmmss, el, els, esc, requireAuth };
+  /* ---- Web Push -----------------------------------------------------------
+     Lets a phone that added the console to its home screen get emergency,
+     call and job alerts while it isn't open — no App Store, no native app.
+     iOS only allows this for an *installed* (home-screen) PWA, not a bare
+     Safari tab; other platforms allow it either way. */
+  function urlBase64ToUint8Array(base64url) {
+    const raw = atob(base64url.replace(/-/g, '+').replace(/_/g, '/'));
+    return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+  }
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && typeof Notification !== 'undefined';
+  const push = {
+    isSupported: pushSupported,
+    async status() {
+      if (!pushSupported()) return 'unsupported';
+      if (Notification.permission === 'denied') return 'denied';
+      const reg = await navigator.serviceWorker.getRegistration('/sw.js');
+      const sub = reg && (await reg.pushManager.getSubscription());
+      return sub ? 'subscribed' : 'available';
+    },
+    async enable() {
+      if (!pushSupported()) throw new Error('Push is not supported in this browser');
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') throw new Error('Notification permission was not granted');
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+      const { key } = await api('GET', '/api/push/vapid-public-key');
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key) });
+      await api('POST', '/api/push/subscribe', { subscription: sub.toJSON() });
+      return sub;
+    },
+    async disable() {
+      if (!pushSupported()) return;
+      const reg = await navigator.serviceWorker.getRegistration('/sw.js');
+      const sub = reg && (await reg.pushManager.getSubscription());
+      if (!sub) return;
+      await api('DELETE', '/api/push/subscribe', { endpoint: sub.endpoint });
+      await sub.unsubscribe();
+    },
+  };
+
+  return { api, send, outbox, keybinds, login, getSession, setSession, clearSession, bus, audio, makeMap, push, hhmmss, el, els, esc, requireAuth };
 })();
