@@ -1,0 +1,498 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CCCS \u2014 Critical Communications, Dispatch & Control-Room System",
+    "version": "0.1.0",
+    "description": "Commercial security dispatch and radio platform. Telephony runs against a simulated PBX driver unless PBX_MODE=asterisk."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4000"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/api/auth/login": {
+      "post": {
+        "summary": "Sign in and receive a bearer token",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "token + user"
+          },
+          "401": {
+            "description": "invalid credentials"
+          }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "summary": "Current user",
+        "responses": {
+          "200": {
+            "description": "user"
+          }
+        }
+      }
+    },
+    "/api/radios": {
+      "get": {
+        "summary": "List radios",
+        "responses": {
+          "200": {
+            "description": "radios"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a radio (SYSTEM_ADMIN). ISSI is unique.",
+        "responses": {
+          "201": {
+            "description": "created"
+          },
+          "409": {
+            "description": "ISSI already exists"
+          }
+        }
+      }
+    },
+    "/api/radios/{id}": {
+      "get": {
+        "summary": "Radio by id or ISSI",
+        "responses": {
+          "200": {
+            "description": "radio"
+          },
+          "404": {
+            "description": "not found"
+          }
+        }
+      }
+    },
+    "/api/radios/{id}/status": {
+      "post": {
+        "summary": "Set operational status",
+        "responses": {
+          "200": {
+            "description": "radio"
+          }
+        }
+      }
+    },
+    "/api/radios/{id}/location": {
+      "post": {
+        "summary": "Push a GPS fix",
+        "responses": {
+          "200": {
+            "description": "radio"
+          }
+        }
+      }
+    },
+    "/api/mdts": {
+      "get": {
+        "summary": "List MDTs",
+        "responses": {
+          "200": {
+            "description": "mdts"
+          }
+        }
+      }
+    },
+    "/api/callsigns": {
+      "get": {
+        "summary": "List call signs with radios, MDTs, crew",
+        "responses": {
+          "200": {
+            "description": "call signs"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a call sign",
+        "responses": {
+          "201": {
+            "description": "created"
+          }
+        }
+      }
+    },
+    "/api/callsigns/{id}/assign": {
+      "post": {
+        "summary": "Assign a radio and/or MDT to a call sign",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove a radio and/or MDT from a call sign",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/talkgroups": {
+      "get": {
+        "summary": "List talkgroups, membership and current floor holder",
+        "responses": {
+          "200": {
+            "description": "talkgroups"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a talkgroup",
+        "responses": {
+          "201": {
+            "description": "created"
+          }
+        }
+      }
+    },
+    "/api/talkgroups/{id}": {
+      "patch": {
+        "summary": "Rename or describe a talkgroup",
+        "responses": {
+          "200": {
+            "description": "talkgroup"
+          }
+        }
+      }
+    },
+    "/api/talkgroups/{id}/members": {
+      "post": {
+        "summary": "Affiliate a radio to a talkgroup",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove a radio from a talkgroup",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/calls/private": {
+      "post": {
+        "summary": "Start a private call to a radio/ISSI",
+        "responses": {
+          "201": {
+            "description": "call"
+          },
+          "409": {
+            "description": "busy or offline"
+          }
+        }
+      }
+    },
+    "/api/calls/group": {
+      "post": {
+        "summary": "Start a group call to a talkgroup or list of resources",
+        "responses": {
+          "201": {
+            "description": "call"
+          }
+        }
+      }
+    },
+    "/api/calls/{id}/accept": {
+      "post": {
+        "summary": "Answer a call",
+        "responses": {
+          "200": {
+            "description": "call"
+          }
+        }
+      }
+    },
+    "/api/calls/{id}/reject": {
+      "post": {
+        "summary": "Decline a call",
+        "responses": {
+          "200": {
+            "description": "call"
+          }
+        }
+      }
+    },
+    "/api/calls/{id}/end": {
+      "post": {
+        "summary": "Clear a call",
+        "responses": {
+          "200": {
+            "description": "call"
+          }
+        }
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "summary": "List jobs",
+        "responses": {
+          "200": {
+            "description": "jobs"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a job",
+        "responses": {
+          "201": {
+            "description": "created"
+          }
+        }
+      }
+    },
+    "/api/jobs/{id}": {
+      "patch": {
+        "summary": "Update job status or notes",
+        "responses": {
+          "200": {
+            "description": "job"
+          }
+        }
+      }
+    },
+    "/api/jobs/{id}/assign": {
+      "post": {
+        "summary": "Dispatch a job to call signs, radios or MDTs",
+        "responses": {
+          "200": {
+            "description": "job"
+          }
+        }
+      }
+    },
+    "/api/jobs/{id}/ack": {
+      "post": {
+        "summary": "Acknowledge a dispatched job",
+        "responses": {
+          "200": {
+            "description": "job"
+          }
+        }
+      }
+    },
+    "/api/emergency": {
+      "get": {
+        "summary": "List emergency events",
+        "responses": {
+          "200": {
+            "description": "events"
+          }
+        }
+      },
+      "post": {
+        "summary": "Activate a radio emergency",
+        "responses": {
+          "201": {
+            "description": "event"
+          }
+        }
+      }
+    },
+    "/api/emergency/{id}/ack": {
+      "post": {
+        "summary": "Acknowledge an emergency",
+        "responses": {
+          "200": {
+            "description": "event"
+          }
+        }
+      }
+    },
+    "/api/emergency/{id}/resolve": {
+      "post": {
+        "summary": "Reset an emergency",
+        "responses": {
+          "200": {
+            "description": "event"
+          }
+        }
+      }
+    },
+    "/api/messages": {
+      "get": {
+        "summary": "List messages visible to the caller",
+        "responses": {
+          "200": {
+            "description": "messages"
+          }
+        }
+      },
+      "post": {
+        "summary": "Send a text message",
+        "responses": {
+          "201": {
+            "description": "message"
+          }
+        }
+      }
+    },
+    "/api/messages/{id}/read": {
+      "post": {
+        "summary": "Mark a message read",
+        "responses": {
+          "200": {
+            "description": "message"
+          }
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "summary": "Audit/event timeline with type, text and date filters",
+        "responses": {
+          "200": {
+            "description": "events"
+          }
+        }
+      }
+    },
+    "/api/state": {
+      "get": {
+        "summary": "Full snapshot for console bootstrap",
+        "responses": {
+          "200": {
+            "description": "state"
+          }
+        }
+      }
+    },
+    "/api/users": {
+      "get": {
+        "summary": "List users (SYSTEM_ADMIN)",
+        "responses": {
+          "200": {
+            "description": "users"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a user (SYSTEM_ADMIN)",
+        "responses": {
+          "201": {
+            "description": "created"
+          }
+        }
+      }
+    },
+    "/api/radios/{id}/welfare": {
+      "post": {
+        "summary": "Start or reset a lone-worker welfare timer",
+        "responses": {
+          "200": {
+            "description": "radio"
+          },
+          "400": {
+            "description": "interval out of range"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Cancel a welfare timer",
+        "responses": {
+          "200": {
+            "description": "radio"
+          },
+          "409": {
+            "description": "no timer running"
+          }
+        }
+      }
+    },
+    "/api/radios/{id}/welfare/check": {
+      "post": {
+        "summary": "Check in against a running welfare timer",
+        "responses": {
+          "200": {
+            "description": "radio"
+          }
+        }
+      }
+    },
+    "/api/sites": {
+      "get": {
+        "summary": "List sites under contract",
+        "responses": {
+          "200": {
+            "description": "sites"
+          }
+        }
+      },
+      "post": {
+        "summary": "Add a site",
+        "responses": {
+          "201": {
+            "description": "created"
+          },
+          "409": {
+            "description": "site exists"
+          }
+        }
+      }
+    },
+    "/api/calls/pstn": {
+      "post": {
+        "summary": "Dial an outside number through the PBX (digits must start with the outside-line prefix)",
+        "responses": {
+          "201": {
+            "description": "call"
+          },
+          "400": {
+            "description": "bad dialled string"
+          },
+          "502": {
+            "description": "PBX rejected the call"
+          }
+        }
+      }
+    },
+    "/api/pbx/inbound": {
+      "post": {
+        "summary": "Inbound DDI from the PBX dialplan; authenticated with X-PBX-Secret",
+        "security": [],
+        "responses": {
+          "201": {
+            "description": "call"
+          },
+          "401": {
+            "description": "bad secret"
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "summary": "Client bootstrap: ICE servers, outside-line prefix, telephony driver",
+        "responses": {
+          "200": {
+            "description": "config"
+          }
+        }
+      }
+    }
+  }
+}

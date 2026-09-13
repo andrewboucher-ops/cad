@@ -1,0 +1,41 @@
+{
+  "_comment": "Copy to seed.json and edit. Used on first boot only — once the database exists it is ignored, so this cannot overwrite live data. Delete data/cccs.db to start again.",
+
+  "sites": [
+    { "name": "Meridian Business Park", "address": "Unit 4, Meridian Way", "lat": 51.5290, "lon": -0.0870, "keyholder": "J. Whitlock 07700 900412" },
+    { "name": "Carlton Retail Centre", "address": "18 Carlton Road", "lat": 51.4930, "lon": -0.1620, "keyholder": "Duty manager 07700 900188" }
+  ],
+
+  "vehicles": [
+    { "registration": "VAN-101", "type": "Patrol van" },
+    { "registration": "CAR-201", "type": "Response car" }
+  ],
+
+  "talkgroups": [
+    { "name": "PATROL 1", "description": "Mobile patrol, north sector" },
+    { "name": "CONTROL", "description": "Control room net" }
+  ],
+
+  "callsigns": [
+    {
+      "name": "P101",
+      "description": "Mobile patrol, north",
+      "vehicle": "VAN-101",
+      "personnel": ["Dan Whitfield", "Sam Oduya"],
+      "radios": [
+        { "issi": "234100001", "alias": "P101 HANDHELD", "type": "HANDHELD", "talkgroup": "PATROL 1", "pbx_extension": "9001" }
+      ],
+      "mdts": [
+        { "code": "MDT-001", "serial": "SN-MDT-0001" }
+      ]
+    }
+  ],
+
+  "users": [
+    { "username": "controller", "password": "CHANGE-ME", "role": "DISPATCHER", "display_name": "Control Room", "email": "controller@yourcompany.co.uk" },
+    { "username": "admin", "password": "CHANGE-ME", "role": "SYSTEM_ADMIN", "display_name": "System Admin", "email": "admin@yourcompany.co.uk" },
+    { "username": "dwhitfield", "password": "CHANGE-ME", "role": "RADIO_USER", "display_name": "Dan Whitfield", "radio": "234100001", "email": "dan.whitfield@yourcompany.co.uk" },
+    { "username": "mdt001", "password": "CHANGE-ME", "role": "MDT_USER", "display_name": "P101 Terminal", "mdt": "MDT-001" }
+  ],
+  "_email_comment": "email is optional. If set, signing in with that Microsoft 365 account (matched by email/UPN) logs into this same account — see SSO.md. Leave it out for accounts that should only ever use a local password (e.g. shared terminal logins like mdt001)."
+}

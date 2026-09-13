@@ -1,0 +1,30 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Runtime / local data
+.env
+data/
+seed.json
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Android build outputs & generated native project
+android/android/
+android/www/
+android/*.jks
+android/keystore.properties
+android/.gradle/
+android/local.properties
+android/capacitor-cordova-android-plugins/
+
+# Leftover extraction artifact — recovered into proper locations, safe to ignore
+mnt/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

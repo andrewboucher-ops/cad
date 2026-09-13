@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CCCS Radio</string>
+    <string name="title_activity_main">CCCS Radio</string>
+    <string name="package_name">uk.cccs.radio</string>
+    <string name="custom_url_scheme">uk.cccs.radio</string>
+    <string name="service_channel_name">Radio status</string>
+    <string name="service_running">Radio on air</string>
+    <string name="service_running_detail">Registered and monitoring the talkgroup.</string>
+</resources>

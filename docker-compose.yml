@@ -1,0 +1,11 @@
+services:
+  cccs:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      # Set a real secret before running anywhere shared. Never commit one.
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in your .env file first}
+      PORT: "4000"
+      SIMULATION: "on"
+    restart: unless-stopped

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HTTPS only. This is not policy theatre: Android blocks getUserMedia and WebRTC
+  on insecure origins, so a cleartext build has no radio audio at all.
+
+  For local development against a laptop, uncomment the debug-overrides block and
+  put your machine's address in. Never ship that in a release build.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!--
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+    -->
+</network-security-config>

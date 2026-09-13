@@ -1,0 +1,914 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — radio terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css">
+<style>
+  body { display: grid; place-items: start center; min-height: 100vh; padding: 12px; }
+  .handset { width: min(380px, 100%); display: flex; flex-direction: column; gap: 10px; }
+
+  /* ---- top bar: logo is press-and-hold for settings, matching the
+     physical handset's minimal button count (no visible Settings key) ---- */
+  .r-topbar {
+    display: flex; align-items: center; justify-content: center; gap: 10px; position: relative;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  }
+  .r-logo {
+    font-weight: 700; letter-spacing: .14em; font-size: 15px; padding: 4px 10px; border-radius: 5px;
+    background: var(--panel-2); user-select: none; -webkit-user-select: none; cursor: pointer;
+  }
+  .r-logo:active { background: var(--panel-3); }
+  .r-topbar .wifi { color: var(--available); }
+  .r-topbar .battery { color: var(--ink-dim); }
+  .r-topbar .side { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+  .r-topbar .side.left { position: absolute; left: 10px; }
+  .r-topbar .side.right { position: absolute; right: 10px; }
+
+  /* ---- the 6-button grid: User / Cads / Rpt / Text / Chan / AVL ---- */
+  .r-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .r-grid button {
+    padding: 14px 6px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; font-size: 13px;
+  }
+  .r-grid button.pulsing { animation: r-breathe 2.6s ease-in-out infinite; }
+  @keyframes r-breathe { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(.72); } }
+  @media (prefers-reduced-motion: reduce) { .r-grid button.pulsing { animation: none; } }
+
+  .r-channel { text-align: center; font-family: var(--mono); font-size: 12px; color: var(--ink-dim); }
+
+  /* ---- the PTT bar itself: ISSI in white above it, call sign inside it,
+     blue idle / green receiving / red transmitting ---- */
+  .r-issi { text-align: center; font-family: var(--mono); font-size: 13px; letter-spacing: .1em; color: #fff; }
+  .r-pttbar {
+    width: 100%; height: 100px; border: none; border-radius: 8px; cursor: pointer;
+    background: linear-gradient(180deg, #2f6fed, #1d4ed8); color: #fff;
+    font-family: var(--mono); font-size: 28px; font-weight: 700; letter-spacing: .1em;
+    touch-action: none; user-select: none; transition: background .1s ease;
+  }
+  .r-pttbar.rx { background: linear-gradient(180deg, #22c55e, #15803d); }
+  .r-pttbar.tx { background: linear-gradient(180deg, #ef4444, #b91c1c); }
+  .r-pttbar:disabled { opacity: .5; }
+
+  .emg { width: 100%; height: 54px; font-size: 16px; letter-spacing: .14em; }
+  .incoming { border: 2px solid var(--emergency); border-radius: 6px; padding: 14px; background: #2a1113; }
+  .jobcard { border-left: 3px solid var(--priority); padding: 10px 12px; background: var(--panel-2); border-radius: 3px; }
+  .lock-overlay {
+    position: fixed; inset: 0; z-index: 100; background: rgba(6, 10, 16, .96);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    text-align: center; padding: 24px; touch-action: none; user-select: none;
+  }
+  .lock-overlay .big { font-family: var(--mono); font-size: 26px; letter-spacing: .12em; }
+  .lock-overlay .hint { color: var(--ink-dim); max-width: 300px; }
+  .lock-overlay .live { color: var(--emergency); font-family: var(--mono); }
+  .lock-overlay .ptt {
+    height: 78px; font-size: 16px; border-radius: 8px; background: #123a2a; border: 2px solid #15803d;
+    color: #bbf7d0; touch-action: none; user-select: none;
+  }
+  .lock-overlay .ptt.tx { background: #4c1113; border-color: #ef4444; color: #fecaca; }
+  .msgline { font-family: var(--mono); font-size: 12px; border-bottom: 1px solid rgba(34,49,69,.5); padding: 3px 0; }
+</style>
+</head>
+<body>
+<div class="handset">
+  <div class="r-topbar">
+    <span class="side left"><svg class="wifi" width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M2 8.5a16 16 0 0120 0M5.5 12.5a11 11 0 0113 0M9 16.5a5.5 5.5 0 016 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="20" r="1.4" fill="currentColor"/></svg> <span class="link-net" id="net">link down</span></span>
+    <span class="r-logo" id="rlogo" title="Press and hold for settings">RADIO</span>
+    <span class="side right"><span class="mono dim" id="pending" style="font-size:10px"></span><span class="mono" id="queued" style="font-size:10px;color:var(--busy)"></span></span>
+  </div>
+
+  <div class="r-grid">
+    <button class="btn" id="bUser">User</button>
+    <button class="btn" id="bCads">Cads</button>
+    <button class="btn" id="bRpt">Rpt</button>
+    <button class="btn" id="bText">Text</button>
+    <button class="btn" id="bChan">Chan</button>
+    <button class="btn" id="bAvl">AVL</button>
+  </div>
+
+  <div class="r-channel" id="tg">no talkgroup</div>
+  <div class="dim mono" style="font-size:12px;text-align:center" id="welfare"></div>
+  <div class="dim mono" style="font-size:11px;text-align:center" id="covertFlag"></div>
+
+  <div id="alertHost"></div>
+
+  <div class="r-issi" id="issi">ISSI ----</div>
+  <button class="r-pttbar" id="ptt"><span id="cs">----</span></button>
+
+  <button class="btn danger emg" id="bEmg">EMERGENCY</button>
+
+  <section class="panel"><header>Radio log</header><div class="body log" id="log" style="max-height:190px"></div></section>
+</div>
+
+<div id="modalHost"></div>
+<div id="lockHost"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script src="/app.js"></script>
+<script>
+const { api, el, esc } = CCCS;
+if (!CCCS.requireAuth(['RADIO_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+
+const qIssi = new URLSearchParams(location.search).get('issi');
+let radio = null, currentCall = null, currentJob = null, txing = false;
+const log = (line) => {
+  const d = document.createElement('div');
+  d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`;
+  el('#log').prepend(d);
+};
+
+const AVL_COLOUR = {
+  AVAILABLE: 'linear-gradient(180deg,#22c55e,#15803d)', BUSY: 'linear-gradient(180deg,#eab308,#a16207)',
+  ON_TASK: 'linear-gradient(180deg,#3b82f6,#1d4ed8)', EN_ROUTE: 'linear-gradient(180deg,#3b82f6,#1d4ed8)',
+  ON_SCENE: 'linear-gradient(180deg,#3b82f6,#1d4ed8)', OUT_OF_SERVICE: '', OFFLINE: '',
+};
+function paint() {
+  if (!radio) return;
+  el('#issi').textContent = `ISSI ${radio.issi}`;
+  el('#cs').textContent = radio.callsign || radio.issi;
+  el('#tg').textContent = radio.talkgroup || 'no talkgroup';
+  el('#ptt').disabled = !radio.talkgroup;
+  const avl = el('#bAvl');
+  avl.style.background = AVL_COLOUR[radio.status] || '';
+  avl.classList.toggle('pulsing', !['OFFLINE', 'OUT_OF_SERVICE'].includes(radio.status));
+}
+
+function modal(title, html, onMount) {
+  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
+  el('#mClose').onclick = closeModal; onMount && onMount();
+}
+const closeModal = () => (el('#modalHost').innerHTML = '');
+
+/* ---- actions ---- */
+el('#bAvl').onclick = () => modal('Change status', `
+  <label for="sSel">Operational status</label>
+  <select id="sSel">${['AVAILABLE', 'BUSY', 'ON_TASK', 'EN_ROUTE', 'ON_SCENE', 'OUT_OF_SERVICE'].map((s) => `<option ${radio.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+  <div style="height:12px"></div><button class="btn primary" id="sGo">Set status</button>`, () => {
+  el('#sGo').onclick = async () => {
+    const r = await CCCS.send('POST', `/api/radios/${radio.issi}/status`, { status: el('#sSel').value }, 'status change');
+    if (r.queued) { radio.status = el('#sSel').value; paint(); log(`STATUS ${radio.status} QUEUED — WILL SEND WHEN LINK RETURNS`); }
+    closeModal();
+  };
+});
+
+/* User: identity is fixed per handset (ISSI is hard-set), so this is a
+ * "more" hub for the less-frequent functions rather than a real user
+ * switcher — private call, position, welfare, lock, dial, settings. */
+el('#bUser').onclick = () => modal('More', `
+  <p class="dim" style="margin:0 0 10px">${esc(radio.callsign || radio.issi)} · ISSI ${esc(radio.issi)}</p>
+  <div class="btn-row" style="flex-direction:column;align-items:stretch;gap:8px">
+    <button class="btn" id="muPrivate">Private call</button>
+    <button class="btn" id="muDial">Dial an outside number</button>
+    <button class="btn" id="muPos">Position</button>
+    <button class="btn" id="muWelfare">Welfare timer</button>
+    <button class="btn" id="muCallReq">Request call</button>
+    <button class="btn" id="muPriReq">Priority call</button>
+    <button class="btn" id="muLock">Lock keypad</button>
+    <button class="btn" id="muStatusCode">Status code</button>
+    <button class="btn" id="muCovert">Covert mode</button>
+    <button class="btn" id="muSettings">Settings</button>
+  </div>`, () => {
+  el('#muPrivate').onclick = () => { closeModal(); openPrivateCall(); };
+  el('#muDial').onclick = () => { closeModal(); openDial(); };
+  el('#muPos').onclick = () => { closeModal(); openPosition(); };
+  el('#muWelfare').onclick = () => { closeModal(); openWelfare(); };
+  el('#muCallReq').onclick = () => { closeModal(); requestCall(false, 'menu'); };
+  el('#muPriReq').onclick = () => { closeModal(); if (confirm('Send a PRIORITY call request to control?')) requestCall(true, 'menu'); };
+  el('#muLock').onclick = () => { closeModal(); setLocked(true); };
+  el('#muStatusCode').onclick = () => { closeModal(); statusCodeMenu(); };
+  el('#muCovert').onclick = () => { closeModal(); setCovert(!covert); };
+  el('#muSettings').onclick = () => { closeModal(); openSettings(); };
+});
+
+function openPrivateCall() {
+  api('GET', '/api/radios').then((radios) => modal('Private call', `
+    <label for="pIssi">Dial ISSI</label>
+    <input id="pIssi" class="mono" value="" placeholder="234100002" inputmode="numeric">
+    <label for="pPick">Or pick a radio</label>
+    <select id="pPick">${radios.filter((r) => r.issi !== radio.issi).map((r) => `<option value="${r.issi}">${esc(r.callsign || r.issi)} — ${r.issi} (${r.connected ? 'on air' : 'offline'})</option>`).join('')}</select>
+    <div style="height:12px"></div><button class="btn primary" id="pGo">Call</button><p class="err" id="pErr"></p>`, () => {
+    el('#pGo').onclick = async () => {
+      const to = el('#pIssi').value.trim() || el('#pPick').value;
+      try { currentCall = await api('POST', '/api/calls/private', { to }); closeModal(); showOutgoing(currentCall); }
+      catch (e) { el('#pErr').textContent = e.message === 'destination radio offline' ? 'That radio is not on air.' : e.message; }
+    };
+  }));
+}
+
+function showOutgoing(call) {
+  const names = call.participants.filter((p) => p.role === 'CALLEE').map((p) => p.callsign || p.issi).join(', ');
+  el('#alertHost').innerHTML = `<div class="incoming"><strong>CALLING</strong><div class="mono" style="font-size:18px">${esc(names)}</div><div class="mono dim" id="callState">RINGING</div><div class="btn-row" style="margin-top:10px"><button class="btn danger" id="cEnd">End call</button></div></div>`;
+  el('#cEnd').onclick = async () => { await api('POST', `/api/calls/${call.id}/end`); };
+  log(`CALLING ${names}`);
+}
+
+function showIncoming(call) {
+  currentCall = call;
+  const from = call.from_label || (call.participants.find((p) => p.role === 'CALLER') || {}).callsign || 'CONTROL';
+  const fromIssi = (call.participants.find((p) => p.role === 'CALLER') || {}).issi || '—';
+  el('#alertHost').innerHTML = `
+    <div class="incoming">
+      <strong>INCOMING ${call.kind} CALL</strong>
+      <div class="mono" style="font-size:20px">${esc(from)}</div>
+      <div class="mono dim">from ISSI ${esc(fromIssi)}</div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn ok" id="cAns">Answer</button>
+        <button class="btn danger" id="cDec">Decline</button>
+      </div>
+    </div>`;
+  el('#cAns').onclick = async () => {
+    await audio.getMic().catch((e) => log('MIC DENIED: ' + e.message));
+    await api('POST', `/api/calls/${call.id}/accept`);
+  };
+  el('#cDec').onclick = async () => { await api('POST', `/api/calls/${call.id}/reject`); };
+  log(`INCOMING CALL from ${from}`);
+}
+
+function openWelfare() {
+  modal('Welfare timer', `
+  <p class="dim">Set a timer before you go in. Check in before it runs out, or control is alerted with your last known position.</p>
+  <label for="wMin">Check in within</label>
+  <select id="wMin">
+    <option value="300">5 minutes</option><option value="600" selected>10 minutes</option>
+    <option value="900">15 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option>
+  </select>
+  <label for="wNote">What you are doing</label>
+  <input id="wNote" placeholder="Internal check, Meridian Business Park">
+  <div class="btn-row" style="margin-top:12px">
+    <button class="btn ok" id="wStart">Start timer</button>
+    <button class="btn" id="wCheck">Check in now</button>
+    <button class="btn danger" id="wStop">Cancel timer</button>
+  </div>
+  <p class="err" id="wErr"></p>`, () => {
+  const guard = (fn) => async () => { try { await fn(); closeModal(); } catch (e) { el('#wErr').textContent = e.message; } };
+  el('#wStart').onclick = guard(async () => {
+    radio = await api('POST', `/api/radios/${radio.issi}/welfare`, { interval_s: Number(el('#wMin').value), note: el('#wNote').value });
+    log(`WELFARE TIMER SET ${Math.round(radio.welfare_interval_s / 60)} MIN`);
+  });
+  el('#wCheck').onclick = guard(async () => {
+    const out = await CCCS.send('POST', `/api/radios/${radio.issi}/welfare/check`, {}, 'welfare check-in');
+    if (out && out.queued) log('CHECK-IN HELD — NO LINK, WILL RETRY');
+    else { radio = out; log('CHECKED IN'); }
+  });
+  el('#wStop').onclick = guard(async () => { radio = await api('DELETE', `/api/radios/${radio.issi}/welfare`, {}); log('WELFARE TIMER CANCELLED'); });
+  });
+}
+
+setInterval(() => {
+  if (!radio || !radio.welfare_due_at) { el('#welfare').textContent = ''; return; }
+  const left = Math.round((Date.parse(radio.welfare_due_at) - Date.now()) / 1000);
+  el('#welfare').textContent = left > 0
+    ? `Check in within ${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`
+    : 'WELFARE OVERDUE';
+  el('#welfare').className = 'mono ' + (left > 60 ? 'dim' : 'txt-EMERGENCY');
+}, 1000);
+
+async function raiseEmergency(source) {
+  const r = await CCCS.send('POST', '/api/emergency', {}, 'emergency');
+  log(r.queued ? `EMERGENCY QUEUED — NO LINK (${source})` : `EMERGENCY ACTIVATED (${source})`);
+  el('#bEmg').classList.add('tx');
+  setTimeout(() => el('#bEmg').classList.remove('tx'), 3000);
+}
+function statusCodeMenu() {
+  modal('Send status code', `
+    <p class="dim">Two digits, no talking, no channel time.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      ${statusCodes.map((c) => `<button class="btn" data-code="${c.code}" style="text-align:left"><span class="mono">${c.code}</span> ${esc(c.label)}</button>`).join('')}
+    </div>`, () => {
+    CCCS.els('[data-code]').forEach((b) => (b.onclick = async () => {
+      const out = await CCCS.send('POST', `/api/radios/${radio.issi}/status`, { code: b.dataset.code }, `status ${b.dataset.code}`);
+      log(out && out.queued ? `STATUS ${b.dataset.code} HELD — NO LINK` : `STATUS ${b.dataset.code} SENT`);
+      closeModal();
+    }));
+  });
+}
+async function setCovert(on) {
+  covert = on;
+  document.body.style.filter = on ? 'brightness(0.22)' : '';
+  el('#covertFlag').textContent = on ? 'COVERT' : '';
+  await CCCS.send('POST', `/api/radios/${radio.issi}/covert`, { on }, `covert ${on ? 'on' : 'off'}`);
+  log(on ? 'COVERT MODE ON — SCREEN DIMMED, TONES OFF' : 'COVERT MODE OFF');
+}
+function openPosition() {
+  modal('Position', `
+  <dl class="kv" style="display:grid;grid-template-columns:100px 1fr;gap:4px 10px">
+    <dt class="dim">Latitude</dt><dd class="mono">${radio.lat?.toFixed(5)}</dd>
+    <dt class="dim">Longitude</dt><dd class="mono">${radio.lon?.toFixed(5)}</dd>
+    <dt class="dim">Speed</dt><dd class="mono">${radio.speed} mph</dd>
+    <dt class="dim">Heading</dt><dd class="mono">${radio.heading}°</dd>
+    <dt class="dim">Battery</dt><dd class="mono">${radio.battery}%</dd>
+  </dl>`);
+}
+async function sendPosition() {
+  const push = async (lat, lon) => {
+    const out = await CCCS.send('POST', `/api/radios/${radio.issi}/position-report`,
+      lat === undefined ? {} : { lat, lon }, 'position report');
+    log(out && out.queued ? 'POSITION REPORT HELD — NO LINK' : 'POSITION REPORT SENT');
+  };
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => push(pos.coords.latitude, pos.coords.longitude),
+      () => push(),
+      { enableHighAccuracy: true, timeout: 5000 }
+    );
+  } else await push();
+}
+async function requestCall(priority, source) {
+  const r = await CCCS.send('POST', '/api/calls/request', { priority }, priority ? 'priority call request' : 'call request');
+  log(r && r.queued
+    ? `${priority ? 'PRIORITY ' : ''}CALL REQUEST HELD — NO LINK`
+    : `${priority ? 'PRIORITY ' : ''}CALL REQUEST SENT TO CONTROL${source ? ' (' + source + ')' : ''}`);
+  el('#covertFlag').textContent = priority ? 'PRIORITY CALL REQUESTED' : 'CALL REQUESTED';
+  setTimeout(() => { if (/CALL REQUEST/.test(el('#covertFlag').textContent)) el('#covertFlag').textContent = ''; }, 6000);
+  beepTwice();
+}
+
+el('#bEmg').onclick = async () => {
+  if (!confirm('Send an emergency alert to control?')) return;
+  raiseEmergency('screen');
+};
+
+/* ---- press-and-hold logo (or, when bound, hardware key "0") opens settings —
+   matches the physical device's minimal visible button count. ---- */
+function bindLongPress(target, ms, fn) {
+  let t = null;
+  const start = (e) => { if (e.cancelable) e.preventDefault(); t = setTimeout(fn, ms); };
+  const cancel = () => { if (t) { clearTimeout(t); t = null; } };
+  target.addEventListener('mousedown', start); target.addEventListener('touchstart', start, { passive: false });
+  target.addEventListener('mouseup', cancel); target.addEventListener('mouseleave', cancel); target.addEventListener('touchend', cancel);
+}
+bindLongPress(el('#rlogo'), 800, () => openSettings());
+
+/* ---- hardware keys ---- */
+async function pushBindings() {
+  const b = keys.bindings;
+  try {
+    await api('PUT', '/api/me/settings', {
+      ptt_token: b.ptt, sos_token: b.sos, sos_hold_ms: b.sosHoldMs,
+      call_token: b.call, priority_token: b.priority, lock_token: b.lock,
+      redial_token: b.redial, talkgroup_token: b.talkgroup, status_token: b.status,
+      covert_token: b.covert, position_token: b.position,
+      action_hold_ms: b.holdMs, speed_dial: b.speedDial || {},
+    });
+  }
+  catch (e) { log('COULD NOT SAVE BINDINGS: ' + e.message); }
+}
+async function pullBindings() {
+  try {
+    const s = await api('GET', '/api/me/settings');
+    if (s.ptt_token) keys.set('ptt', s.ptt_token);
+    if (s.sos_token) keys.set('sos', s.sos_token);
+    if (s.sos_hold_ms) keys.setHold(s.sos_hold_ms);
+    if (s.call_token !== undefined) keys.set('call', s.call_token);
+    if (s.priority_token !== undefined) keys.set('priority', s.priority_token);
+    if (s.lock_token !== undefined) keys.set('lock', s.lock_token);
+    if (s.action_hold_ms) keys.setActionHold(s.action_hold_ms);
+    for (const [field, action] of [['redial_token', 'redial'], ['talkgroup_token', 'talkgroup'],
+                                   ['status_token', 'status'], ['covert_token', 'covert'], ['position_token', 'position']]) {
+      if (s[field] !== undefined) keys.set(action, s[field]);
+    }
+    if (s.speed_dial) for (const [ch, entry] of Object.entries(s.speed_dial)) keys.setSpeedDial(ch, entry);
+  } catch { /* offline: the device's own bindings stand */ }
+}
+
+/* ---- keypad actions ---- */
+let locked = false, covert = false, lastParty = null, statusCodes = [];
+
+api('GET', '/api/status-codes').then((c) => (statusCodes = c)).catch(() => {});
+
+async function redial() {
+  if (!lastParty) return log('NO LAST CALL TO RETURN');
+  try {
+    if (lastParty.type === 'phone') {
+      currentCall = await api('POST', '/api/calls/pstn', { digits: lastParty.target });
+      showPstn(currentCall);
+    } else {
+      currentCall = await api('POST', '/api/calls/private', { to: lastParty.target });
+      showOutgoing(currentCall);
+    }
+    log(`RETURNING CALL TO ${lastParty.label || lastParty.target}`);
+  } catch (e) { log('REDIAL FAILED: ' + e.message); }
+}
+
+async function speedDial(ch) {
+  const entry = keys.speedDial[ch];
+  if (!entry) return;
+  try {
+    if (entry.type === 'phone') {
+      currentCall = await api('POST', '/api/calls/pstn', { digits: entry.target });
+      showPstn(currentCall);
+    } else {
+      currentCall = await api('POST', '/api/calls/private', { to: entry.target });
+      showOutgoing(currentCall);
+    }
+    lastParty = { ...entry };
+    log(`SPEED DIAL ${ch} → ${entry.label}`);
+  } catch (e) { log(`SPEED DIAL ${ch} FAILED: ${e.message}`); }
+}
+
+function setLocked(next) {
+  locked = next;
+  if (!locked) { el('#lockHost').innerHTML = ''; log('KEYPAD UNLOCKED'); return; }
+  const unlockLabel = keys.hasHardwareKeys ? `Hold ${keys.label(keys.bindings.lock)} to unlock` : 'Hold the button below to unlock';
+  el('#lockHost').innerHTML = `
+    <div class="lock-overlay" id="lockOverlay" role="dialog" aria-label="Keypad locked">
+      <div class="big">KEYPAD LOCKED</div>
+      <div class="mono" id="lockCs">${esc(radio ? (radio.callsign || radio.issi) : '')}</div>
+      <div class="hint">${esc(unlockLabel)}. Talk and SOS still work, and incoming calls will still come through.</div>
+      <div class="live" id="lockLive"></div>
+      ${keys.hasHardwareKeys ? '' : '<button class="btn" id="lockBtn" style="padding:18px 28px">Hold to unlock</button>'}
+      <div style="display:flex;gap:10px;width:min(340px,100%);margin-top:6px">
+        <button class="ptt" id="lockPtt" style="flex:2;height:78px;font-size:16px">PUSH TO TALK</button>
+        <button class="btn danger" id="lockSos" style="flex:1;height:78px">SOS</button>
+      </div>
+    </div>`;
+  log('KEYPAD LOCKED');
+  const lp = el('#lockPtt');
+  if (lp) {
+    lp.addEventListener('mousedown', pttDown); lp.addEventListener('touchstart', pttDown);
+    lp.addEventListener('mouseup', pttUp); lp.addEventListener('touchend', pttUp);
+  }
+  const ls = el('#lockSos');
+  if (ls) ls.onclick = () => { if (confirm('Send an emergency alert to control?')) raiseEmergency('lock screen'); };
+  const btn = el('#lockBtn');
+  if (btn) {
+    let t = null;
+    const start = (e) => { e.preventDefault(); el('#lockLive').textContent = 'Keep holding…'; t = setTimeout(() => setLocked(false), keys.bindings.holdMs || 800); };
+    const stop = () => { if (t) { clearTimeout(t); t = null; } if (el('#lockLive')) el('#lockLive').textContent = ''; };
+    btn.addEventListener('mousedown', start); btn.addEventListener('touchstart', start);
+    btn.addEventListener('mouseup', stop); btn.addEventListener('touchend', stop); btn.addEventListener('mouseleave', stop);
+  }
+}
+
+const keys = CCCS.keybinds({
+  onPtt: (pressed) => (pressed ? pttDown(new Event('key')) : pttUp()),
+  onSos: () => raiseEmergency('hardware key'),
+  onSosArming: (ms) => { el('#covertFlag').textContent = `Hold for SOS… (${Math.round(ms / 1000)}s)`; beepTwice(); },
+  onSosCancelled: () => (el('#covertFlag').textContent = ''),
+  onAction: (action) => {
+    if (locked && action !== 'lock') return;
+    if (action === 'call') return requestCall(false, 'keypad');
+    if (action === 'priority') return requestCall(true, 'keypad');
+    if (action === 'lock') return setLocked(!locked);
+    if (action === 'redial') return redial();
+    if (action === 'talkgroup') return el('#bChan').click();
+    if (action === 'status') return statusCodeMenu();
+    if (action === 'covert') return setCovert(!covert);
+    if (action === 'position') return sendPosition();
+    if (action === 'settings') return openSettings();
+  },
+  onTap: (ch) => {
+    if (locked) return;
+    speedDial(ch);
+  },
+  onActionArming: (action, ms) => {
+    const label = {
+      call: 'Hold for call request', priority: 'Hold for PRIORITY call request',
+      lock: locked ? 'Hold to unlock' : 'Hold to lock keypad',
+      redial: 'Hold to call back last party', talkgroup: 'Hold for talkgroup',
+      status: 'Hold for status code', covert: covert ? 'Hold to leave covert mode' : 'Hold for covert mode',
+      position: 'Hold to send position', settings: 'Hold for settings',
+    }[action] || 'Hold…';
+    const target = locked ? el('#lockLive') : el('#covertFlag');
+    if (target) target.textContent = `${label}…`;
+  },
+  onActionCancelled: () => {
+    if (locked && el('#lockLive')) el('#lockLive').textContent = '';
+    else if (!/REQUEST/.test(el('#covertFlag').textContent)) el('#covertFlag').textContent = '';
+  },
+  onLearn: (which, token) => {
+    log(`${which.toUpperCase()} KEY BOUND TO ${keys.label(token)}`);
+    pushBindings();
+  },
+});
+pullBindings();
+
+function openSettings() {
+  const b = keys.bindings;
+  modal('Settings', `
+    <p class="dim">Bind the handset's physical buttons. Press <em>Learn</em>, then press the button on the device — it works with any key the handset sends, so a new model needs no new app.</p>
+
+    <label>Push to talk</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="mono" id="kPtt" style="flex:1">${esc(keys.label(b.ptt))}</span>
+      <button class="btn" id="learnPtt">Learn</button>
+    </div>
+
+    <label>SOS / emergency</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="mono" id="kSos" style="flex:1">${esc(keys.label(b.sos))}</span>
+      <button class="btn" id="learnSos">Learn</button>
+      <button class="btn" id="clearSos">Clear</button>
+    </div>
+
+    <label for="holdMs">SOS hold time before it sends</label>
+    <select id="holdMs">
+      ${[1000, 2000, 3000, 5000].map((ms) => `<option value="${ms}" ${b.sosHoldMs === ms ? 'selected' : ''}>${ms / 1000} seconds</option>`).join('')}
+    </select>
+    <p class="dim" style="font-size:12px">A tap will not send an SOS. Hold the button for this long. Shorter is faster in a real incident; longer means fewer alarms raised by a pocket.</p>
+
+    <label>Long-press actions</label>
+    <p class="dim" style="font-size:12px">Standard keypad convention: hold 1 to ask control for a call, hold # for a priority call, hold * to lock. Rebind any of them if your handset's keypad differs.${keys.hasHardwareKeys ? '' : ' <strong>No hardware keys seen on this handset yet</strong> — use the on-screen buttons instead, or press a key now to register it.'}</p>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="dim" style="width:110px">Call request</span>
+      <span class="mono" id="kCall" style="flex:1">${esc(keys.label(b.call))}</span>
+      <button class="btn" id="learnCall">Learn</button>
+      <button class="btn" id="clearCall">Clear</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <span class="dim" style="width:110px">Priority call</span>
+      <span class="mono" id="kPri" style="flex:1">${esc(keys.label(b.priority))}</span>
+      <button class="btn" id="learnPri">Learn</button>
+      <button class="btn" id="clearPri">Clear</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <span class="dim" style="width:110px">Lock keypad</span>
+      <span class="mono" id="kLock" style="flex:1">${esc(keys.label(b.lock))}</span>
+      <button class="btn" id="learnLock">Learn</button>
+      <button class="btn" id="clearLock">Clear</button>
+    </div>
+
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <span class="dim" style="width:110px">Return last call</span>
+      <span class="mono" id="kRedial" style="flex:1">${esc(keys.label(b.redial))}</span>
+      <button class="btn" id="learnRedial">Learn</button>
+      <button class="btn" id="clearRedial">Clear</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <span class="dim" style="width:110px">Talkgroup</span>
+      <span class="mono" id="kTg" style="flex:1">${esc(keys.label(b.talkgroup))}</span>
+      <button class="btn" id="learnTg">Learn</button>
+      <button class="btn" id="clearTg">Clear</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <span class="dim" style="width:110px">Status code</span>
+      <span class="mono" id="kStatus" style="flex:1">${esc(keys.label(b.status))}</span>
+      <button class="btn" id="learnStatus">Learn</button>
+      <button class="btn" id="clearStatus">Clear</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <span class="dim" style="width:110px">Covert mode</span>
+      <span class="mono" id="kCovert" style="flex:1">${esc(keys.label(b.covert))}</span>
+      <button class="btn" id="learnCovert">Learn</button>
+      <button class="btn" id="clearCovert">Clear</button>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <span class="dim" style="width:110px">Position report</span>
+      <span class="mono" id="kPos" style="flex:1">${esc(keys.label(b.position))}</span>
+      <button class="btn" id="learnPos">Learn</button>
+      <button class="btn" id="clearPos">Clear</button>
+    </div>
+
+    <label>Speed dial — tap a digit to call</label>
+    <p class="dim" style="font-size:12px">A tap dials; a hold runs whatever action is bound to that key. Enter a call sign or ISSI for a radio, or 9 and a number for a telephone.</p>
+    <div id="sdList"></div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <select id="sdKey" style="width:70px">${['0','1','2','3','4','5','6','7','8','9'].map((d) => `<option>${d}</option>`).join('')}</select>
+      <input id="sdTarget" placeholder="234100002 or 902071234567" style="flex:1">
+      <button class="btn" id="sdAdd">Set</button>
+    </div>
+
+    <label for="actHold">Hold time for long-press actions</label>
+    <select id="actHold">
+      ${[500, 800, 1200, 2000].map((ms) => `<option value="${ms}" ${b.holdMs === ms ? 'selected' : ''}>${ms / 1000} seconds</option>`).join('')}
+    </select>
+
+    <label>Queued for sending</label>
+    <div class="log" id="qList" style="max-height:130px;overflow:auto"></div>
+    <div class="btn-row" style="margin-top:8px">
+      <button class="btn" id="qFlush">Retry now</button>
+      <button class="btn danger" id="qClear">Discard queue</button>
+    </div>
+    <div class="btn-row" style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">
+      <button class="btn danger" id="stSignOut">Sign out</button>
+    </div>`, () => {
+    const paintQueue = () => {
+      const items = CCCS.outbox.pending();
+      el('#qList').innerHTML = items.length
+        ? items.map((i) => `<div><span class="t">${CCCS.hhmmss(new Date(i.at))}</span>${esc(i.label)}</div>`).join('')
+        : '<div class="dim">Nothing waiting. Everything has reached control.</div>';
+    };
+    paintQueue();
+    el('#stSignOut').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+    el('#learnPtt').onclick = () => { keys.learn('ptt'); el('#kPtt').textContent = 'press the button now…'; };
+    el('#learnSos').onclick = () => { keys.learn('sos'); el('#kSos').textContent = 'press the button now…'; };
+    el('#clearSos').onclick = () => { keys.set('sos', null); pushBindings(); el('#kSos').textContent = 'not set'; };
+    el('#holdMs').onchange = () => { keys.setHold(Number(el('#holdMs').value)); pushBindings(); };
+    const paintSpeedDial = () => {
+      const sd = keys.speedDial;
+      const rows = Object.entries(sd);
+      el('#sdList').innerHTML = rows.length
+        ? rows.map(([ch, e]) => `<div class="msgline"><span class="mono">${esc(ch)}</span> → ${esc(e.label)} <span class="dim">${e.type}</span> <button class="btn" style="padding:0 6px;font-size:11px" data-sdrm="${esc(ch)}">remove</button></div>`).join('')
+        : '<div class="dim">Nothing set.</div>';
+      CCCS.els('[data-sdrm]').forEach((btn) => (btn.onclick = () => { keys.setSpeedDial(btn.dataset.sdrm, null); pushBindings(); paintSpeedDial(); }));
+    };
+    paintSpeedDial();
+    el('#sdAdd').onclick = () => {
+      const target = el('#sdTarget').value.trim();
+      if (!target) return;
+      const phone = target.startsWith('9') && target.length > 6;
+      keys.setSpeedDial(el('#sdKey').value, { type: phone ? 'phone' : 'radio', target, label: target });
+      pushBindings(); el('#sdTarget').value = ''; paintSpeedDial();
+    };
+
+    const learn = (action, target) => () => { keys.learn(action); el(target).textContent = 'press the button now…'; };
+    el('#learnCall').onclick = learn('call', '#kCall');
+    el('#learnPri').onclick = learn('priority', '#kPri');
+    el('#learnLock').onclick = learn('lock', '#kLock');
+    el('#learnRedial').onclick = learn('redial', '#kRedial');
+    el('#learnTg').onclick = learn('talkgroup', '#kTg');
+    el('#learnStatus').onclick = learn('status', '#kStatus');
+    el('#learnCovert').onclick = learn('covert', '#kCovert');
+    el('#learnPos').onclick = learn('position', '#kPos');
+    [['redial', '#kRedial'], ['talkgroup', '#kTg'], ['status', '#kStatus'], ['covert', '#kCovert'], ['position', '#kPos']]
+      .forEach(([action, target]) => {
+        const btn = el('#clear' + { redial: 'Redial', talkgroup: 'Tg', status: 'Status', covert: 'Covert', position: 'Pos' }[action]);
+        if (btn) btn.onclick = () => { keys.set(action, null); pushBindings(); el(target).textContent = 'not set'; };
+      });
+    el('#clearCall').onclick = () => { keys.set('call', null); pushBindings(); el('#kCall').textContent = 'not set'; };
+    el('#clearPri').onclick = () => { keys.set('priority', null); pushBindings(); el('#kPri').textContent = 'not set'; };
+    el('#clearLock').onclick = () => { keys.set('lock', null); pushBindings(); el('#kLock').textContent = 'not set'; };
+    el('#actHold').onchange = () => { keys.setActionHold(Number(el('#actHold').value)); pushBindings(); };
+    el('#qFlush').onclick = async () => { await CCCS.outbox.flush(); paintQueue(); };
+    el('#qClear').onclick = () => { if (confirm('Discard everything waiting to send? It will not reach control.')) { CCCS.outbox.clear(); paintQueue(); } };
+  });
+}
+
+CCCS.outbox.onChange((n) => {
+  el('#queued').textContent = n ? `${n} queued` : '';
+});
+
+/* CADS: current job (if any) plus recent history for this call sign. */
+el('#bCads').onclick = async () => {
+  const jobs = await api('GET', '/api/jobs');
+  const mine = jobs.filter((j) => j.resources.some((r) => r.radio === radio.issi));
+  currentJob = mine.find((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
+  const history = mine.filter((j) => ['COMPLETED', 'CANCELLED'].includes(j.status))
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).slice(0, 8);
+  showJob(currentJob, history);
+};
+
+function showJob(j, history = []) {
+  const acked = j && j.resources.some((r) => r.radio === radio.issi && r.acknowledged);
+  const historyHtml = history.length ? `
+    <label style="margin-top:14px">Recent jobs</label>
+    <div class="log">${history.map((h) => `<div class="mono">${esc(h.reference)} — ${esc(h.status)} · ${esc(h.incident_type)}</div>`).join('')}</div>` : '';
+  modal(j ? `Job ${j.reference}` : 'CAD', `
+    ${j ? `
+    <div class="jobcard">
+      <div><span class="pri pri-${j.priority}">${j.priority}</span> <strong class="mono">${esc(j.reference)}</strong></div>
+      <p style="margin:8px 0 0"><strong>${esc(j.incident_type)}</strong><br>${esc(j.location)}</p>
+      <p class="dim" style="margin:6px 0 0">${esc(j.description || '')}</p>
+      <p class="dim mono" style="margin:6px 0 0">Status ${esc(j.status)}</p>
+    </div>
+    <div class="btn-row" style="margin-top:12px">
+      ${acked ? '' : '<button class="btn ok" id="jAck">Accept job</button>'}
+      <button class="btn" id="jEnr">En route</button>
+      <button class="btn" id="jScene">On scene</button>
+      <button class="btn" id="jDone">Completed</button>
+      <button class="btn" id="jNav">Navigate</button>
+    </div>` : '<p class="dim">No job assigned to this call sign right now.</p>'}
+    ${historyHtml}`, () => {
+    if (!j) return;
+    const set = async (s) => {
+      const r = await CCCS.send('PATCH', `/api/jobs/${j.id}`, { status: s }, `job ${j.reference} ${s}`);
+      await CCCS.send('POST', `/api/radios/${radio.issi}/status`, { status: s === 'COMPLETED' ? 'AVAILABLE' : s }, 'status change');
+      if (r.queued) log(`${j.reference} ${s} QUEUED`);
+      closeModal();
+    };
+    if (el('#jAck')) el('#jAck').onclick = async () => {
+      const r = await CCCS.send('POST', `/api/jobs/${j.id}/ack`, {}, `acknowledge ${j.reference}`);
+      if (r.queued) log(`ACKNOWLEDGEMENT OF ${j.reference} QUEUED`);
+      closeModal();
+      offerNavigate(j);
+    };
+    el('#jEnr').onclick = () => set('EN_ROUTE');
+    el('#jScene').onclick = () => set('ON_SCENE');
+    el('#jDone').onclick = () => set('COMPLETED');
+    el('#jNav').onclick = () => { closeModal(); showNavMap(j); };
+  });
+}
+
+function offerNavigate(job) {
+  if (job.lat == null) return;
+  if (confirm(`${job.reference} accepted. Navigate to the incident now?`)) showNavMap(job);
+}
+
+function showNavMap(job) {
+  modal(`Navigate — ${job.reference}`, `
+    <div class="map" id="navMap" style="height:320px;border-radius:4px;overflow:hidden"></div>
+    <p class="mono" id="navInfo" style="margin:8px 0 0"></p>`, () => {
+    const navMap = CCCS.makeMap(el('#navMap'), { zoom: 14 });
+    const go = (lat, lon) => {
+      const units = [{ lat, lon, status: 'ON_TASK', callsign: radio.callsign || radio.issi, issi: radio.issi }];
+      const jobs = job.lat != null ? [job] : [];
+      navMap.render(units, jobs);
+      if (job.lat != null) {
+        navMap.setRoute([lat, lon], [job.lat, job.lon], (summary) => {
+          const miles = (summary.totalDistance / 1609.34).toFixed(1);
+          const mins = Math.round(summary.totalTime / 60);
+          el('#navInfo').textContent = `${miles} mi · ${mins} min to ${job.reference}`;
+        });
+      } else navMap.fitToData(units, []);
+    };
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => go(pos.coords.latitude, pos.coords.longitude),
+        () => go(radio.lat, radio.lon),
+        { enableHighAccuracy: true, timeout: 5000 });
+    } else go(radio.lat, radio.lon);
+  });
+}
+
+/* Rpt: play back whatever was last heard on this talkgroup. */
+el('#bRpt').onclick = () => {
+  if (!audio.playLastRecording()) log('NOTHING TO REPEAT YET');
+};
+
+el('#bChan').onclick = async () => {
+  const tgs = await api('GET', '/api/talkgroups');
+  modal('Talkgroup', `
+    <label for="tSel">Affiliate to</label>
+    <select id="tSel">${tgs.map((t) => `<option value="${t.id}" ${t.name === radio.talkgroup ? 'selected' : ''}>${esc(t.name)} (${t.members.length})</option>`).join('')}</select>
+    <div style="height:12px"></div><button class="btn primary" id="tGo">Join talkgroup</button>`, () => {
+    el('#tGo').onclick = async () => {
+      await api('POST', `/api/talkgroups/${el('#tSel').value}/members`, { radio: radio.issi });
+      radio = await api('GET', `/api/radios/${radio.issi}`); paint(); closeModal();
+    };
+  });
+};
+
+el('#bText').onclick = async () => {
+  const msgs = await api('GET', '/api/messages');
+  modal('Messages', `
+    <div class="log" style="max-height:200px;overflow:auto">${msgs.slice(-30).reverse().map((m) => `<div class="msgline"><span class="t">${CCCS.hhmmss(new Date(m.sent_at))}</span>${esc(m.from_label)} → ${esc(m.to_label)}: ${esc(m.body)} <span class="dim">${m.state}</span></div>`).join('') || '<div class="dim">No messages.</div>'}</div>
+    <label for="txt">Message to control</label>
+    <textarea id="txt" rows="2"></textarea>
+    <div style="height:10px"></div><button class="btn primary" id="send">Send to control</button>`, () => {
+    el('#send').onclick = async () => {
+      const r = await CCCS.send('POST', '/api/messages', { to_control: true, body: el('#txt').value }, 'message to control');
+      if (r.queued) log('MESSAGE QUEUED — WILL SEND WHEN LINK RETURNS');
+      closeModal();
+    };
+  });
+};
+
+function openDial() {
+  modal('Dial an outside number', `
+  <p class="dim">Dial ${'9'} then the number to call a telephone through the PBX. Radio numbers are dialled from <em>Private call</em>.</p>
+  <input id="dNum" class="mono" style="font-size:22px;letter-spacing:.08em" value="9" inputmode="tel">
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px">
+    ${['1','2','3','4','5','6','7','8','9','*','0','#'].map((k) => `<button class="btn" data-k="${k}" style="font-size:20px;padding:12px">${k}</button>`).join('')}
+  </div>
+  <div class="btn-row" style="margin-top:10px">
+    <button class="btn ok" id="dGo" style="flex:1">Call</button>
+    <button class="btn" id="dDel">Delete</button>
+  </div>
+  <p class="err" id="dErr"></p>`, () => {
+  CCCS.els('[data-k]').forEach((b) => (b.onclick = () => (el('#dNum').value += b.dataset.k)));
+  el('#dDel').onclick = () => (el('#dNum').value = el('#dNum').value.slice(0, -1));
+  el('#dGo').onclick = async () => {
+    try {
+      currentCall = await api('POST', '/api/calls/pstn', { digits: el('#dNum').value });
+      closeModal();
+      showPstn(currentCall);
+    } catch (e) { el('#dErr').textContent = e.message; }
+  };
+  });
+}
+
+function showPstn(call) {
+  el('#alertHost').innerHTML = `<div class="incoming" style="border-color:var(--on-task);background:#11202e">
+    <strong>OUTSIDE CALL</strong>
+    <div class="mono" style="font-size:20px">${esc(call.dialled_number || '')}</div>
+    <div class="mono dim" id="callState">DIALLING</div>
+    <div class="btn-row" style="margin-top:10px"><button class="btn danger" id="pEnd">End call</button></div></div>`;
+  el('#pEnd').onclick = () => api('POST', `/api/calls/${call.id}/end`, {});
+  log(`DIALLING ${call.dialled_number}`);
+}
+
+/* ---- PTT ---- */
+function pttDown(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  if (txing || !radio.talkgroup) return;
+  txing = true;
+  bus.send('radio.ptt_start', { talkgroup: radio.talkgroup, as_radio: radio.issi });
+}
+function pttUp() {
+  if (!txing) return;
+  txing = false;
+  audio.stopPublishing();
+  bus.send('radio.ptt_release', { talkgroup: radio.talkgroup, as_radio: radio.issi });
+}
+el('#ptt').addEventListener('mousedown', pttDown);
+el('#ptt').addEventListener('touchstart', pttDown);
+window.addEventListener('mouseup', pttUp);
+window.addEventListener('touchend', pttUp);
+
+/* ---- realtime ---- */
+let bus;
+bus = CCCS.bus((up) => {
+  el('#net').textContent = up ? 'link up' : 'link down';
+  el('#net').classList.toggle('up', up);
+  if (up) {
+    bus.send('radio.attach', { issi: qIssi || undefined, radio_id: me.radio_id || undefined });
+    CCCS.outbox.flush();
+  }
+});
+
+const audio = CCCS.audio(bus);
+let actx;
+function beepTwice() {
+  if (covert) return;
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    [0, 0.25].forEach((t) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.frequency.value = 1200; g.gain.value = 0.06;
+      o.connect(g); g.connect(actx.destination);
+      o.start(actx.currentTime + t); o.stop(actx.currentTime + t + 0.12);
+    });
+  } catch {}
+}
+let pstnCfg = { prefix: '9', driver: 'simulated', media: false };
+api('GET', '/api/config').then((c) => (pstnCfg = c.pstn)).catch(() => {});
+
+bus.on('ptt.granted', async ({ listeners }) => {
+  try { await audio.publishTo(listeners); }
+  catch (e) { log('MIC DENIED: ' + e.message); }
+})
+.on('radio.attached', async (r) => {
+  radio = r; paint();
+  log(`REGISTERED ISSI ${r.issi} AS ${r.callsign || r.issi}`);
+  const jobs = await api('GET', '/api/jobs');
+  currentJob = jobs.find((j) => j.resources.some((x) => x.radio === r.issi) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
+})
+.on('radio.status_changed', (r) => { if (radio && r.issi === radio.issi) { radio = r; paint(); } })
+.on('radio.location_changed', (r) => { if (radio && r.issi === radio.issi) radio = r; })
+.on('call.incoming', (c) => { if (c.participants.some((p) => p.radio_id === radio.id && p.role === 'CALLEE')) showIncoming(c); })
+.on('call.accepted', (c) => {
+  const n = el('#callState');
+  if (n) n.textContent = c.kind === 'PSTN' ? (pstnCfg.media ? 'CONNECTED' : 'CONNECTED — no media on the simulated gateway') : 'CONNECTED';
+  const other = (c.participants || []).find((p) => p.radio_id !== radio.id && p.issi);
+  if (c.kind !== 'PSTN' && other && c.from_radio_id === radio.id) audio.call(`radio:${other.issi}`).catch((e) => log('MIC DENIED: ' + e.message)); if (currentCall && currentCall.id === c.id) { el('#alertHost').innerHTML = `<div class="incoming" style="border-color:var(--available)"><strong>CALL ACTIVE</strong><div class="btn-row" style="margin-top:10px"><button class="btn danger" id="cEnd2">End call</button></div></div>`; el('#cEnd2').onclick = () => api('POST', `/api/calls/${c.id}/end`); } log(`CALL #${c.id} CONNECTED`); })
+.on('call.rejected', (c) => { log(`CALL #${c.id} DECLINED by ${c.rejected_by}`); })
+.on('call.incoming', (c) => {
+  const caller = (c.participants || []).find((p) => p.role === 'CALLER');
+  if (caller && caller.issi) lastParty = { type: 'radio', target: caller.issi, label: caller.callsign || caller.issi };
+  else if (c.kind === 'PSTN' && c.dialled_number) lastParty = { type: 'phone', target: `9${c.dialled_number}`, label: c.from_label };
+})
+.on('call.ended', (c) => { audio.hangUp(); el('#alertHost').innerHTML = ''; currentCall = null; log(`CALL #${c.id} ENDED (${c.end_reason})`); })
+.on('job.assigned_to_you', (j) => {
+  if (!j.resources.some((r) => r.radio === radio.issi)) return;
+  currentJob = j;
+  el('#alertHost').innerHTML = `<div class="incoming" style="border-color:var(--priority);background:#2a1c11"><strong>NEW JOB</strong><div class="mono" style="font-size:18px">${esc(j.reference)} · ${esc(j.priority)}</div><div>${esc(j.location)}</div><div class="btn-row" style="margin-top:10px"><button class="btn ok" id="jaAcc">Accept</button><button class="btn" id="jaView">View</button></div></div>`;
+  el('#jaAcc').onclick = async () => {
+    const r = await CCCS.send('POST', `/api/jobs/${j.id}/ack`, {}, `acknowledge ${j.reference}`);
+    el('#alertHost').innerHTML = '';
+    log(r.queued ? `ACKNOWLEDGEMENT OF ${j.reference} QUEUED` : `ACKNOWLEDGED ${j.reference}`);
+    offerNavigate(j);
+  };
+  el('#jaView').onclick = () => showJob(j);
+  log(`NEW JOB ${j.reference} ${j.priority} — ${j.location}`);
+})
+.on('job.status_changed', (j) => { if (currentJob && j.id === currentJob.id) currentJob = j; })
+.on('radio.ptt_started', (p) => {
+  if (!radio || p.talkgroup !== radio.talkgroup) return;
+  const mine = p.issi === radio.issi;
+  el('#ptt').classList.toggle('tx', mine);
+  el('#ptt').classList.toggle('rx', !mine);
+  if (!mine) audio.beginRecording();
+  log(`${mine ? 'TX' : 'RX ' + p.callsign} on ${p.talkgroup}`);
+})
+.on('radio.ptt_released', (p) => {
+  if (!radio || p.talkgroup !== radio.talkgroup) return;
+  el('#ptt').classList.remove('tx', 'rx');
+  audio.endRecording();
+})
+.on('ptt.denied', (p) => { txing = false; log(`PTT DENIED — ${p.holder} has the floor`); })
+.on('call.request_cleared', (r) => {
+  if (radio && r.issi === radio.issi) {
+    log(r.state === 'ANSWERED' ? `CALL REQUEST ANSWERED BY ${r.answered_by}` : 'CALL REQUEST CANCELLED');
+  }
+})
+.on('welfare.started', ({ radio: r }) => { if (radio && r.issi === radio.issi) radio = r; })
+.on('welfare.checked_in', (r) => { if (radio && r.issi === radio.issi) radio = r; })
+.on('welfare.stopped', (r) => { if (radio && r.issi === radio.issi) radio = r; })
+.on('welfare.due_soon', ({ seconds_left }) => { log(`WELFARE CHECK-IN DUE IN ${seconds_left}s`); beepTwice(); })
+.on('welfare.overdue', (e) => { if (radio && e.issi === radio.issi) { radio.welfare_due_at = null; log('WELFARE OVERDUE — CONTROL ALERTED'); } })
+.on('emergency.acknowledged', (e) => { if (radio && e.issi === radio.issi) log(`EMERGENCY ACKNOWLEDGED BY ${e.acknowledged_by}`); })
+.on('emergency.resolved', (e) => { if (radio && e.issi === radio.issi) log('EMERGENCY RESET BY CONTROL'); })
+.on('message.received', (m) => { if (radio && m.to_radio_id === radio.id) log(`MSG ${m.from_label}: ${m.body}`); })
+.on('error', (e) => log(`ERROR: ${e.message}`));
+</script>
+</body>
+</html>

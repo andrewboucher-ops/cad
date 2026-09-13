@@ -1,0 +1,28 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # No dependencies to install — the server is zero-dependency by design.
+      - name: Run the suite
+        run: npm test
+      - name: Check the server boots and seeds cleanly
+        run: |
+          AUTH_SECRET=ci-only PORT=4321 DATA_FILE=/tmp/ci.db timeout 20 node server.js &
+          sleep 3
+          curl -fsS -X POST localhost:4321/api/auth/login \
+            -H 'content-type: application/json' \
+            -d '{"username":"dispatcher","password":"dispatch123"}' > /dev/null
+          echo "server boots and authenticates"

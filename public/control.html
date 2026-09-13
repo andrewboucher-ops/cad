@@ -1,0 +1,855 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — control room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<link rel="stylesheet" href="https://unpkg.com/golden-layout@2.6.0/dist/css/goldenlayout-base.css">
+<link rel="stylesheet" href="https://unpkg.com/golden-layout@2.6.0/dist/css/themes/goldenlayout-dark-theme.css">
+<style>
+  /* Real docking panels (GoldenLayout): drag tabs to rearrange, drag borders
+     to resize, close one and its neighbours reflow to fill the space, and
+     each tab's own maximise button is our "expand to fill screen". This
+     replaces an earlier hand-rolled minimize/close/expand-per-panel scheme
+     that could only approximate this. */
+  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; padding-right: 64px; }
+  #glRoot { flex: 1; min-height: 0; margin: 8px; }
+  .lm_content { background: var(--panel); overflow: hidden; }
+  .lm_header { background: var(--panel-2) !important; }
+  .lm_tab { background: var(--panel-2) !important; color: var(--ink-dim) !important; border: none !important; }
+  .lm_tab.lm_active { background: var(--panel) !important; color: var(--ink) !important; box-shadow: inset 0 -2px 0 var(--accent) !important; }
+  .lm_tab .lm_title { font-family: var(--font); font-size: 12px; }
+  .lm_splitter { background: var(--bg) !important; }
+  .lm_splitter:hover, .lm_splitter.lm_dragging { background: var(--accent-dim) !important; }
+  .lm_controls > * { opacity: .7; }
+  .lm_controls > *:hover { opacity: 1; }
+  /* Each tab already has its own close (lm_close_tab); the stack-level one
+     is the same action restated, which read as two close buttons. */
+  .lm_controls > .lm_close { display: none; }
+
+  .pcount {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px; flex: none;
+    border-bottom: 1px solid var(--line); background: var(--panel-2); min-height: 32px; box-sizing: border-box;
+  }
+
+  .actionbar { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  .emg-banner { background: #4c1113; border-bottom: 1px solid #7f1d1d; padding: 8px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .emg-banner strong { color: #fecaca; letter-spacing: .08em; }
+  .req-bar { background: #14202e; border-bottom: 1px solid var(--line); padding: 6px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .req-bar.pri { background: #2a1c11; border-color: var(--priority); }
+  .req-bar strong { letter-spacing: .06em; }
+  .req-bar.pri strong { color: var(--priority); }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 2px 10px; font-size: 13px; }
+  .kv dt { color: var(--ink-dim); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; align-self: center; }
+  .kv dd { margin: 0; font-family: var(--mono); }
+  .tg-pill { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+
+  /* ---- terminal / incident cards (replaces the plain text rows) ---- */
+  #resList .row, #jobList .row {
+    flex-direction: column; align-items: stretch; gap: 7px; padding: 11px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel-2); margin-bottom: 7px; border-bottom: none;
+  }
+  #resList .row:hover, #jobList .row:hover { border-color: var(--accent-dim); background: var(--panel-2); }
+  #resList .row.sel, #jobList .row.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; background: var(--panel-2); }
+  .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .card-top .cs { font-family: var(--mono); font-weight: 700; font-size: 14px; }
+  .card-sub { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-dim); font-size: 11.5px; }
+  .status-pill { font-size: 10px; font-weight: 700; letter-spacing: .05em; padding: 3px 10px; border-radius: 20px; text-transform: uppercase; white-space: nowrap; }
+  .status-pill.on { background: rgba(34,197,94,.16); color: var(--available); }
+  .status-pill.busy { background: rgba(234,179,8,.16); color: var(--busy); }
+  .status-pill.off { background: rgba(100,116,139,.18); color: var(--offline); }
+  .status-pill.emg { background: rgba(239,68,68,.2); color: var(--emergency); }
+  .assign-ic {
+    display: flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+    border-radius: 50%; border: none; background: rgba(239,68,68,.16); color: var(--emergency);
+    cursor: pointer; flex: none; transition: background-color .12s var(--ease);
+  }
+  .assign-ic:hover { background: rgba(239,68,68,.3); }
+  #jobList .row.closed { opacity: .55; }
+  .callback-tag {
+    background: linear-gradient(90deg,#4a3405,#5c4008); border: 1px solid #a16207; color: #fde68a;
+    font-weight: 700; font-size: 10.5px; letter-spacing: .04em; text-align: center; text-transform: uppercase;
+    padding: 6px; border-radius: 5px; cursor: pointer;
+  }
+  .callback-tag:hover { filter: brightness(1.15); }
+
+  /* ---- quick-nav icon rail: also how you bring back a closed panel ---- */
+  .icon-rail {
+    position: fixed; right: 0; top: 0; bottom: 0; width: 64px; z-index: 40;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel)); border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; align-items: center; padding-top: 58px; gap: 3px;
+  }
+  .icon-rail button {
+    position: relative; width: 52px; display: flex; flex-direction: column; align-items: center; gap: 4px;
+    background: none; border: none; color: var(--ink-dim); padding: 9px 0 8px; border-radius: 10px;
+    cursor: pointer; font-size: 9.5px; letter-spacing: .01em; font-family: var(--font);
+    transition: background-color .12s var(--ease), color .12s var(--ease);
+  }
+  .icon-rail button:hover { background: var(--panel-3); color: var(--ink); }
+  .icon-rail button svg { width: 19px; height: 19px; }
+  .icon-rail .badge {
+    position: absolute; top: 2px; right: 6px; background: var(--emergency); color: #fff; font-size: 9px;
+    font-weight: 700; border-radius: 20px; padding: 1px 5px; min-width: 14px; line-height: 1.4;
+  }
+  @keyframes flash-glow { 0%, 100% { box-shadow: var(--shadow); } 40% { box-shadow: 0 0 0 2px var(--accent), var(--shadow-lg); } }
+  .flash { animation: flash-glow .9s var(--ease); }
+
+  .filters-drop {
+    padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px;
+    background: var(--panel-2); font-size: 12.5px; flex: none;
+  }
+  .filters-drop label { display: flex; align-items: center; gap: 8px; margin: 0; text-transform: none; letter-spacing: 0; font-size: 12.5px; color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="brand">CCCS CONTROL</span>
+  <span class="link-net" id="net">link down</span>
+  <span class="spacer"></span>
+  <span class="dim" id="who"></span>
+  <button class="btn" id="resetLayout" title="Restore the default panel arrangement" style="padding:2px 8px;font-size:11px">Reset layout</button>
+  <span class="clock" id="clock">--:--:--</span>
+  <button class="btn" id="signout">Sign out</button>
+</div>
+
+<div id="emgWrap"></div>
+<div id="reqWrap"></div>
+
+<div id="glRoot"></div>
+
+<div class="actionbar">
+  <button class="btn primary" id="btnCall">Call radio</button>
+  <button class="btn primary" id="btnGroup">Group call</button>
+  <button class="btn" id="btnMessage">Send message</button>
+  <button class="btn" id="btnTalkgroups">Talkgroups</button>
+  <button class="btn" id="btnAssign">Assignments</button>
+  <span style="flex:1"></span>
+  <select id="pttTg" style="width:180px"></select>
+  <button class="btn ok" id="btnPtt">Hold to transmit</button>
+  <span class="tg-pill" id="floor"></span>
+</div>
+
+<div id="modalHost"></div>
+
+<div class="icon-rail">
+  <button id="railIncidents" title="Incidents"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Incidents</span></button>
+  <button id="railTerminals" title="Terminals"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="1.8"/><path d="M9 19h6M12 15v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Terminals</span></button>
+  <button id="railMessages" title="Messages"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Messages</span></button>
+  <button id="railCallbacks" title="Callbacks"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3l3 1.5-1.2 3.2a12 12 0 007.5 7.5l3.2-1.2L20 17c0 2-1.6 3.5-3.5 3.3C10 19.7 4.3 14 3.7 7.5 3.5 5.6 5 4 7 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Callbacks</span><span class="badge" id="railCallbackBadge" hidden>0</span></button>
+  <button id="railLog" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></button>
+  <button id="railMap" title="Map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Map</span></button>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="/app.js"></script>
+<script type="module">
+import { GoldenLayout } from 'https://unpkg.com/golden-layout@2.6.0/dist/esm/index.js';
+
+const { api, el, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+
+// A GoldenLayout popout window is this same page reloaded with
+// ?gl-window=<id> — but GL takes that as licence to wipe document.body
+// entirely and replace it with its own single-panel scaffolding, so none of
+// this page's normal chrome (topbar, actionbar, icon rail) exists there.
+// Every statement below that touches that chrome has to be skipped, or it
+// throws against a null element and can stop other setup mid-script.
+const isPopout = /[?&]gl-window=/.test(location.search);
+
+if (!isPopout) {
+  el('#who').textContent = `${me.display_name} · ${me.role}`;
+  el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+  setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
+  // keep welfare countdowns ticking without a server round trip
+  setInterval(() => { if (state.radios.some((r) => r.welfare_due_at)) renderResources(); }, 1000);
+}
+
+const state = { radios: [], mdts: [], jobs: [], sites: [], requests: [], talkgroups: [], emergencies: [], events: [], selected: null, calls: new Map() };
+let map; // assigned once the 'map' panel is mounted, below
+
+/* ---------- rendering ---------- */
+function welfareLeft(r) {
+  if (!r.welfare_due_at) return '';
+  const left = Math.round((Date.parse(r.welfare_due_at) - Date.now()) / 1000);
+  if (left <= 0) return 'overdue';
+  return `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`;
+}
+
+function pillClass(r) {
+  if (r.emergency) return 'emg';
+  if (r.status === 'AVAILABLE') return 'on';
+  if (['OFFLINE', 'OUT_OF_SERVICE'].includes(r.status)) return 'off';
+  return 'busy';
+}
+
+function renderResources() {
+  if (!el('#resList')) return;
+  const reqByIssi = new Map(state.requests.filter((r) => r.state === 'PENDING').map((r) => [r.issi, r]));
+  const rows = state.radios.map((r) => {
+    const req = reqByIssi.get(r.issi);
+    return `
+    <div class="row ${state.selected === r.issi ? 'sel' : ''} ${r.emergency ? 'alarm' : ''}" data-issi="${r.issi}">
+      <div class="card-top">
+        <span class="cs">${esc(r.callsign || '—')}</span>
+        <span class="status-pill ${pillClass(r)}">${(r.emergency ? 'EMERGENCY' : r.status).replace('_', ' ')}</span>
+      </div>
+      <div class="card-sub">
+        <span class="mono">ISSI ${r.issi}${r.covert ? ' · covert' : ''}</span>
+        <span>${esc(r.talkgroup || '—')}${r.welfare_due_at ? ' · welfare ' + welfareLeft(r) : ''}</span>
+      </div>
+      ${req ? `<div class="callback-tag" data-cbcall="${r.issi}">${req.priority ? 'Priority callback requested' : 'Callback requested'}</div>` : ''}
+    </div>`;
+  }).join('');
+  // A terminal working a job shows that job's cycle status (matching what's
+  // on its own screen); only falls back to duty status once the job clears —
+  // one status vocabulary end to end, not two competing ones.
+  const jobStatusClass = (s) => ({ EN_ROUTE: 'busy', ON_SCENE: 'busy', TRANSPORTING: 'busy', DISPATCHED: 'busy', ACKNOWLEDGED: 'busy' }[s] || 'on');
+  const mdtPillClass = (m, job) => !m.connected ? 'off' : job ? jobStatusClass(job.status) : m.duty_status === 'BUSY' ? 'busy' : m.duty_status === 'OUT_OF_SERVICE' ? 'off' : 'on';
+  const mdtRows = state.mdts.map((m) => {
+    const job = state.jobs.find((j) => j.resources.some((r) => r.mdt === m.mdt_code) && !['COMPLETED', 'CANCELLED'].includes(j.status));
+    const label = m.connected ? (job ? job.status : (m.duty_status || 'AVAILABLE')).replace('_', ' ') : 'OFFLINE';
+    return `
+    <div class="row" data-mdt="${m.mdt_code}">
+      <div class="card-top">
+        <span class="cs">${esc(m.mdt_code)}</span>
+        <span class="status-pill ${mdtPillClass(m, job)}">${label}</span>
+      </div>
+      <div class="card-sub"><span>${esc(m.callsign || 'unassigned')}</span><span>${m.crew && m.crew.length ? esc(m.crew.map((c) => c.name).join(', ')) : 'no crew'}</span></div>
+    </div>`;
+  }).join('');
+  el('#resList').innerHTML = rows + `<div style="padding:10px 8px 4px" class="dim" >Mobile data terminals</div>` + mdtRows;
+  if (el('#resCount')) el('#resCount').textContent = `${state.radios.filter((r) => r.connected).length}/${state.radios.length} on air`;
+  CCCS.els('#resList .row[data-issi]').forEach((n) => n.addEventListener('click', () => select(n.dataset.issi)));
+  CCCS.els('[data-cbcall]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); callRadio(b.dataset.cbcall); }));
+}
+
+const ASSIGN_ICON = '<svg viewBox="0 0 24 24" fill="none" width="16" height="16"><circle cx="9" cy="8" r="3" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="17" cy="8.5" r="2.4" stroke="currentColor" stroke-width="1.6" opacity=".7"/><path d="M14.5 19c.3-2.4 2-4.2 4-4.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".7"/></svg>';
+
+function renderJobs() {
+  if (!el('#jobList')) return;
+  const showClosed = el('#fltClosed') && el('#fltClosed').checked;
+  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const open = state.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)
+    || (showClosed && Date.parse(j.updated_at) > dayAgo));
+  el('#jobList').innerHTML = open.length ? open.map((j) => `
+    <div class="row ${['COMPLETED', 'CANCELLED'].includes(j.status) ? 'closed' : ''}" data-job="${j.id}">
+      <div class="card-top">
+        <span class="cs">${esc(j.reference)}</span>
+        <span style="display:flex;align-items:center;gap:8px">
+          <span class="pri pri-${j.priority}">${j.priority}</span>
+          <button class="assign-ic" data-assignjob="${j.id}" title="Assign call signs">${ASSIGN_ICON}</button>
+        </span>
+      </div>
+      <div class="card-sub">
+        <span>${esc(j.status.replace('_', ' '))}</span>
+        <span>${esc(j.resources.map((r) => r.callsign || r.radio || r.mdt).join(', ') || 'unassigned')}</span>
+      </div>
+    </div>`).join('') : '<p class="dim">No open jobs. Create one to start a dispatch.</p>';
+  CCCS.els('#jobList .row').forEach((n) => n.addEventListener('click', () => jobModal(state.jobs.find((j) => j.id === Number(n.dataset.job)))));
+  CCCS.els('[data-assignjob]').forEach((b) => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    assignModal(state.jobs.find((j) => j.id === Number(b.dataset.assignjob)));
+  }));
+  updateCallbackBadge();
+}
+
+/** Tap a call sign to dispatch every radio and MDT on it — mirrors how a
+ * real dispatch console assigns by call sign rather than by individual
+ * device, since a car's radio and its MDT should move together. */
+async function assignModal(job) {
+  if (!job) return;
+  const callsigns = await api('GET', '/api/callsigns');
+  const buttonsHtml = () => callsigns.map((c) => {
+    const n = c.radios.length + c.mdts.length;
+    const already = job.resources.some((r) => r.callsign === c.name);
+    return `<button class="btn ${already ? 'ok' : 'primary'}" data-cs="${esc(c.name)}" ${already || !n ? 'disabled' : ''}>${esc(c.name)} ${already ? '— assigned' : `(${n})`}</button>`;
+  }).join('') || '<p class="dim">No call signs configured.</p>';
+
+  function paint() {
+    el('#csButtons').innerHTML = buttonsHtml();
+    CCCS.els('[data-cs]').forEach((b) => (b.onclick = async () => {
+      try { job = await api('POST', `/api/jobs/${job.id}/assign`, { resources: [b.dataset.cs] }); paint(); }
+      catch (e) { alert(e.message); }
+    }));
+  }
+
+  modal(`Assign — ${job.reference}`, `
+    <p class="dim" style="margin:0 0 12px">Tap a call sign to dispatch every radio and MDT on it to ${esc(job.reference)}.</p>
+    <div class="btn-row" id="csButtons"></div>`, paint);
+}
+
+function updateCallbackBadge() {
+  const n = state.requests.filter((r) => r.state === 'PENDING').length;
+  const b = el('#railCallbackBadge');
+  if (!b) return;
+  b.textContent = n; b.hidden = n === 0;
+}
+
+function renderDetail() {
+  if (!el('#detailBody')) return;
+  const r = state.radios.find((x) => x.issi === state.selected);
+  if (!r) return;
+  const job = state.jobs.find((j) => j.id === r.job_id);
+  el('#detailBody').innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span class="dot s-${r.emergency ? 'EMERGENCY' : r.status}"></span>
+      <strong class="mono" style="font-size:18px">${esc(r.callsign || r.issi)}</strong>
+      <span class="txt-${r.status}">${r.status.replace('_', ' ')}</span>
+    </div>
+    <dl class="kv">
+      <dt>ISSI</dt><dd>${r.issi}</dd>
+      <dt>Type</dt><dd>${r.radio_type}</dd>
+      <dt>Vehicle</dt><dd>${esc(r.vehicle || '—')}</dd>
+      <dt>Talkgroup</dt><dd>${esc(r.talkgroup || '—')}</dd>
+      <dt>Job</dt><dd>${job ? esc(job.reference) : '—'}</dd>
+      <dt>Crew</dt><dd>${esc(r.personnel.join(', ') || '—')}</dd>
+      <dt>Speed</dt><dd>${r.speed} mph</dd>
+      <dt>Battery</dt><dd>${r.battery}%</dd>
+      <dt>Signal</dt><dd>${esc(r.signal)}</dd>
+      <dt>Position</dt><dd>${r.lat ? r.lat.toFixed(4) + ', ' + r.lon.toFixed(4) : '—'}</dd>
+      <dt>Last seen</dt><dd>${r.last_seen ? new Date(r.last_seen).toLocaleTimeString() : 'never'}</dd>
+      <dt>Welfare</dt><dd>${r.welfare_due_at ? welfareLeft(r) + ' remaining' : 'no timer'}</dd>
+      <dt>Status code</dt><dd>${esc(r.status_code || '—')}</dd>
+      <dt>Covert</dt><dd>${r.covert ? 'ON — will not sound when called' : 'off'}</dd>
+    </dl>
+    <div class="btn-row" style="margin-top:10px">
+      <button class="btn primary" id="dCall">Call ${esc(r.callsign || r.issi)}</button>
+      <button class="btn" id="dMsg">Message</button>
+    </div>`;
+  el('#dCall').onclick = () => callRadio(r.issi);
+  el('#dMsg').onclick = () => messageModal(r.issi);
+}
+
+function mapData() {
+  return {
+    units: state.radios.filter((r) => r.connected || r.status !== 'OFFLINE'),
+    jobs: state.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)),
+  };
+}
+function renderMap() {
+  if (!map) return;
+  const { units, jobs } = mapData();
+  map.render(units, jobs, (u) => select(u.issi));
+}
+
+function renderEmergencies() {
+  if (!el('#emgWrap')) return; // this chrome doesn't exist in a GL popout window
+  const active = state.emergencies.filter((e) => e.state !== 'RESOLVED');
+  el('#emgWrap').innerHTML = active.map((e) => `
+    <div class="emg-banner">
+      <strong>${e.kind === 'WELFARE' ? 'WELFARE OVERDUE — NO CHECK-IN' : 'RADIO EMERGENCY'}</strong>
+      <span class="mono">${esc(e.callsign)} · ISSI ${e.issi} · ${e.lat ? e.lat.toFixed(4) + ', ' + e.lon.toFixed(4) : 'no fix'} · ${new Date(e.activated_at).toLocaleTimeString()}</span>
+      ${e.note ? `<span class="dim">last task: ${esc(e.note)}</span>` : ''}
+      <span class="dim">${e.state === 'ACKNOWLEDGED' ? 'acknowledged by ' + esc(e.acknowledged_by) : ''}</span>
+      <span style="flex:1"></span>
+      ${e.state === 'ACTIVE' ? `<button class="btn danger" data-ack="${e.id}">Acknowledge</button>` : ''}
+      <button class="btn" data-emgcall="${e.issi}">Call radio</button>
+      <button class="btn" data-loc="${e.issi}">View location</button>
+      <button class="btn ok" data-res="${e.id}">Reset emergency</button>
+    </div>`).join('');
+  CCCS.els('[data-ack]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.ack}/ack`)));
+  CCCS.els('[data-res]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.res}/resolve`)));
+  CCCS.els('[data-emgcall]').forEach((b) => (b.onclick = () => callRadio(b.dataset.emgcall)));
+  CCCS.els('[data-loc]').forEach((b) => (b.onclick = () => select(b.dataset.loc)));
+  if (active.some((e) => e.state === 'ACTIVE')) beep();
+}
+
+function renderRequests() {
+  if (!el('#reqWrap')) return; // this chrome doesn't exist in a GL popout window
+  const open = state.requests.filter((r) => r.state === 'PENDING')
+    .sort((a, b) => (b.priority - a.priority) || (Date.parse(a.requested_at) - Date.parse(b.requested_at)));
+  el('#reqWrap').innerHTML = open.map((r) => `
+    <div class="req-bar ${r.priority ? 'pri' : ''}">
+      <strong>${r.priority ? 'PRIORITY CALL REQUEST' : 'CALL REQUEST'}</strong>
+      <span class="mono">${esc(r.callsign)} · ISSI ${r.issi} · ${new Date(r.requested_at).toLocaleTimeString()}</span>
+      ${r.note ? `<span class="dim">${esc(r.note)}</span>` : ''}
+      <span style="flex:1"></span>
+      <button class="btn primary" data-reqcall="${r.issi}">Call ${esc(r.callsign)}</button>
+      <button class="btn" data-reqloc="${r.issi}">Locate</button>
+      <button class="btn" data-reqclear="${r.id}">Clear</button>
+    </div>`).join('');
+  CCCS.els('[data-reqcall]').forEach((b) => (b.onclick = () => callRadio(b.dataset.reqcall)));
+  CCCS.els('[data-reqloc]').forEach((b) => (b.onclick = () => select(b.dataset.reqloc)));
+  CCCS.els('[data-reqclear]').forEach((b) => (b.onclick = () => api('POST', `/api/calls/requests/${b.dataset.reqclear}/clear`, {})));
+  if (open.some((r) => r.priority)) beep();
+  updateCallbackBadge();
+}
+
+function renderLog() {
+  if (!el('#log') || !el('#logFilter')) return;
+  const f = el('#logFilter').value.toLowerCase();
+  const rows = state.events.filter((e) => !f || e.summary.toLowerCase().includes(f)).slice(-250);
+  el('#log').innerHTML = rows.map((e) => `<div><span class="t">${CCCS.hhmmss(new Date(e.at))}</span>${esc(e.summary)}</div>`).join('');
+  el('#log').scrollTop = el('#log').scrollHeight;
+}
+
+function select(issi) { state.selected = issi; renderResources(); renderDetail(); }
+
+let audioCtx;
+function beep() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = 880; g.gain.value = 0.05;
+    o.connect(g); g.connect(audioCtx.destination); o.start();
+    o.stop(audioCtx.currentTime + 0.18);
+  } catch {}
+}
+
+/* ---------- modals ---------- */
+function modal(title, html, onMount) {
+  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
+  el('#mClose').onclick = closeModal;
+  onMount && onMount();
+}
+const closeModal = () => (el('#modalHost').innerHTML = '');
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+async function callRadio(issi) {
+  try {
+    const call = await api('POST', '/api/calls/private', { to: issi });
+    activeCall(call);
+  } catch (e) { modal('Call failed', `<p class="err">${esc(e.message)}</p>`); }
+}
+
+function activeCall(call) {
+  const names = call.participants.map((p) => p.callsign || p.issi).join(', ');
+  state.calls.set(call.id, call);
+  modal(`Call #${call.id}`, `
+    <p>To <strong class="mono">${esc(names)}</strong></p>
+    <p id="callState" class="mono">${esc(call.state)}</p>
+    <div class="btn-row"><button class="btn danger" id="endCall">Clear call</button></div>`, () => {
+    el('#endCall').onclick = async () => { await api('POST', `/api/calls/${call.id}/end`); closeModal(); };
+  });
+}
+
+if (!isPopout) {
+el('#btnCall').onclick = () => modal('Call a radio', `
+  <label for="cTo">Destination radio or ISSI</label>
+  <select id="cTo">${state.radios.map((r) => `<option value="${r.issi}">${esc(r.callsign || r.issi)} — ${r.issi} (${r.connected ? 'on air' : 'offline'})</option>`).join('')}</select>
+  <div style="height:12px"></div><button class="btn primary" id="cGo">Start call</button>`,
+  () => (el('#cGo').onclick = () => callRadio(el('#cTo').value)));
+
+el('#btnGroup').onclick = () => modal('Group call', `
+  <label for="gTg">Talkgroup</label>
+  <select id="gTg"><option value="">— pick individual resources instead —</option>${state.talkgroups.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select>
+  <label for="gList">Or select radios (ctrl/cmd-click for several)</label>
+  <select id="gList" multiple size="6">${state.radios.filter((r) => r.connected).map((r) => `<option value="${r.issi}">${esc(r.callsign)} — ${r.issi}</option>`).join('')}</select>
+  <div style="height:12px"></div><button class="btn primary" id="gGo">Start group call</button>`, () => {
+  el('#gGo').onclick = async () => {
+    const tg = el('#gTg').value;
+    const picks = [...el('#gList').selectedOptions].map((o) => o.value);
+    try {
+      const call = await api('POST', '/api/calls/group', tg ? { talkgroup: Number(tg) } : { to: picks });
+      activeCall(call);
+    } catch (e) { el('#gGo').insertAdjacentHTML('afterend', `<p class="err">${esc(e.message)}</p>`); }
+  };
+});
+
+el('#btnMessage').onclick = () => messageModal(state.selected);
+}
+function messageModal(issi) {
+  modal('Send message', `
+    <label for="mTo">Recipient</label>
+    <select id="mTo">
+      ${state.radios.map((r) => `<option value="r:${r.issi}" ${r.issi === issi ? 'selected' : ''}>RADIO ${esc(r.callsign || r.issi)} — ${r.issi}</option>`).join('')}
+      ${state.mdts.map((m) => `<option value="m:${m.mdt_code}">MDT ${esc(m.mdt_code)}</option>`).join('')}
+    </select>
+    <label for="mBody">Message</label>
+    <textarea id="mBody" rows="3"></textarea>
+    <div style="height:12px"></div><button class="btn primary" id="mSend">Send</button>`, () => {
+    el('#mSend').onclick = async () => {
+      const [kind, id] = el('#mTo').value.split(':');
+      await api('POST', '/api/messages', { [kind === 'r' ? 'to_radio' : 'to_mdt']: id, body: el('#mBody').value });
+      closeModal();
+    };
+  });
+}
+
+function openNewJobModal() {
+  modal('Create job', `
+  <label for="jType">Incident type</label>
+  <input id="jType" list="incidentTypes" value="Alarm activation">
+  <datalist id="incidentTypes">
+    <option>Alarm activation</option><option>Intruder on site</option><option>Keyholding response</option>
+    <option>Lock and unlock</option><option>Patrol visit</option><option>Fire alarm</option>
+    <option>Vandalism</option><option>Trespass</option><option>Welfare check</option>
+  </datalist>
+  <label for="jPri">Priority</label>
+  <select id="jPri"><option>RED</option><option selected>AMBER</option><option>GREEN</option><option>ROUTINE</option></select>
+  <label for="jSite">Site under contract</label>
+  <select id="jSite"><option value="">— not a contracted site —</option>${state.sites.map((x) => `<option value="${x.id}">${esc(x.name)} — ${esc(x.address)}</option>`).join('')}</select>
+  <label for="jLoc">Location (used when no site is selected)</label>
+  <input id="jLoc" value="">
+  <label for="jW3w">What3Words <span class="dim">(optional — for locations with no address, e.g. open ground at an event)</span></label>
+  <input id="jW3w" placeholder="///filled.count.soap">
+  <label for="jDesc">Description</label>
+  <textarea id="jDesc" rows="2">Zone 3 activation reported by monitoring centre.</textarea>
+  <label for="jCaller">Caller</label>
+  <input id="jCaller" value="Monitoring centre, ref ARC-00000">
+  <label for="jRes">Resources to dispatch</label>
+  <select id="jRes" multiple size="6">${state.radios.map((r) => `<option value="${r.callsign || r.issi}">${esc(r.callsign || r.issi)} — ${r.status.replace('_', ' ')}</option>`).join('')}</select>
+  <div style="height:12px"></div><button class="btn primary" id="jGo">Create and dispatch</button>`, () => {
+  el('#jGo').onclick = async () => {
+    try {
+      const job = await api('POST', '/api/jobs', {
+        incident_type: el('#jType').value, priority: el('#jPri').value,
+        location: el('#jLoc').value, site: el('#jSite').value || undefined,
+        description: el('#jDesc').value, caller: el('#jCaller').value,
+        what3words: el('#jW3w').value.replace(/^\/+/, '').trim() || undefined,
+      });
+      const picks = [...el('#jRes').selectedOptions].map((o) => o.value);
+      if (picks.length) await api('POST', `/api/jobs/${job.id}/assign`, { resources: picks });
+      closeModal();
+    } catch (e) { el('#jGo').insertAdjacentHTML('afterend', `<p class="err">${esc(e.message)}</p>`); }
+  };
+});
+}
+
+function jobModal(j) {
+  if (!j) return;
+  modal(`Job ${j.reference}`, `
+    <dl class="kv">
+      <dt>Priority</dt><dd><span class="pri pri-${j.priority}">${j.priority}</span></dd>
+      <dt>Status</dt><dd>${esc(j.status)}</dd>
+      <dt>Type</dt><dd>${esc(j.incident_type)}</dd>
+      <dt>Location</dt><dd>${esc(j.location)}</dd>
+      ${j.what3words ? `<dt>What3Words</dt><dd class="mono">///${esc(j.what3words)}</dd>` : ''}
+      <dt>Caller</dt><dd>${esc(j.caller || '—')}</dd>
+      <dt>Detail</dt><dd>${esc(j.description || '—')}</dd>
+      <dt>Resources</dt><dd>${j.resources.map((r) => `${esc(r.callsign || r.radio || r.mdt)}${r.acknowledged ? ' ✓' : ''}`).join('<br>') || '—'}</dd>
+    </dl>
+    <label for="jAdd">Assign more resources</label>
+    <select id="jAdd" multiple size="4">${state.radios.map((r) => `<option value="${r.callsign || r.issi}">${esc(r.callsign || r.issi)}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn primary" id="jAssign">Dispatch</button>
+      <button class="btn ok" id="jDone">Mark completed</button>
+      <button class="btn danger" id="jCancel">Cancel job</button>
+    </div>`, () => {
+    el('#jAssign').onclick = async () => {
+      const picks = [...el('#jAdd').selectedOptions].map((o) => o.value);
+      if (picks.length) await api('POST', `/api/jobs/${j.id}/assign`, { resources: picks });
+      closeModal();
+    };
+    el('#jDone').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }); closeModal(); };
+    el('#jCancel').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }); closeModal(); };
+  });
+}
+
+if (!isPopout) {
+el('#btnTalkgroups').onclick = async () => {
+  const tgs = await api('GET', '/api/talkgroups');
+  modal('Talkgroups', tgs.map((t) => `
+    <div style="margin-bottom:14px">
+      <strong class="mono">${esc(t.name)}</strong> <span class="dim">${t.floor_holder ? '· ' + esc(t.floor_holder) + ' has the floor' : ''}</span>
+      <div class="log" style="margin-top:4px">${t.members.map((m) => `<div>${esc(m.callsign)} <span class="txt-${m.status}">${m.status.replace('_', ' ')}</span> <button class="btn" style="padding:0 6px;font-size:11px" data-rm="${t.id}:${m.issi}">remove</button></div>`).join('') || '<div class="dim">no members</div>'}</div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <select data-add="${t.id}" style="flex:1">${state.radios.map((r) => `<option value="${r.issi}">${esc(r.callsign || r.issi)}</option>`).join('')}</select>
+        <button class="btn" data-addbtn="${t.id}">Add</button>
+      </div>
+    </div>`).join('') + `
+    <label for="tgName">New talkgroup name</label>
+    <div style="display:flex;gap:6px"><input id="tgName" placeholder="OPERATIONS"><button class="btn primary" id="tgNew">Create</button></div>`, () => {
+    CCCS.els('[data-rm]').forEach((b) => (b.onclick = async () => {
+      const [id, issi] = b.dataset.rm.split(':');
+      await api('DELETE', `/api/talkgroups/${id}/members`, { radio: issi });
+      el('#btnTalkgroups').click();
+    }));
+    CCCS.els('[data-addbtn]').forEach((b) => (b.onclick = async () => {
+      const sel = document.querySelector(`[data-add="${b.dataset.addbtn}"]`);
+      await api('POST', `/api/talkgroups/${b.dataset.addbtn}/members`, { radio: sel.value });
+      el('#btnTalkgroups').click();
+    }));
+    el('#tgNew').onclick = async () => { await api('POST', '/api/talkgroups', { name: el('#tgName').value }); el('#btnTalkgroups').click(); };
+  });
+};
+}
+
+if (!isPopout) {
+el('#btnAssign').onclick = async () => {
+  const cs = await api('GET', '/api/callsigns');
+  modal('Call sign assignments', cs.map((c) => `
+    <div style="margin-bottom:12px">
+      <strong class="mono">${esc(c.name)}</strong> <span class="dim">${esc(c.description || '')}</span>
+      <div class="log">
+        ${c.radios.map((r) => `<div>radio ${r.issi} <button class="btn" style="padding:0 6px;font-size:11px" data-unr="${c.id}:${r.issi}">remove</button></div>`).join('')}
+        ${c.mdts.map((m) => `<div>${esc(m.mdt_code)} <button class="btn" style="padding:0 6px;font-size:11px" data-unm="${c.id}:${m.mdt_code}">remove</button></div>`).join('')}
+        ${c.personnel.map((p) => `<div class="dim">${esc(p)}</div>`).join('')}
+      </div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <select data-pick="${c.id}" style="flex:1">
+          ${state.radios.map((r) => `<option value="r:${r.issi}">radio ${r.issi}</option>`).join('')}
+          ${state.mdts.map((m) => `<option value="m:${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}
+        </select>
+        <button class="btn" data-assign="${c.id}">Assign</button>
+      </div>
+    </div>`).join(''), () => {
+    CCCS.els('[data-assign]').forEach((b) => (b.onclick = async () => {
+      const v = document.querySelector(`[data-pick="${b.dataset.assign}"]`).value;
+      const [kind, id] = v.split(':');
+      await api('POST', `/api/callsigns/${b.dataset.assign}/assign`, { [kind === 'r' ? 'radio' : 'mdt']: id });
+      el('#btnAssign').click();
+    }));
+    CCCS.els('[data-unr]').forEach((b) => (b.onclick = async () => {
+      const [id, issi] = b.dataset.unr.split(':');
+      await api('DELETE', `/api/callsigns/${id}/assign`, { radio: issi });
+      el('#btnAssign').click();
+    }));
+    CCCS.els('[data-unm]').forEach((b) => (b.onclick = async () => {
+      const [id, code] = b.dataset.unm.split(':');
+      await api('DELETE', `/api/callsigns/${id}/assign`, { mdt: code });
+      el('#btnAssign').click();
+    }));
+  });
+};
+}
+
+/* ---------- PTT from the console ---------- */
+let txTg = null;
+function pttDown() {
+  const id = Number(el('#pttTg').value);
+  if (!id || txTg) return;
+  txTg = id; bus.send('radio.ptt_start', { talkgroup_id: id });
+  el('#btnPtt').classList.add('danger'); el('#btnPtt').textContent = 'Transmitting';
+}
+function pttUp() {
+  if (!txTg) return;
+  audio.stopPublishing();
+  bus.send('radio.ptt_release', { talkgroup_id: txTg });
+  txTg = null;
+  el('#btnPtt').classList.remove('danger'); el('#btnPtt').textContent = 'Hold to transmit';
+}
+if (!isPopout) {
+  el('#btnPtt').addEventListener('mousedown', pttDown);
+  el('#btnPtt').addEventListener('touchstart', (e) => { e.preventDefault(); pttDown(); });
+  window.addEventListener('mouseup', pttUp);
+  window.addEventListener('touchend', pttUp);
+}
+
+/* ------------------------------------------------------------------ *
+ * GoldenLayout shell — drag tabs to rearrange, drag borders to resize,
+ * close one and its neighbours reflow, each tab's own maximise button
+ * fills the screen. Panels are plain DOM built the same way they always
+ * were; only how they're mounted changes.
+ * ------------------------------------------------------------------ */
+const glRoot = document.getElementById('glRoot');
+const layout = new GoldenLayout(glRoot);
+
+function mount(container, toolbarHtml, bodyHtml) {
+  container.element.style.cssText = 'display:flex;flex-direction:column;height:100%;overflow:hidden';
+  container.element.innerHTML = (toolbarHtml ? `<div class="pcount">${toolbarHtml}</div>` : '') + bodyHtml;
+}
+
+layout.registerComponentFactoryFunction('jobs', (container) => {
+  mount(container,
+    '<button class="btn" id="jobFilters" style="padding:2px 8px;font-size:11px">Filters</button>' +
+    '<button class="btn" id="newJob" style="padding:2px 8px;font-size:11px">Create job</button>',
+    '<div class="filters-drop hide" id="jobFiltersDrop"><label><input type="checkbox" id="fltClosed"> Include recently closed (last 24h)</label></div>' +
+    '<div class="body" id="jobList" style="flex:1;overflow:auto"></div>');
+  // GoldenLayout builds new panels in a detached tree before attaching the
+  // whole layout, so document-wide queries (plain el()) can't find elements
+  // we just created — scope to container.element, which works either way.
+  const $ = (sel) => el(sel, container.element);
+  $('#jobFilters').onclick = () => $('#jobFiltersDrop').classList.toggle('hide');
+  $('#fltClosed').onchange = renderJobs;
+  $('#newJob').onclick = openNewJobModal;
+  renderJobs();
+});
+
+layout.registerComponentFactoryFunction('map', (container) => {
+  mount(container, '<button class="btn" id="mapRecenter" style="padding:2px 8px;font-size:11px">Recenter</button>',
+    '<div class="map" id="map" style="flex:1"></div>');
+  const $ = (sel) => el(sel, container.element);
+  map = CCCS.makeMap($('#map'));
+  $('#mapRecenter').onclick = () => { const { units, jobs } = mapData(); map.fitToData(units, jobs); };
+  container.on('resize', () => map && map.invalidateSize());
+  renderMap();
+});
+
+layout.registerComponentFactoryFunction('resources', (container) => {
+  mount(container, '<span class="spacer" style="flex:1"></span><span class="dim" id="resCount"></span>',
+    '<div class="body" id="resList" style="flex:1;overflow:auto"></div>');
+  renderResources();
+});
+
+layout.registerComponentFactoryFunction('detail', (container) => {
+  mount(container, null, '<div class="body" id="detailBody" style="flex:1;overflow:auto"><p class="dim">Select a resource to see its identity, status and location.</p></div>');
+  renderDetail();
+});
+
+layout.registerComponentFactoryFunction('comms', (container) => {
+  mount(container, '<input id="logFilter" placeholder="Filter by call sign, ISSI, job…" style="width:240px;padding:3px 8px;font-size:12px">',
+    '<div class="body log" id="log" style="flex:1;overflow:auto"></div>');
+  el('#logFilter', container.element).addEventListener('input', renderLog);
+  renderLog();
+});
+
+const PANEL_TITLES = { jobs: 'Active Jobs', map: 'Operational Map', resources: 'Resources', comms: 'Communications and Events', detail: 'Resource Detail' };
+
+const defaultLayoutConfig = {
+  // Popout really is useful here — genuinely separate windows for a
+  // multi-monitor control room, one browser window per screen. If the
+  // browser ever blocks the popup, blockedPopoutsThrowError below makes
+  // that fail quietly instead of losing the panel. The redundant stack-level
+  // close button (each tab already has its own) is hidden with CSS instead
+  // of header.close — that config flag turned out to disable more than the
+  // icon (drag-to-reorder and close went with it), so leave GL's own
+  // defaults alone and just hide the extra icon.
+  settings: { blockedPopoutsThrowError: false },
+  root: {
+    type: 'column',
+    content: [
+      {
+        type: 'row', height: 72,
+        content: [
+          { type: 'component', componentType: 'jobs', title: PANEL_TITLES.jobs, width: 22 },
+          { type: 'component', componentType: 'map', title: PANEL_TITLES.map, width: 56 },
+          { type: 'component', componentType: 'resources', title: PANEL_TITLES.resources, width: 22 },
+        ],
+      },
+      {
+        type: 'row', height: 28,
+        content: [
+          { type: 'component', componentType: 'comms', title: PANEL_TITLES.comms, width: 75 },
+          { type: 'component', componentType: 'detail', title: PANEL_TITLES.detail, width: 25 },
+        ],
+      },
+    ],
+  },
+};
+
+// Bump this whenever defaultLayoutConfig's shape or settings change —
+// otherwise a browser with an old save never sees the update, since a saved
+// layout always wins over the default. This is what silently carried an
+// earlier broken config (header.close disabling drag/close) forward even
+// after the code was fixed.
+const LAYOUT_VERSION = 2;
+
+// (isPopout is declared near the top of the script.) The component
+// factories above must still be registered so GL can rebuild whichever one
+// component this popout is for, but GL manages its own config for that
+// window (it wrote the config to localStorage keyed by <id> before opening
+// it) and expects to take over on its own; force-loading the full 5-panel
+// default into it as well only fights that and is the other half of
+// "popout is blank".
+function loadSavedOrDefault() {
+  let cfg = defaultLayoutConfig;
+  try {
+    const saved = JSON.parse(localStorage.getItem('cccs.layout') || 'null');
+    if (saved && saved.__v === LAYOUT_VERSION) cfg = saved.config;
+  } catch {}
+  try { layout.loadLayout(cfg); }
+  catch (e) { console.warn('[cccs] saved layout would not load, using default:', e.message); layout.loadLayout(defaultLayoutConfig); }
+}
+
+function saveLayoutState() {
+  try { localStorage.setItem('cccs.layout', JSON.stringify({ __v: LAYOUT_VERSION, config: layout.saveLayout() })); } catch {}
+}
+
+if (!isPopout) {
+  loadSavedOrDefault();
+  layout.on('stateChanged', saveLayoutState);
+}
+window.addEventListener('resize', () => layout.updateRootSize());
+
+if (!isPopout) {
+el('#resetLayout').onclick = () => {
+  if (!confirm('Restore the default panel arrangement? Any custom sizing or rearranging you’ve done will be lost.')) return;
+  localStorage.removeItem('cccs.layout');
+  location.reload();
+};
+}
+
+/* ---------- quick-nav icon rail: brings a closed panel back. If it's
+ * already open this adds a second copy rather than focusing the existing
+ * one — an acceptable trade for not tracking GL's internal tree by hand;
+ * closing the extra copy costs one click. ---------- */
+function openPanel(type) {
+  layout.newComponent(type, undefined, PANEL_TITLES[type]);
+  saveLayoutState();
+}
+function focusPanel(sel) {
+  const node = el(sel);
+  if (!node) return;
+  node.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), 900);
+}
+if (!isPopout) {
+el('#railIncidents').onclick = () => openPanel('jobs');
+el('#railTerminals').onclick = () => openPanel('resources');
+el('#railMessages').onclick = () => el('#btnMessage').click();
+el('#railCallbacks').onclick = () => focusPanel('#reqWrap');
+el('#railLog').onclick = () => openPanel('comms');
+el('#railMap').onclick = () => openPanel('map');
+}
+
+/* ---------- realtime ---------- */
+let bus;
+bus = CCCS.bus((up) => {
+  const n = el('#net');
+  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
+  if (up) boot();
+});
+
+const upsert = (list, item, key = 'id') => {
+  const i = list.findIndex((x) => x[key] === item[key]);
+  if (i >= 0) list[i] = item; else list.push(item);
+};
+
+const audio = CCCS.audio(bus);
+bus.on('ptt.granted', ({ listeners }) => audio.publishTo(listeners).catch((e) => console.warn('mic', e)))
+   .on('call.accepted', (c) => { const other = (c.participants || []).find((p) => p.issi); if (c.kind !== 'PSTN' && other) audio.call(`radio:${other.issi}`).catch(() => {}); })
+   .on('call.ended', () => audio.hangUp())
+   .on('radio.status_changed', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); renderMap(); })
+   .on('radio.connected', (r) => { upsert(state.radios, r); renderResources(); })
+   .on('radio.created', (r) => { upsert(state.radios, r); renderResources(); })
+   .on('radio.assigned', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
+   .on('radio.location_changed', (r) => { upsert(state.radios, r); renderMap(); if (state.selected === r.issi) renderDetail(); })
+   .on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderResources(); })
+   .on('mdt.assigned', (m) => { upsert(state.mdts, m); renderResources(); })
+   .on('mdt.crew_changed', (m) => { upsert(state.mdts, m); renderResources(); })
+   .on('job.created', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); })
+   .on('job.dispatched', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); })
+   .on('job.status_changed', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); renderResources(); })
+   .on('job.acknowledged', ({ job }) => { upsert(state.jobs, job); renderJobs(); renderResources(); })
+   .on('emergency.activated', (e) => { upsert(state.emergencies, e); renderEmergencies(); renderResources(); })
+   .on('radio.covert_changed', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
+   .on('radio.position_report', (r) => { upsert(state.radios, r); renderMap(); renderDetail(); })
+   .on('call.request', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); })
+   .on('call.request_cleared', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); })
+   .on('welfare.started', ({ radio }) => { upsert(state.radios, radio); renderResources(); renderDetail(); })
+   .on('welfare.checked_in', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
+   .on('welfare.stopped', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
+   .on('emergency.acknowledged', (e) => { upsert(state.emergencies, e); renderEmergencies(); })
+   .on('emergency.resolved', (e) => { upsert(state.emergencies, e); renderEmergencies(); })
+   .on('event.logged', (e) => { state.events.push(e); if (state.events.length > 400) state.events.shift(); renderLog(); })
+   .on('radio.ptt_started', (p) => { const f = el('#floor'); if (f) f.textContent = `TX ${p.callsign} · ${p.talkgroup}`; })
+   .on('radio.ptt_released', (p) => { const f = el('#floor'); if (f) f.textContent = ''; })
+   .on('ptt.denied', (p) => { const f = el('#floor'); if (f) f.textContent = `${p.reason} — ${p.holder} has the floor`; txTg = null; const b = el('#btnPtt'); if (b) { b.classList.remove('danger'); b.textContent = 'Hold to transmit'; } })
+   .on('call.accepted', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = 'ACTIVE — connected'; })
+   .on('call.rejected', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `DECLINED by ${c.rejected_by}`; })
+   .on('call.ended', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `ENDED (${c.end_reason}) after ${c.duration_s}s`; })
+   .on('message.received', () => {});
+
+async function boot() {
+  const s = await api('GET', '/api/state');
+  state.radios = s.radios; state.mdts = s.mdts; state.jobs = s.jobs;
+  state.talkgroups = s.talkgroups; state.emergencies = s.emergencies; state.events = s.events;
+  state.sites = s.sites || [];
+  state.requests = s.call_requests || [];
+  if (el('#pttTg')) el('#pttTg').innerHTML = s.talkgroups.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+  renderResources(); renderJobs(); renderMap(); renderEmergencies(); renderRequests(); renderLog();
+}
+boot();
+</script>
+</body>
+</html>

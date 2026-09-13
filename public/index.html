@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login">
+    <div class="mark">
+      <span class="glyph">C</span>
+      <strong>CCCS</strong>
+    </div>
+    <p class="dim">Critical communications, dispatch and control room.</p>
+
+    <div class="panel"><div class="body">
+      <label for="u">Username</label>
+      <input id="u" autocomplete="username" autofocus>
+      <label for="p">Password</label>
+      <input id="p" type="password" autocomplete="current-password">
+      <label for="dest">Open</label>
+      <select id="dest">
+        <option value="/control.html">Control room</option>
+        <option value="/radio.html">Radio terminal</option>
+        <option value="/mdt.html">Mobile data terminal</option>
+      </select>
+      <div style="height:12px"></div>
+      <button class="btn primary" id="go" style="width:100%">Sign in</button>
+      <p class="err" id="err"></p>
+      <div id="ms-sso" hidden>
+        <div style="text-align:center;margin:14px 0;opacity:.6">or</div>
+        <a class="btn" id="ms-go" style="width:100%;display:block;text-align:center;box-sizing:border-box">Sign in with Microsoft</a>
+      </div>
+      <div class="creds">
+        dispatcher / dispatch123 — control room<br>
+        supervisor / super123 — control room<br>
+        admin / admin123 — control room + admin<br>
+        radio101 / radio123 — radio A101 (ISSI 234100001)<br>
+        radio102 / radio123 — radio A102 (ISSI 234100002)<br>
+        radio103 / radio123 — radio A103 (ISSI 234100003)<br>
+        mdt001 / mdt123 — MDT-001
+      </div>
+    </div></div>
+  </div>
+</div>
+<script src="/app.js"></script>
+<script>
+const { el } = CCCS;
+const params = new URLSearchParams(location.search);
+const next = params.get('next');
+if (next) el('#dest').value = next;
+
+function landingFor(role, dest) {
+  if (role === 'RADIO_USER' && dest === '/control.html') return '/radio.html';
+  if (role === 'MDT_USER' && dest !== '/mdt.html') return '/mdt.html';
+  return dest;
+}
+
+// Returning from Microsoft with a one-time code: exchange it for a session.
+const ssoCode = params.get('sso');
+const ssoError = params.get('sso_error');
+if (ssoError) el('#err').textContent = ssoError;
+if (ssoCode) {
+  el('#go').disabled = true;
+  CCCS.api('GET', `/api/auth/microsoft/session?code=${encodeURIComponent(ssoCode)}`)
+    .then((s) => { CCCS.setSession(s); location.href = landingFor(s.user.role, el('#dest').value); })
+    .catch((e) => { el('#err').textContent = e.message; el('#go').disabled = false; });
+}
+
+// Only offer the Microsoft button when the server has SSO configured.
+CCCS.api('GET', '/api/auth/microsoft/status').then((s) => {
+  if (!s.enabled) return;
+  el('#ms-sso').hidden = false;
+  el('#ms-go').addEventListener('click', () => { location.href = '/api/auth/microsoft/login'; });
+}).catch(() => {});
+
+async function submit() {
+  el('#err').textContent = '';
+  el('#go').disabled = true;
+  try {
+    const s = await CCCS.login(el('#u').value.trim(), el('#p').value);
+    location.href = landingFor(s.user.role, el('#dest').value);
+  } catch (e) {
+    el('#err').textContent = e.message === 'invalid credentials'
+      ? 'That username and password do not match. Check the demo list below.' : e.message;
+    el('#go').disabled = false;
+  }
+}
+el('#go').addEventListener('click', submit);
+document.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+</script>
+</body>
+</html>

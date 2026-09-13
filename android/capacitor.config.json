@@ -1,0 +1,20 @@
+{
+  "appId": "uk.cccs.radio",
+  "appName": "CCCS Radio",
+  "webDir": "www",
+  "server": {
+    "url": "https://cccs.yourdomain.example",
+    "cleartext": false,
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_radio",
+      "sound": "emergency.wav"
+    }
+  }
+}

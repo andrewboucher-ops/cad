@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — mobile data terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css">
+<style>
+  /* Fills the browser window — these run full-screen on dedicated vehicle
+     tablets (Windows kiosk browser or the Android app), not as a small
+     device mockup floating on a desktop. Function-key columns either side
+     and a mode bar along the bottom, matching the real rugged MDT layout,
+     where Map/CAD/TXT are screens you switch to. The terminal session
+     itself stays signed in for the shift; crew sign in/out via USR. */
+  html, body { height: 100%; }
+  body { display: flex; margin: 0; background: #0d1218; overflow: hidden; }
+  .mdt-shell { flex: 1; display: flex; }
+  .mdt-screen { flex: 1; background: #eef1f6; display: flex; flex-direction: column; }
+
+  .mdt-topbar { background: linear-gradient(120deg,#1d4ed8,#2f6fed); color: #fff; padding: 8px 14px; display: flex; align-items: center; gap: 10px; }
+  .mdt-topbar .wifi { opacity: .9; }
+  .mdt-topbar .mid { flex: 1; text-align: center; font-size: 11px; line-height: 1.3; }
+  .mdt-topbar .mid .ident { font-weight: 700; letter-spacing: .04em; }
+  .mdt-topbar .clock { font-family: var(--mono); font-size: 12px; }
+  .mdt-topbar .link-net { font-size: 10px; }
+  .mdt-topbar .link-net.up { color: #bbf7d0; }
+  .mdt-topbar .link-net:not(.up) { color: #fecaca; }
+
+  .mdt-body { display: flex; flex: 1; min-height: 0; }
+  .mdt-col { display: flex; flex-direction: column; gap: 7px; padding: 10px 8px; width: 96px; background: #dde4ee; flex: none; overflow-y: auto; }
+  .mdt-key {
+    border: none; border-radius: 7px; padding: 11px 4px; font-size: 11px; font-weight: 700; letter-spacing: .03em;
+    background: linear-gradient(180deg,#4677e0,#2f5bc4); color: #fff; cursor: pointer; text-transform: uppercase;
+    font-family: var(--font); transition: filter .1s ease, transform .1s ease;
+  }
+  .mdt-key:hover { filter: brightness(1.1); }
+  .mdt-key:active { transform: translateY(1px); }
+  .mdt-key:disabled { opacity: .35; cursor: not-allowed; filter: none; }
+  .mdt-key.chan { background: linear-gradient(180deg,#eab308,#ca8a04); color: #1c1300; }
+  .mdt-key.mode-active { background: linear-gradient(180deg,#f97316,#c2410c); }
+  .mdt-key.status-active { background: linear-gradient(180deg,#22c55e,#15803d); animation: status-breathe 2.6s ease-in-out infinite; }
+  @keyframes status-breathe { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(.78); } }
+  @media (prefers-reduced-motion: reduce) { .mdt-key.status-active { animation: none; } }
+  .mdt-key.small { padding: 8px 4px; font-size: 10px; }
+  .mdt-key .crew-badge {
+    display: inline-block; margin-left: 3px; background: rgba(255,255,255,.3); border-radius: 20px;
+    font-size: 9px; padding: 0 5px;
+  }
+  .mdt-col .grow { flex: 1; }
+
+  .mdt-center { flex: 1; min-width: 0; background: #f6f8fb; display: flex; flex-direction: column; }
+  .mdt-center .inner { padding: 20px 24px; overflow: auto; flex: 1; max-width: 920px; width: 100%; margin: 0 auto; box-sizing: border-box; }
+  .mdt-view.hide { display: none; }
+  .mdt-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  .mdt-bottombar { display: flex; gap: 6px; padding: 8px; background: #dde4ee; }
+  .mdt-bottombar .mdt-key { flex: 1; position: relative; }
+  .mdt-bottombar .badge {
+    position: absolute; top: -5px; right: -5px; background: var(--emergency); color: #fff; font-size: 9px;
+    font-weight: 700; border-radius: 20px; padding: 1px 5px; min-width: 14px;
+  }
+
+  .jobhead { font-family: var(--mono); font-size: 22px; font-weight: 700; letter-spacing: .04em; }
+  .field { margin-bottom: 10px; }
+  .field span { display: block; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: #64748b; }
+  .field div { font-size: 15px; color: #16202c; }
+  .new-job { border: 2px solid var(--priority); border-radius: 10px; padding: 16px; background: #fff7ed; margin-bottom: 12px; }
+  .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+  #mdtMap { height: 100%; min-height: 300px; }
+  .mdt-view#view-map { padding: 0; display: flex; }
+  .mdt-view#view-map.hide { display: none; }
+  #view-map .inner-map { flex: 1; position: relative; }
+  #routeInfo {
+    position: absolute; left: 10px; bottom: 10px; z-index: 500; background: #1d4ed8; color: #fff;
+    padding: 8px 14px; border-radius: 8px; font-weight: 700; font-size: 13px; box-shadow: 0 4px 14px -4px rgba(0,0,0,.4);
+  }
+
+  .crew-card {
+    display: flex; align-items: center; justify-content: space-between; padding: 10px 12px;
+    background: #fff; border: 1px solid #dde3ec; border-radius: 8px; margin-bottom: 8px;
+  }
+  .crew-card .name { font-weight: 700; color: #16202c; }
+  .crew-card .since { font-size: 11px; color: #64748b; }
+
+  @media (max-width: 560px) {
+    .mdt-col { width: 62px; padding: 7px 5px; }
+    .mdt-key { font-size: 9.5px; padding: 9px 2px; }
+  }
+</style>
+</head>
+<body>
+<div class="mdt-shell">
+  <div class="mdt-screen">
+    <div class="mdt-topbar">
+      <svg class="wifi" width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M2 8.5a16 16 0 0120 0M5.5 12.5a11 11 0 0113 0M9 16.5a5.5 5.5 0 016 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="20" r="1.4" fill="currentColor"/></svg>
+      <div class="mid">
+        <div id="clock" class="clock">--:--:--</div>
+        <div class="ident" id="ident">MDT —</div>
+      </div>
+      <span class="link-net" id="net">link down</span>
+    </div>
+
+    <div class="mdt-body">
+      <div class="mdt-col left">
+        <button class="mdt-key chan" data-view="usr" title="Terminal &amp; call sign">CHAN</button>
+        <button class="mdt-key" data-view="crew" title="Crew sign in/out">USR<span class="crew-badge" id="crewCount" hidden>0</span></button>
+        <button class="mdt-key" data-view="rpt" title="Activity log">RPT</button>
+        <div class="grow"></div>
+        <button class="mdt-key small" id="btnFunc1" title="Retry the link now">FUNC1</button>
+        <button class="mdt-key small" id="btnFunc2" title="Not configured" disabled>FUNC2</button>
+      </div>
+
+      <div class="mdt-center">
+        <div id="alertHost"></div>
+        <div id="offlineBar" class="hide" style="margin:10px 10px 0;border:1px solid var(--busy);border-radius:8px;padding:12px;background:#fffbeb">
+          <strong style="color:#b45309">No link to control</strong>
+          <div class="dim" id="offlineDetail" style="color:#64748b">Work carries on. Anything you do is saved on this terminal and sent the moment the link returns.</div>
+        </div>
+
+        <div class="mdt-view" id="view-cad"><div class="inner">
+          <div id="jobBody"><p class="dim">No job assigned. Dispatched jobs appear here immediately.</p></div>
+        </div></div>
+
+        <div class="mdt-view hide" id="view-map"><div class="inner-map">
+          <div class="map map-light" id="mdtMap"></div>
+          <div id="routeInfo" hidden></div>
+        </div></div>
+
+        <div class="mdt-view hide" id="view-txt"><div class="inner">
+          <label for="note">Message to control</label>
+          <textarea id="note" rows="4"></textarea>
+          <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="send">Send</button></div>
+          <section class="panel" style="margin-top:16px"><header>Sent this session</header><div class="body log" id="txtLog" style="max-height:160px"></div></section>
+        </div></div>
+
+        <div class="mdt-view hide" id="view-usr"><div class="inner">
+          <div id="info"></div>
+          <div style="margin-top:18px;padding-top:12px;border-top:1px solid #dde3ec">
+            <button class="btn" id="terminalSignOut" style="font-size:11px;padding:4px 10px">Sign out this terminal</button>
+            <p class="dim" style="font-size:11px;margin-top:6px">Only for redeploying the terminal to a different vehicle. Crew sign-in/out (USR) is separate and does not touch this.</p>
+          </div>
+        </div></div>
+
+        <div class="mdt-view hide" id="view-crew"><div class="inner">
+          <p class="dim" style="margin:0 0 12px">Up to 3 people can be signed in to this vehicle at once. This is the record of who was on the call, not a login.</p>
+          <div id="crewList"></div>
+          <div id="crewAddWrap" style="margin-top:12px">
+            <label for="crewName">Crew member name</label>
+            <div style="display:flex;gap:8px"><input id="crewName" placeholder="e.g. J. Smith"><button class="btn primary" id="crewAdd">Sign in</button></div>
+          </div>
+        </div></div>
+
+        <div class="mdt-view hide" id="view-rpt"><div class="inner">
+          <section class="panel"><header>Terminal log</header><div class="body log" id="log" style="max-height:280px"></div></section>
+        </div></div>
+      </div>
+
+      <div class="mdt-col right" id="statusCol"></div>
+    </div>
+
+    <div class="mdt-bottombar">
+      <button class="mdt-key mode-active" data-view="map">Map/Nav</button>
+      <button class="mdt-key" data-view="cad">CAD</button>
+      <button class="mdt-key" data-view="txt">TXT<span class="badge" id="queuedDot" hidden>!</span></button>
+      <button class="mdt-key" data-view="usr" id="btnCallsign">—</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script src="/app.js"></script>
+<script>
+const { api, el, esc } = CCCS;
+if (!CCCS.requireAuth(['MDT_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
+
+/* Deliberately no routine sign-out control: the terminal stays authenticated
+ * for the vehicle's shift (or longer — see MDT_TOKEN_TTL_MS server-side).
+ * The only way out is the low-emphasis one under CHAN, for redeploying the
+ * physical terminal, not for end-of-shift. */
+el('#terminalSignOut').onclick = () => {
+  if (confirm('Sign this terminal out of CCCS? Only do this when redeploying it to a different vehicle — crew should sign out via USR instead, at end of shift.')) {
+    CCCS.clearSession(); location.href = '/index.html';
+  }
+};
+
+/* ---------- view switching: CAD default, everything else is a mode swap ---------- */
+const VIEWS = ['cad', 'map', 'txt', 'usr', 'crew', 'rpt'];
+function showView(name) {
+  VIEWS.forEach((v) => el('#view-' + v).classList.toggle('hide', v !== name));
+  CCCS.els('[data-view]').forEach((b) => b.classList.toggle('mode-active', b.dataset.view === name));
+  // The map is rendered while hidden (display:none), so Leaflet computes
+  // bounds against a zero-size container until it's actually visible —
+  // invalidate, then re-fit/re-route now that the size is real.
+  if (name === 'map') setTimeout(() => { mdtMap.invalidateSize(); paintMap(); }, 0);
+}
+CCCS.els('[data-view]').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view)));
+showView('cad');
+
+const qCode = new URLSearchParams(location.search).get('mdt');
+let mdt = null, job = null;
+const log = (line) => {
+  const d = document.createElement('div'); d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`; el('#log').prepend(d);
+};
+
+const mdtMap = CCCS.makeMap(el('#mdtMap'), { zoom: 14, theme: 'light' });
+function paintMap() {
+  const units = mdt && mdt.lat != null ? [{ lat: mdt.lat, lon: mdt.lon, status: job ? 'ON_TASK' : 'AVAILABLE', callsign: mdt.callsign || mdt.mdt_code, issi: mdt.mdt_code }] : [];
+  const jobs = job && job.lat != null ? [job] : [];
+  mdtMap.render(units, jobs);
+
+  const haveRoute = mdt && mdt.lat != null && job && job.lat != null;
+  if (haveRoute) {
+    mdtMap.setRoute([mdt.lat, mdt.lon], [job.lat, job.lon], (summary) => {
+      const miles = (summary.totalDistance / 1609.34).toFixed(1);
+      const mins = Math.round(summary.totalTime / 60);
+      el('#routeInfo').textContent = `${miles} mi · ${mins} min to ${job.reference}`;
+      el('#routeInfo').hidden = false;
+    });
+  } else {
+    mdtMap.clearRoute();
+    el('#routeInfo').hidden = true;
+    mdtMap.fitToData(units, jobs);
+  }
+}
+
+function paintCrew() {
+  if (!mdt) return;
+  const crew = mdt.crew || [];
+  const badge = el('#crewCount');
+  badge.hidden = crew.length === 0; badge.textContent = crew.length;
+  el('#crewList').innerHTML = crew.length ? crew.map((c) => `
+    <div class="crew-card">
+      <div><div class="name">${esc(c.name)}</div><div class="since">signed in ${new Date(c.signed_in_at).toLocaleTimeString()}</div></div>
+      <button class="btn danger" data-crewout="${c.id}" style="padding:4px 10px;font-size:12px">Sign out</button>
+    </div>`).join('') : '<p class="dim">No crew signed in.</p>';
+  CCCS.els('[data-crewout]').forEach((b) => (b.onclick = async () => {
+    try { await api('DELETE', `/api/mdts/${mdt.id}/crew/${b.dataset.crewout}`); }
+    catch (e) { alert(e.message); }
+  }));
+  el('#crewAddWrap').style.display = crew.length >= 3 ? 'none' : '';
+}
+el('#crewAdd').onclick = async () => {
+  const name = el('#crewName').value.trim();
+  if (!name) return;
+  try { await api('POST', `/api/mdts/${mdt.id}/crew`, { name }); el('#crewName').value = ''; }
+  catch (e) { alert(e.message); }
+};
+
+function paintInfo() {
+  if (!mdt) return;
+  el('#ident').textContent = `${mdt.mdt_code} · ${mdt.callsign || 'unassigned'}`;
+  el('#btnCallsign').textContent = mdt.callsign || mdt.mdt_code;
+  el('#info').innerHTML = `
+    <div class="info-grid">
+      <div class="field"><span>MDT</span><div class="mono">${esc(mdt.mdt_code)}</div></div>
+      <div class="field"><span>Call sign</span><div class="mono">${esc(mdt.callsign || '—')}</div></div>
+      <div class="field"><span>Vehicle</span><div class="mono">${esc(mdt.vehicle || '—')}</div></div>
+      <div class="field"><span>Operator</span><div>${esc(mdt.operator || me.display_name)}</div></div>
+      <div class="field"><span>Network</span><div class="mono">${esc(mdt.network)} · ${mdt.battery}%</div></div>
+      <div class="field"><span>Position</span><div class="mono">${mdt.lat ? mdt.lat.toFixed(4) + ', ' + mdt.lon.toFixed(4) : 'awaiting fix'}</div></div>
+    </div>`;
+  paintCrew();
+  paintMap();
+}
+
+function paintStatusColumn() {
+  if (!job) {
+    const duty = (mdt && mdt.duty_status) || 'AVAILABLE';
+    const opts = [['AVAILABLE', 'AVL'], ['BUSY', 'BSY'], ['OUT_OF_SERVICE', 'OOS']];
+    el('#statusCol').innerHTML = opts.map(([code, label]) =>
+      `<button class="mdt-key ${duty === code ? 'status-active' : ''}" data-duty="${code}">${label}</button>`).join('');
+    CCCS.els('#statusCol [data-duty]').forEach((b) => (b.onclick = async () => {
+      try { mdt = await api('POST', `/api/mdts/${mdt.id}/duty-status`, { status: b.dataset.duty }); paintStatusColumn(); log(`DUTY STATUS → ${b.dataset.duty}`); }
+      catch (e) { alert(e.message); }
+    }));
+    return;
+  }
+  const mine = job.resources.find((r) => r.mdt === mdt.mdt_code);
+  const steps = [
+    ['EN_ROUTE', 'ENR'], ['ON_SCENE', 'ONSC'], ['TRANSPORTING', 'TRAN'], ['COMPLETED', 'DONE'],
+  ];
+  el('#statusCol').innerHTML =
+    (mine && !mine.acknowledged ? '<button class="mdt-key status-active" id="acc">ACC</button>' : '') +
+    steps.map(([code, label]) => `<button class="mdt-key ${job.status === code ? 'status-active' : ''}" data-set="${code}">${label}</button>`).join('');
+  if (el('#acc')) el('#acc').onclick = async () => {
+    const r = await CCCS.send('POST', `/api/jobs/${job.id}/ack`, {}, `acknowledge ${job.reference}`);
+    log(r.queued ? `ACKNOWLEDGEMENT QUEUED — ${job.reference}` : `ACKNOWLEDGED ${job.reference}`);
+  };
+  CCCS.els('#statusCol [data-set]').forEach((b) => (b.onclick = async () => {
+    const r = await CCCS.send('PATCH', `/api/jobs/${job.id}`, { status: b.dataset.set }, `${job.reference} → ${b.dataset.set}`);
+    if (r.queued) {
+      job.status = b.dataset.set;
+      localStorage.setItem('cccs.mdt.job', JSON.stringify(job));
+      paintJob();
+      log(`${b.dataset.set} QUEUED — NOT YET SEEN BY CONTROL`);
+    }
+  }));
+}
+
+function paintJob() {
+  paintStatusColumn();
+  if (!job) { el('#jobBody').innerHTML = '<p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>'; paintMap(); return; }
+  el('#jobBody').innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span class="jobhead">${esc(job.reference)}</span>
+      <span class="pri pri-${job.priority}">${job.priority}</span>
+      <span class="mono dim">${esc(job.status)}</span>
+      ${CCCS.outbox.count() ? '<span class="mono" style="color:#b45309">unconfirmed — waiting for link</span>' : ''}
+    </div>
+    <div style="margin-top:12px">
+      <div class="field"><span>Incident</span><div>${esc(job.incident_type)}</div></div>
+      <div class="field"><span>Location</span><div>${esc(job.location)}</div></div>
+      <div class="field"><span>Details</span><div>${esc(job.description || '—')}</div></div>
+      <div class="field"><span>Caller</span><div>${esc(job.caller || '—')}</div></div>
+      <div class="field"><span>Notes</span><div>${esc(job.notes || '—')}</div></div>
+      <div class="field"><span>Resources</span><div class="mono">${job.resources.map((r) => esc(r.callsign || r.radio || r.mdt) + (r.acknowledged ? ' ✓' : '')).join(' · ')}</div></div>
+    </div>`;
+  paintMap();
+}
+
+el('#send').onclick = async () => {
+  const body = el('#note').value.trim();
+  if (!body) return;
+  const r = await CCCS.send('POST', '/api/messages', { to_control: true, body }, 'message to control');
+  el('#note').value = '';
+  const line = r.queued ? `QUEUED: ${body}` : `SENT: ${body}`;
+  log(line);
+  const d = document.createElement('div'); d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`; el('#txtLog').prepend(d);
+};
+
+el('#btnFunc1').onclick = () => CCCS.outbox.flush();
+
+const bus = CCCS.bus((up) => {
+  el('#net').textContent = up ? 'link up' : 'link down';
+  el('#net').classList.toggle('up', up);
+  el('#offlineBar').classList.toggle('hide', up);
+  if (up) {
+    bus.send('mdt.attach', { mdt_code: qCode || undefined, mdt_id: me.mdt_id || undefined });
+    CCCS.outbox.flush().then(() => { if (job) paintJob(); });
+  }
+});
+
+CCCS.outbox.onChange((n) => {
+  el('#queuedDot').hidden = n === 0;
+  el('#offlineDetail').textContent = n
+    ? `${n} item${n === 1 ? '' : 's'} saved on this terminal, waiting for the link.`
+    : 'Work carries on. Anything you do is saved on this terminal and sent the moment the link returns.';
+});
+
+// Real GPS from the tablet — this is what makes the nav view (and the
+// control room's map) show where the vehicle actually is.
+if ('geolocation' in navigator) {
+  navigator.geolocation.watchPosition(
+    (pos) => { if (mdt) api('POST', `/api/mdts/${mdt.id}/location`, { lat: pos.coords.latitude, lon: pos.coords.longitude }).catch(() => {}); },
+    () => {}, { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 },
+  );
+}
+
+bus.on('mdt.attached', async (m) => {
+  mdt = m; paintInfo(); log(`${m.mdt_code} REGISTERED`);
+  try {
+    const jobs = await api('GET', '/api/jobs');
+    job = jobs.find((j) => j.resources.some((r) => r.mdt === m.mdt_code) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
+    if (job) localStorage.setItem('cccs.mdt.job', JSON.stringify(job));
+    else localStorage.removeItem('cccs.mdt.job');
+  } catch {
+    try { job = JSON.parse(localStorage.getItem('cccs.mdt.job') || 'null'); } catch { job = null; }
+    if (job) log('SHOWING LAST KNOWN JOB — NOT CONFIRMED WITH CONTROL');
+  }
+  paintJob();
+})
+.on('mdt.status_changed', (m) => { if (mdt && m.id === mdt.id) { mdt = m; paintInfo(); paintStatusColumn(); } })
+.on('mdt.crew_changed', (m) => { if (mdt && m.id === mdt.id) { mdt = m; paintCrew(); } })
+.on('job.assigned_to_you', (j) => {
+  if (!mdt || !j.resources.some((r) => r.mdt === mdt.mdt_code)) return;
+  job = j; paintJob();
+  el('#alertHost').innerHTML = `<div class="new-job"><strong style="letter-spacing:.1em">NEW JOB</strong>
+    <div class="jobhead">${esc(j.reference)}</div>
+    <div><span class="pri pri-${j.priority}">${j.priority}</span> ${esc(j.location)}</div>
+    <p>${esc(j.description || '')}</p>
+    <div class="btn-row"><button class="btn ok" id="aAcc">Accept job</button><button class="btn" id="aRej">Reject</button></div></div>`;
+  el('#aAcc').onclick = async () => { await api('POST', `/api/jobs/${j.id}/ack`, {}); el('#alertHost').innerHTML = ''; log(`ACKNOWLEDGED ${j.reference}`); };
+  el('#aRej').onclick = async () => { await api('POST', '/api/messages', { to_control: true, body: `${j.reference} rejected by ${mdt.mdt_code}` }); el('#alertHost').innerHTML = ''; };
+  log(`NEW JOB ${j.reference} (${j.priority})`);
+  showView('cad');
+})
+.on('job.status_changed', (j) => { if (job && j.id === job.id) { job = j; paintJob(); } })
+.on('job.acknowledged', ({ job: j }) => { if (job && j.id === job.id) { job = j; paintJob(); } })
+.on('message.received', (m) => { if (mdt && m.to_mdt_id === mdt.id) log(`MSG ${m.from_label}: ${m.body}`); })
+.on('error', (e) => log(`ERROR: ${e.message}`));
+</script>
+</body>
+</html>
