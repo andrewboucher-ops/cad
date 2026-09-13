@@ -82,9 +82,16 @@
   .mdt-view#view-map.hide { display: none; }
   #view-map .inner-map { flex: 1; position: relative; }
   #routeInfo {
-    position: absolute; left: 10px; bottom: 10px; z-index: 500; background: #1d4ed8; color: #fff;
-    padding: 8px 14px; border-radius: 8px; font-weight: 700; font-size: 13px; box-shadow: 0 4px 14px -4px rgba(0,0,0,.4);
+    position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 500; background: #1d4ed8; color: #fff;
+    padding: 10px 14px; border-radius: 8px; box-shadow: 0 4px 14px -4px rgba(0,0,0,.4);
+    display: flex; align-items: center; gap: 10px;
   }
+  #routeInfo .icon { font-size: 24px; line-height: 1; }
+  #routeInfo .main { flex: 1; min-width: 0; }
+  #routeInfo .distance { font-weight: 700; font-size: 15px; }
+  #routeInfo .text { font-size: 12px; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #routeInfo .summary { font-size: 11px; opacity: .7; }
+  #routeInfo button { background: rgba(255,255,255,.15); border: none; color: #fff; border-radius: 6px; padding: 4px 8px; font-size: 15px; }
 
   .crew-card {
     display: flex; align-items: center; justify-content: space-between; padding: 10px 12px;
@@ -134,7 +141,15 @@
 
         <div class="mdt-view hide" id="view-map"><div class="inner-map">
           <div class="map map-light" id="mdtMap"></div>
-          <div id="routeInfo" hidden></div>
+          <div id="routeInfo" hidden>
+            <span class="icon" id="routeIcon">⬆️</span>
+            <div class="main">
+              <div class="distance" id="routeDistance"></div>
+              <div class="text" id="routeText"></div>
+              <div class="summary" id="routeSummary"></div>
+            </div>
+            <button id="routeMute" title="Mute voice prompts">🔊</button>
+          </div>
         </div></div>
 
         <div class="mdt-view hide" id="view-txt"><div class="inner">
@@ -218,23 +233,49 @@ const log = (line) => {
 };
 
 const mdtMap = CCCS.makeMap(el('#mdtMap'), { zoom: 14, theme: 'light' });
+const mdtAnnouncer = CCCS.navAnnouncer();
+el('#routeMute').onclick = () => {
+  mdtAnnouncer.setMuted(!mdtAnnouncer.muted);
+  el('#routeMute').textContent = mdtAnnouncer.muted ? '🔇' : '🔊';
+};
+let mdtRoutedJobId = null, mdtLastReroute = 0;
+/** Only does the expensive Leaflet work (fitBounds, routing) while the map
+ * view is actually the visible one — a hidden mdt-view is zero-size, and
+ * driving setRoute's fitSelectedRoutes against that throws. Called on every
+ * GPS fix and every job change; cheap the rest of the time because it bails
+ * on the visibility check first. */
 function paintMap() {
   const units = mdt && mdt.lat != null ? [{ lat: mdt.lat, lon: mdt.lon, status: job ? 'ON_TASK' : 'AVAILABLE', callsign: mdt.callsign || mdt.mdt_code, issi: mdt.mdt_code }] : [];
   const jobs = job && job.lat != null ? [job] : [];
-  mdtMap.render(units, jobs);
+  const visible = !el('#view-map').classList.contains('hide');
 
   const haveRoute = mdt && mdt.lat != null && job && job.lat != null;
-  if (haveRoute) {
-    mdtMap.setRoute([mdt.lat, mdt.lon], [job.lat, job.lon], (summary) => {
-      const miles = (summary.totalDistance / 1609.34).toFixed(1);
-      const mins = Math.round(summary.totalTime / 60);
-      el('#routeInfo').textContent = `${miles} mi · ${mins} min to ${job.reference}`;
-      el('#routeInfo').hidden = false;
-    });
-  } else {
-    mdtMap.clearRoute();
-    el('#routeInfo').hidden = true;
-    mdtMap.fitToData(units, jobs);
+  if (!haveRoute) { mdtRoutedJobId = null; if (visible) { mdtMap.render(units, jobs); mdtMap.clearRoute(); mdtMap.fitToData(units, jobs); } el('#routeInfo').hidden = true; return; }
+  if (!visible) return; // state (mdt.lat/lon, job) is still kept current; just skip the Leaflet work
+
+  mdtMap.render(units, jobs);
+  mdtMap.centerOn(mdt.lat, mdt.lon, 16);
+  // maneuverFor needs the routed coordinates/instructions, which only exist
+  // once setRoute's async callback fires — paint the banner there too, not
+  // just synchronously below, or a freshly (re)routed leg shows nothing
+  // until the next GPS fix happens to land.
+  if (mdtRoutedJobId !== job.id) { mdtRoutedJobId = job.id; mdtMap.setRoute([mdt.lat, mdt.lon], [job.lat, job.lon], paintRouteBanner); }
+  paintRouteBanner();
+}
+function paintRouteBanner() {
+  if (!mdt || mdt.lat == null || !job || job.lat == null) return;
+  const m = mdtMap.maneuverFor(mdt.lat, mdt.lon);
+  if (!m) { el('#routeInfo').hidden = true; return; }
+  mdtAnnouncer.check(m);
+  el('#routeInfo').hidden = false;
+  el('#routeIcon').textContent = CCCS.navIcon(m.instruction);
+  el('#routeText').textContent = m.arrived ? 'Arrived' : (m.instruction.text || 'Continue');
+  el('#routeDistance').textContent = m.arrived ? 'Arrived' : (m.distance >= 1000 ? `${(m.distance / 1000).toFixed(1)} km` : `${m.distance} m`);
+  el('#routeSummary').textContent = m.etaSeconds != null ? `${(m.remaining / 1609.34).toFixed(1)} mi remaining · ETA ${Math.max(1, Math.round(m.etaSeconds / 60))} min to ${job.reference}` : '';
+  if (m.offRoute && Date.now() - mdtLastReroute > 15000) {
+    mdtLastReroute = Date.now();
+    mdtMap.setRoute([mdt.lat, mdt.lon], [job.lat, job.lon], paintRouteBanner);
+    log('OFF ROUTE — RECALCULATING');
   }
 }
 
@@ -384,7 +425,7 @@ bus.on('mdt.attached', async (m) => {
   }
   paintJob();
 })
-.on('mdt.status_changed', (m) => { if (mdt && m.id === mdt.id) { mdt = m; paintInfo(); paintStatusColumn(); } })
+.on('mdt.status_changed', (m) => { if (mdt && m.id === mdt.id) { mdt = m; paintInfo(); paintStatusColumn(); paintMap(); } })
 .on('mdt.crew_changed', (m) => { if (mdt && m.id === mdt.id) { mdt = m; paintCrew(); } })
 .on('job.assigned_to_you', (j) => {
   if (!mdt || !j.resources.some((r) => r.mdt === mdt.mdt_code)) return;

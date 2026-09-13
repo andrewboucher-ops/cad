@@ -114,6 +114,20 @@
 <div id="modalHost"></div>
 <div id="lockHost"></div>
 
+<div id="satnav" class="hide" style="position:fixed;inset:0;z-index:900;background:#000;display:flex;flex-direction:column">
+  <div id="satnavMap" style="flex:1;min-height:0"></div>
+  <div style="background:#0d1218;color:#fff;padding:12px 14px;display:flex;align-items:center;gap:12px;border-top:2px solid #1d4ed8">
+    <span id="satnavIcon" style="font-size:30px;line-height:1">⬆️</span>
+    <div style="flex:1;min-width:0">
+      <div id="satnavDistance" style="font-size:22px;font-weight:700">—</div>
+      <div id="satnavText" class="dim" style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Getting your position…</div>
+    </div>
+    <button class="btn" id="satnavMute" title="Mute voice prompts">🔊</button>
+    <button class="btn danger" id="satnavExit">Exit</button>
+  </div>
+  <div id="satnavSummary" class="dim mono" style="text-align:center;background:#0d1218;color:#9ca3af;font-size:12px;padding:0 0 8px"></div>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
@@ -733,31 +747,74 @@ function offerNavigate(job) {
   if (confirm(`${job.reference} accepted. Navigate to the incident now?`)) showNavMap(job);
 }
 
-function showNavMap(job) {
-  modal(`Navigate — ${job.reference}`, `
-    <div class="map" id="navMap" style="height:320px;border-radius:4px;overflow:hidden"></div>
-    <p class="mono" id="navInfo" style="margin:8px 0 0"></p>`, () => {
-    const navMap = CCCS.makeMap(el('#navMap'), { zoom: 14 });
-    const go = (lat, lon) => {
-      const units = [{ lat, lon, status: 'ON_TASK', callsign: radio.callsign || radio.issi, issi: radio.issi }];
-      const jobs = job.lat != null ? [job] : [];
-      navMap.render(units, jobs);
-      if (job.lat != null) {
-        navMap.setRoute([lat, lon], [job.lat, job.lon], (summary) => {
-          const miles = (summary.totalDistance / 1609.34).toFixed(1);
-          const mins = Math.round(summary.totalTime / 60);
-          el('#navInfo').textContent = `${miles} mi · ${mins} min to ${job.reference}`;
-        });
-      } else navMap.fitToData(units, []);
-    };
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => go(pos.coords.latitude, pos.coords.longitude),
-        () => go(radio.lat, radio.lon),
-        { enableHighAccuracy: true, timeout: 5000 });
-    } else go(radio.lat, radio.lon);
-  });
+/* Full-screen turn-by-turn — a real sat nav, not an overview map: continuous
+ * GPS tracking (not one static fix), a maneuver banner with icon/distance/
+ * voice prompts at 500/200/50m, and reroute-on-divergence. Falls back to a
+ * plain overview (no live tracking) if the job has no destination fix. */
+let satnavMap = null, satnavWatchId = null, satnavAnnouncer = null, satnavLastReroute = 0;
+function startSatNav(job) {
+  if (job.lat == null) { modal('Navigate', '<p class="dim">This job has no location to navigate to.</p>'); return; }
+  el('#satnav').classList.remove('hide');
+  if (!satnavMap) satnavMap = CCCS.makeMap(el('#satnavMap'), { zoom: 17 });
+  satnavMap.invalidateSize();
+  satnavAnnouncer = satnavAnnouncer || CCCS.navAnnouncer();
+  el('#satnavMute').onclick = () => {
+    satnavAnnouncer.setMuted(!satnavAnnouncer.muted);
+    el('#satnavMute').textContent = satnavAnnouncer.muted ? '🔇' : '🔊';
+  };
+  el('#satnavExit').onclick = stopSatNav;
+  el('#satnavText').textContent = 'Getting your position…';
+  el('#satnavDistance').textContent = '—';
+  el('#satnavSummary').textContent = '';
+
+  let routed = false, lastFix = null;
+  function paintBanner() {
+    if (!lastFix) return;
+    const [lat, lon] = lastFix;
+    const m = satnavMap.maneuverFor(lat, lon);
+    if (!m) return;
+    satnavAnnouncer.check(m);
+    el('#satnavIcon').textContent = CCCS.navIcon(m.instruction);
+    el('#satnavText').textContent = m.arrived ? 'Arrived' : (m.instruction.text || 'Continue');
+    el('#satnavDistance').textContent = m.arrived ? 'Arrived' : (m.distance >= 1000 ? `${(m.distance / 1000).toFixed(1)} km` : `${m.distance} m`);
+    if (m.etaSeconds != null) {
+      const mi = (m.remaining / 1609.34).toFixed(1);
+      el('#satnavSummary').textContent = `${mi} mi remaining · ETA ${Math.max(1, Math.round(m.etaSeconds / 60))} min`;
+    }
+    if (m.offRoute && Date.now() - satnavLastReroute > 15000) {
+      satnavLastReroute = Date.now();
+      satnavMap.setRoute([lat, lon], [job.lat, job.lon], paintBanner);
+      log('OFF ROUTE — RECALCULATING');
+    }
+  }
+  const onFix = (lat, lon) => {
+    lastFix = [lat, lon];
+    const units = [{ lat, lon, status: 'ON_TASK', callsign: radio.callsign || radio.issi, issi: radio.issi }];
+    satnavMap.render(units, [job]);
+    satnavMap.centerOn(lat, lon, 17);
+    if (!routed) {
+      routed = true;
+      // maneuverFor needs the routed coordinates/instructions, which only
+      // exist once this async callback fires — calling it synchronously
+      // right after setRoute would just see last tick's (or no) route.
+      satnavMap.setRoute([lat, lon], [job.lat, job.lon], paintBanner);
+    }
+    paintBanner();
+  };
+
+  if (navigator.geolocation) {
+    satnavWatchId = navigator.geolocation.watchPosition(
+      (pos) => onFix(pos.coords.latitude, pos.coords.longitude),
+      (err) => { el('#satnavText').textContent = `No GPS fix (${err.message}) — showing last known position`; if (radio.lat != null) onFix(radio.lat, radio.lon); },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 });
+  } else if (radio.lat != null) onFix(radio.lat, radio.lon);
 }
+function stopSatNav() {
+  if (satnavWatchId != null) { navigator.geolocation.clearWatch(satnavWatchId); satnavWatchId = null; }
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  el('#satnav').classList.add('hide');
+}
+function showNavMap(job) { startSatNav(job); }
 
 /* Rpt: play back whatever was last heard on this talkgroup. */
 el('#bRpt').onclick = () => {

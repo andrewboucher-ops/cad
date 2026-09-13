@@ -445,13 +445,98 @@ const CCCS = (() => {
             fitSelectedRoutes: true, show: false, createMarker: () => null,
             lineOptions: { styles: [{ color: '#3b82f6', weight: 5, opacity: .85 }] },
           }).addTo(map);
-          this._routing.on('routesfound', (e) => onSummary && e.routes[0] && onSummary(e.routes[0].summary));
+          this._routing.on('routesfound', (e) => {
+            this._route = e.routes[0];
+            onSummary && this._route && onSummary(this._route.summary);
+          });
         }
         this._routing.setWaypoints([L.latLng(from[0], from[1]), L.latLng(to[0], to[1])]);
       },
-      clearRoute() { if (this._routing) this._routing.setWaypoints([]); },
+      clearRoute() { if (this._routing) this._routing.setWaypoints([]); this._route = null; },
       invalidateSize() { map.invalidateSize(); },
+      /** Recenters without the "fit everything" logic fitToData uses —
+       * a sat-nav view wants to stay locked on the vehicle at a fixed,
+       * fairly close zoom, not zoom out to fit the destination too. */
+      centerOn(lat, lon, zoom) { map.setView([lat, lon], zoom || map.getZoom()); },
+      /** Turn-by-turn against the last route found: nearest point on the
+       * route to (lat, lon), the next instruction from there, and distance
+       * to it. Null with no route yet. `offRoute` past 70m off the line is
+       * the caller's cue to call setRoute again from the new position —
+       * recalculation itself is the caller's job since only it knows the
+       * destination and how often it wants to hit the OSRM demo server. */
+      maneuverFor(lat, lon) {
+        const route = this._route;
+        if (!route || !route.coordinates || !route.coordinates.length || !route.instructions || !route.instructions.length) return null;
+        let nearestIdx = 0, nearestDist = Infinity;
+        route.coordinates.forEach((c, i) => {
+          const d = haversine(lat, lon, c.lat, c.lng);
+          if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+        });
+        const upcoming = route.instructions.find((instr) => instr.index >= nearestIdx) || route.instructions[route.instructions.length - 1];
+        const target = route.coordinates[upcoming.index] || route.coordinates[route.coordinates.length - 1];
+        const distance = haversine(lat, lon, target.lat, target.lng);
+        const isLast = upcoming === route.instructions[route.instructions.length - 1];
+        // Remaining distance/ETA along what's left of the route, not the
+        // route's original totals — those don't shrink as you drive.
+        let remaining = haversine(lat, lon, route.coordinates[nearestIdx].lat, route.coordinates[nearestIdx].lng);
+        for (let i = nearestIdx; i < route.coordinates.length - 1; i++) {
+          remaining += haversine(route.coordinates[i].lat, route.coordinates[i].lng, route.coordinates[i + 1].lat, route.coordinates[i + 1].lng);
+        }
+        const avgSpeed = route.summary && route.summary.totalTime ? route.summary.totalDistance / route.summary.totalTime : null; // m/s
+        return {
+          instruction: upcoming, distance: Math.round(distance), offRoute: nearestDist > 70, arrived: isLast && distance < 25,
+          remaining: Math.round(remaining), etaSeconds: avgSpeed ? Math.round(remaining / avgSpeed) : null,
+        };
+      },
     };
+  }
+
+  function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+    const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  /** Voice prompts at three distance bands per maneuver, like a normal sat
+   * nav — not one announcement right as you're already at the junction.
+   * Tracks which bands it's already spoken for the CURRENT instruction and
+   * resets the moment maneuverFor() moves on to the next one. */
+  function navAnnouncer() {
+    let lastIndex = -1, said = new Set();
+    let muted = false;
+    function speak(text) {
+      if (muted || !('speechSynthesis' in window)) return;
+      try {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+      } catch {}
+    }
+    return {
+      check(m) {
+        if (!m || !m.instruction) return;
+        if (m.instruction.index !== lastIndex) { lastIndex = m.instruction.index; said = new Set(); }
+        const text = m.instruction.text || 'continue';
+        if (m.arrived) { if (!said.has('arrived')) { said.add('arrived'); speak('You have arrived at your destination.'); } return; }
+        if (m.distance <= 50 && !said.has(50)) { said.add(50); said.add(200); said.add(500); speak(text); }
+        else if (m.distance <= 200 && !said.has(200)) { said.add(200); said.add(500); speak(`In 200 metres, ${text}`); }
+        else if (m.distance <= 500 && !said.has(500)) { said.add(500); speak(`In 500 metres, ${text}`); }
+      },
+      setMuted(v) { muted = v; if (v && 'speechSynthesis' in window) window.speechSynthesis.cancel(); },
+      get muted() { return muted; },
+    };
+  }
+
+  /** Arrow/glyph for a Leaflet Routing Machine instruction type — the OSRM
+   * formatter's vocabulary, not exhaustive but covers what a road network
+   * actually produces. */
+  const NAV_ICONS = {
+    Straight: '⬆️', Head: '⬆️', Continue: '⬆️', SlightRight: '↗️', Right: '➡️', SharpRight: '↘️',
+    TurnAround: '↩️', SharpLeft: '↙️', Left: '⬅️', SlightLeft: '↖️', Roundabout: '🔄',
+    DestinationReached: '🏁', WaypointReached: '📍', StartAt: '⬆️',
+  };
+  function navIcon(instruction) {
+    return NAV_ICONS[instruction && instruction.type] || '⬆️';
   }
 
   /* ---- WebRTC audio ----------------------------------------------------
@@ -654,5 +739,5 @@ const CCCS = (() => {
     },
   };
 
-  return { api, send, outbox, keybinds, login, getSession, setSession, clearSession, bus, audio, makeMap, push, hhmmss, el, els, esc, requireAuth };
+  return { api, send, outbox, keybinds, login, getSession, setSession, clearSession, bus, audio, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth };
 })();
