@@ -139,6 +139,7 @@
   <select id="pttTg" style="width:180px"></select>
   <button class="btn ok" id="btnPtt">Hold to transmit</button>
   <span class="tg-pill" id="floor"></span>
+  <button class="btn danger" id="audioBlocked" hidden title="The browser blocked incoming audio from playing — click to enable it">🔇 Click to enable audio</button>
 </div>
 
 <div id="modalHost"></div>
@@ -838,6 +839,13 @@ const upsert = (list, item, key = 'id') => {
 };
 
 const audio = CCCS.audio(bus);
+audio.onPeerAudio = (addr, state) => {
+  const b = el('#audioBlocked');
+  if (!b) return;
+  if (state === 'blocked') b.hidden = false;
+  else if (state === true) b.hidden = true;
+};
+if (el('#audioBlocked')) el('#audioBlocked').onclick = () => { if (audio.resumeAudio()) el('#audioBlocked').hidden = true; };
 bus.on('ptt.granted', ({ listeners }) => audio.publishTo(listeners).catch((e) => console.warn('mic', e)))
    .on('call.accepted', (c) => { const other = (c.participants || []).find((p) => p.issi); if (c.kind !== 'PSTN' && other) audio.call(`radio:${other.issi}`).catch(() => {}); })
    .on('call.ended', () => audio.hangUp())

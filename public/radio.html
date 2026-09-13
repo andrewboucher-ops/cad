@@ -85,7 +85,7 @@
   <div class="r-topbar">
     <span class="side left"><svg class="wifi" width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M2 8.5a16 16 0 0120 0M5.5 12.5a11 11 0 0113 0M9 16.5a5.5 5.5 0 016 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="20" r="1.4" fill="currentColor"/></svg> <span class="link-net" id="net">link down</span></span>
     <span class="r-logo" id="rlogo" title="Press and hold for settings">RADIO</span>
-    <span class="side right"><span class="mono dim" id="pending" style="font-size:10px"></span><span class="mono" id="queued" style="font-size:10px;color:var(--busy)"></span></span>
+    <span class="side right"><button id="audioBlocked" hidden title="Audio was blocked by the browser — tap to enable it" style="background:none;border:none;color:var(--priority);font-size:15px;padding:0">🔇</button><span class="mono dim" id="pending" style="font-size:10px"></span><span class="mono" id="queued" style="font-size:10px;color:var(--busy)"></span></span>
   </div>
 
   <div class="r-grid">
@@ -856,6 +856,13 @@ bus = CCCS.bus((up) => {
 });
 
 const audio = CCCS.audio(bus);
+audio.onPeerAudio = (addr, state) => {
+  const b = el('#audioBlocked');
+  if (!b) return;
+  if (state === 'blocked') b.hidden = false;
+  else if (state === true) b.hidden = true;
+};
+el('#audioBlocked').onclick = () => { if (audio.resumeAudio()) el('#audioBlocked').hidden = true; };
 let actx;
 function beepTwice() {
   if (covert) return;

@@ -598,6 +598,18 @@ const CCCS = (() => {
       hangUp() { stopPublishing(); },
       set onPeerAudio(fn) { onLevel = fn; },
       get peerCount() { return peers.size; },
+      /** Retry playback on every live sink from inside a click handler — a
+       * direct user gesture is usually enough to clear a browser's autoplay
+       * block, which is the single most common cause of "shows connected,
+       * no sound" and otherwise fails with nothing more than a console
+       * warning nobody sees. */
+      resumeAudio() {
+        let ok = true;
+        for (const [addr, sink] of sinks) {
+          sink.play().then(() => onLevel && onLevel(addr, true)).catch((e) => { ok = false; console.warn(`[cccs] resume failed for ${addr}:`, e.message); });
+        }
+        return ok;
+      },
     };
   }
 
