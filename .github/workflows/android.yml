@@ -68,6 +68,16 @@ jobs:
         working-directory: android
         run: |
           npx cap add android
+          # AGP 8.7.2 (pinned in build.gradle) needs Gradle 8.9+; Capacitor's own
+          # wrapper template ships an older Gradle, so force it regardless of what
+          # Capacitor bundles.
+          cat > android/gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.9-all.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
           # Our hand-written sources and config win over Capacitor's defaults.
           cp -r app/src/main/java android/app/src/main/
           cp app/src/main/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
