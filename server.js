@@ -323,6 +323,7 @@ class Conn {
     this.id = crypto.randomUUID();
     this.radioId = null; this.mdtId = null;
     this.buf = Buffer.alloc(0); this.alive = true;
+    this.awaitingPong = false;
     sockets.add(this);
     socket.on('data', (d) => this.onData(d));
     socket.on('close', () => this.close());
@@ -351,6 +352,7 @@ class Conn {
       this.buf = this.buf.subarray(offset + maskLen + len);
       if (opcode === 0x8) { this.close(); return; }
       if (opcode === 0x9) { this.socket.write(encodeFrame(data.toString(), 0xa)); continue; }
+      if (opcode === 0xa) { this.awaitingPong = false; continue; }
       if (opcode === 0x1) {
         try { handleWsMessage(this, JSON.parse(data.toString())); }
         catch (e) { this.send('error', { message: String(e.message || e) }); }
@@ -371,6 +373,24 @@ class Conn {
     }
   }
 }
+
+/* A dead TCP peer (laptop slept, network changed, cable pulled) often gives
+ * neither a close nor an error event — the OS just goes quiet. Left alone,
+ * that connection lingers in `sockets` forever: still "connected" for
+ * presence, still counted as a PTT listener, so a control operator can hear
+ * their own voice come back from a ghost session that's actually gone.
+ * A plain WS ping/pong (opcode 0x9/0xa) catches this in one round trip —
+ * browsers answer server-sent pings at the protocol level with no JS needed
+ * on the client, so this is purely a server-side addition. */
+const HEARTBEAT_MS = 30000;
+setInterval(() => {
+  for (const c of sockets) {
+    if (!c.alive) continue;
+    if (c.awaitingPong) { c.close(); continue; }
+    c.awaitingPong = true;
+    try { c.socket.write(encodeFrame('', 0x9)); } catch { c.close(); }
+  }
+}, HEARTBEAT_MS).unref?.();
 
 /* Peer addressing for WebRTC signalling: 'radio:<ISSI>' or 'conn:<uuid>'. */
 function peerAddr(conn) {

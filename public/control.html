@@ -140,6 +140,10 @@
   <button class="btn ok" id="btnPtt">Hold to transmit</button>
   <span class="tg-pill" id="floor"></span>
   <button class="btn danger" id="audioBlocked" hidden title="The browser blocked incoming audio from playing — click to enable it">🔇 Click to enable audio</button>
+  <span class="tg-pill" id="callBar" hidden style="display:inline-flex;align-items:center;gap:6px">
+    📞 <span id="callBarNames"></span> <span id="callBarState" class="dim"></span>
+    <button class="btn danger" id="callBarEnd" style="padding:0 8px;font-size:11px">End call</button>
+  </span>
 </div>
 
 <div id="modalHost"></div>
@@ -430,6 +434,7 @@ async function callRadio(issi) {
 function activeCall(call) {
   const names = call.participants.map((p) => p.callsign || p.issi).join(', ');
   state.calls.set(call.id, call);
+  paintCallBar();
   modal(`Call #${call.id}`, `
     <p>To <strong class="mono">${esc(names)}</strong></p>
     <p id="callState" class="mono">${esc(call.state)}</p>
@@ -437,6 +442,22 @@ function activeCall(call) {
     el('#endCall').onclick = async () => { await api('POST', `/api/calls/${call.id}/end`); closeModal(); };
   });
 }
+
+/* Closing the call modal to go look at a job used to lose all trace that a
+ * call was still live — no indicator, no way to end it short of finding the
+ * radio again and hoping "destination busy" jogs your memory. This survives
+ * the modal closing: it's driven off state.calls, not off the modal's DOM. */
+function paintCallBar() {
+  const bar = el('#callBar');
+  if (!bar) return;
+  const live = [...state.calls.values()].filter((c) => !['ENDED', 'REJECTED'].includes(c.state)).pop();
+  if (!live) { bar.hidden = true; return; }
+  bar.hidden = false;
+  el('#callBarNames').textContent = live.participants.map((p) => p.callsign || p.issi).join(', ') || `#${live.id}`;
+  el('#callBarState').textContent = live.state === 'RINGING' ? 'ringing…' : 'connected';
+  el('#callBarEnd').onclick = async () => { await api('POST', `/api/calls/${live.id}/end`); };
+}
+if (el('#callBar')) el('#callBar').hidden = true;
 
 if (!isPopout) {
 el('#btnCall').onclick = () => modal('Call a radio', `
@@ -875,9 +896,9 @@ bus.on('ptt.granted', ({ listeners }) => audio.publishTo(listeners).catch((e) =>
    .on('radio.ptt_started', (p) => { const f = el('#floor'); if (f) f.textContent = `TX ${p.callsign} · ${p.talkgroup}`; })
    .on('radio.ptt_released', (p) => { const f = el('#floor'); if (f) f.textContent = ''; })
    .on('ptt.denied', (p) => { const f = el('#floor'); if (f) f.textContent = `${p.reason} — ${p.holder} has the floor`; txTg = null; const b = el('#btnPtt'); if (b) { b.classList.remove('danger'); b.textContent = 'Hold to transmit'; } })
-   .on('call.accepted', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = 'ACTIVE — connected'; })
-   .on('call.rejected', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `DECLINED by ${c.rejected_by}`; })
-   .on('call.ended', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `ENDED (${c.end_reason}) after ${c.duration_s}s`; })
+   .on('call.accepted', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = 'ACTIVE — connected'; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
+   .on('call.rejected', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `DECLINED by ${c.rejected_by}`; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
+   .on('call.ended', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `ENDED (${c.end_reason}) after ${c.duration_s}s`; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
    .on('message.received', () => {});
 
 async function boot() {
