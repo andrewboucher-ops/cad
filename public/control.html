@@ -201,16 +201,28 @@ function pillClass(r) {
   return 'busy';
 }
 
+// A terminal (radio or MDT) working a job shows that job's cycle status,
+// matching what's on its own screen — one status vocabulary end to end,
+// not the terminal's own status label competing with the job's. Falls back
+// to the terminal's own status once the job clears. ACKNOWLEDGED gets
+// abbreviated; the pill is tight on width and "EN ROUTE"/"ON SCENE" already
+// read fine at full length.
+const jobStatusLabel = (s) => (s === 'ACKNOWLEDGED' ? 'ACK' : s.replace('_', ' '));
+const jobStatusClass = (s) => ({ EN_ROUTE: 'busy', ON_SCENE: 'busy', TRANSPORTING: 'busy', DISPATCHED: 'busy', ACKNOWLEDGED: 'busy' }[s] || 'on');
+
 function renderResources() {
   if (!el('#resList')) return;
   const reqByIssi = new Map(state.requests.filter((r) => r.state === 'PENDING').map((r) => [r.issi, r]));
   const rows = state.radios.map((r) => {
     const req = reqByIssi.get(r.issi);
+    const job = state.jobs.find((j) => j.resources.some((x) => x.radio === r.issi) && !['COMPLETED', 'CANCELLED'].includes(j.status));
+    const pillCls = job && !r.emergency ? jobStatusClass(job.status) : pillClass(r);
+    const pillText = r.emergency ? 'EMERGENCY' : job ? jobStatusLabel(job.status) : r.status.replace('_', ' ');
     return `
     <div class="row ${state.selected === r.issi ? 'sel' : ''} ${r.emergency ? 'alarm' : ''}" data-issi="${r.issi}">
       <div class="card-top">
         <span class="cs">${esc(r.callsign || '—')}</span>
-        <span class="status-pill ${pillClass(r)}">${(r.emergency ? 'EMERGENCY' : r.status).replace('_', ' ')}</span>
+        <span class="status-pill ${pillCls}">${pillText}</span>
       </div>
       <div class="card-sub">
         <span class="mono">ISSI ${r.issi}${r.covert ? ' · covert' : ''}</span>
@@ -219,14 +231,10 @@ function renderResources() {
       ${req ? `<div class="callback-tag" data-cbcall="${r.issi}">${req.priority ? 'Priority callback requested' : 'Callback requested'}</div>` : ''}
     </div>`;
   }).join('');
-  // A terminal working a job shows that job's cycle status (matching what's
-  // on its own screen); only falls back to duty status once the job clears —
-  // one status vocabulary end to end, not two competing ones.
-  const jobStatusClass = (s) => ({ EN_ROUTE: 'busy', ON_SCENE: 'busy', TRANSPORTING: 'busy', DISPATCHED: 'busy', ACKNOWLEDGED: 'busy' }[s] || 'on');
   const mdtPillClass = (m, job) => !m.connected ? 'off' : job ? jobStatusClass(job.status) : m.duty_status === 'BUSY' ? 'busy' : m.duty_status === 'OUT_OF_SERVICE' ? 'off' : 'on';
   const mdtRows = state.mdts.map((m) => {
     const job = state.jobs.find((j) => j.resources.some((r) => r.mdt === m.mdt_code) && !['COMPLETED', 'CANCELLED'].includes(j.status));
-    const label = m.connected ? (job ? job.status : (m.duty_status || 'AVAILABLE')).replace('_', ' ') : 'OFFLINE';
+    const label = !m.connected ? 'OFFLINE' : job ? jobStatusLabel(job.status) : (m.duty_status || 'AVAILABLE').replace('_', ' ');
     return `
     <div class="row" data-mdt="${m.mdt_code}">
       <div class="card-top">
