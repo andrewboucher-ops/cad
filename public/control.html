@@ -231,12 +231,12 @@ function renderResources() {
       ${req ? `<div class="callback-tag" data-cbcall="${r.issi}">${req.priority ? 'Priority callback requested' : 'Callback requested'}</div>` : ''}
     </div>`;
   }).join('');
-  const mdtPillClass = (m, job) => !m.connected ? 'off' : job ? jobStatusClass(job.status) : m.duty_status === 'BUSY' ? 'busy' : m.duty_status === 'OUT_OF_SERVICE' ? 'off' : 'on';
+  const mdtPillClass = (m, job) => m.emergency ? 'emg' : !m.connected ? 'off' : job ? jobStatusClass(job.status) : m.duty_status === 'BUSY' ? 'busy' : m.duty_status === 'OUT_OF_SERVICE' ? 'off' : 'on';
   const mdtRows = state.mdts.map((m) => {
     const job = state.jobs.find((j) => j.resources.some((r) => r.mdt === m.mdt_code) && !['COMPLETED', 'CANCELLED'].includes(j.status));
-    const label = !m.connected ? 'OFFLINE' : job ? jobStatusLabel(job.status) : (m.duty_status || 'AVAILABLE').replace('_', ' ');
+    const label = m.emergency ? 'EMERGENCY' : !m.connected ? 'OFFLINE' : job ? jobStatusLabel(job.status) : (m.duty_status || 'AVAILABLE').replace('_', ' ');
     return `
-    <div class="row" data-mdt="${m.mdt_code}">
+    <div class="row ${m.emergency ? 'alarm' : ''}" data-mdt="${m.mdt_code}">
       <div class="card-top">
         <span class="cs">${esc(m.mdt_code)}</span>
         <span class="status-pill ${mdtPillClass(m, job)}">${label}</span>
@@ -364,20 +364,22 @@ function renderEmergencies() {
   const active = state.emergencies.filter((e) => e.state !== 'RESOLVED');
   el('#emgWrap').innerHTML = active.map((e) => `
     <div class="emg-banner">
-      <strong>${e.kind === 'WELFARE' ? 'WELFARE OVERDUE — NO CHECK-IN' : 'RADIO EMERGENCY'}</strong>
-      <span class="mono">${esc(e.callsign)} · ISSI ${e.issi} · ${e.lat ? e.lat.toFixed(4) + ', ' + e.lon.toFixed(4) : 'no fix'} · ${new Date(e.activated_at).toLocaleTimeString()}</span>
+      <strong>${e.kind === 'WELFARE' ? 'WELFARE OVERDUE — NO CHECK-IN' : 'EMERGENCY'}</strong>
+      <span class="mono">${esc(e.callsign)} · ${e.issi ? 'ISSI ' + e.issi : e.mdt_code} · ${e.lat ? e.lat.toFixed(4) + ', ' + e.lon.toFixed(4) : 'no fix'} · ${new Date(e.activated_at).toLocaleTimeString()}</span>
       ${e.note ? `<span class="dim">last task: ${esc(e.note)}</span>` : ''}
       <span class="dim">${e.state === 'ACKNOWLEDGED' ? 'acknowledged by ' + esc(e.acknowledged_by) : ''}</span>
       <span style="flex:1"></span>
+      ${e.job_id ? `<button class="btn" data-emgjob="${e.job_id}">Job ${esc((state.jobs.find((j) => j.id === e.job_id) || {}).reference || '')}</button>` : ''}
       ${e.state === 'ACTIVE' ? `<button class="btn danger" data-ack="${e.id}">Acknowledge</button>` : ''}
-      <button class="btn" data-emgcall="${e.issi}">Call radio</button>
-      <button class="btn" data-loc="${e.issi}">View location</button>
+      ${e.issi ? `<button class="btn" data-emgcall="${e.issi}">Call radio</button>` : ''}
+      ${e.issi ? `<button class="btn" data-loc="${e.issi}">View location</button>` : ''}
       <button class="btn ok" data-res="${e.id}">Reset emergency</button>
     </div>`).join('');
   CCCS.els('[data-ack]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.ack}/ack`)));
   CCCS.els('[data-res]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.res}/resolve`)));
   CCCS.els('[data-emgcall]').forEach((b) => (b.onclick = () => callRadio(b.dataset.emgcall)));
   CCCS.els('[data-loc]').forEach((b) => (b.onclick = () => select(b.dataset.loc)));
+  CCCS.els('[data-emgjob]').forEach((b) => (b.onclick = () => jobModal(state.jobs.find((j) => j.id === Number(b.dataset.emgjob)))));
   if (active.some((e) => e.state === 'ACTIVE')) beep();
 }
 
@@ -571,7 +573,8 @@ function jobModal(j) {
     ['Completed', j.completed_at, j.transporting_at || j.on_scene_at],
   ].filter(([, at]) => at);
   modal(`Job ${j.reference}`, `
-    <dl class="kv">
+    <div class="btn-row" style="margin-bottom:8px"><span style="flex:1"></span><button class="btn" id="jEditToggle">Edit details</button></div>
+    <dl class="kv" id="jDetailsView">
       <dt>Priority</dt><dd><span class="pri pri-${j.priority}">${j.priority}</span></dd>
       <dt>Status</dt><dd>${esc(j.status)}</dd>
       <dt>Type</dt><dd>${esc(j.incident_type)}</dd>
@@ -588,6 +591,22 @@ function jobModal(j) {
         `${label} <span class="dim">${new Date(at).toLocaleTimeString()}${since ? ` (+${fmtElapsed(since, at)})` : ''}</span>`
       ).join('<br>')}${!['COMPLETED', 'CANCELLED'].includes(j.status) && timeline.length ? `<br>${esc(j.status.replace('_', ' '))} for <span class="dim" id="jElapsed">${fmtElapsed(timeline[timeline.length - 1][1])}</span>` : ''}</dd>` : ''}
     </dl>
+    <div id="jDetailsEdit" class="hide">
+      <label for="jType">Incident type</label>
+      <input id="jType" value="${esc(j.incident_type)}">
+      <label for="jLoc">Location</label>
+      <input id="jLoc" value="${esc(j.location)}">
+      <label for="jW3w">What3Words</label>
+      <input id="jW3w" value="${esc(j.what3words || '')}" placeholder="///word.word.word">
+      <label for="jCaller">Caller</label>
+      <input id="jCaller" value="${esc(j.caller || '')}">
+      <label for="jDesc">Detail</label>
+      <textarea id="jDesc" rows="3" style="width:100%;resize:vertical">${esc(j.description || '')}</textarea>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn primary" id="jSaveDetails">Save details</button>
+        <button class="btn" id="jCancelEdit">Cancel</button>
+      </div>
+    </div>
     <label for="jNotes">Notes — visible to every assigned call sign</label>
     <textarea id="jNotes" rows="3" style="width:100%;resize:vertical">${esc(j.notes || '')}</textarea>
     <div class="btn-row" style="margin-top:6px"><button class="btn" id="jSaveNotes">Save notes</button></div>
@@ -607,6 +626,19 @@ function jobModal(j) {
     el('#jDone').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }); closeModal(); };
     el('#jCancel').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }); closeModal(); };
     el('#jSaveNotes').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }); closeModal(); };
+    el('#jEditToggle').onclick = () => {
+      el('#jDetailsView').classList.add('hide');
+      el('#jEditToggle').classList.add('hide');
+      el('#jDetailsEdit').classList.remove('hide');
+    };
+    el('#jCancelEdit').onclick = () => { closeModal(); jobModal(j); };
+    el('#jSaveDetails').onclick = async () => {
+      await api('PATCH', `/api/jobs/${j.id}`, {
+        incident_type: el('#jType').value, location: el('#jLoc').value,
+        what3words: el('#jW3w').value, caller: el('#jCaller').value, description: el('#jDesc').value,
+      });
+      closeModal();
+    };
     CCCS.els('[data-standdown]').forEach((b) => (b.onclick = async () => {
       const [kind, id] = b.dataset.standdown.split(':');
       if (!confirm(`Stand down ${id} from this job?`)) return;

@@ -48,6 +48,9 @@
   .mdt-key:active { transform: translateY(1px); }
   .mdt-key:disabled { opacity: .35; cursor: not-allowed; filter: none; }
   .mdt-key.chan { background: linear-gradient(180deg,#eab308,#ca8a04); color: #1c1300; }
+  .mdt-key.emg { background: linear-gradient(180deg,#ef4444,#b91c1c); color: #fff; }
+  .ident-emg { color: #ef4444; font-weight: 700; animation: status-breathe 1.4s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .ident-emg { animation: none; } }
   .mdt-key.mode-active { background: linear-gradient(180deg,#f97316,#c2410c); }
   .mdt-key.status-active { background: linear-gradient(180deg,#22c55e,#15803d); animation: status-breathe 2.6s ease-in-out infinite; }
   @keyframes status-breathe { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(.78); } }
@@ -125,7 +128,7 @@
         <button class="mdt-key" data-view="rpt" title="Activity log">RPT</button>
         <div class="grow"></div>
         <button class="mdt-key small" id="btnFunc1" title="Retry the link now">FUNC1</button>
-        <button class="mdt-key small" id="btnFunc2" title="Not configured" disabled>FUNC2</button>
+        <button class="mdt-key small emg" id="bEmg" title="Raise an emergency">EMERG</button>
       </div>
 
       <div class="mdt-center">
@@ -304,7 +307,8 @@ el('#crewAdd').onclick = async () => {
 
 function paintInfo() {
   if (!mdt) return;
-  el('#ident').textContent = `${mdt.mdt_code} · ${mdt.callsign || 'unassigned'}`;
+  el('#ident').textContent = mdt.emergency ? `${mdt.mdt_code} · EMERGENCY` : `${mdt.mdt_code} · ${mdt.callsign || 'unassigned'}`;
+  el('#ident').classList.toggle('ident-emg', !!mdt.emergency);
   el('#btnCallsign').textContent = mdt.callsign || mdt.mdt_code;
   el('#info').innerHTML = `
     <div class="info-grid">
@@ -385,6 +389,13 @@ el('#send').onclick = async () => {
 };
 
 el('#btnFunc1').onclick = () => CCCS.outbox.flush();
+el('#bEmg').onclick = async () => {
+  if (!confirm('Send an emergency alert to control?')) return;
+  const r = await CCCS.send('POST', '/api/emergency', {}, 'emergency');
+  log(r.queued ? 'EMERGENCY QUEUED — NO LINK' : 'EMERGENCY ACTIVATED');
+  el('#bEmg').classList.add('mode-active');
+  setTimeout(() => el('#bEmg').classList.remove('mode-active'), 3000);
+};
 
 const bus = CCCS.bus((up) => {
   el('#net').textContent = up ? 'link up' : 'link down';

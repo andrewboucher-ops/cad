@@ -185,7 +185,7 @@ function seedFromFile(file) {
       if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: radio.id });
     }
     for (const m of cs.mdts || []) {
-      const mdt = { id: nextId('mdts'), mdt_code: String(m.code).toUpperCase(), serial: m.serial || m.code, callsign_id: rec.id, vehicle_id: vehicle ? vehicle.id : null, status: 'OFFLINE', duty_status: 'AVAILABLE', job_id: null, battery: 100, network: 'LTE', operator: null, lat: null, lon: null, connected: false, crew: [] };
+      const mdt = { id: nextId('mdts'), mdt_code: String(m.code).toUpperCase(), serial: m.serial || m.code, callsign_id: rec.id, vehicle_id: vehicle ? vehicle.id : null, status: 'OFFLINE', duty_status: 'AVAILABLE', job_id: null, battery: 100, network: 'LTE', operator: null, lat: null, lon: null, connected: false, crew: [], emergency: false };
       db.mdts.push(mdt); byName.mdts.set(mdt.mdt_code, mdt);
     }
   }
@@ -245,7 +245,7 @@ function seed() {
     return r;
   };
   const mkMdt = (code, serial, callsign_id, vehicle_id) => {
-    const m = { id: nextId('mdts'), mdt_code: code, serial, callsign_id, vehicle_id, status: 'OFFLINE', duty_status: 'AVAILABLE', job_id: null, battery: 80 + Math.floor(Math.random() * 20), network: 'LTE', operator: null, lat: null, lon: null, connected: false, crew: [] };
+    const m = { id: nextId('mdts'), mdt_code: code, serial, callsign_id, vehicle_id, status: 'OFFLINE', duty_status: 'AVAILABLE', job_id: null, battery: 80 + Math.floor(Math.random() * 20), network: 'LTE', operator: null, lat: null, lon: null, connected: false, crew: [], emergency: false };
     db.mdts.push(m); return m;
   };
 
@@ -456,7 +456,7 @@ function publicRadio(r) {
 function publicMdt(m) {
   const cs = db.callsigns.find((c) => c.id === m.callsign_id);
   const veh = db.vehicles.find((v) => v.id === m.vehicle_id);
-  return { id: m.id, mdt_code: m.mdt_code, serial: m.serial, callsign: cs ? cs.name : null, callsign_id: m.callsign_id, vehicle: veh ? veh.registration : null, status: m.status, duty_status: m.duty_status || 'AVAILABLE', job_id: m.job_id, battery: m.battery, network: m.network, operator: m.operator, connected: m.connected, lat: m.lat, lon: m.lon, crew: m.crew || [] };
+  return { id: m.id, mdt_code: m.mdt_code, serial: m.serial, callsign: cs ? cs.name : null, callsign_id: m.callsign_id, vehicle: veh ? veh.registration : null, status: m.status, duty_status: m.duty_status || 'AVAILABLE', job_id: m.job_id, battery: m.battery, network: m.network, operator: m.operator, connected: m.connected, lat: m.lat, lon: m.lon, crew: m.crew || [], emergency: m.emergency || false };
 }
 function publicJob(j) {
   const assigns = db.job_assignments.filter((a) => a.job_id === j.id);
@@ -489,7 +489,7 @@ function setRadioStatus(radio, status, reason = '') {
   broadcast('radio.status_changed', publicRadio(radio));
   logEvent('radio.status_changed', `${callsignOf(radio)} STATUS → ${status}`, { radio_id: radio.id, issi: radio.issi, from: prev, to: status });
 }
-const callsignOf = (r) => { const c = db.callsigns.find((x) => x.id === r.callsign_id); return c ? c.name : r.issi; };
+const callsignOf = (r) => { const c = db.callsigns.find((x) => x.id === r.callsign_id); return c ? c.name : (r.issi || r.mdt_code); };
 
 function releaseFloorFor(radio) {
   for (const tg of db.talkgroups) {
@@ -1340,6 +1340,15 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
     }
   }
   if (body.notes !== undefined) j.notes = body.notes;
+  // Incident details — mainly for a job auto-created from an emergency,
+  // which starts with placeholders (raw coordinates, no description) and
+  // gets filled in as the officer actually reports what's going on.
+  const DETAIL_FIELDS = { incident_type: 120, location: 200, description: 2000, caller: 200 };
+  if (Object.keys(DETAIL_FIELDS).some((f) => body[f] !== undefined)) {
+    if (!isControlRole(user.role)) throw httpError(403, 'only control can edit incident details');
+    for (const [f, max] of Object.entries(DETAIL_FIELDS)) if (body[f] !== undefined) j[f] = String(body[f]).slice(0, max);
+    if (body.what3words !== undefined) j.what3words = String(body.what3words).replace(/^\/+/, '').trim();
+  }
   j.updated_at = new Date().toISOString();
   broadcast('job.status_changed', publicJob(j));
   logEvent('job.status_changed', `JOB ${j.reference} → ${j.status}`, { job_id: j.id });
@@ -1365,19 +1374,51 @@ route('POST', '/api/jobs/:id/stand-down', CONTROL, ({ params, body }) => {
 });
 
 // Emergency
+/** An emergency needs backup dispatched to it, which means it needs a job —
+ * otherwise a supervisor's only way to send other units is to freehand a new
+ * job and hope the location matches. Created with no resources assigned:
+ * the officer/crew already in trouble aren't who you'd "dispatch" to their
+ * own emergency, so this is deliberately backup-only. Location starts as raw
+ * coordinates and incident_type/description/caller start as placeholders —
+ * there's no reverse geocoding here — and get filled in via the job's own
+ * edit fields as details actually come in over the air. */
+function createEmergencyJob(ev) {
+  const j = {
+    id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
+    incident_type: ev.kind === 'WELFARE' ? 'WELFARE ALARM' : 'OFFICER EMERGENCY', priority: 'RED',
+    location: ev.lat != null ? `${ev.lat.toFixed(5)}, ${ev.lon.toFixed(5)} (add details as received)` : 'Location unknown — add details as received',
+    site_id: null, keyholder: '', lat: ev.lat, lon: ev.lon,
+    description: '', caller: ev.callsign, required_resources: 2, what3words: '',
+    notes: '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    emergency_id: ev.id,
+  };
+  db.jobs.push(j);
+  ev.job_id = j.id;
+  broadcast('job.created', publicJob(j));
+  logEvent('job.created', `JOB ${j.reference} CREATED (RED) — ${j.incident_type} ${ev.callsign}`, { job_id: j.id, emergency_id: ev.id });
+  return j;
+}
 route('POST', '/api/emergency', ALL, ({ body, user }) => {
-  const radio = user.role === 'RADIO_USER' ? db.radios.find((r) => r.id === user.radio_id) : findRadio(body.radio);
-  if (!radio) throw httpError(404, 'radio not found');
-  const open = db.emergency_events.find((e) => e.radio_id === radio.id && e.state !== 'RESOLVED');
+  const radio = user.role === 'RADIO_USER' ? db.radios.find((r) => r.id === user.radio_id) : (body.radio ? findRadio(body.radio) : null);
+  const mdt = user.role === 'MDT_USER' ? db.mdts.find((m) => m.id === user.mdt_id) : (body.mdt ? findMdt(body.mdt) : null);
+  if (!radio && !mdt) throw httpError(404, 'radio or mdt not found');
+  const open = db.emergency_events.find((e) => ((radio && e.radio_id === radio.id) || (mdt && e.mdt_id === mdt.id)) && e.state !== 'RESOLVED');
   if (open) return open;
-  radio.emergency = true;
-  setRadioStatus(radio, 'EMERGENCY', 'emergency button');
-  const ev = { id: nextId('emergency_events'), kind: 'EMERGENCY', radio_id: radio.id, issi: radio.issi, callsign: callsignOf(radio), lat: radio.lat, lon: radio.lon, state: 'ACTIVE', activated_at: new Date().toISOString(), acknowledged_at: null, acknowledged_by: null, resolved_at: null };
+  if (radio) { radio.emergency = true; setRadioStatus(radio, 'EMERGENCY', 'emergency button'); }
+  if (mdt) { mdt.emergency = true; broadcast('mdt.status_changed', publicMdt(mdt)); }
+  const who = radio || mdt;
+  const ev = {
+    id: nextId('emergency_events'), kind: 'EMERGENCY', radio_id: radio ? radio.id : null, mdt_id: mdt ? mdt.id : null,
+    issi: radio ? radio.issi : null, mdt_code: mdt ? mdt.mdt_code : null, callsign: callsignOf(who),
+    lat: who.lat, lon: who.lon, state: 'ACTIVE', activated_at: new Date().toISOString(),
+    acknowledged_at: null, acknowledged_by: null, resolved_at: null, job_id: null,
+  };
   db.emergency_events.push(ev);
+  createEmergencyJob(ev);
   broadcast('emergency.activated', ev);
-  pushToRoles(CONTROL, { title: 'EMERGENCY', body: `${ev.callsign} (${ev.issi})`, url: '/control.html', tag: 'cccs-emergency' });
+  pushToRoles(CONTROL, { title: 'EMERGENCY', body: `${ev.callsign} (${ev.issi || ev.mdt_code})`, url: '/control.html', tag: 'cccs-emergency' });
   store.flushNow();
-  logEvent('emergency.activated', `!!! EMERGENCY — ${ev.callsign} (${ev.issi})`, { emergency_id: ev.id, radio_id: radio.id });
+  logEvent('emergency.activated', `!!! EMERGENCY — ${ev.callsign} (${ev.issi || ev.mdt_code})`, { emergency_id: ev.id, radio_id: ev.radio_id, mdt_id: ev.mdt_id });
   return { __status: 201, __body: ev };
 });
 route('GET', '/api/emergency', ALL, () => db.emergency_events.slice(-100));
@@ -1393,6 +1434,8 @@ route('POST', '/api/emergency/:id/resolve', CONTROL, ({ params, user }) => {
   ev.state = 'RESOLVED'; ev.resolved_at = new Date().toISOString();
   const radio = db.radios.find((r) => r.id === ev.radio_id);
   if (radio && ev.kind !== 'WELFARE') { radio.emergency = false; setRadioStatus(radio, radio.connected ? 'AVAILABLE' : 'OFFLINE', 'emergency cleared'); }
+  const mdt = db.mdts.find((m) => m.id === ev.mdt_id);
+  if (mdt) { mdt.emergency = false; broadcast('mdt.status_changed', publicMdt(mdt)); }
   broadcast('emergency.resolved', ev);
   logEvent('emergency.resolved', `EMERGENCY ${ev.callsign} RESOLVED BY ${user.display_name}`, { emergency_id: ev.id });
   return ev;
@@ -1719,6 +1762,7 @@ function welfareTick() {
         activated_at: new Date().toISOString(), acknowledged_at: null, acknowledged_by: null, resolved_at: null,
       };
       db.emergency_events.push(ev);
+      createEmergencyJob(ev);
       broadcast('welfare.overdue', ev);
       broadcast('emergency.activated', ev);
       pushToRoles(CONTROL, { title: 'Welfare alarm', body: `${ev.callsign} (${ev.issi}) — no check-in`, url: '/control.html', tag: 'cccs-emergency' });
