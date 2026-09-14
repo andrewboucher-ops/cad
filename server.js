@@ -1025,6 +1025,17 @@ route('POST', '/api/radios', ADMIN, ({ body }) => {
   logEvent('radio.created', `RADIO ${issi} CREATED`, { radio_id: r.id });
   return { __status: 201, __body: publicRadio(r) };
 });
+route('DELETE', '/api/radios/:id', ADMIN, ({ params }) => {
+  const r = findRadio(params.id);
+  if (!r) throw httpError(404, 'radio not found');
+  if (r.job_id) throw httpError(409, 'radio is assigned to an open job — stand it down first');
+  if (db.users.some((u) => u.radio_id === r.id)) throw httpError(409, 'an account is still linked to this radio — unlink it from the account first');
+  db.talkgroup_members = db.talkgroup_members.filter((m) => m.radio_id !== r.id);
+  db.radios = db.radios.filter((x) => x.id !== r.id);
+  broadcast('radio.deleted', { id: r.id, issi: r.issi });
+  logEvent('radio.deleted', `RADIO ${r.issi} DELETED`, { radio_id: r.id });
+  return { ok: true };
+});
 route('POST', '/api/radios/:id/status', ALL, ({ params, body, user }) => {
   const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
   if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
@@ -1109,6 +1120,31 @@ route('POST', '/api/mdts/:id/location', MDT_CREW, ({ params, body, user }) => {
   return publicMdt(m);
 });
 
+route('POST', '/api/mdts', ADMIN, ({ body }) => {
+  const mdt_code = String(body.mdt_code || '').trim().toUpperCase();
+  if (!mdt_code) throw httpError(400, 'mdt_code is required');
+  if (db.mdts.some((m) => m.mdt_code === mdt_code)) throw httpError(409, 'MDT code already exists');
+  const cs = body.callsign ? findCallsign(body.callsign) : null;
+  const m = {
+    id: nextId('mdts'), mdt_code, serial: body.serial || mdt_code, callsign_id: cs ? cs.id : null,
+    vehicle_id: null, status: 'OFFLINE', duty_status: 'AVAILABLE', job_id: null, battery: 100,
+    network: 'LTE', operator: null, lat: null, lon: null, connected: false, crew: [], emergency: false,
+  };
+  db.mdts.push(m);
+  broadcast('mdt.created', publicMdt(m));
+  logEvent('mdt.created', `MDT ${mdt_code} CREATED`, { mdt_id: m.id });
+  return { __status: 201, __body: publicMdt(m) };
+});
+route('DELETE', '/api/mdts/:id', ADMIN, ({ params }) => {
+  const m = db.mdts.find((x) => x.id === Number(params.id));
+  if (!m) throw httpError(404, 'MDT not found');
+  if (m.job_id) throw httpError(409, 'MDT is assigned to an open job — stand it down first');
+  if (db.users.some((u) => u.mdt_id === m.id)) throw httpError(409, 'an account is still linked to this MDT — unlink it from the account first');
+  db.mdts = db.mdts.filter((x) => x.id !== m.id);
+  broadcast('mdt.deleted', { id: m.id, mdt_code: m.mdt_code });
+  logEvent('mdt.deleted', `MDT ${m.mdt_code} DELETED`, { mdt_id: m.id });
+  return { ok: true };
+});
 route('GET', '/api/vehicles', ALL, () => db.vehicles);
 route('GET', '/api/personnel', ALL, () => db.personnel);
 
