@@ -24,7 +24,7 @@
             android:textSize="20sp"
             android:paddingBottom="24dp" />
 
-        <!-- No username/password on this device -- pick this radio's ISSI
+        <!-- No username/password on this device: pick this radio's ISSI
              from the list control already knows about, then its PIN. Both
              set from the control-room Admin screen, not typed here beyond
              the PIN itself. -->
