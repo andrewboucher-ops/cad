@@ -427,7 +427,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     // the right code can be identified, and treat it as PTT by default
     // since that's the control every handset in this fleet has.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (shouldHandle(keyCode)) {
+        if (mainScreen.visibility == View.VISIBLE && shouldHandle(keyCode)) {
             if (event.repeatCount == 0) { appendLog("KEY DOWN $keyCode"); startPtt() }
             return true
         }
@@ -435,7 +435,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (shouldHandle(keyCode)) {
+        if (mainScreen.visibility == View.VISIBLE && shouldHandle(keyCode)) {
             appendLog("KEY UP $keyCode")
             stopPtt()
             return true
