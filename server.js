@@ -1709,14 +1709,26 @@ const MQTT_USERNAME = process.env.MQTT_USERNAME || '';
 const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
 const MQTT_TOPIC = process.env.MQTT_TOPIC || 'guardm8/tcp/cccs';
 const MQTT_HEARTBEAT_S = Number(process.env.MQTT_HEARTBEAT_S || 60);
+// AURA doesn't recognise this payload shape yet — confirmed live, it shows
+// up as an unacknowledged "Unparsed signal" alarm card, P3/OTHER, one per
+// message. That's fine to discover once; it is NOT fine every 60 seconds
+// forever, and it's actively wrong for a real emergency (a panic press
+// showing as a low-priority "OTHER" alarm is worse than not sending it).
+// So: keep the connection itself up (harmless — AURA never sees anything
+// from bare CONNECT/PINGREQ), but hold the actual publishes behind this
+// flag until AURA's real expected fields are known. Flip to true (or set
+// MQTT_AURA_PUBLISH_ENABLED=1) once that's confirmed.
+const MQTT_AURA_PUBLISH_ENABLED = process.env.MQTT_AURA_PUBLISH_ENABLED === '1';
 if (MQTT_HOST) {
   mqttStart({ host: MQTT_HOST, port: MQTT_PORT, username: MQTT_USERNAME || undefined, password: MQTT_PASSWORD || undefined, clientId: 'cccs' });
-  setInterval(() => {
-    mqttPublishNow(MQTT_TOPIC, JSON.stringify({ event_code: 'heartbeat', source: 'CCCS', timestamp: new Date().toISOString() }));
-  }, MQTT_HEARTBEAT_S * 1000).unref?.();
+  if (MQTT_AURA_PUBLISH_ENABLED) {
+    setInterval(() => {
+      mqttPublishNow(MQTT_TOPIC, JSON.stringify({ event_code: 'heartbeat', source: 'CCCS', timestamp: new Date().toISOString() }));
+    }, MQTT_HEARTBEAT_S * 1000).unref?.();
+  }
 }
 function forwardEmergencyToAura(ev) {
-  if (!MQTT_HOST) return;
+  if (!MQTT_HOST || !MQTT_AURA_PUBLISH_ENABLED) return;
   const payload = JSON.stringify({
     event_code: 'PA', event_type: 'EMERGENCY', priority: 'CRITICAL',
     reference: `CCCS-${ev.id}`, source: 'CCCS',
