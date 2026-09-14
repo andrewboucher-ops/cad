@@ -1010,10 +1010,17 @@ route('GET', '/api/radios/:id', ALL, ({ params }) => {
   const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
   return publicRadio(r);
 });
+/** ISSIs are allocated, not chosen — an admin picking their own risks a typo
+ * that collides with (or is one digit off from) a real unit. Next-after-
+ * highest keeps them looking like the existing block instead of starting a
+ * new numbering scheme every time. */
+function nextIssi() {
+  const nums = db.radios.map((r) => parseInt(r.issi, 10)).filter((n) => !isNaN(n));
+  const base = nums.length ? Math.max(...nums) : 234100000;
+  return String(base + 1).padStart(9, '0');
+}
 route('POST', '/api/radios', ADMIN, ({ body }) => {
-  const issi = String(body.issi || '').trim();
-  if (!/^\d{6,15}$/.test(issi)) throw httpError(400, 'ISSI must be 6-15 digits');
-  if (db.radios.some((r) => r.issi === issi)) throw httpError(409, 'ISSI already exists');
+  const issi = nextIssi();
   const type = String(body.radio_type || 'HANDHELD').toUpperCase();
   if (!['HANDHELD', 'VEHICLE', 'FIXED', 'MDT'].includes(type)) throw httpError(400, 'invalid radio_type');
   const cs = body.callsign ? findCallsign(body.callsign) : null;
@@ -1024,6 +1031,31 @@ route('POST', '/api/radios', ADMIN, ({ body }) => {
   broadcast('radio.created', publicRadio(r));
   logEvent('radio.created', `RADIO ${issi} CREATED`, { radio_id: r.id });
   return { __status: 201, __body: publicRadio(r) };
+});
+route('PATCH', '/api/radios/:id', ADMIN, ({ params, body }) => {
+  const r = findRadio(params.id);
+  if (!r) throw httpError(404, 'radio not found');
+  // ISSI is allocated at creation and not editable here — see nextIssi().
+  if ('alias' in body) r.alias = String(body.alias || '').trim() || r.issi;
+  if ('radio_type' in body) {
+    const type = String(body.radio_type || '').toUpperCase();
+    if (!['HANDHELD', 'VEHICLE', 'FIXED', 'MDT'].includes(type)) throw httpError(400, 'invalid radio_type');
+    r.radio_type = type;
+  }
+  if ('pbx_extension' in body) r.pbx_extension = body.pbx_extension || null;
+  if ('callsign' in body) {
+    const cs = body.callsign ? findCallsign(body.callsign) : null;
+    r.callsign_id = cs ? cs.id : null;
+  }
+  if ('talkgroup' in body) {
+    db.talkgroup_members = db.talkgroup_members.filter((m) => m.radio_id !== r.id);
+    const tg = body.talkgroup ? findTalkgroup(body.talkgroup) : null;
+    r.talkgroup_id = tg ? tg.id : null;
+    if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: r.id });
+  }
+  broadcast('radio.status_changed', publicRadio(r));
+  logEvent('radio.updated', `RADIO ${r.issi} UPDATED`, { radio_id: r.id });
+  return publicRadio(r);
 });
 route('DELETE', '/api/radios/:id', ADMIN, ({ params }) => {
   const r = findRadio(params.id);
@@ -1134,6 +1166,24 @@ route('POST', '/api/mdts', ADMIN, ({ body }) => {
   broadcast('mdt.created', publicMdt(m));
   logEvent('mdt.created', `MDT ${mdt_code} CREATED`, { mdt_id: m.id });
   return { __status: 201, __body: publicMdt(m) };
+});
+route('PATCH', '/api/mdts/:id', ADMIN, ({ params, body }) => {
+  const m = db.mdts.find((x) => x.id === Number(params.id));
+  if (!m) throw httpError(404, 'MDT not found');
+  if ('mdt_code' in body) {
+    const mdt_code = String(body.mdt_code || '').trim().toUpperCase();
+    if (!mdt_code) throw httpError(400, 'mdt_code is required');
+    if (db.mdts.some((x) => x.id !== m.id && x.mdt_code === mdt_code)) throw httpError(409, 'MDT code already exists');
+    m.mdt_code = mdt_code;
+  }
+  if ('serial' in body) m.serial = String(body.serial || '').trim() || m.mdt_code;
+  if ('callsign' in body) {
+    const cs = body.callsign ? findCallsign(body.callsign) : null;
+    m.callsign_id = cs ? cs.id : null;
+  }
+  broadcast('mdt.status_changed', publicMdt(m));
+  logEvent('mdt.updated', `MDT ${m.mdt_code} UPDATED`, { mdt_id: m.id });
+  return publicMdt(m);
 });
 route('DELETE', '/api/mdts/:id', ADMIN, ({ params }) => {
   const m = db.mdts.find((x) => x.id === Number(params.id));

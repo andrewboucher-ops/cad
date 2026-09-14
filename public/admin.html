@@ -296,7 +296,7 @@ function paintRadios() {
   el('#rTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
       <thead><tr><th style="width:130px">ISSI</th><th>Alias</th><th style="width:110px">Type</th><th style="width:120px">Callsign</th><th style="width:130px">Talkgroup</th><th style="width:100px">Status</th><th style="width:70px"></th></tr></thead>
-      <tbody>${rows.map((r) => `<tr>
+      <tbody>${rows.map((r) => `<tr class="clickable" data-radio="${r.id}">
         <td class="mono">${esc(r.issi)}</td>
         <td>${esc(r.alias || '—')}</td>
         <td class="dim">${esc(r.radio_type)}</td>
@@ -306,53 +306,69 @@ function paintRadios() {
         <td><button class="btn danger" data-delradio="${r.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
       </tr>`).join('')}</tbody>
     </table>` : '<p class="empty-note">No radios yet.</p>';
-  els('#rTableWrap [data-delradio]').forEach((b) => (b.onclick = () => deleteRadio(Number(b.dataset.delradio))));
+  els('#rTableWrap [data-radio]').forEach((row) => row.addEventListener('click', (e) => {
+    if (e.target.closest('[data-delradio]')) return;
+    radioModal(allRadios.find((r) => r.id === Number(row.dataset.radio)));
+  }));
+  els('#rTableWrap [data-delradio]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteRadio(Number(b.dataset.delradio)); }));
 }
 el('#rSearch').addEventListener('input', paintRadios);
 
 async function deleteRadio(id) {
   const r = allRadios.find((x) => x.id === id);
   if (!r || !confirm(`Delete radio ${r.alias || r.issi} (ISSI ${r.issi})? This cannot be undone.`)) return;
-  try { await api('DELETE', `/api/radios/${id}`); await load(); showTab('radios'); }
+  try { await api('DELETE', `/api/radios/${id}`); closeModal(); await load(); showTab('radios'); }
   catch (e) { alert(e.message); }
 }
 
-function radioForm() {
+function radioForm(r) {
+  const isNew = !r;
   return `
     <form class="stack" id="rForm">
-      <label>ISSI (6-15 digits)</label>
-      <input id="nrIssi" autocomplete="off">
+      ${isNew ? '' : `<label>ISSI</label><input value="${esc(r.issi)}" disabled>`}
       <label>Alias</label>
-      <input id="nrAlias" autocomplete="off">
+      <input id="nrAlias" autocomplete="off" value="${isNew ? '' : esc(r.alias || '')}">
       <label>Radio type</label>
-      <select id="nrType"><option value="HANDHELD">Handheld</option><option value="VEHICLE">Vehicle</option><option value="FIXED">Fixed</option></select>
+      <select id="nrType">
+        <option value="HANDHELD" ${!isNew && r.radio_type === 'HANDHELD' ? 'selected' : ''}>Handheld</option>
+        <option value="VEHICLE" ${!isNew && r.radio_type === 'VEHICLE' ? 'selected' : ''}>Vehicle</option>
+        <option value="FIXED" ${!isNew && r.radio_type === 'FIXED' ? 'selected' : ''}>Fixed</option>
+      </select>
       <label>Callsign (optional)</label>
-      <select id="nrCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('')}</select>
+      <select id="nrCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${esc(c.name)}" ${!isNew && r.callsign === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <label>Talkgroup (optional)</label>
-      <select id="nrTalkgroup"><option value="">— none —</option>${allTalkgroups.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`).join('')}</select>
+      <select id="nrTalkgroup"><option value="">— none —</option>${allTalkgroups.map((t) => `<option value="${esc(t.name)}" ${!isNew && r.talkgroup === t.name ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
       <p class="dim" id="rError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
-el('#btnNewRadio').onclick = () => {
-  modal('New radio', radioForm(), () => {
+function radioModal(r) {
+  modal(r ? `Edit — ${r.issi}` : 'New radio', radioForm(r), () => {
     const foot = document.querySelector('#modalHost .foot');
-    foot.innerHTML = `<span class="btn-row" style="margin:0;justify-content:flex-end;width:100%">
-      <button class="btn" id="rCancel">Cancel</button>
-      <button class="btn primary" id="rSave">Create radio</button>
-    </span>`;
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${r ? '<button class="btn danger" id="rDelete">Delete radio</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="rCancel">Cancel</button>
+          <button class="btn primary" id="rSave">${r ? 'Save changes' : 'Create radio'}</button>
+        </span>
+      </div>`;
     el('#rCancel').onclick = closeModal;
+    if (el('#rDelete')) el('#rDelete').onclick = () => deleteRadio(r.id);
     el('#rSave').onclick = async () => {
+      const body = {
+        alias: el('#nrAlias').value.trim() || undefined,
+        radio_type: el('#nrType').value, callsign: el('#nrCallsign').value || null,
+        talkgroup: el('#nrTalkgroup').value || null,
+      };
       try {
-        await api('POST', '/api/radios', {
-          issi: el('#nrIssi').value.trim(), alias: el('#nrAlias').value.trim() || undefined,
-          radio_type: el('#nrType').value, callsign: el('#nrCallsign').value || undefined,
-          talkgroup: el('#nrTalkgroup').value || undefined,
-        });
+        if (r) await api('PATCH', `/api/radios/${r.id}`, body);
+        else await api('POST', '/api/radios', body);
         closeModal(); await load(); showTab('radios');
       } catch (e) { el('#rError').textContent = e.message; }
     };
   });
-};
+}
+el('#btnNewRadio').onclick = () => radioModal(null);
 
 /* ---------- MDTs ---------- */
 function paintMdts() {
@@ -362,7 +378,7 @@ function paintMdts() {
   el('#mTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
       <thead><tr><th style="width:130px">MDT code</th><th>Serial</th><th style="width:120px">Callsign</th><th style="width:100px">Status</th><th style="width:70px"></th></tr></thead>
-      <tbody>${rows.map((m) => `<tr>
+      <tbody>${rows.map((m) => `<tr class="clickable" data-mdt="${m.id}">
         <td class="mono">${esc(m.mdt_code)}</td>
         <td class="dim">${esc(m.serial || '—')}</td>
         <td class="dim">${esc(m.callsign || '—')}</td>
@@ -370,48 +386,61 @@ function paintMdts() {
         <td><button class="btn danger" data-delmdt="${m.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
       </tr>`).join('')}</tbody>
     </table>` : '<p class="empty-note">No MDTs yet.</p>';
-  els('#mTableWrap [data-delmdt]').forEach((b) => (b.onclick = () => deleteMdt(Number(b.dataset.delmdt))));
+  els('#mTableWrap [data-mdt]').forEach((row) => row.addEventListener('click', (e) => {
+    if (e.target.closest('[data-delmdt]')) return;
+    mdtModal(allMdts.find((m) => m.id === Number(row.dataset.mdt)));
+  }));
+  els('#mTableWrap [data-delmdt]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteMdt(Number(b.dataset.delmdt)); }));
 }
 el('#mSearch').addEventListener('input', paintMdts);
 
 async function deleteMdt(id) {
   const m = allMdts.find((x) => x.id === id);
   if (!m || !confirm(`Delete MDT ${m.mdt_code}? This cannot be undone.`)) return;
-  try { await api('DELETE', `/api/mdts/${id}`); await load(); showTab('mdts'); }
+  try { await api('DELETE', `/api/mdts/${id}`); closeModal(); await load(); showTab('mdts'); }
   catch (e) { alert(e.message); }
 }
 
-function mdtForm() {
+function mdtForm(m) {
+  const isNew = !m;
   return `
     <form class="stack" id="mForm">
       <label>MDT code</label>
-      <input id="nmCode" autocomplete="off">
+      <input id="nmCode" autocomplete="off" value="${isNew ? '' : esc(m.mdt_code)}">
       <label>Serial (optional)</label>
-      <input id="nmSerial" autocomplete="off">
+      <input id="nmSerial" autocomplete="off" value="${isNew ? '' : esc(m.serial || '')}">
       <label>Callsign (optional)</label>
-      <select id="nmCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('')}</select>
+      <select id="nmCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${esc(c.name)}" ${!isNew && m.callsign === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <p class="dim" id="mError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
-el('#btnNewMdt').onclick = () => {
-  modal('New MDT', mdtForm(), () => {
+function mdtModal(m) {
+  modal(m ? `Edit — ${m.mdt_code}` : 'New MDT', mdtForm(m), () => {
     const foot = document.querySelector('#modalHost .foot');
-    foot.innerHTML = `<span class="btn-row" style="margin:0;justify-content:flex-end;width:100%">
-      <button class="btn" id="mCancel">Cancel</button>
-      <button class="btn primary" id="mSave">Create MDT</button>
-    </span>`;
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${m ? '<button class="btn danger" id="mDelete">Delete MDT</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="mCancel">Cancel</button>
+          <button class="btn primary" id="mSave">${m ? 'Save changes' : 'Create MDT'}</button>
+        </span>
+      </div>`;
     el('#mCancel').onclick = closeModal;
+    if (el('#mDelete')) el('#mDelete').onclick = () => deleteMdt(m.id);
     el('#mSave').onclick = async () => {
+      const body = {
+        mdt_code: el('#nmCode').value.trim(), serial: el('#nmSerial').value.trim() || undefined,
+        callsign: el('#nmCallsign').value || null,
+      };
       try {
-        await api('POST', '/api/mdts', {
-          mdt_code: el('#nmCode').value.trim(), serial: el('#nmSerial').value.trim() || undefined,
-          callsign: el('#nmCallsign').value || undefined,
-        });
+        if (m) await api('PATCH', `/api/mdts/${m.id}`, body);
+        else await api('POST', '/api/mdts', body);
         closeModal(); await load(); showTab('mdts');
       } catch (e) { el('#mError').textContent = e.message; }
     };
   });
-};
+}
+el('#btnNewMdt').onclick = () => mdtModal(null);
 
 CCCS.bus((up) => {
   const n = el('#net');

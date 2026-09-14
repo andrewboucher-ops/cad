@@ -11,19 +11,112 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="/console.css">
+<style>
+  :root { --violet: #7c6ce8; --violet-dim: #5b4bc4; }
+  body { background: #0b0a14; }
+  .login-page { display: flex; min-height: 100vh; }
+  .login-hero, .login-form-side { min-height: 100vh; box-sizing: border-box; }
+
+  /* ---- left: the pitch ---- */
+  .login-hero {
+    flex: 1.35; position: relative; overflow: hidden; padding: 48px 56px;
+    display: flex; flex-direction: column;
+    background: radial-gradient(90% 70% at 15% 10%, #221c3e 0%, #120f22 55%, #0b0a14 100%);
+  }
+  .hero-grid {
+    position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      linear-gradient(rgba(124,108,232,.14) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(124,108,232,.14) 1px, transparent 1px);
+    background-size: 44px 44px;
+    -webkit-mask-image: radial-gradient(80% 65% at 20% 15%, #000 0%, transparent 75%);
+    mask-image: radial-gradient(80% 65% at 20% 15%, #000 0%, transparent 75%);
+  }
+  .hero-logo { position: relative; width: 220px; height: auto; margin-bottom: auto; }
+  .hero-copy { position: relative; margin-top: 40px; }
+  .hero-copy h1 { margin: 0; font-size: 44px; line-height: 1.12; font-weight: 800; letter-spacing: -.01em; color: #fff; max-width: 560px; }
+  .hero-copy p { margin: 18px 0 0; font-size: 16px; line-height: 1.5; color: #b8b3d6; max-width: 480px; }
+
+  .hero-legend { position: relative; display: flex; gap: 26px; margin-top: 56px; flex-wrap: wrap; }
+  .legend-item { min-width: 78px; }
+  .legend-item .dash { display: block; width: 34px; height: 3px; border-radius: 2px; margin-bottom: 10px; }
+  .legend-item strong { display: block; font-size: 12.5px; font-weight: 700; letter-spacing: .04em; }
+  .legend-item span.lbl { display: block; font-size: 11.5px; color: #9089b0; margin-top: 2px; }
+  .dash.red { background: var(--pri-red, #f87171); } .legend-item:nth-child(1) strong { color: #f87171; }
+  .dash.amber { background: var(--pri-amber, #fbbf24); } .legend-item:nth-child(2) strong { color: #fbbf24; }
+  .dash.green { background: var(--pri-green, #4ade80); } .legend-item:nth-child(3) strong { color: #4ade80; }
+  .dash.routine { background: #8ea0c9; } .legend-item:nth-child(4) strong { color: #8ea0c9; }
+  .dash.emg { background: #fb5f5f; } .legend-item:nth-child(5) strong { color: #fb5f5f; }
+  .dash.link { background: var(--violet); } .legend-item:nth-child(6) strong { color: var(--violet); }
+  .hero-foot { position: relative; margin: 22px 0 0; font-size: 12px; color: #726b96; max-width: 480px; line-height: 1.5; }
+
+  /* ---- right: the form ---- */
+  .login-form-side { flex: 1; display: flex; align-items: center; justify-content: center; padding: 40px; background: #100e1c; border-left: 1px solid rgba(124,108,232,.15); }
+  .login-form { width: 100%; max-width: 340px; }
+  .login-form .eyebrow { display: block; font-size: 11px; font-weight: 700; letter-spacing: .12em; color: var(--violet); text-transform: uppercase; }
+  .login-form h2 { margin: 6px 0 26px; font-size: 26px; font-weight: 800; color: #fff; }
+  .login-form label { display: block; font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: #8a83a8; margin: 16px 0 6px; }
+  .login-form label:first-of-type { margin-top: 0; }
+  .login-form input, .login-form select {
+    width: 100%; box-sizing: border-box; background: #17142a; border: 1px solid #2c2649; border-radius: 8px;
+    color: #fff; padding: 11px 12px; font-size: 14px; font-family: var(--font);
+  }
+  .login-form input:focus, .login-form select:focus { outline: none; border-color: var(--violet); box-shadow: 0 0 0 3px rgba(124,108,232,.25); }
+  .login-btn {
+    width: 100%; margin-top: 20px; padding: 12px; border: none; border-radius: 8px; cursor: pointer;
+    background: linear-gradient(180deg, var(--violet), var(--violet-dim)); color: #fff; font-weight: 700; font-size: 14.5px;
+    font-family: var(--font); box-shadow: 0 8px 20px -8px rgba(124,108,232,.6);
+  }
+  .login-btn:disabled { opacity: .6; cursor: default; }
+  .or-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0; color: #6b6489; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+  .or-divider::before, .or-divider::after { content: ""; flex: 1; height: 1px; background: #2c2649; }
+  .ms-btn {
+    display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; box-sizing: border-box;
+    padding: 11px; border: 1px solid #2c2649; border-radius: 8px; background: #17142a; color: #fff;
+    font-weight: 600; font-size: 13.5px; font-family: var(--font); cursor: pointer; text-decoration: none;
+  }
+  .ms-btn:hover { border-color: #443c72; }
+  .login-notice {
+    margin-top: 22px; padding: 12px 14px; border: 1px solid #2c2649; border-radius: 8px;
+    background: rgba(124,108,232,.08); color: #a29cc2; font-size: 12px; line-height: 1.5;
+  }
+  .login-err { color: #f87171; font-size: 12.5px; min-height: 16px; margin: 10px 0 0; }
+
+  @media (max-width: 860px) {
+    .login-page { flex-direction: column; }
+    .login-hero { padding: 36px 28px; }
+    .hero-copy h1 { font-size: 32px; }
+    .login-form-side { border-left: none; border-top: 1px solid rgba(124,108,232,.15); }
+  }
+</style>
 </head>
 <body>
-<div class="login-wrap">
-  <div class="login">
-    <div class="mark">
-      <img class="brand-logo brand-logo-lg" src="/assets/echelon-mark.png" alt="">
-      <strong>CCCS</strong>
+<div class="login-page">
+  <div class="login-hero">
+    <div class="hero-grid"></div>
+    <img class="hero-logo" src="/assets/echelon-wordmark.png" alt="Echelon">
+    <div class="hero-copy">
+      <h1>The critical communications console.</h1>
+      <p>Every transmission, every dispatch, every action — on the record.</p>
     </div>
-    <p class="dim">Critical communications, dispatch and control room.</p>
+    <div class="hero-legend">
+      <div class="legend-item"><span class="dash red"></span><strong>RED</strong><span class="lbl">Critical</span></div>
+      <div class="legend-item"><span class="dash amber"></span><strong>AMBER</strong><span class="lbl">High</span></div>
+      <div class="legend-item"><span class="dash green"></span><strong>GREEN</strong><span class="lbl">Low</span></div>
+      <div class="legend-item"><span class="dash routine"></span><strong>ROUTINE</strong><span class="lbl">Non-urgent</span></div>
+      <div class="legend-item"><span class="dash emg"></span><strong>EMERGENCY</strong><span class="lbl">Officer down</span></div>
+      <div class="legend-item"><span class="dash link"></span><strong>LINK UP</strong><span class="lbl">Realtime bus</span></div>
+    </div>
+    <p class="hero-foot">The priority scale, not a live reading. Every job in this console carries its priority as colour and label, end to end.</p>
+  </div>
 
-    <div class="panel"><div class="body">
+  <div class="login-form-side">
+    <div class="login-form">
+      <span class="eyebrow">Operator sign-in</span>
+      <h2>Sign in</h2>
+
       <label for="u">Username</label>
       <input id="u" autocomplete="username" autofocus>
       <label for="p">Password</label>
@@ -34,23 +127,20 @@
         <option value="/radio.html">Radio terminal</option>
         <option value="/mdt.html">Mobile data terminal</option>
       </select>
-      <div style="height:12px"></div>
-      <button class="btn primary" id="go" style="width:100%">Sign in</button>
-      <p class="err" id="err"></p>
+
+      <button class="login-btn" id="go">Sign in</button>
+      <p class="login-err" id="err"></p>
+
       <div id="ms-sso" hidden>
-        <div style="text-align:center;margin:14px 0;opacity:.6">or</div>
-        <a class="btn" id="ms-go" style="width:100%;display:block;text-align:center;box-sizing:border-box">Sign in with Microsoft</a>
+        <div class="or-divider">OR</div>
+        <a class="ms-btn" id="ms-go">
+          <svg width="16" height="16" viewBox="0 0 16 16"><rect width="7" height="7" x="0" y="0" fill="#f25022"/><rect width="7" height="7" x="9" y="0" fill="#7fba00"/><rect width="7" height="7" x="0" y="9" fill="#00a4ef"/><rect width="7" height="7" x="9" y="9" fill="#ffb900"/></svg>
+          Sign in with Microsoft
+        </a>
       </div>
-      <div class="creds">
-        dispatcher / dispatch123 — control room<br>
-        supervisor / super123 — control room<br>
-        admin / admin123 — control room + admin<br>
-        radio101 / radio123 — radio A101 (ISSI 234100001)<br>
-        radio102 / radio123 — radio A102 (ISSI 234100002)<br>
-        radio103 / radio123 — radio A103 (ISSI 234100003)<br>
-        mdt001 / mdt123 — MDT-001
-      </div>
-    </div></div>
+
+      <div class="login-notice">This console signs in against the live CCCS server. Use the account your supervisor issued you.</div>
+    </div>
   </div>
 </div>
 <script src="/app.js"></script>
@@ -91,8 +181,7 @@ async function submit() {
     const s = await CCCS.login(el('#u').value.trim(), el('#p').value);
     location.href = landingFor(s.user.role, el('#dest').value);
   } catch (e) {
-    el('#err').textContent = e.message === 'invalid credentials'
-      ? 'That username and password do not match. Check the demo list below.' : e.message;
+    el('#err').textContent = e.message === 'invalid credentials' ? 'That username and password do not match.' : e.message;
     el('#go').disabled = false;
   }
 }
