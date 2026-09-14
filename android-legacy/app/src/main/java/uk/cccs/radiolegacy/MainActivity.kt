@@ -16,8 +16,10 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.Spinner
 import android.widget.TextView
 import org.json.JSONObject
 
@@ -51,10 +53,11 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
 
     private lateinit var loginScreen: View
     private lateinit var mainScreen: View
-    private lateinit var loginUsername: EditText
-    private lateinit var loginPassword: EditText
+    private lateinit var loginIssi: Spinner
+    private lateinit var loginPin: EditText
     private lateinit var loginButton: Button
     private lateinit var loginError: TextView
+    private var directory: List<Api.DirectoryEntry> = emptyList()
     private lateinit var statusLed: View
     private lateinit var linkStatus: TextView
     private lateinit var callsignLabel: TextView
@@ -82,7 +85,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         radioId = if (prefs.contains(KEY_RADIO_ID)) prefs.getInt(KEY_RADIO_ID, -1) else null
         callsign = prefs.getString(KEY_CALLSIGN, null)
 
-        if (token != null) showMain() else showLogin()
+        if (token != null) showMain() else { showLogin(); loadDirectory() }
     }
 
     override fun onDestroy() {
@@ -96,8 +99,8 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     private fun bindViews() {
         loginScreen = findViewById(R.id.loginScreen)
         mainScreen = findViewById(R.id.mainScreen)
-        loginUsername = findViewById(R.id.loginUsername)
-        loginPassword = findViewById(R.id.loginPassword)
+        loginIssi = findViewById(R.id.loginIssi)
+        loginPin = findViewById(R.id.loginPin)
         loginButton = findViewById(R.id.loginButton)
         loginError = findViewById(R.id.loginError)
         statusLed = findViewById(R.id.statusLed)
@@ -126,21 +129,44 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
 
     // -- Login ------------------------------------------------------------
 
+    /** No username/password to type — just the list of radios control has
+     * already set up (see GET /api/radios/directory), so the only typing
+     * left on this login screen is the PIN. */
+    private fun loadDirectory() {
+        Thread {
+            try {
+                val entries = Api.directory()
+                main.post {
+                    directory = entries
+                    val labels = if (entries.isEmpty()) listOf("No radios configured yet")
+                        else entries.map { e -> (if (e.callsign != null) "${e.callsign} — " else "") + (e.alias ?: e.issi) + " (${e.issi})" }
+                    loginIssi.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+                }
+            } catch (e: Exception) {
+                main.post { loginError.text = e.message ?: "Could not load radio list" }
+            }
+        }.start()
+    }
+
     private fun doLogin() {
-        val username = loginUsername.text.toString().trim()
-        val password = loginPassword.text.toString()
-        if (username.isEmpty() || password.isEmpty()) {
-            loginError.text = "Enter a username and password"
+        val entry = directory.getOrNull(loginIssi.selectedItemPosition)
+        val pin = loginPin.text.toString().trim()
+        if (entry == null) {
+            loginError.text = "No radio selected"
+            return
+        }
+        if (pin.length != 6) {
+            loginError.text = "Enter the 6-digit PIN"
             return
         }
         loginButton.isEnabled = false
         loginError.text = ""
         Thread {
             try {
-                val result = Api.login(username, password)
+                val result = Api.loginRadio(entry.issi, pin)
                 if (result.role != "RADIO_USER" || result.radioId == null) {
                     main.post {
-                        loginError.text = "This account isn't set up as a radio"
+                        loginError.text = "This ISSI isn't set up as a radio"
                         loginButton.isEnabled = true
                     }
                     return@Thread
@@ -148,17 +174,19 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
                 prefs.edit()
                     .putString(KEY_TOKEN, result.token)
                     .putInt(KEY_RADIO_ID, result.radioId)
+                    .putString(KEY_ISSI, result.issi)
                     .putString(KEY_DISPLAY_NAME, result.displayName)
                     .apply()
                 token = result.token
                 radioId = result.radioId
+                issi = result.issi
                 main.post {
                     loginButton.isEnabled = true
                     showMain()
                 }
             } catch (e: Exception) {
                 main.post {
-                    loginError.text = e.message ?: "Login failed"
+                    loginError.text = e.message ?: "Sign-in failed"
                     loginButton.isEnabled = true
                 }
             }

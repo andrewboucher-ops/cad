@@ -38,6 +38,12 @@ const CCCS = (() => {
     return out;
   }
 
+  async function loginRadio(issi, pin) {
+    const out = await api('POST', '/api/auth/radio-login', { issi, pin });
+    setSession(out);
+    return out;
+  }
+
   /* ---- Offline outbox ---------------------------------------------------
      A vehicle loses signal mid-job. Writes are queued on the device and
      replayed in order when the link returns, each carrying an idempotency key
@@ -768,5 +774,5 @@ const CCCS = (() => {
     },
   };
 
-  return { api, send, outbox, keybinds, login, getSession, setSession, clearSession, bus, audio, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth };
+  return { api, send, outbox, keybinds, login, loginRadio, getSession, setSession, clearSession, bus, audio, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth };
 })();

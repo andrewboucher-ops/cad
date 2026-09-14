@@ -508,6 +508,7 @@ function publicRadio(r) {
     welfare_interval_s: r.welfare_interval_s || null, welfare_due_at: r.welfare_due_at || null,
     covert: Boolean(r.covert), status_code: r.status_code || null,
     personnel: db.personnel.filter((p) => p.callsign_id === r.callsign_id).map((p) => p.name),
+    has_pin: Boolean(r.pin_hash),
   };
 }
 function publicMdt(m) {
@@ -846,6 +847,49 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   return { token, user: publicUser(user) };
 });
 
+/* ---- Radio sign-in by ISSI + PIN --------------------------------------
+ * Radios don't have individually managed usernames/passwords — a radio IS
+ * its ISSI (auto-assigned at creation, see nextIssi()), and control
+ * assigns it a callsign, same as any other radio admin. The backing
+ * db.users row this still needs internally (every permission check in
+ * this file keys off user.radio_id) is provisioned transparently here on
+ * first sign-in, never surfaced as a thing admin has to manage. */
+function findOrCreateRadioUser(radio) {
+  let u = db.users.find((x) => x.radio_id === radio.id && x.role === 'RADIO_USER');
+  if (!u) {
+    u = {
+      id: nextId('users'), username: `radio-${radio.issi}`,
+      password_hash: hashPassword(crypto.randomBytes(24).toString('hex')), // unusable via /api/auth/login — PIN is the only way in
+      role: 'RADIO_USER', display_name: radio.alias || radio.issi,
+      radio_id: radio.id, mdt_id: null, created_at: new Date().toISOString(),
+    };
+    db.users.push(u);
+  }
+  return u;
+}
+
+// Unauthenticated, deliberately minimal — just enough for the sign-in
+// screen's ISSI picker. No location, status, battery or emergency state.
+route('GET', '/api/radios/directory', null, () =>
+  db.radios.map((r) => {
+    const cs = db.callsigns.find((c) => c.id === r.callsign_id);
+    return { issi: r.issi, alias: r.alias, callsign: cs ? cs.name : null };
+  }));
+
+route('POST', '/api/auth/radio-login', null, ({ body }) => {
+  const radio = findRadio(body.issi);
+  if (!radio) throw httpError(404, 'unknown radio');
+  if (!radio.pin_hash) throw httpError(409, 'this radio has no PIN set — ask control to set one in Admin');
+  if (!verifyPassword(String(body.pin || ''), radio.pin_hash)) {
+    logEvent('auth.failed', `Failed PIN sign-in for radio ${radio.issi}`, { radio_id: radio.id });
+    throw httpError(401, 'incorrect PIN');
+  }
+  const user = findOrCreateRadioUser(radio);
+  const token = sign({ sub: user.id, role: user.role, exp: Date.now() + TOKEN_TTL_MS });
+  logEvent('auth.login', `Radio ${radio.issi} signed in`, { user_id: user.id, radio_id: radio.id });
+  return { token, user: publicUser(user) };
+});
+
 /* ---- Microsoft Entra ID (Azure AD) single sign-on --------------------
  * Alongside local username/password, never replacing it. A Microsoft sign-in
  * only succeeds if its email/UPN matches an existing CCCS account's `email`
@@ -1064,7 +1108,9 @@ route('POST', '/api/radios', ADMIN, ({ body }) => {
   if (!['HANDHELD', 'VEHICLE', 'FIXED', 'MDT'].includes(type)) throw httpError(400, 'invalid radio_type');
   const cs = body.callsign ? findCallsign(body.callsign) : null;
   const tg = body.talkgroup ? findTalkgroup(body.talkgroup) : null;
-  const r = { id: nextId('radios'), issi, alias: body.alias || issi, radio_type: type, status: 'OFFLINE', callsign_id: cs ? cs.id : null, vehicle_id: null, talkgroup_id: tg ? tg.id : null, job_id: null, assigned_user_id: null, battery: 100, signal: 'UNKNOWN', lat: 51.5074, lon: -0.1278, speed: 0, heading: 0, last_seen: null, emergency: false, connected: false, sim_target: null, pbx_extension: body.pbx_extension || null };
+  const pin = String(body.pin || '').trim();
+  if (pin && !/^\d{6}$/.test(pin)) throw httpError(400, 'PIN must be 6 digits');
+  const r = { id: nextId('radios'), issi, alias: body.alias || issi, radio_type: type, status: 'OFFLINE', callsign_id: cs ? cs.id : null, vehicle_id: null, talkgroup_id: tg ? tg.id : null, job_id: null, assigned_user_id: null, battery: 100, signal: 'UNKNOWN', lat: 51.5074, lon: -0.1278, speed: 0, heading: 0, last_seen: null, emergency: false, connected: false, sim_target: null, pbx_extension: body.pbx_extension || null, pin_hash: pin ? hashPassword(pin) : null };
   db.radios.push(r);
   if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: r.id });
   broadcast('radio.created', publicRadio(r));
@@ -1091,6 +1137,15 @@ route('PATCH', '/api/radios/:id', ADMIN, ({ params, body }) => {
     const tg = body.talkgroup ? findTalkgroup(body.talkgroup) : null;
     r.talkgroup_id = tg ? tg.id : null;
     if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: r.id });
+  }
+  if ('pin' in body) {
+    const pin = String(body.pin || '').trim();
+    if (pin) {
+      if (!/^\d{6}$/.test(pin)) throw httpError(400, 'PIN must be 6 digits');
+      r.pin_hash = hashPassword(pin);
+    } else {
+      r.pin_hash = null; // explicit clear — sign-in with this ISSI is refused until a new PIN is set
+    }
   }
   broadcast('radio.status_changed', publicRadio(r));
   logEvent('radio.updated', `RADIO ${r.issi} UPDATED`, { radio_id: r.id });

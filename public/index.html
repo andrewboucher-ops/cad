@@ -83,6 +83,13 @@
     background: rgba(124,108,232,.08); color: #a29cc2; font-size: 12px; line-height: 1.5;
   }
   .login-err { color: #f87171; font-size: 12.5px; min-height: 16px; margin: 10px 0 0; }
+  .mode-toggle { display: flex; gap: 4px; padding: 3px; background: #17142a; border: 1px solid #2c2649; border-radius: 9px; margin-bottom: 22px; }
+  .mode-toggle button {
+    flex: 1; padding: 8px; border: none; border-radius: 6px; background: transparent; color: #8a83a8;
+    font-family: var(--font); font-size: 12.5px; font-weight: 700; letter-spacing: .03em; cursor: pointer;
+  }
+  .mode-toggle button.active { background: linear-gradient(180deg, var(--violet), var(--violet-dim)); color: #fff; }
+  .pin-input { letter-spacing: .3em; font-size: 18px; font-weight: 700; text-align: center; }
 
   @media (max-width: 860px) {
     .login-page { flex-direction: column; }
@@ -114,32 +121,54 @@
 
   <div class="login-form-side">
     <div class="login-form">
-      <span class="eyebrow">Operator sign-in</span>
-      <h2>Sign in</h2>
-
-      <label for="u">Username</label>
-      <input id="u" autocomplete="username" autofocus>
-      <label for="p">Password</label>
-      <input id="p" type="password" autocomplete="current-password">
-      <label for="dest">Open</label>
-      <select id="dest">
-        <option value="/control.html">Control room</option>
-        <option value="/radio.html">Radio terminal</option>
-        <option value="/mdt.html">Mobile data terminal</option>
-      </select>
-
-      <button class="login-btn" id="go">Sign in</button>
-      <p class="login-err" id="err"></p>
-
-      <div id="ms-sso" hidden>
-        <div class="or-divider">OR</div>
-        <a class="ms-btn" id="ms-go">
-          <svg width="16" height="16" viewBox="0 0 16 16"><rect width="7" height="7" x="0" y="0" fill="#f25022"/><rect width="7" height="7" x="9" y="0" fill="#7fba00"/><rect width="7" height="7" x="0" y="9" fill="#00a4ef"/><rect width="7" height="7" x="9" y="9" fill="#ffb900"/></svg>
-          Sign in with Microsoft
-        </a>
+      <div class="mode-toggle">
+        <button type="button" id="modeOperator" class="active">Operator</button>
+        <button type="button" id="modeRadio">Radio</button>
       </div>
 
-      <div class="login-notice">This console signs in against the live CCCS server. Use the account your supervisor issued you.</div>
+      <div id="operatorFields">
+        <span class="eyebrow">Operator sign-in</span>
+        <h2>Sign in</h2>
+
+        <label for="u">Username</label>
+        <input id="u" autocomplete="username" autofocus>
+        <label for="p">Password</label>
+        <input id="p" type="password" autocomplete="current-password">
+        <label for="dest">Open</label>
+        <select id="dest">
+          <option value="/control.html">Control room</option>
+          <option value="/radio.html">Radio terminal</option>
+          <option value="/mdt.html">Mobile data terminal</option>
+        </select>
+
+        <button class="login-btn" id="go">Sign in</button>
+
+        <div id="ms-sso" hidden>
+          <div class="or-divider">OR</div>
+          <a class="ms-btn" id="ms-go">
+            <svg width="16" height="16" viewBox="0 0 16 16"><rect width="7" height="7" x="0" y="0" fill="#f25022"/><rect width="7" height="7" x="9" y="0" fill="#7fba00"/><rect width="7" height="7" x="0" y="9" fill="#00a4ef"/><rect width="7" height="7" x="9" y="9" fill="#ffb900"/></svg>
+            Sign in with Microsoft
+          </a>
+        </div>
+
+        <div class="login-notice">This console signs in against the live CCCS server. Use the account your supervisor issued you.</div>
+      </div>
+
+      <div id="radioFields" hidden>
+        <span class="eyebrow">Radio sign-in</span>
+        <h2>Radio terminal</h2>
+
+        <label for="rIssi">This radio</label>
+        <select id="rIssi"></select>
+        <label for="rPin">PIN</label>
+        <input id="rPin" class="pin-input" inputmode="numeric" pattern="[0-9]*" maxlength="6" type="password" autocomplete="off">
+
+        <button class="login-btn" id="rGo">Sign in</button>
+
+        <div class="login-notice">Pick this radio from the list and enter the 6-digit PIN control gave you. No username or password needed.</div>
+      </div>
+
+      <p class="login-err" id="err"></p>
     </div>
   </div>
 </div>
@@ -186,7 +215,42 @@ async function submit() {
   }
 }
 el('#go').addEventListener('click', submit);
-document.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+
+/* ---- Radio mode: pick this radio's ISSI from a list, type its PIN —
+   no username/password. See /api/auth/radio-login in server.js. */
+function setMode(mode) {
+  const radio = mode === 'radio';
+  el('#modeOperator').classList.toggle('active', !radio);
+  el('#modeRadio').classList.toggle('active', radio);
+  el('#operatorFields').hidden = radio;
+  el('#radioFields').hidden = !radio;
+  el('#err').textContent = '';
+}
+el('#modeOperator').addEventListener('click', () => setMode('operator'));
+el('#modeRadio').addEventListener('click', () => setMode('radio'));
+
+CCCS.api('GET', '/api/radios/directory').then((radios) => {
+  el('#rIssi').innerHTML = radios
+    .map((r) => `<option value="${r.issi}">${r.callsign ? `${r.callsign} — ` : ''}${r.alias || r.issi} (${r.issi})</option>`)
+    .join('') || '<option value="">No radios configured yet</option>';
+}).catch(() => { el('#rIssi').innerHTML = '<option value="">Could not load radio list</option>'; });
+
+async function submitRadio() {
+  el('#err').textContent = '';
+  el('#rGo').disabled = true;
+  try {
+    await CCCS.loginRadio(el('#rIssi').value, el('#rPin').value.trim());
+    location.href = '/radio.html';
+  } catch (e) {
+    el('#err').textContent = e.message === 'incorrect PIN' ? 'That PIN is not right.' : e.message;
+    el('#rGo').disabled = false;
+  }
+}
+el('#rGo').addEventListener('click', submitRadio);
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  if (el('#radioFields').hidden) submit(); else submitRadio();
+});
 </script>
 </body>
 </html>

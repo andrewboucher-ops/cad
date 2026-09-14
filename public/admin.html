@@ -308,7 +308,7 @@ function paintRadios() {
     r.issi.includes(q) || (r.alias || '').toLowerCase().includes(q) || (r.callsign || '').toLowerCase().includes(q));
   el('#rTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
-      <thead><tr><th style="width:130px">ISSI</th><th>Alias</th><th style="width:110px">Type</th><th style="width:120px">Callsign</th><th style="width:130px">Talkgroup</th><th style="width:100px">Status</th><th style="width:70px"></th></tr></thead>
+      <thead><tr><th style="width:130px">ISSI</th><th>Alias</th><th style="width:110px">Type</th><th style="width:120px">Callsign</th><th style="width:130px">Talkgroup</th><th style="width:100px">Status</th><th style="width:70px">PIN</th><th style="width:70px"></th></tr></thead>
       <tbody>${rows.map((r) => `<tr class="clickable" data-radio="${r.id}">
         <td class="mono">${esc(r.issi)}</td>
         <td>${esc(r.alias || '—')}</td>
@@ -316,6 +316,7 @@ function paintRadios() {
         <td class="dim">${esc(r.callsign || '—')}</td>
         <td class="dim">${esc(r.talkgroup || '—')}</td>
         <td class="dim">${esc(r.status)}</td>
+        <td class="dim">${r.has_pin ? 'set' : '—'}</td>
         <td><button class="btn danger" data-delradio="${r.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
       </tr>`).join('')}</tbody>
     </table>` : '<p class="empty-note">No radios yet.</p>';
@@ -351,6 +352,8 @@ function radioForm(r) {
       <select id="nrCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${esc(c.name)}" ${!isNew && r.callsign === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <label>Talkgroup (optional)</label>
       <select id="nrTalkgroup"><option value="">— none —</option>${allTalkgroups.map((t) => `<option value="${esc(t.name)}" ${!isNew && r.talkgroup === t.name ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+      <label>Sign-in PIN ${!isNew && r.has_pin ? '(set — leave blank to keep)' : '(6 digits — this is how the radio signs in, no separate account needed)'}</label>
+      <input id="nrPin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off" placeholder="${!isNew && r.has_pin ? '••••••' : 'e.g. 480217'}">
       <p class="dim" id="rError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
@@ -368,11 +371,14 @@ function radioModal(r) {
     el('#rCancel').onclick = closeModal;
     if (el('#rDelete')) el('#rDelete').onclick = () => deleteRadio(r.id);
     el('#rSave').onclick = async () => {
+      const pin = el('#nrPin').value.trim();
+      if (pin && !/^\d{6}$/.test(pin)) { el('#rError').textContent = 'PIN must be 6 digits'; return; }
       const body = {
         alias: el('#nrAlias').value.trim() || undefined,
         radio_type: el('#nrType').value, callsign: el('#nrCallsign').value || null,
         talkgroup: el('#nrTalkgroup').value || null,
       };
+      if (pin) body.pin = pin;
       try {
         if (r) await api('PATCH', `/api/radios/${r.id}`, body);
         else await api('POST', '/api/radios', body);

@@ -16,11 +16,15 @@ object Api {
     const val BASE_URL = "https://$HOST"
 
     class LoginResult(val token: String, val role: String, val displayName: String, val radioId: Int?, val issi: String?)
+    class DirectoryEntry(val issi: String, val alias: String?, val callsign: String?)
 
-    /** Runs on the calling thread — callers must not call this from the UI
-     * thread; MainActivity always calls it from a background Thread. */
-    fun login(username: String, password: String): LoginResult {
-        val url = URL("$BASE_URL/api/auth/login")
+    /** No username/password on this device — a radio signs in with just its
+     * ISSI (picked from the directory below, not typed) and a short PIN
+     * control sets when it assigns the ISSI to a callsign. See
+     * /api/auth/radio-login in server.js. Runs on the calling thread —
+     * callers must not call this from the UI thread. */
+    fun loginRadio(issi: String, pin: String): LoginResult {
+        val url = URL("$BASE_URL/api/auth/radio-login")
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
@@ -29,8 +33,8 @@ object Api {
         conn.readTimeout = 10000
 
         val body = JSONObject()
-        body.put("username", username)
-        body.put("password", password)
+        body.put("issi", issi)
+        body.put("pin", pin)
         conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
 
         val status = conn.responseCode
@@ -38,7 +42,7 @@ object Api {
         val text = stream.bufferedReader().use { it.readText() }
 
         if (status !in 200..299) {
-            val err = try { JSONObject(text).optString("error", "login failed") } catch (_: Exception) { "login failed" }
+            val err = try { JSONObject(text).optString("error", "sign-in failed") } catch (_: Exception) { "sign-in failed" }
             throw Exception(err)
         }
 
@@ -47,10 +51,33 @@ object Api {
         return LoginResult(
             token = json.getString("token"),
             role = user.getString("role"),
-            displayName = user.optString("display_name", username),
+            displayName = user.optString("display_name", issi),
             radioId = if (user.isNull("radio_id")) null else user.getInt("radio_id"),
-            issi = null // resolved from the radio.attach response once the WS is open, not known at login time
+            issi = issi
         )
+    }
+
+    /** Unauthenticated, deliberately minimal — just enough to fill the
+     * sign-in screen's radio picker (see /api/radios/directory). */
+    fun directory(): List<DirectoryEntry> {
+        val url = URL("$BASE_URL/api/radios/directory")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 10000
+        conn.readTimeout = 10000
+        val status = conn.responseCode
+        val stream = if (status in 200..299) conn.inputStream else conn.errorStream
+        val text = stream.bufferedReader().use { it.readText() }
+        if (status !in 200..299) throw Exception("could not load radio list")
+        val arr = org.json.JSONArray(text)
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            DirectoryEntry(
+                issi = o.getString("issi"),
+                alias = if (o.isNull("alias")) null else o.optString("alias"),
+                callsign = if (o.isNull("callsign")) null else o.optString("callsign")
+            )
+        }
     }
 
     /** POST with a bearer token, used for the two REST calls this app makes

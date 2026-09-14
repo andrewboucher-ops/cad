@@ -24,24 +24,27 @@
             android:textSize="20sp"
             android:paddingBottom="24dp" />
 
-        <EditText
-            android:id="@+id/loginUsername"
+        <!-- No username/password on this device -- pick this radio's ISSI
+             from the list control already knows about, then its PIN. Both
+             set from the control-room Admin screen, not typed here beyond
+             the PIN itself. -->
+        <Spinner
+            android:id="@+id/loginIssi"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="Username"
-            android:textColor="#ffffff"
-            android:textColorHint="#5b6472"
-            android:inputType="text"
-            android:singleLine="true" />
+            android:layout_height="wrap_content" />
 
         <EditText
-            android:id="@+id/loginPassword"
+            android:id="@+id/loginPin"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Password"
+            android:layout_marginTop="12dp"
+            android:hint="PIN"
             android:textColor="#ffffff"
             android:textColorHint="#5b6472"
-            android:inputType="textPassword"
+            android:inputType="numberPassword"
+            android:maxLength="6"
+            android:gravity="center"
+            android:textSize="22sp"
             android:singleLine="true" />
 
         <Button
