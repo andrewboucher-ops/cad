@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0a0b12">
+
+    <!-- Shown once, on first launch — the token this produces is kept in
+         SharedPreferences and reused on every later launch, same as a real
+         handset gets provisioned once, not re-logged-in every power-cycle. -->
+    <LinearLayout
+        android:id="@+id/loginScreen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="CCCS RADIO"
+            android:textColor="#ffffff"
+            android:textStyle="bold"
+            android:textSize="20sp"
+            android:paddingBottom="24dp" />
+
+        <EditText
+            android:id="@+id/loginUsername"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Username"
+            android:textColor="#ffffff"
+            android:textColorHint="#5b6472"
+            android:inputType="text"
+            android:singleLine="true" />
+
+        <EditText
+            android:id="@+id/loginPassword"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Password"
+            android:textColor="#ffffff"
+            android:textColorHint="#5b6472"
+            android:inputType="textPassword"
+            android:singleLine="true" />
+
+        <Button
+            android:id="@+id/loginButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="SIGN IN"
+            android:textColor="#ffffff"
+            android:background="#1d4ed8" />
+
+        <TextView
+            android:id="@+id/loginError"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textColor="#ef4444"
+            android:gravity="center" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/mainScreen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingBottom="12dp">
+
+            <View
+                android:id="@+id/statusLed"
+                android:layout_width="16dp"
+                android:layout_height="16dp"
+                android:background="#4b5563" />
+
+            <TextView
+                android:id="@+id/linkStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="10dp"
+                android:text="LINK DOWN"
+                android:textColor="#8b93a3"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/callsignLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="---"
+                android:textColor="#ffffff"
+                android:textStyle="bold"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/talkgroupLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="no talkgroup"
+            android:textColor="#8b93a3"
+            android:textSize="13sp"
+            android:paddingBottom="16dp" />
+
+        <TextView
+            android:id="@+id/statusLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="OFFLINE"
+            android:textColor="#22c55e"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:paddingBottom="24dp" />
+
+        <Button
+            android:id="@+id/pttButton"
+            android:layout_width="match_parent"
+            android:layout_height="140dp"
+            android:text="HOLD TO TALK"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="#ffffff"
+            android:background="#1d4ed8" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="16dp" />
+
+        <Button
+            android:id="@+id/panicButton"
+            android:layout_width="match_parent"
+            android:layout_height="80dp"
+            android:text="EMERGENCY"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="#ef4444"
+            android:background="#2a0f0f" />
+
+        <TextView
+            android:id="@+id/logView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="16dp"
+            android:textColor="#5b6472"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:scrollbars="vertical" />
+
+    </LinearLayout>
+</FrameLayout>

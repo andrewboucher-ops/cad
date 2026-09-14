@@ -1,0 +1,42 @@
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'uk.cccs.radiolegacy'
+    compileSdk 33
+
+    defaultConfig {
+        applicationId 'uk.cccs.radiolegacy'
+        // Android 4.4 (KitKat) and up — this is the whole point of this
+        // second, separate app: the Capacitor-based uk.cccs.radio needs 26+
+        // (AndroidX's own floor, not a choice made for this app), which real
+        // deployed rugged-PTT hardware on 4.4 can never meet. No AndroidX
+        // here at all, precisely so nothing quietly raises this floor again.
+        minSdkVersion 19
+        targetSdkVersion 33
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    // Deliberately no AndroidX / support library — see minSdkVersion comment
+    // above. Plain android.app.Activity, plain android.widget views.
+}

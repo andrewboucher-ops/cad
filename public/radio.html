@@ -1068,14 +1068,14 @@ bus.on('ptt.granted', async ({ listeners }) => {
   if (!j.resources.some((r) => r.radio === radio.issi)) return;
   currentJob = j;
   ensureLocationTracking();
-  el('#alertHost').innerHTML = `<div class="incoming" style="border-color:var(--priority);background:#2a1c11"><strong>NEW JOB</strong><div class="mono" style="font-size:18px">${esc(j.reference)} · ${esc(j.priority)}</div><div>${esc(j.location)}</div><div class="btn-row" style="margin-top:10px"><button class="btn ok" id="jaAcc">Accept</button><button class="btn" id="jaView">View</button></div></div>`;
+  el('#alertHost').innerHTML = `<div class="incoming" style="border-color:var(--priority);background:#2a1c11"><strong>INCIDENT ASSIGNED</strong><div style="font-size:18px;margin-top:4px">Please return to vehicle</div><div class="btn-row" style="margin-top:10px"><button class="btn ok" id="jaAcc">Accept</button></div></div>`;
   el('#jaAcc').onclick = async () => {
     const r = await CCCS.send('POST', `/api/jobs/${j.id}/ack`, {}, `acknowledge ${j.reference}`);
     el('#alertHost').innerHTML = '';
     log(r.queued ? `ACKNOWLEDGEMENT OF ${j.reference} QUEUED` : `ACKNOWLEDGED ${j.reference}`);
     offerNavigate(j);
   };
-  el('#jaView').onclick = () => showJob(j);
+  beepTwice();
   log(`NEW JOB ${j.reference} ${j.priority} — ${j.location}`);
 })
 .on('job.status_changed', (j) => {
