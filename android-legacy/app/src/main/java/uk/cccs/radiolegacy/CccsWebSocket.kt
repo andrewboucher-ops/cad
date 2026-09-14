@@ -68,7 +68,13 @@ class CccsWebSocket(private val host: String, private val port: Int, private val
             // them on here, the handshake falls back to TLS 1.0 and a
             // modern server (this one included) refuses the connection.
             val plain = Socket(host, port)
-            val ssl = SSLSocketFactory.getDefault().createSocket(plain, host, port, true) as SSLSocket
+            // getDefault()'s declared return type is the plain SocketFactory
+            // (that's its actual signature in javax.net.ssl.SSLSocketFactory),
+            // which only exposes the host/port createSocket overloads — the
+            // Socket-wrapping one used below exists only on SSLSocketFactory
+            // itself, hence the cast.
+            val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
+            val ssl = factory.createSocket(plain, host, port, true) as SSLSocket
             val supported = ssl.supportedProtocols.toSet()
             val wanted = arrayOf("TLSv1.2", "TLSv1.1").filter { it in supported }
             if (wanted.isNotEmpty()) ssl.enabledProtocols = wanted.toTypedArray()
