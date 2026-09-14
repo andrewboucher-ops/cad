@@ -192,7 +192,24 @@ function paint() {
   led.classList.toggle('lit', !['OFFLINE', 'OUT_OF_SERVICE'].includes(ledStatus));
   led.classList.toggle('pulsing', ledStatus === 'EMERGENCY' || !['OFFLINE', 'OUT_OF_SERVICE'].includes(ledStatus) && radio.status !== 'AVAILABLE');
   led.title = radio.emergency ? 'EMERGENCY' : (radio.status || '').replace('_', ' ');
+  setHardwareLed(ledStatus);
   ensureLocationTracking();
+}
+
+/** The physical status LED on the handset itself, not the on-screen dot
+ * above — routed through a native Capacitor plugin (StatusLedPlugin,
+ * Android only) since a WebView can't reach hardware directly. Silently
+ * does nothing in a normal browser tab or if the plugin isn't present,
+ * so this is safe to call unconditionally from paint(). Only actually
+ * calls the plugin when the status changes, since paint() runs far more
+ * often than the LED needs to update. */
+let lastHardwareLedStatus = null;
+function setHardwareLed(status) {
+  if (status === lastHardwareLedStatus) return;
+  lastHardwareLedStatus = status;
+  const plugin = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.StatusLed;
+  if (!plugin) return;
+  plugin.setStatus({ status }).catch(() => {});
 }
 
 function modal(title, html, onMount) {

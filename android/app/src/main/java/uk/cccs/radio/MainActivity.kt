@@ -35,6 +35,7 @@ class MainActivity : BridgeActivity() {
     }.toTypedArray()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        registerPlugin(StatusLedPlugin::class.java)
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         requestMissingPermissions()
