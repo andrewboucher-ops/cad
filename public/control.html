@@ -29,7 +29,7 @@
   .lm_header { background: var(--panel-2) !important; }
   .lm_tab { background: var(--panel-2) !important; color: var(--ink-dim) !important; border: none !important; }
   .lm_tab.lm_active { background: var(--panel) !important; color: var(--ink) !important; box-shadow: inset 0 -2px 0 var(--accent) !important; }
-  .lm_tab .lm_title { font-family: var(--font); font-size: 12px; }
+  .lm_tab .lm_title { font-family: var(--font) !important; font-size: 11.5px !important; font-weight: 700 !important; letter-spacing: .04em !important; text-transform: uppercase !important; }
   .lm_splitter { background: var(--bg) !important; }
   .lm_splitter:hover, .lm_splitter.lm_dragging { background: var(--accent-dim) !important; }
   .lm_controls > * { opacity: .7; }
@@ -163,7 +163,7 @@
 
 <div class="icon-rail">
   <div class="rail-brand">
-    <span class="mark">C</span>
+    <img class="brand-logo" src="/assets/echelon-mark.png" alt="">
     <span>
       <div class="name">CCCS CONTROL</div>
       <div class="sub">Critical comms &amp; dispatch</div>
@@ -176,7 +176,7 @@
   <button id="railMap" title="Map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Map</span></button>
   <button id="railMessages" title="Messages"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Messages</span></button>
   <button id="railCallbacks" title="Callbacks"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3l3 1.5-1.2 3.2a12 12 0 007.5 7.5l3.2-1.2L20 17c0 2-1.6 3.5-3.5 3.3C10 19.7 4.3 14 3.7 7.5 3.5 5.6 5 4 7 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Callbacks</span><span class="badge" id="railCallbackBadge" hidden>0</span></button>
-  <button id="railLog" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></button>
+  <a id="railLog" title="Log" href="/log.html"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
 
   <div class="rail-section">Fleet</div>
   <button id="railTalkgroups" title="Talkgroups"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5M14 8a3 3 0 100-6M18.5 13.7c2 .5 3.5 2.3 3.5 4.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Talkgroups</span></button>
@@ -834,14 +834,7 @@ layout.registerComponentFactoryFunction('detail', (container) => {
   renderDetail();
 });
 
-layout.registerComponentFactoryFunction('comms', (container) => {
-  mount(container, '<input id="logFilter" placeholder="Filter by call sign, ISSI, job…" style="width:240px;padding:3px 8px;font-size:12px">',
-    '<div class="body log" id="log" style="flex:1;overflow:auto"></div>');
-  el('#logFilter', container.element).addEventListener('input', renderLog);
-  renderLog();
-});
-
-const PANEL_TITLES = { jobs: 'Active Jobs', map: 'Operational Map', resources: 'Resources', comms: 'Communications and Events', detail: 'Resource Detail' };
+const PANEL_TITLES = { jobs: 'Active Jobs', map: 'Operational Map', resources: 'Resources', detail: 'Resource Detail' };
 
 const defaultLayoutConfig = {
   // Popout really is useful here — genuinely separate windows for a
@@ -867,8 +860,7 @@ const defaultLayoutConfig = {
       {
         type: 'row', height: 28,
         content: [
-          { type: 'component', componentType: 'comms', title: PANEL_TITLES.comms, width: 75 },
-          { type: 'component', componentType: 'detail', title: PANEL_TITLES.detail, width: 25 },
+          { type: 'component', componentType: 'detail', title: PANEL_TITLES.detail, width: 100 },
         ],
       },
     ],
@@ -880,7 +872,7 @@ const defaultLayoutConfig = {
 // layout always wins over the default. This is what silently carried an
 // earlier broken config (header.close disabling drag/close) forward even
 // after the code was fixed.
-const LAYOUT_VERSION = 2;
+const LAYOUT_VERSION = 3;
 
 // (isPopout is declared near the top of the script.) The component
 // factories above must still be registered so GL can rebuild whichever one
@@ -963,7 +955,6 @@ el('#railIncidents').onclick = () => openPanel('jobs');
 el('#railTerminals').onclick = () => openPanel('resources');
 el('#railMessages').onclick = () => el('#btnMessage').click();
 el('#railCallbacks').onclick = () => focusPanel('#reqWrap');
-el('#railLog').onclick = () => openPanel('comms');
 el('#railMap').onclick = () => openPanel('map');
 el('#railTalkgroups').onclick = () => el('#btnTalkgroups').click();
 el('#railAssignments').onclick = () => el('#btnAssign').click();
