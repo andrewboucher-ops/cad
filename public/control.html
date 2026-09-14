@@ -23,7 +23,7 @@
      each tab's own maximise button is our "expand to fill screen". This
      replaces an earlier hand-rolled minimize/close/expand-per-panel scheme
      that could only approximate this. */
-  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; padding-right: 64px; }
+  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; padding-left: 228px; }
   #glRoot { flex: 1; min-height: 0; margin: 8px; }
   .lm_content { background: var(--panel); overflow: hidden; }
   .lm_header { background: var(--panel-2) !important; }
@@ -84,23 +84,41 @@
   }
   .callback-tag:hover { filter: brightness(1.15); }
 
-  /* ---- quick-nav icon rail: also how you bring back a closed panel ---- */
+  /* ---- left sidebar: nav rail, also how you bring back a closed panel ----
+     A real labelled sidebar (logo, section headers, icon+label rows), not
+     the thin icon-only strip this used to be — matches the reference
+     console's OPERATIONS/ESTATE nav rather than approximating it. */
   .icon-rail {
-    position: fixed; right: 0; top: 0; bottom: 0; width: 64px; z-index: 40;
-    background: linear-gradient(180deg, var(--panel-2), var(--panel)); border-left: 1px solid var(--line);
-    display: flex; flex-direction: column; align-items: center; padding-top: 58px; gap: 3px;
+    position: fixed; left: 0; top: 0; bottom: 0; width: 228px; z-index: 40;
+    background: var(--panel); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; padding: 0 0 16px; overflow-y: auto;
+  }
+  .rail-brand {
+    display: flex; align-items: center; gap: 10px; padding: 18px 18px 16px; flex: none;
+  }
+  .rail-brand .mark {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    background: linear-gradient(150deg, var(--accent), var(--accent-dim));
+    display: grid; place-items: center; font-weight: 800; font-size: 13px; color: #04120f;
+  }
+  .rail-brand .name { font-weight: 800; letter-spacing: .07em; font-size: 13px; line-height: 1.2; }
+  .rail-brand .sub { font-size: 10px; color: var(--ink-dim); letter-spacing: .04em; margin-top: 1px; }
+  .rail-section {
+    font-size: 10px; font-weight: 700; letter-spacing: .1em; color: var(--ink-dim); text-transform: uppercase;
+    padding: 16px 18px 6px;
   }
   .icon-rail button {
-    position: relative; width: 52px; display: flex; flex-direction: column; align-items: center; gap: 4px;
-    background: none; border: none; color: var(--ink-dim); padding: 9px 0 8px; border-radius: 10px;
-    cursor: pointer; font-size: 9.5px; letter-spacing: .01em; font-family: var(--font);
+    position: relative; display: flex; align-items: center; gap: 12px; width: 100%;
+    background: none; border: none; color: var(--ink-dim); padding: 9px 18px; text-align: left;
+    cursor: pointer; font-size: 13px; font-weight: 500; letter-spacing: .01em; font-family: var(--font);
     transition: background-color .12s var(--ease), color .12s var(--ease);
   }
-  .icon-rail button:hover { background: var(--panel-3); color: var(--ink); }
-  .icon-rail button svg { width: 19px; height: 19px; }
+  .icon-rail button:hover { background: var(--panel-2); color: var(--ink); }
+  .icon-rail button svg { width: 18px; height: 18px; flex: none; }
+  .icon-rail button span:not(.badge) { flex: 1; }
   .icon-rail .badge {
-    position: absolute; top: 2px; right: 6px; background: var(--emergency); color: #fff; font-size: 9px;
-    font-weight: 700; border-radius: 20px; padding: 1px 5px; min-width: 14px; line-height: 1.4;
+    background: var(--emergency); color: #fff; font-size: 9.5px;
+    font-weight: 700; border-radius: 20px; padding: 1px 6px; min-width: 15px; line-height: 1.5; text-align: center;
   }
   @keyframes flash-glow { 0%, 100% { box-shadow: var(--shadow); } 40% { box-shadow: 0 0 0 2px var(--accent), var(--shadow-lg); } }
   .flash { animation: flash-glow .9s var(--ease); }
@@ -140,7 +158,6 @@
 </head>
 <body>
 <div class="topbar">
-  <span class="brand"><span class="mark">C</span>CCCS CONTROL</span>
   <span class="link-net" id="net">link down</span>
   <span class="spacer"></span>
   <button class="btn" id="btnNotify" title="Get emergency and job alerts on this device even when it's in the background" style="padding:6px 10px;font-size:11px">🔔 Notifications</button>
@@ -181,12 +198,25 @@
 <div id="modalHost"></div>
 
 <div class="icon-rail">
+  <div class="rail-brand">
+    <span class="mark">C</span>
+    <span>
+      <div class="name">CCCS CONTROL</div>
+      <div class="sub">Critical comms &amp; dispatch</div>
+    </span>
+  </div>
+
+  <div class="rail-section">Operations</div>
   <button id="railIncidents" title="Incidents"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Incidents</span></button>
   <button id="railTerminals" title="Terminals"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="1.8"/><path d="M9 19h6M12 15v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Terminals</span></button>
+  <button id="railMap" title="Map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Map</span></button>
   <button id="railMessages" title="Messages"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Messages</span></button>
   <button id="railCallbacks" title="Callbacks"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3l3 1.5-1.2 3.2a12 12 0 007.5 7.5l3.2-1.2L20 17c0 2-1.6 3.5-3.5 3.3C10 19.7 4.3 14 3.7 7.5 3.5 5.6 5 4 7 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Callbacks</span><span class="badge" id="railCallbackBadge" hidden>0</span></button>
   <button id="railLog" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></button>
-  <button id="railMap" title="Map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Map</span></button>
+
+  <div class="rail-section">Fleet</div>
+  <button id="railTalkgroups" title="Talkgroups"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5M14 8a3 3 0 100-6M18.5 13.7c2 .5 3.5 2.3 3.5 4.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Talkgroups</span></button>
+  <button id="railAssignments" title="Assignments"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/></svg><span>Assignments</span></button>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -971,6 +1001,8 @@ el('#railMessages').onclick = () => el('#btnMessage').click();
 el('#railCallbacks').onclick = () => focusPanel('#reqWrap');
 el('#railLog').onclick = () => openPanel('comms');
 el('#railMap').onclick = () => openPanel('map');
+el('#railTalkgroups').onclick = () => el('#btnTalkgroups').click();
+el('#railAssignments').onclick = () => el('#btnAssign').click();
 }
 
 /* ---------- realtime ---------- */
