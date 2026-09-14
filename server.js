@@ -1413,6 +1413,55 @@ route('POST', '/api/jobs', CONTROL, ({ body, user }) => {
   logEvent('job.created', `JOB ${j.reference} CREATED (${priority})`, { job_id: j.id });
   return { __status: 201, __body: publicJob(j) };
 });
+
+/* ---- GuardM8 integration ----------------------------------------------
+ * GuardM8 (Echelon's separate guarding/alarm-receiving product) pushes an
+ * alarm straight in as a dispatchable job, the same shape a call taker
+ * would create by hand. Authenticated with a shared secret rather than a
+ * user session — GuardM8 is a system, not a CCCS operator — same pattern
+ * as the PBX inbound route below. external_ref lets GuardM8 retry a send
+ * (e.g. after a network blip) without creating a duplicate job: resending
+ * the same external_ref returns the job already created for it instead of
+ * making a second one. */
+const GUARDM8_PRIORITY_MAP = {
+  RED: 'RED', CRITICAL: 'RED', P1: 'RED',
+  AMBER: 'AMBER', HIGH: 'AMBER', P2: 'AMBER',
+  GREEN: 'GREEN', MEDIUM: 'GREEN', P3: 'GREEN',
+  ROUTINE: 'ROUTINE', LOW: 'ROUTINE', P4: 'ROUTINE',
+};
+route('POST', '/api/integrations/guardm8/jobs', null, ({ body, req }) => {
+  const secret = process.env.GUARDM8_SECRET;
+  if (!secret || req.headers['x-guardm8-secret'] !== secret) throw httpError(401, 'bad GuardM8 secret');
+
+  const externalRef = body.external_ref !== undefined && body.external_ref !== null ? String(body.external_ref) : null;
+  if (externalRef) {
+    const existing = db.jobs.find((x) => x.external_ref === externalRef);
+    if (existing) return { __status: 200, __body: publicJob(existing) };
+  }
+
+  const priority = GUARDM8_PRIORITY_MAP[String(body.priority || 'GREEN').toUpperCase()] || 'GREEN';
+  const site = body.site ? db.sites.find((x) => x.id === Number(body.site) || x.name === String(body.site)) : null;
+  if (!body.location && !site) throw httpError(400, 'location or site required');
+
+  const j = {
+    id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
+    incident_type: body.incident_type || 'ALARM', priority,
+    location: body.location || `${site.name}, ${site.address}`,
+    site_id: site ? site.id : null, keyholder: site ? site.keyholder : (body.keyholder || ''),
+    lat: body.lat != null ? Number(body.lat) : (site && site.lat != null ? site.lat : null),
+    lon: body.lon != null ? Number(body.lon) : (site && site.lon != null ? site.lon : null),
+    description: body.description || '', caller: body.caller || 'GuardM8', required_resources: Number(body.required_resources || 1),
+    what3words: String(body.what3words || '').replace(/^\/+/, '').trim(),
+    notes: body.notes || '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    external_source: 'guardm8', external_ref: externalRef,
+  };
+  db.jobs.push(j);
+  broadcast('job.created', publicJob(j));
+  pushToRoles(CONTROL, { title: 'New job — GuardM8', body: `${j.reference} · ${j.incident_type} · ${j.location}`, url: '/control.html', tag: 'cccs-job' });
+  logEvent('job.created', `JOB ${j.reference} CREATED (${priority}) — via GuardM8`, { job_id: j.id, external_ref: externalRef });
+  return { __status: 201, __body: publicJob(j) };
+});
+
 route('POST', '/api/jobs/:id/assign', CONTROL, ({ params, body }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
   const targets = body.resources || body.to || [];
