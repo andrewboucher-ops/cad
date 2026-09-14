@@ -164,6 +164,10 @@ a { color: var(--accent); }
   cursor: pointer; font-size: 13px; font-weight: 500; letter-spacing: .01em; font-family: var(--font);
   text-decoration: none; transition: background-color .12s var(--ease), color .12s var(--ease);
 }
+/* The class rule above beats the UA [hidden]{display:none} on specificity
+   alone, so a role-gated rail item (e.g. #railAdmin) would stay visible
+   despite the hidden attribute without this explicit override. */
+.icon-rail button[hidden], .icon-rail a[hidden] { display: none; }
 .icon-rail button:hover, .icon-rail a:hover { background: var(--panel-2); color: var(--ink); }
 .icon-rail a.active { background: var(--panel-2); color: var(--ink); box-shadow: inset 3px 0 0 var(--accent); }
 .icon-rail button svg, .icon-rail a svg { width: 18px; height: 18px; flex: none; }

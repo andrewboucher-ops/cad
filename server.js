@@ -1966,7 +1966,7 @@ function normalizeEmail(raw, { forId } = {}) {
   return email;
 }
 
-route('GET', '/api/users', ADMIN, () => db.users.map((u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, radio_id: u.radio_id, mdt_id: u.mdt_id, email: u.email || null })));
+route('GET', '/api/users', ADMIN, () => db.users.map(publicUser));
 route('POST', '/api/users', ADMIN, ({ body }) => {
   const username = String(body.username || '').toLowerCase().trim();
   if (!username || !body.password) throw httpError(400, 'username and password required');
@@ -1983,8 +1983,27 @@ route('PATCH', '/api/users/:id', ADMIN, ({ params, body }) => {
   const u = db.users.find((x) => x.id === Number(params.id));
   if (!u) throw httpError(404, 'user not found');
   if ('email' in body) u.email = normalizeEmail(body.email, { forId: u.id });
+  if ('display_name' in body) u.display_name = String(body.display_name || '').trim() || u.username;
+  if ('role' in body) {
+    if (!ROLES.includes(body.role)) throw httpError(400, 'invalid role');
+    u.role = body.role;
+  }
+  if ('radio_id' in body) u.radio_id = body.radio_id || null;
+  if ('mdt_id' in body) u.mdt_id = body.mdt_id || null;
+  if ('password' in body && body.password) {
+    if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
+    u.password_hash = hashPassword(String(body.password));
+  }
   logEvent('user.updated', `USER ${u.username} UPDATED`, { user_id: u.id });
   return publicUser(u);
+});
+route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
+  const u = db.users.find((x) => x.id === Number(params.id));
+  if (!u) throw httpError(404, 'user not found');
+  if (u.id === user.id) throw httpError(400, 'cannot delete the account you are signed in as');
+  db.users = db.users.filter((x) => x.id !== u.id);
+  logEvent('user.deleted', `USER ${u.username} DELETED`, { user_id: u.id });
+  return { ok: true };
 });
 
 /* ------------------------------------------------------------------ *
