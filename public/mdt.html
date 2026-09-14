@@ -326,7 +326,7 @@ function paintInfo() {
 function paintStatusColumn() {
   if (!job) {
     const duty = (mdt && mdt.duty_status) || 'AVAILABLE';
-    const opts = [['AVAILABLE', 'AVL'], ['BUSY', 'BSY'], ['OUT_OF_SERVICE', 'OOS']];
+    const opts = [['AVAILABLE', 'AVL'], ['BUSY', 'BSY'], ['MEAL_BREAK', 'MEAL'], ['OUT_OF_SERVICE', 'OOS']];
     el('#statusCol').innerHTML = opts.map(([code, label]) =>
       `<button class="mdt-key ${duty === code ? 'status-active' : ''}" data-duty="${code}">${label}</button>`).join('');
     CCCS.els('#statusCol [data-duty]').forEach((b) => (b.onclick = async () => {

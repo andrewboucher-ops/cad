@@ -94,7 +94,7 @@
     <button class="btn" id="bRpt">Rpt</button>
     <button class="btn" id="bText">Text</button>
     <button class="btn" id="bChan">Chan</button>
-    <button class="btn" id="bAvl">AVL<div id="bAvlStatus" style="font-size:10px;font-weight:500;letter-spacing:.03em;opacity:.85;margin-top:2px"></div></button>
+    <button class="btn" id="bAvl"><div id="bAvlStatus"></div></button>
   </div>
 
   <div class="r-channel" id="tg">no talkgroup</div>
@@ -147,6 +147,7 @@ const log = (line) => {
 
 const AVL_COLOUR = {
   AVAILABLE: 'linear-gradient(180deg,#22c55e,#15803d)', BUSY: 'linear-gradient(180deg,#eab308,#a16207)',
+  MEAL_BREAK: 'linear-gradient(180deg,#eab308,#a16207)', ACKNOWLEDGED: 'linear-gradient(180deg,#3b82f6,#1d4ed8)',
   ON_TASK: 'linear-gradient(180deg,#3b82f6,#1d4ed8)', EN_ROUTE: 'linear-gradient(180deg,#3b82f6,#1d4ed8)',
   ON_SCENE: 'linear-gradient(180deg,#3b82f6,#1d4ed8)', OUT_OF_SERVICE: '', OFFLINE: '',
 };
@@ -159,7 +160,11 @@ function paint() {
   const avl = el('#bAvl');
   avl.style.background = AVL_COLOUR[radio.status] || '';
   avl.classList.toggle('pulsing', !['OFFLINE', 'OUT_OF_SERVICE'].includes(radio.status));
+  // The button used to always read the static label "AVL" with the status
+  // as a subtitle underneath; now that a real status is always shown, the
+  // fixed "AVL" text is redundant — just show the status itself.
   el('#bAvlStatus').textContent = radio.emergency ? 'EMERGENCY' : (radio.status || '').replace('_', ' ');
+  ensureLocationTracking();
 }
 
 function modal(title, html, onMount) {
@@ -171,7 +176,7 @@ const closeModal = () => (el('#modalHost').innerHTML = '');
 /* ---- actions ---- */
 el('#bAvl').onclick = () => modal('Change status', `
   <label for="sSel">Operational status</label>
-  <select id="sSel">${['AVAILABLE', 'BUSY', 'ON_TASK', 'EN_ROUTE', 'ON_SCENE', 'OUT_OF_SERVICE'].map((s) => `<option ${radio.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+  <select id="sSel">${['AVAILABLE', 'BUSY', 'ON_TASK', 'EN_ROUTE', 'ON_SCENE', 'MEAL_BREAK', 'OUT_OF_SERVICE'].map((s) => `<option ${radio.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
   <div style="height:12px"></div><button class="btn primary" id="sGo">Set status</button>`, () => {
   el('#sGo').onclick = async () => {
     const r = await CCCS.send('POST', `/api/radios/${radio.issi}/status`, { status: el('#sSel').value }, 'status change');
@@ -328,6 +333,23 @@ function openPosition() {
     <dt class="dim">Battery</dt><dd class="mono">${radio.battery}%</dd>
   </dl>`);
 }
+/* Background GPS while a job is live, separate from the sat nav view — the
+ * server derives EN_ROUTE/ON_SCENE from these reports (checkAutoJobProgress
+ * in server.js), so it needs them whether or not the officer has the nav
+ * screen open. Starts/stops itself based on currentJob; safe to call this
+ * from anywhere currentJob might have changed since it's a no-op otherwise. */
+let radioLocWatchId = null;
+function ensureLocationTracking() {
+  const shouldTrack = currentJob && !['ON_SCENE', 'TRANSPORTING', 'COMPLETED', 'CANCELLED'].includes(currentJob.status) && navigator.geolocation;
+  if (shouldTrack && radioLocWatchId == null) {
+    radioLocWatchId = navigator.geolocation.watchPosition(
+      (pos) => { api('POST', `/api/radios/${radio.issi}/location`, { lat: pos.coords.latitude, lon: pos.coords.longitude, speed: pos.coords.speed || 0 }).catch(() => {}); },
+      () => {}, { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 });
+  } else if (!shouldTrack && radioLocWatchId != null) {
+    navigator.geolocation.clearWatch(radioLocWatchId);
+    radioLocWatchId = null;
+  }
+}
 async function sendPosition() {
   const push = async (lat, lon) => {
     const out = await CCCS.send('POST', `/api/radios/${radio.issi}/position-report`,
@@ -369,7 +391,14 @@ function bindLongPress(target, ms, fn) {
 bindLongPress(el('#rlogo'), 800, () => openSettings());
 
 /* ---- hardware keys ---- */
+/* Once a physical SOS key is bound, the on-screen EMERGENCY button is
+ * redundant screen real-estate and a mis-tap risk — hide it. Re-shown the
+ * moment the binding is cleared. */
+function paintEmgVisibility() {
+  el('#bEmg').hidden = Boolean(keys.bindings.sos);
+}
 async function pushBindings() {
+  paintEmgVisibility();
   const b = keys.bindings;
   try {
     await api('PUT', '/api/me/settings', {
@@ -398,6 +427,7 @@ async function pullBindings() {
     }
     if (s.speed_dial) for (const [ch, entry] of Object.entries(s.speed_dial)) keys.setSpeedDial(ch, entry);
   } catch { /* offline: the device's own bindings stand */ }
+  paintEmgVisibility();
 }
 
 /* ---- keypad actions ---- */
@@ -510,6 +540,7 @@ const keys = CCCS.keybinds({
     pushBindings();
   },
 });
+paintEmgVisibility();
 pullBindings();
 
 function openSettings() {
@@ -697,6 +728,7 @@ el('#bCads').onclick = async () => {
   const jobs = await api('GET', '/api/jobs');
   const mine = jobs.filter((j) => j.resources.some((r) => r.radio === radio.issi));
   currentJob = mine.find((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
+  ensureLocationTracking();
   const history = mine.filter((j) => ['COMPLETED', 'CANCELLED'].includes(j.status))
     .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).slice(0, 8);
   showJob(currentJob, history);
@@ -946,6 +978,7 @@ bus.on('ptt.granted', async ({ listeners }) => {
   log(`REGISTERED ISSI ${r.issi} AS ${r.callsign || r.issi}`);
   const jobs = await api('GET', '/api/jobs');
   currentJob = jobs.find((j) => j.resources.some((x) => x.radio === r.issi) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
+  ensureLocationTracking();
 })
 .on('radio.status_changed', (r) => { if (radio && r.issi === radio.issi) { radio = r; paint(); } })
 .on('radio.location_changed', (r) => { if (radio && r.issi === radio.issi) radio = r; })
@@ -965,6 +998,7 @@ bus.on('ptt.granted', async ({ listeners }) => {
 .on('job.assigned_to_you', (j) => {
   if (!j.resources.some((r) => r.radio === radio.issi)) return;
   currentJob = j;
+  ensureLocationTracking();
   el('#alertHost').innerHTML = `<div class="incoming" style="border-color:var(--priority);background:#2a1c11"><strong>NEW JOB</strong><div class="mono" style="font-size:18px">${esc(j.reference)} · ${esc(j.priority)}</div><div>${esc(j.location)}</div><div class="btn-row" style="margin-top:10px"><button class="btn ok" id="jaAcc">Accept</button><button class="btn" id="jaView">View</button></div></div>`;
   el('#jaAcc').onclick = async () => {
     const r = await CCCS.send('POST', `/api/jobs/${j.id}/ack`, {}, `acknowledge ${j.reference}`);
@@ -978,9 +1012,10 @@ bus.on('ptt.granted', async ({ listeners }) => {
 .on('job.status_changed', (j) => {
   if (!currentJob || j.id !== currentJob.id) return;
   currentJob = j.resources.some((r) => r.radio === radio.issi) ? j : null;
+  ensureLocationTracking();
 })
 .on('job.stood_down', (j) => {
-  if (currentJob && j.id === currentJob.id) { currentJob = null; el('#alertHost').innerHTML = ''; log(`STOOD DOWN FROM JOB ${j.reference}`); }
+  if (currentJob && j.id === currentJob.id) { currentJob = null; el('#alertHost').innerHTML = ''; log(`STOOD DOWN FROM JOB ${j.reference}`); ensureLocationTracking(); }
 })
 .on('radio.ptt_started', (p) => {
   if (!radio || p.talkgroup !== radio.talkgroup) return;

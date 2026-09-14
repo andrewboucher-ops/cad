@@ -84,7 +84,7 @@ const db = {
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
 
-const RADIO_STATUSES = ['OFFLINE', 'AVAILABLE', 'BUSY', 'ON_TASK', 'EN_ROUTE', 'ON_SCENE', 'EMERGENCY', 'OUT_OF_SERVICE'];
+const RADIO_STATUSES = ['OFFLINE', 'AVAILABLE', 'ACKNOWLEDGED', 'BUSY', 'ON_TASK', 'EN_ROUTE', 'ON_SCENE', 'MEAL_BREAK', 'EMERGENCY', 'OUT_OF_SERVICE'];
 const JOB_STATES = ['CREATED', 'DISPATCHED', 'ACKNOWLEDGED', 'EN_ROUTE', 'ON_SCENE', 'TRANSPORTING', 'COMPLETED', 'CANCELLED'];
 // First time a job reaches each of these, stamp it — this is what "time
 // en route" / "time on scene" is computed from client-side, with no separate
@@ -93,6 +93,41 @@ const JOB_STATUS_TS_FIELD = { DISPATCHED: 'dispatched_at', ACKNOWLEDGED: 'acknow
 function stampJobStatus(j, status) {
   const field = JOB_STATUS_TS_FIELD[status];
   if (field && !j[field]) j[field] = new Date().toISOString();
+}
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+const ON_SCENE_RADIUS_M = 100;
+const EN_ROUTE_DELTA_M = 25;
+/** Called from every radio/MDT location report. Advances a job's status
+ * without anyone touching a button: ACKNOWLEDGED -> EN_ROUTE the first time
+ * the reported distance to the job meaningfully decreases (actual movement
+ * toward it, not GPS jitter), and either of those -> ON_SCENE once within
+ * arrival radius. Deliberately does not touch TRANSPORTING/COMPLETED — those
+ * stay a human decision. `assignment.last_distance_m` is the only state this
+ * needs, and it's meaningless once the job is no longer being tracked, so it
+ * is simply left stale rather than cleaned up. */
+function checkAutoJobProgress(radio, mdt, lat, lon) {
+  const jobId = radio ? radio.job_id : mdt.job_id;
+  if (!jobId) return;
+  const j = db.jobs.find((x) => x.id === jobId);
+  if (!j || j.lat == null || ['ON_SCENE', 'TRANSPORTING', 'COMPLETED', 'CANCELLED'].includes(j.status)) return;
+  const a = db.job_assignments.find((x) => x.job_id === j.id && ((radio && x.radio_id === radio.id) || (mdt && x.mdt_id === mdt.id)));
+  if (!a) return;
+  const dist = haversineMeters(lat, lon, j.lat, j.lon);
+  let newStatus = null;
+  if (['ACKNOWLEDGED', 'EN_ROUTE'].includes(j.status) && dist < ON_SCENE_RADIUS_M) newStatus = 'ON_SCENE';
+  else if (j.status === 'ACKNOWLEDGED' && a.last_distance_m != null && dist < a.last_distance_m - EN_ROUTE_DELTA_M) newStatus = 'EN_ROUTE';
+  a.last_distance_m = dist;
+  if (!newStatus) return;
+  j.status = newStatus; stampJobStatus(j, newStatus); j.updated_at = new Date().toISOString();
+  if (radio && radio.connected && !radio.emergency) setRadioStatus(radio, newStatus, `auto — ${newStatus === 'ON_SCENE' ? 'arrived at job location' : 'movement toward job detected'}`);
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.status_changed', `JOB ${j.reference} → ${newStatus} (auto)`, { job_id: j.id });
 }
 const PRIORITIES = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
 const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'RADIO_USER', 'MDT_USER'];
@@ -992,6 +1027,7 @@ route('POST', '/api/radios/:id/location', ALL, ({ params, body, user }) => {
   if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
   Object.assign(r, { lat: Number(body.lat), lon: Number(body.lon), speed: Number(body.speed || 0), heading: Number(body.heading || 0), last_seen: new Date().toISOString() });
   db.locations.push({ id: nextId('locations'), radio_id: r.id, lat: r.lat, lon: r.lon, speed: r.speed, heading: r.heading, at: r.last_seen });
+  checkAutoJobProgress(r, null, r.lat, r.lon);
   broadcast('radio.location_changed', publicRadio(r));
   return publicRadio(r);
 });
@@ -1031,7 +1067,7 @@ route('DELETE', '/api/mdts/:id/crew/:crewId', MDT_CREW, ({ params, user }) => {
 /* Manual duty status, independent of job assignment — a vehicle can declare
  * itself busy or out of service even with nothing dispatched to it. Job
  * status (EN_ROUTE etc.) is separate and takes over once a job exists. */
-const MDT_DUTY_STATUSES = ['AVAILABLE', 'BUSY', 'OUT_OF_SERVICE'];
+const MDT_DUTY_STATUSES = ['AVAILABLE', 'BUSY', 'MEAL_BREAK', 'OUT_OF_SERVICE'];
 route('POST', '/api/mdts/:id/duty-status', MDT_CREW, ({ params, body, user }) => {
   const m = db.mdts.find((x) => x.id === Number(params.id)); if (!m) throw httpError(404, 'MDT not found');
   if (user.role === 'MDT_USER' && user.mdt_id !== m.id) throw httpError(403, 'not your terminal');
@@ -1047,6 +1083,7 @@ route('POST', '/api/mdts/:id/location', MDT_CREW, ({ params, body, user }) => {
   const m = db.mdts.find((x) => x.id === Number(params.id)); if (!m) throw httpError(404, 'MDT not found');
   if (user.role === 'MDT_USER' && user.mdt_id !== m.id) throw httpError(403, 'not your terminal');
   m.lat = Number(body.lat); m.lon = Number(body.lon);
+  checkAutoJobProgress(null, m, m.lat, m.lon);
   broadcast('mdt.status_changed', publicMdt(m));
   return publicMdt(m);
 });
@@ -1314,6 +1351,14 @@ route('POST', '/api/jobs/:id/ack', ALL, ({ params, user, body }) => {
   assignment.acknowledged = true; assignment.acknowledged_at = new Date().toISOString();
   if (j.status === 'DISPATCHED') { j.status = 'ACKNOWLEDGED'; j.updated_at = assignment.acknowledged_at; }
   stampJobStatus(j, 'ACKNOWLEDGED');
+  const ackRadio = assignment.radio_id ? db.radios.find((r) => r.id === assignment.radio_id) : null;
+  const ackMdt = assignment.mdt_id ? db.mdts.find((m) => m.id === assignment.mdt_id) : null;
+  if (ackRadio && ackRadio.connected && !ackRadio.emergency) setRadioStatus(ackRadio, 'ACKNOWLEDGED', 'job acknowledged');
+  // Baseline for checkAutoJobProgress's "distance is decreasing" check —
+  // without this the first location report after ack has nothing to
+  // compare against and can never detect movement toward the job.
+  const ackActor = ackRadio || ackMdt;
+  if (j.lat != null && ackActor && ackActor.lat != null) assignment.last_distance_m = haversineMeters(ackActor.lat, ackActor.lon, j.lat, j.lon);
   const who = assignment.radio_id ? callsignOf(db.radios.find((r) => r.id === assignment.radio_id)) : (db.mdts.find((m) => m.id === assignment.mdt_id) || {}).mdt_code;
   broadcast('job.acknowledged', { job: publicJob(j), by: who });
   logEvent('job.acknowledged', `${who} ACKNOWLEDGED JOB ${j.reference}`, { job_id: j.id });
@@ -1606,7 +1651,7 @@ const STATUS_CODES = {
   '04': { status: 'ON_SCENE', label: 'On scene / at site' },
   '05': { status: 'ON_TASK', label: 'On task' },
   '06': { status: 'AVAILABLE', label: 'Site clear, resuming patrol' },
-  '07': { status: 'BUSY', label: 'Meal break' },
+  '07': { status: 'MEAL_BREAK', label: 'Meal break' },
   '08': { status: 'OUT_OF_SERVICE', label: 'Out of service' },
 };
 route('GET', '/api/status-codes', ALL, () => Object.entries(STATUS_CODES).map(([code, v]) => ({ code, ...v })));
