@@ -110,18 +110,50 @@
     background: var(--panel-2); font-size: 12.5px; flex: none;
   }
   .filters-drop label { display: flex; align-items: center; gap: 8px; margin: 0; text-transform: none; letter-spacing: 0; font-size: 12.5px; color: var(--ink); }
+
+  /* ---- job detail: header + workflow stepper (job modal) ---- */
+  .job-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
+  .job-head .titles { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .job-head h3 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.01em; }
+  .job-head .elapsed { text-align: right; flex: none; }
+  .job-head .elapsed .big { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; color: var(--ink); }
+  .job-head .elapsed .lbl { font-size: 9.5px; letter-spacing: .08em; color: var(--ink-dim); text-transform: uppercase; margin-top: 4px; }
+
+  .stepper { display: flex; flex-direction: column; }
+  .stepper .step { display: flex; gap: 12px; position: relative; padding-bottom: 14px; }
+  .stepper .step:last-child { padding-bottom: 0; }
+  .stepper .step::before {
+    content: ""; position: absolute; left: 9px; top: 22px; bottom: -2px; width: 1px; background: var(--line);
+  }
+  .stepper .step:last-child::before { display: none; }
+  .stepper .dot-step {
+    width: 20px; height: 20px; border-radius: 50%; flex: none; display: grid; place-items: center;
+    font-size: 10.5px; font-weight: 800; border: 2px solid var(--line); color: var(--ink-dim);
+    background: var(--panel-2); z-index: 1;
+  }
+  .stepper .step.done .dot-step { background: var(--accent-dim); border-color: var(--accent-dim); color: #eafffb; }
+  .stepper .step.current .dot-step { border-color: var(--accent); color: var(--accent); background: var(--panel); }
+  .stepper .step.current .label { color: var(--accent); }
+  .stepper .label { font-weight: 600; font-size: 13px; }
+  .stepper .time { font-size: 11px; color: var(--ink-dim); margin-top: 1px; }
 </style>
 </head>
 <body>
 <div class="topbar">
-  <span class="brand">CCCS CONTROL</span>
+  <span class="brand"><span class="mark">C</span>CCCS CONTROL</span>
   <span class="link-net" id="net">link down</span>
   <span class="spacer"></span>
-  <span class="dim" id="who"></span>
-  <button class="btn" id="btnNotify" title="Get emergency and job alerts on this device even when it's in the background" style="padding:2px 8px;font-size:11px">🔔 Notifications</button>
-  <button class="btn" id="resetLayout" title="Restore the default panel arrangement" style="padding:2px 8px;font-size:11px">Reset layout</button>
+  <button class="btn" id="btnNotify" title="Get emergency and job alerts on this device even when it's in the background" style="padding:6px 10px;font-size:11px">🔔 Notifications</button>
+  <button class="btn" id="resetLayout" title="Restore the default panel arrangement" style="padding:6px 10px;font-size:11px">Reset layout</button>
   <span class="clock" id="clock">--:--:--</span>
-  <button class="btn" id="signout">Sign out</button>
+  <div class="user-block">
+    <span class="avatar" id="avatar"></span>
+    <span class="who">
+      <span class="name" id="whoName"></span>
+      <span class="role" id="whoRole"></span>
+    </span>
+  </div>
+  <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
 </div>
 
 <div id="emgWrap"></div>
@@ -176,7 +208,9 @@ const me = CCCS.getSession().user;
 const isPopout = /[?&]gl-window=/.test(location.search);
 
 if (!isPopout) {
-  el('#who').textContent = `${me.display_name} · ${me.role}`;
+  el('#whoName').textContent = me.display_name;
+  el('#whoRole').textContent = me.role.replace('_', ' ');
+  el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
   el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
   setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
   // keep welfare countdowns ticking without a server round trip
@@ -562,23 +596,40 @@ function fmtElapsed(fromIso, toIso) {
   return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
 }
 
+const JOB_STAGES = [
+  ['DISPATCHED', 'Dispatched'], ['ACKNOWLEDGED', 'Acknowledged'], ['EN_ROUTE', 'En route'],
+  ['ON_SCENE', 'On scene'], ['TRANSPORTING', 'Transporting'], ['COMPLETED', 'Completed'],
+];
 function jobModal(j) {
   if (!j) return;
-  const timeline = [
-    ['Dispatched', j.dispatched_at],
-    ['Acknowledged', j.acknowledged_at, j.dispatched_at],
-    ['En route', j.en_route_at, j.acknowledged_at || j.dispatched_at],
-    ['On scene', j.on_scene_at, j.en_route_at],
-    ['Transporting', j.transporting_at, j.on_scene_at],
-    ['Completed', j.completed_at, j.transporting_at || j.on_scene_at],
-  ].filter(([, at]) => at);
+  const stageAt = { DISPATCHED: j.dispatched_at, ACKNOWLEDGED: j.acknowledged_at, EN_ROUTE: j.en_route_at, ON_SCENE: j.on_scene_at, TRANSPORTING: j.transporting_at, COMPLETED: j.completed_at };
+  let lastDoneIdx = -1;
+  JOB_STAGES.forEach(([code], i) => { if (stageAt[code]) lastDoneIdx = i; });
+  const active = !['COMPLETED', 'CANCELLED'].includes(j.status);
+  const stepper = JOB_STAGES.map(([code, label], i) => {
+    const at = stageAt[code];
+    const isCurrent = at && i === lastDoneIdx && active;
+    return `<div class="step ${at ? (isCurrent ? 'current' : 'done') : ''}">
+      <div class="dot-step">${at && !isCurrent ? '✓' : i + 1}</div>
+      <div><div class="label">${label}</div><div class="time${at ? '' : ' dim'}">${at ? new Date(at).toLocaleTimeString() : 'waiting'}</div></div>
+    </div>`;
+  }).join('');
   modal(`Job ${j.reference}`, `
-    <div class="btn-row" style="margin-bottom:8px"><span style="flex:1"></span><button class="btn" id="jEditToggle">Edit details</button></div>
+    <div class="job-head">
+      <div>
+        <div class="titles">
+          <span class="pri pri-${j.priority}">${j.priority}</span>
+          <h3>${esc(j.incident_type)}</h3>
+        </div>
+        <div class="dim" style="margin-top:5px">${esc(j.reference)} · ${esc(j.location)}</div>
+      </div>
+      ${active ? `<div class="elapsed"><div class="big" id="jElapsedBig">${fmtElapsed(j.created_at)}</div><div class="lbl">since created</div></div>`
+        : `<span class="status-pill ${j.status === 'CANCELLED' ? 'off' : 'on'}">${esc(j.status)}</span>`}
+    </div>
+    ${j.status === 'CANCELLED' ? '' : `<div class="stepper">${stepper}</div>`}
+
+    <div class="btn-row" style="margin:16px 0 8px"><span style="flex:1"></span><button class="btn" id="jEditToggle">Edit details</button></div>
     <dl class="kv" id="jDetailsView">
-      <dt>Priority</dt><dd><span class="pri pri-${j.priority}">${j.priority}</span></dd>
-      <dt>Status</dt><dd>${esc(j.status)}</dd>
-      <dt>Type</dt><dd>${esc(j.incident_type)}</dd>
-      <dt>Location</dt><dd>${esc(j.location)}</dd>
       ${j.what3words ? `<dt>What3Words</dt><dd class="mono">///${esc(j.what3words)}</dd>` : ''}
       <dt>Caller</dt><dd>${esc(j.caller || '—')}</dd>
       <dt>Detail</dt><dd>${esc(j.description || '—')}</dd>
@@ -587,9 +638,6 @@ function jobModal(j) {
           <span style="flex:1">${esc(r.callsign || r.radio || r.mdt)}${r.acknowledged ? ' ✓' : ''}</span>
           <button class="btn danger" style="padding:0 6px;font-size:11px" data-standdown="${esc(r.radio ? 'r:' + r.radio : 'm:' + r.mdt)}">Stand down</button>
         </div>`).join('') : '—'}</dd>
-      ${timeline.length ? `<dt>Timeline</dt><dd>${timeline.map(([label, at, since]) =>
-        `${label} <span class="dim">${new Date(at).toLocaleTimeString()}${since ? ` (+${fmtElapsed(since, at)})` : ''}</span>`
-      ).join('<br>')}${!['COMPLETED', 'CANCELLED'].includes(j.status) && timeline.length ? `<br>${esc(j.status.replace('_', ' '))} for <span class="dim" id="jElapsed">${fmtElapsed(timeline[timeline.length - 1][1])}</span>` : ''}</dd>` : ''}
     </dl>
     <div id="jDetailsEdit" class="hide">
       <label for="jType">Incident type</label>
@@ -645,8 +693,8 @@ function jobModal(j) {
       await api('POST', `/api/jobs/${j.id}/stand-down`, kind === 'r' ? { radio: id } : { mdt: id });
       closeModal();
     }));
-    if (el('#jElapsed')) {
-      const tick = setInterval(() => { const n = el('#jElapsed'); if (!n) return clearInterval(tick); n.textContent = fmtElapsed(timeline[timeline.length - 1][1]); }, 30000);
+    if (el('#jElapsedBig')) {
+      const tick = setInterval(() => { const n = el('#jElapsedBig'); if (!n) return clearInterval(tick); n.textContent = fmtElapsed(j.created_at); }, 30000);
     }
   });
 }
