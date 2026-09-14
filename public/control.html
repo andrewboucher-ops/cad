@@ -790,7 +790,15 @@ if (!isPopout) {
  * were; only how they're mounted changes.
  * ------------------------------------------------------------------ */
 const glRoot = document.getElementById('glRoot');
-const layout = new GoldenLayout(glRoot);
+// A popout window wipes document.body down to nothing before building its
+// single-panel layout (see the isPopout comment above) — but our glRoot div
+// was a child of that body, so by the time GL rebuilds, glRoot has been
+// detached from the document. Passing it as GL's container here would make
+// GL build the whole popout layout inside that now-invisible orphaned node
+// (GL only falls back to document.body when no container is given at all),
+// which is why a popout used to render nothing after its brief flash of the
+// full dashboard. In the popout, let GL manage body itself.
+const layout = isPopout ? new GoldenLayout() : new GoldenLayout(glRoot);
 
 function mount(container, toolbarHtml, bodyHtml) {
   container.element.style.cssText = 'display:flex;flex-direction:column;height:100%;overflow:hidden';
