@@ -1599,6 +1599,44 @@ function createEmergencyJob(ev) {
   logEvent('job.created', `JOB ${j.reference} CREATED (RED) — ${j.incident_type} ${ev.callsign}`, { job_id: j.id, emergency_id: ev.id });
   return j;
 }
+
+/* ---- AURA alarm forwarding ---------------------------------------------
+ * AURA is Echelon's alarm receiving centre platform — an emergency button
+ * press is exactly what an ARC exists to see, so it's forwarded the moment
+ * one is raised. Fire-and-forget, same as webpush: a slow or failed AURA
+ * send must never block or fail the emergency flow itself, since that's
+ * the one thing here that must never silently not work.
+ *
+ * AURA's POST /api/v1/alarm request body wasn't available when this was
+ * written, so the shape below is a reasonable guess — event_code follows
+ * the SIA standard (PA = panic alarm) since AURA's own integration list
+ * also offers raw SIA DC-09 and Contact-ID sources, suggesting that's the
+ * vocabulary its alarm model speaks internally regardless of transport.
+ * Both the header name for the API key and the field names will likely
+ * need adjusting once this has actually been tried against a real AURA
+ * account — inert (no-op) until both env vars are set, exactly like the
+ * PBX and GuardM8 shared secrets above. */
+const AURA_ALARM_URL = process.env.AURA_ALARM_URL || '';
+const AURA_API_KEY = process.env.AURA_API_KEY || '';
+function forwardEmergencyToAura(ev) {
+  if (!AURA_ALARM_URL || !AURA_API_KEY) return;
+  const body = {
+    event_code: 'PA', event_type: 'EMERGENCY', priority: 'CRITICAL',
+    reference: `CCCS-${ev.id}`, source: 'CCCS',
+    callsign: ev.callsign, issi: ev.issi || null, mdt_code: ev.mdt_code || null,
+    description: 'Emergency button activated',
+    lat: ev.lat ?? null, lon: ev.lon ?? null,
+    timestamp: ev.activated_at,
+  };
+  fetch(AURA_ALARM_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': AURA_API_KEY },
+    body: JSON.stringify(body),
+  }).then((r) => {
+    if (!r.ok) console.warn(`[cccs] AURA alarm forward rejected (HTTP ${r.status}) for emergency ${ev.id}`);
+  }).catch((e) => console.warn(`[cccs] AURA alarm forward failed for emergency ${ev.id}:`, e.message));
+}
+
 route('POST', '/api/emergency', ALL, ({ body, user }) => {
   const radio = user.role === 'RADIO_USER' ? db.radios.find((r) => r.id === user.radio_id) : (body.radio ? findRadio(body.radio) : null);
   const mdt = user.role === 'MDT_USER' ? db.mdts.find((m) => m.id === user.mdt_id) : (body.mdt ? findMdt(body.mdt) : null);
@@ -1623,6 +1661,7 @@ route('POST', '/api/emergency', ALL, ({ body, user }) => {
   createEmergencyJob(ev);
   broadcast('emergency.activated', ev);
   pushToRoles(CONTROL, { title: 'EMERGENCY', body: `${ev.callsign} (${ev.issi || ev.mdt_code})`, url: '/control.html', tag: 'cccs-emergency' });
+  forwardEmergencyToAura(ev);
   store.flushNow();
   logEvent('emergency.activated', `!!! EMERGENCY — ${ev.callsign} (${ev.issi || ev.mdt_code})`, { emergency_id: ev.id, radio_id: ev.radio_id, mdt_id: ev.mdt_id });
   return { __status: 201, __body: ev };
