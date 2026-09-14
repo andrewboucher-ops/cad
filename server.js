@@ -1691,6 +1691,24 @@ function mqttPublishNow(topic, payload) {
   return true;
 }
 
+/* ---- SIA-format encoding -------------------------------------------------
+ * Confirmed with the AURA side: the arc/rx/cccs provider parses raw SIA-
+ * format signals, not JSON — every JSON attempt landed as an unparsed
+ * signal with no account attached. An initial attempt at the full SIA
+ * DC-09-2007 wire packet (CRC/length/"SIA-DCS" framing) still didn't
+ * parse; what actually works was confirmed by example — a genuine
+ * "Automatic (periodic) test" event relayed through the same MQTT bridge
+ * from another receiver came through as exactly:
+ *   S016[#7000|Nri0/RP0000]
+ * i.e. this relay's own lighter framing (S + 3-digit sequence) around the
+ * SIA data block, not the full DC-09 packet. Matched here exactly rather
+ * than guessed. */
+let siaSeq = 0;
+function buildSia({ acct, data }) {
+  siaSeq = (siaSeq % 999) + 1;
+  return `S${String(siaSeq).padStart(3, '0')}[#${acct}|${data}]`;
+}
+
 /* ---- AURA alarm forwarding ---------------------------------------------
  * AURA is Echelon's alarm receiving centre platform — an emergency button
  * press is exactly what an ARC exists to see, so it's forwarded the moment
@@ -1698,46 +1716,39 @@ function mqttPublishNow(topic, payload) {
  * endpoint wasn't reachable when that was tried — see git history).
  * Fire-and-forget: a slow or failed publish must never block or fail the
  * emergency flow itself, since that's the one thing here that must never
- * silently not work.
- *
- * The topic below is a guess (AURA's actual MQTT source "RX topic" wasn't
- * available) — confirm it against AURA's integration-source config and
- * adjust MQTT_TOPIC if it differs. Inert until MQTT_HOST is set. */
+ * silently not work. */
 const MQTT_HOST = process.env.MQTT_HOST || '';
 const MQTT_PORT = Number(process.env.MQTT_PORT || 1883);
 const MQTT_USERNAME = process.env.MQTT_USERNAME || '';
 const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
-const MQTT_TOPIC = process.env.MQTT_TOPIC || 'guardm8/tcp/cccs';
+const MQTT_TOPIC = process.env.MQTT_TOPIC || 'arc/rx/cccs';
+const AURA_ACCT = process.env.AURA_ACCT || '8581'; // Echelon Control Centre
 const MQTT_HEARTBEAT_S = Number(process.env.MQTT_HEARTBEAT_S || 60);
-// AURA doesn't recognise this payload shape yet — confirmed live, it shows
-// up as an unacknowledged "Unparsed signal" alarm card, P3/OTHER, one per
-// message. That's fine to discover once; it is NOT fine every 60 seconds
-// forever, and it's actively wrong for a real emergency (a panic press
-// showing as a low-priority "OTHER" alarm is worse than not sending it).
-// So: keep the connection itself up (harmless — AURA never sees anything
-// from bare CONNECT/PINGREQ), but hold the actual publishes behind this
-// flag until AURA's real expected fields are known. Flip to true (or set
-// MQTT_AURA_PUBLISH_ENABLED=1) once that's confirmed.
+// JSON over this topic was confirmed not to parse at all (see above) — hold
+// publishing behind this flag until a real SIA DC-09 send has been checked
+// against AURA at least once, same reasoning as before: a wrong guess here
+// creates a stale alarm card in a live queue, not a silent failure.
 const MQTT_AURA_PUBLISH_ENABLED = process.env.MQTT_AURA_PUBLISH_ENABLED === '1';
 if (MQTT_HOST) {
   mqttStart({ host: MQTT_HOST, port: MQTT_PORT, username: MQTT_USERNAME || undefined, password: MQTT_PASSWORD || undefined, clientId: 'cccs' });
   if (MQTT_AURA_PUBLISH_ENABLED) {
     setInterval(() => {
-      mqttPublishNow(MQTT_TOPIC, JSON.stringify({ event_code: 'heartbeat', source: 'CCCS', timestamp: new Date().toISOString() }));
+      mqttPublishNow(MQTT_TOPIC, buildSia({ acct: AURA_ACCT, data: 'Nri0/RP0000' })); // RP = SIA "automatic test report" — the standard periodic test/heartbeat code, not a real alarm. Matches the confirmed-working example exactly.
     }, MQTT_HEARTBEAT_S * 1000).unref?.();
   }
 }
+// SIA's zone field is numeric-only (4 digits in every confirmed example) —
+// a callsign like "P101" doesn't fit as-is, so use its digits: "P101" -> 0101.
+// Falls back to 0000 for a callsign with no digits at all.
+function zoneFromCallsign(callsign) {
+  const digits = String(callsign || '').replace(/\D/g, '');
+  return (digits || '0').slice(-4).padStart(4, '0');
+}
 function forwardEmergencyToAura(ev) {
   if (!MQTT_HOST || !MQTT_AURA_PUBLISH_ENABLED) return;
-  const payload = JSON.stringify({
-    event_code: 'PA', event_type: 'EMERGENCY', priority: 'CRITICAL',
-    reference: `CCCS-${ev.id}`, source: 'CCCS',
-    callsign: ev.callsign, issi: ev.issi || null, mdt_code: ev.mdt_code || null,
-    description: 'Emergency button activated',
-    lat: ev.lat ?? null, lon: ev.lon ?? null,
-    timestamp: ev.activated_at,
-  });
-  if (!mqttPublishNow(MQTT_TOPIC, payload)) console.warn(`[cccs] AURA MQTT publish skipped for emergency ${ev.id} — not connected to broker`);
+  const zone = zoneFromCallsign(ev.callsign);
+  const packet = buildSia({ acct: AURA_ACCT, data: `Nri0/PA${zone}` }); // PA = SIA panic alarm
+  if (!mqttPublishNow(MQTT_TOPIC, packet)) console.warn(`[cccs] AURA MQTT publish skipped for emergency ${ev.id} — not connected to broker`);
 }
 
 route('POST', '/api/emergency', ALL, ({ body, user }) => {

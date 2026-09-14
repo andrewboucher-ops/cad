@@ -82,6 +82,7 @@
 </head>
 <body>
 <div class="handset">
+  <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon" style="width:100%;height:auto;margin-bottom:2px">
   <div class="r-topbar">
     <span class="side left"><svg class="wifi" width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M2 8.5a16 16 0 0120 0M5.5 12.5a11 11 0 0113 0M9 16.5a5.5 5.5 0 016 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="20" r="1.4" fill="currentColor"/></svg> <span class="link-net" id="net">link down</span></span>
     <span class="r-logo" id="rlogo" title="Press and hold for settings">RADIO</span>
@@ -107,8 +108,6 @@
   <button class="r-pttbar" id="ptt"><span id="cs">----</span></button>
 
   <button class="btn danger emg" id="bEmg">EMERGENCY</button>
-
-  <section class="panel"><header>Radio log</header><div class="body log" id="log" style="max-height:190px"></div></section>
 </div>
 
 <div id="modalHost"></div>
@@ -140,9 +139,11 @@ const me = CCCS.getSession().user;
 const qIssi = new URLSearchParams(location.search).get('issi');
 let radio = null, currentCall = null, currentJob = null, txing = false;
 const log = (line) => {
+  const host = el('#log');
+  if (!host) return;
   const d = document.createElement('div');
   d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`;
-  el('#log').prepend(d);
+  host.prepend(d);
 };
 
 const AVL_COLOUR = {

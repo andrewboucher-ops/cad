@@ -29,7 +29,8 @@
   .mdt-screen { flex: 1; background: #eef1f6; display: flex; flex-direction: column; }
 
   .mdt-topbar { background: linear-gradient(120deg,#1d4ed8,#2f6fed); color: #fff; padding: 8px 14px; display: flex; align-items: center; gap: 10px; }
-  .mdt-topbar .wifi { opacity: .9; }
+  .mdt-topbar .mdt-logo { height: 18px; width: auto; flex: none; }
+  .mdt-topbar .wifi { opacity: .9; flex: none; }
   .mdt-topbar .mid { flex: 1; text-align: center; font-size: 11px; line-height: 1.3; }
   .mdt-topbar .mid .ident { font-weight: 700; letter-spacing: .04em; }
   .mdt-topbar .clock { font-family: var(--mono); font-size: 12px; }
@@ -113,6 +114,7 @@
 <div class="mdt-shell">
   <div class="mdt-screen">
     <div class="mdt-topbar">
+      <img class="mdt-logo" src="/assets/echelon-wordmark.png" alt="Echelon">
       <svg class="wifi" width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M2 8.5a16 16 0 0120 0M5.5 12.5a11 11 0 0113 0M9 16.5a5.5 5.5 0 016 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="20" r="1.4" fill="currentColor"/></svg>
       <div class="mid">
         <div id="clock" class="clock">--:--:--</div>
@@ -125,7 +127,6 @@
       <div class="mdt-col left">
         <button class="mdt-key chan" data-view="usr" title="Terminal &amp; call sign">CHAN</button>
         <button class="mdt-key" data-view="crew" title="Crew sign in/out">USR<span class="crew-badge" id="crewCount" hidden>0</span></button>
-        <button class="mdt-key" data-view="rpt" title="Activity log">RPT</button>
         <div class="grow"></div>
         <button class="mdt-key small" id="btnFunc1" title="Retry the link now">FUNC1</button>
         <button class="mdt-key small emg" id="bEmg" title="Raise an emergency">EMERG</button>
@@ -179,9 +180,6 @@
           </div>
         </div></div>
 
-        <div class="mdt-view hide" id="view-rpt"><div class="inner">
-          <section class="panel"><header>Terminal log</header><div class="body log" id="log" style="max-height:280px"></div></section>
-        </div></div>
       </div>
 
       <div class="mdt-col right" id="statusCol"></div>
@@ -217,7 +215,7 @@ el('#terminalSignOut').onclick = () => {
 };
 
 /* ---------- view switching: CAD default, everything else is a mode swap ---------- */
-const VIEWS = ['cad', 'map', 'txt', 'usr', 'crew', 'rpt'];
+const VIEWS = ['cad', 'map', 'txt', 'usr', 'crew'];
 function showView(name) {
   VIEWS.forEach((v) => el('#view-' + v).classList.toggle('hide', v !== name));
   CCCS.els('[data-view]').forEach((b) => b.classList.toggle('mode-active', b.dataset.view === name));
@@ -232,7 +230,9 @@ showView('cad');
 const qCode = new URLSearchParams(location.search).get('mdt');
 let mdt = null, job = null;
 const log = (line) => {
-  const d = document.createElement('div'); d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`; el('#log').prepend(d);
+  const host = el('#log');
+  if (!host) return;
+  const d = document.createElement('div'); d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`; host.prepend(d);
 };
 
 const mdtMap = CCCS.makeMap(el('#mdtMap'), { zoom: 14, theme: 'light' });
