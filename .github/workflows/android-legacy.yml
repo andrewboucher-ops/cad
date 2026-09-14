@@ -32,7 +32,16 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        # Not android-actions/setup-android@v3: it unconditionally tries to
+        # install the long-deprecated "tools" package as part of its own
+        # setup, and Google has since pruned that package from the SDK
+        # repository listing entirely -- the action now hard-fails on every
+        # run before touching anything of ours. ubuntu-latest already ships
+        # a licensed SDK at $ANDROID_HOME, so just accept licenses and pull
+        # the one platform this project needs directly.
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-33"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
