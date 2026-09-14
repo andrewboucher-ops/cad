@@ -40,8 +40,9 @@ jobs:
         # a licensed SDK at $ANDROID_HOME, so just accept licenses and pull
         # the one platform this project needs directly.
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "platforms;android-33"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-33"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
