@@ -710,7 +710,10 @@ function authFrom(req, url) {
   return db.users.find((u) => u.id === payload.sub) || null;
 }
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json',
+  '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
+};
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -727,7 +730,10 @@ const server = http.createServer(async (req, res) => {
     if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) {
       const chunks = [];
       let size = 0;
-      for await (const c of req) { size += c.length; if (size > 1e6) { return send(413, { error: 'payload too large' }); } chunks.push(c); }
+      // 1MB is plenty for every route except on-scene photo uploads (base64
+      // JSON, ~33% larger than the source file) — raised to accommodate a
+      // real phone photo rather than adding a second, route-specific limit.
+      for await (const c of req) { size += c.length; if (size > 9e6) { return send(413, { error: 'payload too large' }); } chunks.push(c); }
       const raw = Buffer.concat(chunks).toString();
       if (raw) { try { body = JSON.parse(raw); } catch { return send(400, { error: 'invalid JSON body' }); } }
     }
@@ -1393,6 +1399,29 @@ route('GET', '/api/jobs', ALL, ({ query }) => {
   if (query.get('status')) jobs = jobs.filter((j) => j.status === query.get('status').toUpperCase());
   return jobs;
 });
+/* On-scene checklist — every job gets one, instantiated from the site's own
+ * template if it has one configured, else this fixed default. A site with
+ * no template yet (most GuardM8 sites, until someone sets one up in admin)
+ * still gets a sane checklist rather than none at all. Each instantiated
+ * item carries its own completion state; the site's template itself never
+ * does — that's what makes it reusable across jobs. */
+const DEFAULT_CHECKLIST_TEMPLATE = [
+  { title: 'Call control room on arrival', instructions: 'Contact the site’s control room to confirm your arrival on site.' },
+  { title: 'Entrance check', instructions: 'Check the site entry point for signs of unauthorised entry.' },
+  { title: 'Perimeter check', instructions: 'Complete a perimeter check of the site for any signs of damage or forced entry.' },
+  { title: 'Risks on site', instructions: 'Note any risks or hazards observed on site.' },
+  { title: 'Report', instructions: 'Provide a detailed report of the site attendance.' },
+  { title: 'Before departing', instructions: 'Contact the site’s control room to obtain permission to depart.' },
+  { title: 'Departure', instructions: 'Ensure the site is secure on departure.' },
+];
+function instantiateChecklist(site) {
+  const template = site && site.checklist && site.checklist.length ? site.checklist : DEFAULT_CHECKLIST_TEMPLATE;
+  return template.map((item) => ({
+    id: crypto.randomUUID(), title: item.title, instructions: item.instructions || '',
+    status: 'PENDING', notes: '', completed_by: null, completed_at: null,
+  }));
+}
+
 route('POST', '/api/jobs', CONTROL, ({ body, user }) => {
   const priority = String(body.priority || 'GREEN').toUpperCase();
   if (!PRIORITIES.includes(priority)) throw httpError(400, 'invalid priority');
@@ -1408,6 +1437,7 @@ route('POST', '/api/jobs', CONTROL, ({ body, user }) => {
     description: body.description || '', caller: body.caller || '', required_resources: Number(body.required_resources || 1),
     what3words: String(body.what3words || '').replace(/^\/+/, '').trim(),
     notes: body.notes || '', status: 'CREATED', created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    checklist: instantiateChecklist(site), media: [],
   };
   db.jobs.push(j);
   broadcast('job.created', publicJob(j));
@@ -1455,6 +1485,7 @@ route('POST', '/api/integrations/guardm8/jobs', null, ({ body, req }) => {
     what3words: String(body.what3words || '').replace(/^\/+/, '').trim(),
     notes: body.notes || '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     external_source: 'guardm8', external_ref: externalRef,
+    checklist: instantiateChecklist(site), media: [],
   };
   db.jobs.push(j);
   broadcast('job.created', publicJob(j));
@@ -1521,17 +1552,121 @@ route('POST', '/api/jobs/:id/ack', ALL, ({ params, user, body }) => {
   logEvent('job.acknowledged', `${who} ACKNOWLEDGED JOB ${j.reference}`, { job_id: j.id });
   return publicJob(j);
 });
+/* ---- Resolution report ---------------------------------------------- *
+ * Built the moment a job completes and kept on the job itself (so it shows
+ * up in job history in the control room and the incidents log without
+ * needing email to have worked), then emailed out to the site's own
+ * contact and RESOLUTION_REPORT_CC via Microsoft Graph, app-only — inert
+ * until MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET/MS_GRAPH_SENDER are all
+ * set, same gating pattern as the AURA integration above. */
+function escHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+/* Email clients don't send an Authorization header for embedded images, and
+ * most either block external image loading by default or strip data: URIs
+ * outright — so the report's images are referenced as cid: and attached
+ * inline, the one embedding method that actually renders reliably across
+ * real mail clients. buildResolutionReportHtml() always returns the cid:
+ * form; it's the email body verbatim, not something a browser can render
+ * standalone, which is fine since job history in the app renders its own
+ * view straight from job.checklist/job.media (with authenticated URLs)
+ * rather than reusing this HTML. */
+function buildResolutionReportHtml(job) {
+  const site = job.site_id ? db.sites.find((s) => s.id === job.site_id) : null;
+  const fmt = (iso) => (iso ? new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London' }) : '—');
+  const timeline = [
+    ['Job created', job.created_at], ['Dispatched', job.dispatched_at], ['Acknowledged', job.acknowledged_at],
+    ['En route', job.en_route_at], ['On scene', job.on_scene_at], ['Completed', job.completed_at],
+  ].filter(([, t]) => t);
+  const checklistRows = (job.checklist || []).map((item) => `
+    <tr>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e5ea;vertical-align:top">
+        <strong>${escHtml(item.title)}</strong><br><span style="color:#6b7280;font-size:13px">${escHtml(item.instructions)}</span>
+      </td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e5ea;vertical-align:top;white-space:nowrap">
+        ${item.status === 'COMPLETE' ? '✅ Complete' : '⬜ Not completed'}<br>
+        <span style="color:#6b7280;font-size:12px">${item.completed_at ? fmt(item.completed_at) : ''}</span>
+      </td>
+      <td style="padding:8px 12px;border-bottom:1px solid #e2e5ea;vertical-align:top">${escHtml(item.notes || '—')}</td>
+    </tr>`).join('');
+  const photos = (job.media || []).map((m) => `
+    <div style="display:inline-block;margin:6px;text-align:center">
+      <img src="cid:media-${m.id}" style="width:180px;height:135px;object-fit:cover;border-radius:6px;border:1px solid #e2e5ea">
+      <div style="font-size:11px;color:#6b7280;margin-top:4px">${fmt(m.taken_at)}</div>
+    </div>`).join('');
+  return `<!doctype html><html><body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
+    <div style="max-width:640px;margin:0 auto;padding:24px 20px">
+      <img src="cid:echelon-wordmark" style="height:34px;margin-bottom:20px">
+      <h1 style="font-size:20px;margin:0 0 4px">Resolution report — ${escHtml(job.reference)}</h1>
+      <p style="color:#6b7280;margin:0 0 20px">${escHtml(job.incident_type)} · ${escHtml(job.location)}</p>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px">
+        <tr><td style="padding:4px 0;color:#6b7280;width:140px">Priority</td><td>${escHtml(job.priority)}</td></tr>
+        <tr><td style="padding:4px 0;color:#6b7280">Site</td><td>${escHtml(site ? site.name : '—')}</td></tr>
+        <tr><td style="padding:4px 0;color:#6b7280">Description</td><td>${escHtml(job.description || '—')}</td></tr>
+        <tr><td style="padding:4px 0;color:#6b7280">Notes</td><td>${escHtml(job.notes || '—')}</td></tr>
+      </table>
+      <h2 style="font-size:15px;margin:0 0 8px">Timeline</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:13px">
+        ${timeline.map(([label, t]) => `<tr><td style="padding:3px 0;color:#6b7280;width:140px">${label}</td><td>${fmt(t)}</td></tr>`).join('')}
+      </table>
+      <h2 style="font-size:15px;margin:0 0 8px">Checklist</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
+        ${checklistRows || '<tr><td style="padding:8px 12px;color:#6b7280">No checklist on this job.</td></tr>'}
+      </table>
+      ${photos ? `<h2 style="font-size:15px;margin:0 0 8px">Photos</h2><div>${photos}</div>` : ''}
+      <p style="color:#9ca3af;font-size:11px;margin-top:32px">Sent automatically by CCCS — comms.echeloncic.com</p>
+    </div>
+  </body></html>`;
+}
+const MS_GRAPH_SENDER = process.env.MS_GRAPH_SENDER || '';
+const RESOLUTION_REPORT_CC = process.env.RESOLUTION_REPORT_CC || '';
+const GRAPH_MAIL_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && MS_GRAPH_SENDER);
+let graphTokenCache = { token: null, exp: 0 };
+async function getGraphAppToken() {
+  if (graphTokenCache.token && Date.now() < graphTokenCache.exp - 30000) return graphTokenCache.token;
+  const res = await fetch(`https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/token`, {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: MS_CLIENT_ID, client_secret: MS_CLIENT_SECRET, scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials' }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || 'graph token request failed');
+  graphTokenCache = { token: data.access_token, exp: Date.now() + data.expires_in * 1000 };
+  return data.access_token;
+}
+async function sendResolutionReportEmail(job, html) {
+  if (!GRAPH_MAIL_ENABLED) { console.warn(`[cccs] resolution report for ${job.reference} not emailed — Graph mail not configured`); return; }
+  const site = job.site_id ? db.sites.find((s) => s.id === job.site_id) : null;
+  const recipients = [site && site.contact_email, RESOLUTION_REPORT_CC].filter(Boolean);
+  if (!recipients.length) { console.warn(`[cccs] resolution report for ${job.reference} not emailed — no recipient configured`); return; }
+  try {
+    const attachments = [{
+      '@odata.type': '#microsoft.graph.fileAttachment', name: 'echelon-wordmark.png', contentId: 'echelon-wordmark', isInline: true,
+      contentType: 'image/png', contentBytes: fs.readFileSync(path.join(__dirname, 'public', 'assets', 'echelon-wordmark.png')).toString('base64'),
+    }];
+    for (const m of job.media || []) {
+      const file = path.join(mediaDir(job.id), path.basename(m.url));
+      if (!fs.existsSync(file)) continue;
+      attachments.push({
+        '@odata.type': '#microsoft.graph.fileAttachment', name: path.basename(file), contentId: `media-${m.id}`, isInline: true,
+        contentType: MIME[path.extname(file)] || 'application/octet-stream', contentBytes: fs.readFileSync(file).toString('base64'),
+      });
+    }
+    const token = await getGraphAppToken();
+    const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ message: { subject: `Resolution report — ${job.reference}`, body: { contentType: 'HTML', content: html }, toRecipients: recipients.map((address) => ({ emailAddress: { address } })), attachments } }),
+    });
+    if (!res.ok) console.warn(`[cccs] resolution report email failed for ${job.reference}:`, res.status, await res.text());
+    else logEvent('job.report_emailed', `RESOLUTION REPORT EMAILED FOR ${job.reference}`, { job_id: job.id, to: recipients });
+  } catch (e) { console.warn(`[cccs] resolution report email failed for ${job.reference}:`, e.message); }
+}
+
 route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
   if (body.status) {
     const s = String(body.status).toUpperCase();
     if (!JOB_STATES.includes(s)) throw httpError(400, 'invalid job status');
-    if (['RADIO_USER', 'MDT_USER'].includes(user.role)) {
-      const mine = db.job_assignments.some((a) => a.job_id === j.id && (
-        (user.role === 'RADIO_USER' && user.radio_id && a.radio_id === user.radio_id) ||
-        (user.role === 'MDT_USER' && user.mdt_id && a.mdt_id === user.mdt_id)));
-      if (!mine) throw httpError(403, 'job not assigned to you');
-    }
+    assertJobAccess(j, user);
     j.status = s;
     stampJobStatus(j, s);
     if (['COMPLETED', 'CANCELLED'].includes(s)) {
@@ -1539,6 +1674,11 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
         if (a.radio_id) { const r = db.radios.find((x) => x.id === a.radio_id); if (r) { r.job_id = null; if (r.connected && !r.emergency) setRadioStatus(r, 'AVAILABLE', 'job closed'); } }
         if (a.mdt_id) { const m = db.mdts.find((x) => x.id === a.mdt_id); if (m) m.job_id = null; }
       }
+    }
+    if (s === 'COMPLETED') {
+      j.resolution_report_html = buildResolutionReportHtml(j);
+      sendResolutionReportEmail(j, j.resolution_report_html);
+      logEvent('job.report_generated', `RESOLUTION REPORT GENERATED FOR ${j.reference}`, { job_id: j.id });
     }
   }
   if (body.notes !== undefined) j.notes = body.notes;
@@ -1556,6 +1696,74 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   logEvent('job.status_changed', `JOB ${j.reference} → ${j.status}`, { job_id: j.id });
   return publicJob(j);
 });
+/** Only the assigned radio/MDT (or control) may touch a job's checklist —
+ * same "is this mine" check used by the general job PATCH above, pulled out
+ * since both the checklist and media routes need it. */
+function assertJobAccess(j, user) {
+  if (isControlRole(user.role)) return;
+  const mine = db.job_assignments.some((a) => a.job_id === j.id && (
+    (user.role === 'RADIO_USER' && user.radio_id && a.radio_id === user.radio_id) ||
+    (user.role === 'MDT_USER' && user.mdt_id && a.mdt_id === user.mdt_id)));
+  if (!mine) throw httpError(403, 'job not assigned to you');
+}
+route('PATCH', '/api/jobs/:id/checklist/:itemId', ALL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  assertJobAccess(j, user);
+  const item = (j.checklist || []).find((x) => x.id === params.itemId); if (!item) throw httpError(404, 'checklist item not found');
+  if (body.status) {
+    const s = String(body.status).toUpperCase();
+    if (!['PENDING', 'COMPLETE'].includes(s)) throw httpError(400, 'invalid checklist status');
+    item.status = s;
+    if (s === 'COMPLETE') { item.completed_at = new Date().toISOString(); item.completed_by = user.display_name; }
+    else { item.completed_at = null; item.completed_by = null; }
+  }
+  if (body.notes !== undefined) item.notes = String(body.notes).slice(0, 2000);
+  j.updated_at = new Date().toISOString();
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.checklist_updated', `${item.status === 'COMPLETE' ? 'COMPLETED' : 'UPDATED'} "${item.title}" on JOB ${j.reference}`, { job_id: j.id });
+  return publicJob(j);
+});
+
+// Same writable directory the SQLite store uses (see store.js) — the
+// service's systemd unit runs with ProtectSystem=strict, which makes
+// everything else, /opt/cccs/public included, read-only at runtime.
+const UPLOADS_DIR = path.join(path.dirname(process.env.DATA_FILE || path.join(__dirname, 'data', 'cccs.db')), 'uploads');
+const mediaDir = (jobId) => path.join(UPLOADS_DIR, String(jobId));
+const MEDIA_MIME_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' };
+route('POST', '/api/jobs/:id/media', ALL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  assertJobAccess(j, user);
+  const ext = MEDIA_MIME_EXT[body.mimetype];
+  if (!ext) throw httpError(400, 'mimetype must be image/jpeg, image/png or image/webp');
+  if (!body.data) throw httpError(400, 'data (base64) required');
+  if (body.checklist_item_id && !(j.checklist || []).some((x) => x.id === body.checklist_item_id)) throw httpError(404, 'checklist item not found');
+  const bytes = Buffer.from(body.data, 'base64');
+  if (bytes.length > 8e6) throw httpError(413, 'photo too large');
+  const dir = mediaDir(j.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const mediaId = crypto.randomUUID();
+  const filename = `${mediaId}${ext}`;
+  fs.writeFileSync(path.join(dir, filename), bytes);
+  const media = {
+    id: mediaId, url: `/api/jobs/${j.id}/media/${mediaId}`, filename, caption: String(body.caption || '').slice(0, 200),
+    checklist_item_id: body.checklist_item_id || null, taken_by: user.display_name, taken_at: new Date().toISOString(),
+  };
+  j.media = j.media || [];
+  j.media.push(media);
+  j.updated_at = new Date().toISOString();
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.media_added', `PHOTO ADDED TO JOB ${j.reference}`, { job_id: j.id });
+  return { __status: 201, __body: media };
+});
+route('GET', '/api/jobs/:id/media/:mediaId', ALL, ({ params, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  assertJobAccess(j, user);
+  const m = (j.media || []).find((x) => x.id === params.mediaId); if (!m) throw httpError(404, 'photo not found');
+  const file = path.join(mediaDir(j.id), m.filename);
+  if (!fs.existsSync(file)) throw httpError(404, 'photo file missing');
+  return { __body: fs.readFileSync(file), __headers: { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'private, max-age=86400' } };
+});
+
 route('POST', '/api/jobs/:id/stand-down', CONTROL, ({ params, body }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
   const r = body.radio ? findRadio(body.radio) : null;
@@ -1592,7 +1800,7 @@ function createEmergencyJob(ev) {
     site_id: null, keyholder: '', lat: ev.lat, lon: ev.lon,
     description: '', caller: ev.callsign, required_resources: 2, what3words: '',
     notes: '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-    emergency_id: ev.id,
+    emergency_id: ev.id, checklist: [], media: [],
   };
   db.jobs.push(j);
   ev.job_id = j.id;
@@ -2157,10 +2365,46 @@ route('POST', '/api/sites', CONTROL, ({ body }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');
   if (db.sites.some((x) => x.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'site already exists');
-  const site = { id: nextId('sites'), name, address: body.address || '', lat: Number(body.lat) || null, lon: Number(body.lon) || null, keyholder: body.keyholder || '', contract: 'ACTIVE' };
+  const site = {
+    id: nextId('sites'), name, address: body.address || '', lat: Number(body.lat) || null, lon: Number(body.lon) || null,
+    keyholder: body.keyholder || '', contact_email: body.contact_email || '', contract: 'ACTIVE', checklist: [],
+  };
   db.sites.push(site);
   logEvent('site.created', `SITE ${name} ADDED`);
   return { __status: 201, __body: site };
+});
+route('PATCH', '/api/sites/:id', ADMIN, ({ params, body }) => {
+  const site = db.sites.find((x) => x.id === Number(params.id));
+  if (!site) throw httpError(404, 'site not found');
+  if ('name' in body) {
+    const name = String(body.name || '').trim();
+    if (!name) throw httpError(400, 'name required');
+    if (db.sites.some((x) => x.id !== site.id && x.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'site already exists');
+    site.name = name;
+  }
+  if ('address' in body) site.address = body.address || '';
+  if ('lat' in body) site.lat = body.lat === null || body.lat === '' ? null : Number(body.lat);
+  if ('lon' in body) site.lon = body.lon === null || body.lon === '' ? null : Number(body.lon);
+  if ('keyholder' in body) site.keyholder = body.keyholder || '';
+  if ('contact_email' in body) site.contact_email = body.contact_email || '';
+  if ('checklist' in body) {
+    if (!Array.isArray(body.checklist)) throw httpError(400, 'checklist must be an array');
+    site.checklist = body.checklist.map((item) => ({
+      id: item.id || crypto.randomUUID(), title: String(item.title || '').trim(), instructions: String(item.instructions || '').trim(),
+    })).filter((item) => item.title);
+  }
+  logEvent('site.updated', `SITE ${site.name} UPDATED`, { site_id: site.id });
+  return site;
+});
+route('DELETE', '/api/sites/:id', ADMIN, ({ params }) => {
+  const site = db.sites.find((x) => x.id === Number(params.id));
+  if (!site) throw httpError(404, 'site not found');
+  if (db.jobs.some((j) => j.site_id === site.id && !['COMPLETED', 'CANCELLED'].includes(j.status))) {
+    throw httpError(409, 'site has an open job — resolve or cancel it first');
+  }
+  db.sites = db.sites.filter((x) => x.id !== site.id);
+  logEvent('site.deleted', `SITE ${site.name} DELETED`, { site_id: site.id });
+  return { ok: true };
 });
 
 /* ------------------------------------------------------------------ *
