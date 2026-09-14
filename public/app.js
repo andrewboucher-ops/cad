@@ -693,6 +693,37 @@ const CCCS = (() => {
         }
         return ok;
       },
+      /** Diagnostic only — walk every live peer connection's real WebRTC
+       * stats (candidate-pair path, RTT, jitter, loss) instead of guessing
+       * at audio quality problems from the outside. Call from devtools as
+       * `await window.__cccsAudio.debugStats()` during a live, bad-sounding
+       * call. */
+      async debugStats() {
+        const out = [];
+        for (const [addr, pc] of peers) {
+          const stats = await pc.getStats();
+          let pair = null, inbound = null, outbound = null, localType = null, remoteType = null;
+          stats.forEach((r) => {
+            if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || pair === null)) pair = r;
+            if (r.type === 'inbound-rtp' && r.kind === 'audio') inbound = r;
+            if (r.type === 'outbound-rtp' && r.kind === 'audio') outbound = r;
+          });
+          if (pair) stats.forEach((r) => {
+            if (r.id === pair.localCandidateId) localType = r.candidateType;
+            if (r.id === pair.remoteCandidateId) remoteType = r.candidateType;
+          });
+          out.push({
+            addr, connectionState: pc.connectionState,
+            path: pair ? `${localType} -> ${remoteType}` : 'no succeeded pair',
+            rttMs: pair && pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) : null,
+            availableOutgoingBitrateKbps: pair && pair.availableOutgoingBitrate ? Math.round(pair.availableOutgoingBitrate / 1000) : null,
+            inbound: inbound ? { packetsLost: inbound.packetsLost, packetsReceived: inbound.packetsReceived, jitterMs: inbound.jitter != null ? Math.round(inbound.jitter * 1000) : null } : null,
+            outbound: outbound ? { packetsSent: outbound.packetsSent } : null,
+          });
+        }
+        console.table(out);
+        return out;
+      },
     };
   }
 

@@ -969,6 +969,7 @@ bus = CCCS.bus((up) => {
 });
 
 const audio = CCCS.audio(bus);
+window.__cccsAudio = audio; // devtools: await window.__cccsAudio.debugStats()
 audio.onPeerAudio = (addr, state) => {
   const b = el('#audioBlocked');
   if (!b) return;
