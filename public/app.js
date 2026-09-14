@@ -329,8 +329,14 @@ const CCCS = (() => {
   /* ---- SVG map (offline-capable; swap for Leaflet/OSM in production) ---- */
   /**
    * Real streets, not an abstract grid — dispatchers read positions against
-   * actual roads and landmarks. Esri's Dark Gray Canvas is an actual dark
-   * basemap (not a CSS filter hack over light tiles) and needs no API key.
+   * actual roads and landmarks. Esri's free Dark/Light Gray Canvas looked
+   * right but is genuinely capped at zoom 16 — server confirmed to return
+   * byte-identical tiles for z16 and z18, i.e. an upscaled placeholder, not
+   * more detail — so zooming in on an actual incident address turned to
+   * mush exactly when precision mattered most. OSM's own tiles carry real
+   * detail to z19; a hue-rotated invert() gets a genuinely dark map out of
+   * them without an API key, tuned to avoid the "water turns orange" look
+   * naive invert() filters get from CSS filter order alone.
    */
   function makeMap(container, opts = {}) {
     if (typeof L === 'undefined') throw new Error('Leaflet is not loaded — include leaflet.js before app.js');
@@ -338,26 +344,18 @@ const CCCS = (() => {
     const mapDiv = document.createElement('div');
     mapDiv.style.cssText = 'width:100%;height:100%';
     container.appendChild(mapDiv);
+    if (opts.theme !== 'light') mapDiv.classList.add('map-dark-tiles');
 
     const map = L.map(mapDiv, { attributionControl: true, preferCanvas: true })
       .setView(opts.center || [53.6152, -0.2210], opts.zoom || 12); // default: Immingham
 
-    // Two free base layers, no API key or billing for either. Dark Gray for
-    // the ops room; Light Gray for bright vehicle screens (opts.theme) — same
-    // free Esri service family as the satellite layer below.
     map.createPane('street').style.zIndex = 200;
     map.createPane('satellite').style.zIndex = 200;
 
-    const canvasName = opts.theme === 'light' ? 'World_Light_Gray' : 'World_Dark_Gray';
-    const streetLayer = L.layerGroup([
-      L.tileLayer(`https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/${canvasName}_Base/MapServer/tile/{z}/{y}/{x}`, {
-        pane: 'street', maxZoom: 16, maxNativeZoom: 16,
-        attribution: '&copy; <a href="https://www.esri.com">Esri</a>',
-      }),
-      L.tileLayer(`https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/${canvasName}_Reference/MapServer/tile/{z}/{y}/{x}`, {
-        pane: 'street', maxZoom: 16, maxNativeZoom: 16,
-      }),
-    ]);
+    const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      pane: 'street', maxZoom: 19, subdomains: 'abc',
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    });
     const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
       pane: 'satellite', maxZoom: 19,
       attribution: '&copy; <a href="https://www.esri.com">Esri</a>, Maxar, Earthstar Geographics',

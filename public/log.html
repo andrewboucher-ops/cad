@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — log</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Log">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { display: flex; height: 100vh; overflow: hidden; padding-left: 228px; }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .page-body { flex: 1; overflow: auto; padding: 24px 28px; }
+  .page-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+  .page-head h1 { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+  .tabs button {
+    background: none; border: none; color: var(--ink-dim); padding: 10px 4px; margin-right: 22px;
+    font-family: var(--font); font-size: 13.5px; font-weight: 600; cursor: pointer; position: relative;
+  }
+  .tabs button.active { color: var(--ink); }
+  .tabs button.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .toolbar input, .toolbar select { width: auto; min-width: 200px; }
+  table.log-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.log-table th {
+    text-align: left; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim);
+    font-weight: 700; padding: 8px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg);
+  }
+  table.log-table td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  table.log-table tr:hover td { background: var(--panel-2); }
+  table.log-table tr.clickable { cursor: pointer; }
+  .t-col { font-family: var(--mono); color: var(--ink-dim); white-space: nowrap; }
+  .empty-note { color: var(--ink-dim); padding: 30px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="icon-rail">
+  <div class="rail-brand">
+    <span class="mark">C</span>
+    <span>
+      <div class="name">CCCS CONTROL</div>
+      <div class="sub">Critical comms &amp; dispatch</div>
+    </span>
+  </div>
+
+  <div class="rail-section">Operations</div>
+  <a href="/control.html" title="Incidents"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Incidents</span></a>
+  <a href="/control.html" title="Terminals"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="1.8"/><path d="M9 19h6M12 15v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Terminals</span></a>
+  <a href="/control.html" title="Map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Map</span></a>
+  <a href="/control.html" title="Messages"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Messages</span></a>
+  <a href="/control.html" title="Callbacks"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3l3 1.5-1.2 3.2a12 12 0 007.5 7.5l3.2-1.2L20 17c0 2-1.6 3.5-3.5 3.3C10 19.7 4.3 14 3.7 7.5 3.5 5.6 5 4 7 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Callbacks</span></a>
+  <a href="/log.html" class="active" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
+
+  <div class="rail-section">Fleet</div>
+  <a href="/control.html" title="Talkgroups"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5M14 8a3 3 0 100-6M18.5 13.7c2 .5 3.5 2.3 3.5 4.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Talkgroups</span></a>
+  <a href="/control.html" title="Assignments"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/></svg><span>Assignments</span></a>
+</div>
+
+<main>
+  <div class="topbar">
+    <span class="link-net" id="net">link down</span>
+    <span class="spacer"></span>
+    <span class="clock" id="clock">--:--:--</span>
+    <div class="user-block">
+      <span class="avatar" id="avatar"></span>
+      <span class="who">
+        <span class="name" id="whoName"></span>
+        <span class="role" id="whoRole"></span>
+      </span>
+    </div>
+    <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
+  </div>
+
+  <div class="page-body">
+    <div class="page-head"><h1>Log</h1></div>
+    <div class="tabs">
+      <button class="active" id="tabActions">Actions</button>
+      <button id="tabIncidents">Historical incidents</button>
+    </div>
+
+    <div id="viewActions">
+      <div class="toolbar">
+        <input id="aSearch" placeholder="Search summary…">
+        <select id="aType">
+          <option value="">All event types</option>
+        </select>
+      </div>
+      <div id="aTableWrap"></div>
+    </div>
+
+    <div id="viewIncidents" class="hide">
+      <div class="toolbar">
+        <input id="iSearch" placeholder="Search reference, location, call sign…">
+        <select id="iPriority">
+          <option value="">All priorities</option>
+          <option value="RED">Red</option>
+          <option value="AMBER">Amber</option>
+          <option value="GREEN">Green</option>
+          <option value="ROUTINE">Routine</option>
+        </select>
+      </div>
+      <div id="iTableWrap"></div>
+    </div>
+  </div>
+</main>
+
+<div id="modalHost"></div>
+
+<script src="/app.js"></script>
+<script>
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+
+el('#whoName').textContent = me.display_name;
+el('#whoRole').textContent = me.role.replace('_', ' ');
+el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
+el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
+
+function modal(title, html, onMount) {
+  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
+  el('#mClose').onclick = closeModal; onMount && onMount();
+}
+const closeModal = () => (el('#modalHost').innerHTML = '');
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+/* ---------- tabs ---------- */
+function showTab(name) {
+  el('#tabActions').classList.toggle('active', name === 'actions');
+  el('#tabIncidents').classList.toggle('active', name === 'incidents');
+  el('#viewActions').classList.toggle('hide', name !== 'actions');
+  el('#viewIncidents').classList.toggle('hide', name !== 'incidents');
+  if (name === 'actions') loadActions(); else loadIncidents();
+}
+el('#tabActions').onclick = () => showTab('actions');
+el('#tabIncidents').onclick = () => showTab('incidents');
+
+/* ---------- actions log: the audit trail — every meaningful action the
+ * server took, already recorded via logEvent() server-side for exactly
+ * this. Nothing here that isn't already tracked; just a real page to read
+ * it on, with search/type filtering, instead of the small scrolling panel
+ * on the dashboard. ---------- */
+let allEvents = [];
+async function loadActions() {
+  el('#aTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  allEvents = await api('GET', '/api/events?limit=1000');
+  const types = [...new Set(allEvents.map((e) => e.type))].sort();
+  el('#aType').innerHTML = '<option value="">All event types</option>' + types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+  paintActions();
+}
+function paintActions() {
+  const q = el('#aSearch').value.trim().toLowerCase();
+  const type = el('#aType').value;
+  let rows = allEvents.slice().reverse();
+  if (type) rows = rows.filter((e) => e.type === type);
+  if (q) rows = rows.filter((e) => e.summary.toLowerCase().includes(q));
+  rows = rows.slice(0, 500);
+  el('#aTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th style="width:170px">Time</th><th style="width:200px">Type</th><th>Summary</th></tr></thead>
+      <tbody>${rows.map((e) => `<tr><td class="t-col">${new Date(e.at).toLocaleString()}</td><td class="mono dim">${esc(e.type)}</td><td>${esc(e.summary)}</td></tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No matching events.</p>';
+}
+el('#aSearch').addEventListener('input', paintActions);
+el('#aType').addEventListener('change', paintActions);
+
+/* ---------- historical incidents: closed jobs — same data the Active Jobs
+ * panel already has, just the completed/cancelled half with no time limit
+ * on how far back you can search it. ---------- */
+let allJobs = [];
+async function loadIncidents() {
+  el('#iTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  const jobs = await api('GET', '/api/jobs');
+  allJobs = jobs.filter((j) => ['COMPLETED', 'CANCELLED'].includes(j.status))
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+  paintIncidents();
+}
+function paintIncidents() {
+  const q = el('#iSearch').value.trim().toLowerCase();
+  const pri = el('#iPriority').value;
+  let rows = allJobs;
+  if (pri) rows = rows.filter((j) => j.priority === pri);
+  if (q) rows = rows.filter((j) =>
+    j.reference.toLowerCase().includes(q) || (j.location || '').toLowerCase().includes(q) ||
+    j.resources.some((r) => (r.callsign || '').toLowerCase().includes(q)));
+  rows = rows.slice(0, 500);
+  el('#iTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th style="width:110px">Reference</th><th style="width:70px">Priority</th><th>Type</th><th>Location</th><th style="width:140px">Resources</th><th style="width:90px">Status</th><th style="width:170px">Closed</th></tr></thead>
+      <tbody>${rows.map((j) => `<tr class="clickable" data-job="${j.id}">
+        <td class="mono">${esc(j.reference)}</td>
+        <td><span class="pri pri-${j.priority}">${j.priority}</span></td>
+        <td>${esc(j.incident_type)}</td>
+        <td>${esc(j.location)}</td>
+        <td class="dim">${j.resources.map((r) => esc(r.callsign || r.radio || r.mdt)).join(', ') || '—'}</td>
+        <td class="dim">${esc(j.status)}</td>
+        <td class="t-col">${new Date(j.updated_at).toLocaleString()}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No matching incidents.</p>';
+  els('#iTableWrap [data-job]').forEach((row) => row.addEventListener('click', () => incidentModal(allJobs.find((j) => j.id === Number(row.dataset.job)))));
+}
+el('#iSearch').addEventListener('input', paintIncidents);
+el('#iPriority').addEventListener('change', paintIncidents);
+
+function incidentModal(j) {
+  if (!j) return;
+  modal(`Job ${j.reference}`, `
+    <dl class="kv">
+      <dt>Priority</dt><dd><span class="pri pri-${j.priority}">${j.priority}</span></dd>
+      <dt>Status</dt><dd>${esc(j.status)}</dd>
+      <dt>Type</dt><dd>${esc(j.incident_type)}</dd>
+      <dt>Location</dt><dd>${esc(j.location)}</dd>
+      <dt>Caller</dt><dd>${esc(j.caller || '—')}</dd>
+      <dt>Detail</dt><dd>${esc(j.description || '—')}</dd>
+      <dt>Resources</dt><dd>${j.resources.map((r) => esc(r.callsign || r.radio || r.mdt)).join('<br>') || '—'}</dd>
+      <dt>Notes</dt><dd>${esc(j.notes || '—')}</dd>
+      <dt>Created</dt><dd class="mono">${new Date(j.created_at).toLocaleString()}</dd>
+      <dt>Closed</dt><dd class="mono">${new Date(j.updated_at).toLocaleString()}</dd>
+    </dl>`);
+}
+
+/* link status, for parity with the other pages even though this page does
+ * not otherwise need the realtime bus */
+CCCS.bus((up) => {
+  const n = el('#net');
+  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
+});
+
+showTab('actions');
+</script>
+</body>
+</html>

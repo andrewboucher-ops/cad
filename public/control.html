@@ -84,42 +84,6 @@
   }
   .callback-tag:hover { filter: brightness(1.15); }
 
-  /* ---- left sidebar: nav rail, also how you bring back a closed panel ----
-     A real labelled sidebar (logo, section headers, icon+label rows), not
-     the thin icon-only strip this used to be — matches the reference
-     console's OPERATIONS/ESTATE nav rather than approximating it. */
-  .icon-rail {
-    position: fixed; left: 0; top: 0; bottom: 0; width: 228px; z-index: 40;
-    background: var(--panel); border-right: 1px solid var(--line);
-    display: flex; flex-direction: column; padding: 0 0 16px; overflow-y: auto;
-  }
-  .rail-brand {
-    display: flex; align-items: center; gap: 10px; padding: 18px 18px 16px; flex: none;
-  }
-  .rail-brand .mark {
-    width: 30px; height: 30px; border-radius: 8px; flex: none;
-    background: linear-gradient(150deg, var(--accent), var(--accent-dim));
-    display: grid; place-items: center; font-weight: 800; font-size: 13px; color: #04120f;
-  }
-  .rail-brand .name { font-weight: 800; letter-spacing: .07em; font-size: 13px; line-height: 1.2; }
-  .rail-brand .sub { font-size: 10px; color: var(--ink-dim); letter-spacing: .04em; margin-top: 1px; }
-  .rail-section {
-    font-size: 10px; font-weight: 700; letter-spacing: .1em; color: var(--ink-dim); text-transform: uppercase;
-    padding: 16px 18px 6px;
-  }
-  .icon-rail button {
-    position: relative; display: flex; align-items: center; gap: 12px; width: 100%;
-    background: none; border: none; color: var(--ink-dim); padding: 9px 18px; text-align: left;
-    cursor: pointer; font-size: 13px; font-weight: 500; letter-spacing: .01em; font-family: var(--font);
-    transition: background-color .12s var(--ease), color .12s var(--ease);
-  }
-  .icon-rail button:hover { background: var(--panel-2); color: var(--ink); }
-  .icon-rail button svg { width: 18px; height: 18px; flex: none; }
-  .icon-rail button span:not(.badge) { flex: 1; }
-  .icon-rail .badge {
-    background: var(--emergency); color: #fff; font-size: 9.5px;
-    font-weight: 700; border-radius: 20px; padding: 1px 6px; min-width: 15px; line-height: 1.5; text-align: center;
-  }
   @keyframes flash-glow { 0%, 100% { box-shadow: var(--shadow); } 40% { box-shadow: 0 0 0 2px var(--accent), var(--shadow-lg); } }
   .flash { animation: flash-glow .9s var(--ease); }
 

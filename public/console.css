@@ -139,6 +139,44 @@ a { color: var(--accent); }
 .pri-GREEN { color: var(--available); border-color: var(--available); background: rgba(34,197,94,.08); }
 .pri-ROUTINE { color: var(--ink-dim); border-color: var(--offline); }
 
+/* ---- left sidebar: nav rail, shared across every page that has one ----
+   A real labelled sidebar (logo, section headers, icon+label rows), not a
+   thin icon-only strip — matches a real ARC console's OPERATIONS/ESTATE nav
+   rather than approximating it. Rows are <button> on the dashboard (open a
+   panel in place) and <a href> on other pages (real navigation) — same
+   look either way. */
+.icon-rail {
+  position: fixed; left: 0; top: 0; bottom: 0; width: 228px; z-index: 40;
+  background: var(--panel); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; padding: 0 0 16px; overflow-y: auto;
+}
+.rail-brand { display: flex; align-items: center; gap: 10px; padding: 18px 18px 16px; flex: none; }
+.rail-brand .mark {
+  width: 30px; height: 30px; border-radius: 8px; flex: none;
+  background: linear-gradient(150deg, var(--accent), var(--accent-dim));
+  display: grid; place-items: center; font-weight: 800; font-size: 13px; color: #04120f;
+}
+.rail-brand .name { font-weight: 800; letter-spacing: .07em; font-size: 13px; line-height: 1.2; }
+.rail-brand .sub { font-size: 10px; color: var(--ink-dim); letter-spacing: .04em; margin-top: 1px; }
+.rail-section {
+  font-size: 10px; font-weight: 700; letter-spacing: .1em; color: var(--ink-dim); text-transform: uppercase;
+  padding: 16px 18px 6px;
+}
+.icon-rail button, .icon-rail a {
+  position: relative; display: flex; align-items: center; gap: 12px; width: 100%;
+  background: none; border: none; color: var(--ink-dim); padding: 9px 18px; text-align: left;
+  cursor: pointer; font-size: 13px; font-weight: 500; letter-spacing: .01em; font-family: var(--font);
+  text-decoration: none; transition: background-color .12s var(--ease), color .12s var(--ease);
+}
+.icon-rail button:hover, .icon-rail a:hover { background: var(--panel-2); color: var(--ink); }
+.icon-rail a.active { background: var(--panel-2); color: var(--ink); box-shadow: inset 3px 0 0 var(--accent); }
+.icon-rail button svg, .icon-rail a svg { width: 18px; height: 18px; flex: none; }
+.icon-rail button span:not(.badge), .icon-rail a span:not(.badge) { flex: 1; }
+.icon-rail .badge {
+  background: var(--emergency); color: #fff; font-size: 9.5px;
+  font-weight: 700; border-radius: 20px; padding: 1px 6px; min-width: 15px; line-height: 1.5; text-align: center;
+}
+
 /* ---- lists ---- */
 .row {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
@@ -215,8 +253,12 @@ label { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .1e
 @media (prefers-reduced-motion: reduce) { .modal-back, .modal { animation: none; } }
 
 /* ---- map (Leaflet, dark tiles) ---- */
-.map { flex: 1; position: relative; background: #0a121c; }
-.map .leaflet-container { background: #0a121c; font-family: var(--font); }
+.map { flex: 1; position: relative; background: #14161c; }
+.map .leaflet-container { background: #14161c; font-family: var(--font); }
+/* OSM tiles, hue-rotated after inverting so water/greenery land back near
+ * their real colour instead of the orange/purple a plain invert() gives —
+ * scoped to the street pane only, never the satellite imagery or markers. */
+.map-dark-tiles .leaflet-street-pane { filter: invert(1) hue-rotate(200deg) brightness(.92) contrast(.88) saturate(.7); }
 /* Street/Satellite pill switcher */
 .map-toggle {
   display: flex; gap: 2px; background: var(--panel-2); border: 1px solid var(--line);
