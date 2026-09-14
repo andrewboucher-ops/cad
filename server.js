@@ -371,8 +371,8 @@ const sockets = new Set();
 function wsAccept(key) {
   return crypto.createHash('sha1').update(key + GUID).digest('base64');
 }
-function encodeFrame(str, opcode = 0x1) {
-  const payload = Buffer.from(str);
+function encodeFrame(data, opcode = 0x1) {
+  const payload = Buffer.isBuffer(data) ? data : Buffer.from(data);
   const len = payload.length;
   let header;
   if (len < 126) header = Buffer.from([0x80 | opcode, len]);
@@ -421,6 +421,7 @@ class Conn {
         try { handleWsMessage(this, JSON.parse(data.toString())); }
         catch (e) { this.send('error', { message: String(e.message || e) }); }
       }
+      if (opcode === 0x2) relayAudioFrame(this, data);
     }
   }
   close() {
@@ -664,6 +665,36 @@ function pttRelease(conn, payload) {
   logEvent('radio.ptt_released', `${who} RX ← ${tg.name} (${duration}s)`, ev);
 }
 
+/** Server-relayed audio, for clients that can't do WebRTC (old-Android
+ * native handsets — see StatusLedPlugin's doc comment for why: their
+ * WebView predates WebRTC entirely, so this codebase's normal audio path
+ * doesn't reach them). Rather than build a second peer-to-peer transport
+ * for them, they send their own encoded audio as plain binary WebSocket
+ * frames on the same connection already used for PTT signalling
+ * (radio.ptt_start / radio.ptt_release, unchanged), and the server
+ * forwards each frame verbatim to whoever's currently listening on that
+ * talkgroup — a relay, not a mesh, and it reuses the exact same
+ * floor/membership rules pttStart already computes its WebRTC listener
+ * list from, so the two transports agree on who's allowed to talk and who
+ * hears them. It does NOT bridge to WebRTC clients — a native handset and
+ * a web/WebRTC client on the same talkgroup can't hear each other yet,
+ * since that needs real transcoding, not just relaying bytes; both
+ * transports work standalone within their own client population. */
+function relayAudioFrame(conn, data) {
+  const radio = conn.radioId ? db.radios.find((r) => r.id === conn.radioId) : null;
+  const isConsole = !radio && isControlRole(conn.user.role);
+  const tg = db.talkgroups.find((t) => (radio && t.floor_holder_radio_id === radio.id) || (isConsole && t.floor_console_user_id === conn.user.id));
+  if (!tg) return; // not currently holding the floor on anything -- drop silently, not an injection vector
+  const memberIds = db.talkgroup_members.filter((m) => m.talkgroup_id === tg.id).map((m) => m.radio_id);
+  const frame = encodeFrame(data, 0x2);
+  for (const c of sockets) {
+    if (c === conn) continue;
+    const listens = isControlRole(c.user.role) || (c.radioId && memberIds.includes(c.radioId));
+    if (!listens) continue;
+    try { c.socket.write(frame); } catch { c.close(); }
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * HTTP plumbing
  * ------------------------------------------------------------------ */
@@ -713,6 +744,7 @@ function authFrom(req, url) {
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
+  '.apk': 'application/vnd.android.package-archive',
 };
 
 const server = http.createServer(async (req, res) => {
