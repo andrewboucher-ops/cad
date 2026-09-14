@@ -9,6 +9,7 @@
 'use strict';
 
 const http = require('http');
+const net = require('net');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -1600,41 +1601,131 @@ function createEmergencyJob(ev) {
   return j;
 }
 
+/* ---- Minimal MQTT 3.1.1 publisher ---------------------------------------
+ * Publish-only (QoS 0, clean session) — CCCS never subscribes to anything,
+ * so there's no need for the parts of MQTT that make a full client
+ * complicated (PUBACK/PUBREC/PUBREL/PUBCOMP flows, subscription state,
+ * reconnect logic). One TCP connection per publish: CONNECT, wait for
+ * CONNACK, PUBLISH, DISCONNECT, close — same hand-rolled-over-node:net
+ * approach already used for the WebSocket signalling server elsewhere in
+ * this file, rather than pulling in an MQTT client package for a handful
+ * of packet types. */
+function mqttEncodeString(str) {
+  const buf = Buffer.from(str, 'utf8');
+  const len = Buffer.alloc(2); len.writeUInt16BE(buf.length);
+  return Buffer.concat([len, buf]);
+}
+function mqttEncodeRemainingLength(n) {
+  const bytes = [];
+  do {
+    let b = n % 128; n = Math.floor(n / 128);
+    if (n > 0) b |= 0x80;
+    bytes.push(b);
+  } while (n > 0);
+  return Buffer.from(bytes);
+}
+function mqttConnectPacket({ clientId, username, password, keepAlive = 30 }) {
+  let flags = 0x02; // clean session
+  if (username) flags |= 0x80;
+  if (password) flags |= 0x40;
+  const keepAliveBuf = Buffer.alloc(2); keepAliveBuf.writeUInt16BE(keepAlive);
+  const parts = [mqttEncodeString('MQTT'), Buffer.from([4]), Buffer.from([flags]), keepAliveBuf, mqttEncodeString(clientId)];
+  if (username) parts.push(mqttEncodeString(username));
+  if (password) parts.push(mqttEncodeString(password));
+  const body = Buffer.concat(parts);
+  return Buffer.concat([Buffer.from([0x10]), mqttEncodeRemainingLength(body.length), body]);
+}
+function mqttPublishPacket({ topic, payload }) {
+  const body = Buffer.concat([mqttEncodeString(topic), Buffer.from(payload, 'utf8')]); // QoS 0: no packet identifier
+  return Buffer.concat([Buffer.from([0x30]), mqttEncodeRemainingLength(body.length), body]);
+}
+const MQTT_DISCONNECT_PACKET = Buffer.from([0xe0, 0x00]);
+
+const MQTT_PING_PACKET = Buffer.from([0xc0, 0x00]);
+
+/* A persistent connection, not one-shot per event — AURA's source config
+ * has a "warn if silent for 300s (big alarm + siren)" watchdog on by
+ * default, so a client that only ever appears for a few hundred ms per
+ * rare emergency reads to it as a dead/flapping source, not a healthy
+ * idle one. This holds one connection open for the process lifetime,
+ * reconnecting on drop, and a periodic heartbeat message on the same
+ * topic keeps AURA's watchdog satisfied between real events. */
+const mqttState = { socket: null, connected: false, buf: Buffer.alloc(0) };
+function mqttStart({ host, port, username, password, clientId, keepAlive = 60 }) {
+  if (mqttState.socket) return;
+  const socket = net.connect({ host, port });
+  mqttState.socket = socket;
+  mqttState.buf = Buffer.alloc(0);
+  let pingTimer = null;
+  socket.on('connect', () => socket.write(mqttConnectPacket({ clientId, username, password, keepAlive })));
+  socket.on('data', (chunk) => {
+    mqttState.buf = Buffer.concat([mqttState.buf, chunk]);
+    // Only CONNACK (once) and PINGRESP are ever expected back — never
+    // SUBSCRIBEd to anything, so no PUBLISH can arrive from the broker.
+    while (mqttState.buf.length >= 2) {
+      const packetType = mqttState.buf[0] & 0xf0;
+      if (packetType === 0x20 && !mqttState.connected) {
+        const returnCode = mqttState.buf[3];
+        mqttState.buf = mqttState.buf.subarray(4);
+        if (returnCode !== 0) { console.warn(`[cccs] MQTT broker rejected connection (return code ${returnCode})`); socket.destroy(); return; }
+        mqttState.connected = true;
+        pingTimer = setInterval(() => { if (mqttState.socket) mqttState.socket.write(MQTT_PING_PACKET); }, keepAlive * 1000 * 0.8).unref?.();
+      } else if (packetType === 0xd0) {
+        mqttState.buf = mqttState.buf.subarray(2); // PINGRESP, nothing to do
+      } else {
+        mqttState.buf = Buffer.alloc(0); // unexpected — drop rather than get stuck re-parsing garbage
+      }
+    }
+  });
+  const reconnect = () => {
+    if (pingTimer) clearInterval(pingTimer);
+    mqttState.socket = null; mqttState.connected = false;
+    setTimeout(() => mqttStart({ host, port, username, password, clientId, keepAlive }), 10000).unref?.();
+  };
+  socket.on('error', (e) => { console.warn('[cccs] MQTT connection error:', e.message); reconnect(); });
+  socket.on('close', reconnect);
+}
+function mqttPublishNow(topic, payload) {
+  if (!mqttState.connected || !mqttState.socket) return false;
+  mqttState.socket.write(mqttPublishPacket({ topic, payload }));
+  return true;
+}
+
 /* ---- AURA alarm forwarding ---------------------------------------------
  * AURA is Echelon's alarm receiving centre platform — an emergency button
  * press is exactly what an ARC exists to see, so it's forwarded the moment
- * one is raised. Fire-and-forget, same as webpush: a slow or failed AURA
- * send must never block or fail the emergency flow itself, since that's
- * the one thing here that must never silently not work.
+ * one is raised, over MQTT rather than AURA's REST alarm intake (its
+ * endpoint wasn't reachable when that was tried — see git history).
+ * Fire-and-forget: a slow or failed publish must never block or fail the
+ * emergency flow itself, since that's the one thing here that must never
+ * silently not work.
  *
- * AURA's POST /api/v1/alarm request body wasn't available when this was
- * written, so the shape below is a reasonable guess — event_code follows
- * the SIA standard (PA = panic alarm) since AURA's own integration list
- * also offers raw SIA DC-09 and Contact-ID sources, suggesting that's the
- * vocabulary its alarm model speaks internally regardless of transport.
- * Both the header name for the API key and the field names will likely
- * need adjusting once this has actually been tried against a real AURA
- * account — inert (no-op) until both env vars are set, exactly like the
- * PBX and GuardM8 shared secrets above. */
-const AURA_ALARM_URL = process.env.AURA_ALARM_URL || '';
-const AURA_API_KEY = process.env.AURA_API_KEY || '';
+ * The topic below is a guess (AURA's actual MQTT source "RX topic" wasn't
+ * available) — confirm it against AURA's integration-source config and
+ * adjust MQTT_TOPIC if it differs. Inert until MQTT_HOST is set. */
+const MQTT_HOST = process.env.MQTT_HOST || '';
+const MQTT_PORT = Number(process.env.MQTT_PORT || 1883);
+const MQTT_USERNAME = process.env.MQTT_USERNAME || '';
+const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
+const MQTT_TOPIC = process.env.MQTT_TOPIC || 'guardm8/tcp/cccs';
+const MQTT_HEARTBEAT_S = Number(process.env.MQTT_HEARTBEAT_S || 60);
+if (MQTT_HOST) {
+  mqttStart({ host: MQTT_HOST, port: MQTT_PORT, username: MQTT_USERNAME || undefined, password: MQTT_PASSWORD || undefined, clientId: 'cccs' });
+  setInterval(() => {
+    mqttPublishNow(MQTT_TOPIC, JSON.stringify({ event_code: 'heartbeat', source: 'CCCS', timestamp: new Date().toISOString() }));
+  }, MQTT_HEARTBEAT_S * 1000).unref?.();
+}
 function forwardEmergencyToAura(ev) {
-  if (!AURA_ALARM_URL || !AURA_API_KEY) return;
-  const body = {
+  if (!MQTT_HOST) return;
+  const payload = JSON.stringify({
     event_code: 'PA', event_type: 'EMERGENCY', priority: 'CRITICAL',
     reference: `CCCS-${ev.id}`, source: 'CCCS',
     callsign: ev.callsign, issi: ev.issi || null, mdt_code: ev.mdt_code || null,
     description: 'Emergency button activated',
     lat: ev.lat ?? null, lon: ev.lon ?? null,
     timestamp: ev.activated_at,
-  };
-  fetch(AURA_ALARM_URL, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': AURA_API_KEY },
-    body: JSON.stringify(body),
-  }).then((r) => {
-    if (!r.ok) console.warn(`[cccs] AURA alarm forward rejected (HTTP ${r.status}) for emergency ${ev.id}`);
-  }).catch((e) => console.warn(`[cccs] AURA alarm forward failed for emergency ${ev.id}:`, e.message));
+  });
+  if (!mqttPublishNow(MQTT_TOPIC, payload)) console.warn(`[cccs] AURA MQTT publish skipped for emergency ${ev.id} — not connected to broker`);
 }
 
 route('POST', '/api/emergency', ALL, ({ body, user }) => {
