@@ -389,9 +389,24 @@ el('#send').onclick = async () => {
 };
 
 el('#btnFunc1').onclick = () => CCCS.outbox.flush();
+/** Background watchPosition (below) keeps mdt.lat/lon fresh already, but a
+ * fresh fix taken at the exact moment of the press is still worth the
+ * bounded 2s wait for an emergency specifically — see radio.html's
+ * freshFix for the full reasoning. */
+function freshFix(timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 5000 }
+    );
+  });
+}
 el('#bEmg').onclick = async () => {
   if (!confirm('Send an emergency alert to control?')) return;
-  const r = await CCCS.send('POST', '/api/emergency', {}, 'emergency');
+  const fix = await freshFix();
+  const r = await CCCS.send('POST', '/api/emergency', fix || {}, 'emergency');
   log(r.queued ? 'EMERGENCY QUEUED — NO LINK' : 'EMERGENCY ACTIVATED');
   el('#bEmg').classList.add('mode-active');
   setTimeout(() => el('#bEmg').classList.remove('mode-active'), 3000);

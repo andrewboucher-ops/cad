@@ -297,8 +297,26 @@ setInterval(() => {
   el('#welfare').className = 'mono ' + (left > 60 ? 'dim' : 'txt-EMERGENCY');
 }, 1000);
 
+/** A short-capped GPS fix for the exact moment the button is pressed —
+ * background AVL tracking (ensureLocationTracking) only runs while a job is
+ * live, so an idle radio's last-known position can be minutes/hours stale
+ * (or, before its first ever report, still whatever it was seeded with).
+ * The emergency job's location matters too much to trust that; 2s is a
+ * bounded worst case, not a real delay to sending the alert. */
+function freshFix(timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 5000 }
+    );
+  });
+}
+
 async function raiseEmergency(source) {
-  const r = await CCCS.send('POST', '/api/emergency', {}, 'emergency');
+  const fix = await freshFix();
+  const r = await CCCS.send('POST', '/api/emergency', fix || {}, 'emergency');
   log(r.queued ? `EMERGENCY QUEUED — NO LINK (${source})` : `EMERGENCY ACTIVATED (${source})`);
   el('#bEmg').classList.add('tx');
   setTimeout(() => el('#bEmg').classList.remove('tx'), 3000);
@@ -336,11 +354,16 @@ function openPosition() {
 /* Background GPS while a job is live, separate from the sat nav view — the
  * server derives EN_ROUTE/ON_SCENE from these reports (checkAutoJobProgress
  * in server.js), so it needs them whether or not the officer has the nav
- * screen open. Starts/stops itself based on currentJob; safe to call this
- * from anywhere currentJob might have changed since it's a no-op otherwise. */
+ * screen open. Runs continuously once logged in — not just while a job is
+ * live — the same as the MDT side already does: an AVL system exists to
+ * show where units actually are right now, including idle ones, and a
+ * position that only updates during a job goes stale the moment a unit
+ * presses the emergency button while just on patrol (the job that creates
+ * would otherwise be built from whatever position was last seen, possibly
+ * hours old). Safe to call from anywhere; a no-op once already tracking. */
 let radioLocWatchId = null;
 function ensureLocationTracking() {
-  const shouldTrack = currentJob && !['ON_SCENE', 'TRANSPORTING', 'COMPLETED', 'CANCELLED'].includes(currentJob.status) && navigator.geolocation;
+  const shouldTrack = Boolean(radio) && navigator.geolocation;
   if (shouldTrack && radioLocWatchId == null) {
     radioLocWatchId = navigator.geolocation.watchPosition(
       (pos) => { api('POST', `/api/radios/${radio.issi}/location`, { lat: pos.coords.latitude, lon: pos.coords.longitude, speed: pos.coords.speed || 0 }).catch(() => {}); },

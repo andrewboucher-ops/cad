@@ -129,6 +129,26 @@ function checkAutoJobProgress(radio, mdt, lat, lon) {
   broadcast('job.status_changed', publicJob(j));
   logEvent('job.status_changed', `JOB ${j.reference} → ${newStatus} (auto)`, { job_id: j.id });
 }
+
+/** A radio picking EN_ROUTE/ON_SCENE off the AVL status menu (or the
+ * equivalent status code) is reporting the same job progress checkAutoJobProgress
+ * infers from GPS — but unlike an MDT (whose status buttons PATCH the job
+ * directly), a radio only ever touches its own radio.status. The control
+ * room dashboard shows a resource's *job* status once it has one, so without
+ * this the job stayed stuck on ACKNOWLEDGED while the radio itself claimed
+ * EN_ROUTE, and nobody watching the dashboard ever saw it move. Forward-only,
+ * same as the auto path — a manual status pick should never regress a job
+ * that's already further along (e.g. via the MDT or another crew member). */
+function syncJobFromManualStatus(radio, status) {
+  if (!['EN_ROUTE', 'ON_SCENE'].includes(status)) return;
+  if (!radio.job_id) return;
+  const j = db.jobs.find((x) => x.id === radio.job_id);
+  if (!j || ['TRANSPORTING', 'COMPLETED', 'CANCELLED'].includes(j.status)) return;
+  if (JOB_STATES.indexOf(status) <= JOB_STATES.indexOf(j.status)) return;
+  j.status = status; stampJobStatus(j, status); j.updated_at = new Date().toISOString();
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.status_changed', `JOB ${j.reference} → ${status} (manual, ${callsignOf(radio)})`, { job_id: j.id });
+}
 const PRIORITIES = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
 const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'RADIO_USER', 'MDT_USER'];
 
@@ -1020,6 +1040,7 @@ route('POST', '/api/radios/:id/status', ALL, ({ params, body, user }) => {
     r.status_code = code;
   }
   setRadioStatus(r, status, reason);
+  syncJobFromManualStatus(r, status);
   return publicRadio(r);
 });
 route('POST', '/api/radios/:id/location', ALL, ({ params, body, user }) => {
@@ -1449,9 +1470,14 @@ route('POST', '/api/emergency', ALL, ({ body, user }) => {
   if (!radio && !mdt) throw httpError(404, 'radio or mdt not found');
   const open = db.emergency_events.find((e) => ((radio && e.radio_id === radio.id) || (mdt && e.mdt_id === mdt.id)) && e.state !== 'RESOLVED');
   if (open) return open;
+  // The device takes a fresh GPS fix the instant the button is pressed and
+  // sends it here — trust that over whatever lat/lon happens to be on file,
+  // since an idle radio/MDT's stored position can be stale (or, before it's
+  // ever reported one, still whatever it was seeded with).
+  const who = radio || mdt;
+  if (body.lat != null && body.lon != null) { who.lat = Number(body.lat); who.lon = Number(body.lon); }
   if (radio) { radio.emergency = true; setRadioStatus(radio, 'EMERGENCY', 'emergency button'); }
   if (mdt) { mdt.emergency = true; broadcast('mdt.status_changed', publicMdt(mdt)); }
-  const who = radio || mdt;
   const ev = {
     id: nextId('emergency_events'), kind: 'EMERGENCY', radio_id: radio ? radio.id : null, mdt_id: mdt ? mdt.id : null,
     issi: radio ? radio.issi : null, mdt_code: mdt ? mdt.mdt_code : null, callsign: callsignOf(who),
