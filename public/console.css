@@ -150,11 +150,10 @@ a { color: var(--accent); }
   background: var(--panel); border-right: 1px solid var(--line);
   display: flex; flex-direction: column; padding: 0 0 16px; overflow-y: auto;
 }
-.rail-brand { display: flex; align-items: center; gap: 10px; padding: 18px 18px 16px; flex: none; }
+.rail-brand { display: flex; align-items: center; padding: 18px 18px 16px; flex: none; }
 .brand-logo { width: 30px; height: 30px; border-radius: 8px; flex: none; object-fit: contain; }
 .brand-logo-lg { width: 40px; height: 40px; border-radius: 10px; }
-.rail-brand .name { font-weight: 800; letter-spacing: .07em; font-size: 13px; line-height: 1.2; }
-.rail-brand .sub { font-size: 10px; color: var(--ink-dim); letter-spacing: .04em; margin-top: 1px; }
+.brand-wordmark { width: 100%; height: auto; object-fit: contain; }
 .rail-section {
   font-size: 10px; font-weight: 700; letter-spacing: .1em; color: var(--ink-dim); text-transform: uppercase;
   padding: 16px 18px 6px;
