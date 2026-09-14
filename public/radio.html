@@ -37,6 +37,18 @@
   .r-topbar .side.left { position: absolute; left: 10px; }
   .r-topbar .side.right { position: absolute; right: 10px; }
 
+  /* ---- status LED: a real handset's operational light, not just a
+     coloured button — same status→colour mapping as the AVL button,
+     just where your eye actually goes on a physical radio. ---- */
+  .status-led {
+    width: 11px; height: 11px; border-radius: 50%; flex: none; background: #4b5563;
+    box-shadow: 0 0 0 rgba(0,0,0,0); transition: background .2s ease;
+  }
+  .status-led.lit { box-shadow: 0 0 7px 1px currentColor; }
+  .status-led.pulsing { animation: led-pulse 1.6s ease-in-out infinite; }
+  @keyframes led-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .status-led.pulsing { animation: none; } }
+
   /* ---- the 6-button grid: User / Cads / Rpt / Text / Chan / AVL ---- */
   .r-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
   .r-grid button {
@@ -84,7 +96,7 @@
 <div class="handset">
   <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon" style="width:100%;height:auto;margin-bottom:2px">
   <div class="r-topbar">
-    <span class="side left"><svg class="wifi" width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M2 8.5a16 16 0 0120 0M5.5 12.5a11 11 0 0113 0M9 16.5a5.5 5.5 0 016 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="20" r="1.4" fill="currentColor"/></svg> <span class="link-net" id="net">link down</span></span>
+    <span class="side left"><span class="status-led" id="statusLed" title="Status"></span><svg class="wifi" width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M2 8.5a16 16 0 0120 0M5.5 12.5a11 11 0 0113 0M9 16.5a5.5 5.5 0 016 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="20" r="1.4" fill="currentColor"/></svg> <span class="link-net" id="net">link down</span></span>
     <span class="r-logo" id="rlogo" title="Press and hold for settings">RADIO</span>
     <span class="side right"><button id="audioBlocked" hidden title="Audio was blocked by the browser — tap to enable it" style="background:none;border:none;color:var(--priority);font-size:15px;padding:0">🔇</button><span class="mono dim" id="pending" style="font-size:10px"></span><span class="mono" id="queued" style="font-size:10px;color:var(--busy)"></span></span>
   </div>
@@ -152,6 +164,13 @@ const AVL_COLOUR = {
   ON_TASK: 'linear-gradient(180deg,#3b82f6,#1d4ed8)', EN_ROUTE: 'linear-gradient(180deg,#3b82f6,#1d4ed8)',
   ON_SCENE: 'linear-gradient(180deg,#3b82f6,#1d4ed8)', OUT_OF_SERVICE: '', OFFLINE: '',
 };
+// Same status groups as AVL_COLOUR, as a flat hex a small LED can actually
+// glow in (box-shadow needs a solid colour, not a gradient).
+const STATUS_LED_COLOUR = {
+  AVAILABLE: '#22c55e', BUSY: '#eab308', MEAL_BREAK: '#eab308', ACKNOWLEDGED: '#3b82f6',
+  ON_TASK: '#3b82f6', EN_ROUTE: '#3b82f6', ON_SCENE: '#3b82f6', EMERGENCY: '#ef4444',
+  OUT_OF_SERVICE: '#4b5563', OFFLINE: '#4b5563',
+};
 function paint() {
   if (!radio) return;
   el('#issi').textContent = `ISSI ${radio.issi}`;
@@ -165,6 +184,14 @@ function paint() {
   // as a subtitle underneath; now that a real status is always shown, the
   // fixed "AVL" text is redundant — just show the status itself.
   el('#bAvlStatus').textContent = radio.emergency ? 'EMERGENCY' : (radio.status || '').replace('_', ' ');
+  const ledStatus = radio.emergency ? 'EMERGENCY' : radio.status;
+  const led = el('#statusLed');
+  const colour = STATUS_LED_COLOUR[ledStatus] || '#4b5563';
+  led.style.background = colour;
+  led.style.color = colour; // box-shadow uses currentColor for the glow
+  led.classList.toggle('lit', !['OFFLINE', 'OUT_OF_SERVICE'].includes(ledStatus));
+  led.classList.toggle('pulsing', ledStatus === 'EMERGENCY' || !['OFFLINE', 'OUT_OF_SERVICE'].includes(ledStatus) && radio.status !== 'AVAILABLE');
+  led.title = radio.emergency ? 'EMERGENCY' : (radio.status || '').replace('_', ' ');
   ensureLocationTracking();
 }
 
