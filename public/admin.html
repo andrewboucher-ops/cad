@@ -93,12 +93,14 @@
         <button class="btn primary" id="btnNewUser" style="padding:7px 14px;font-size:13px">New account</button>
         <button class="btn primary" id="btnNewRadio" style="padding:7px 14px;font-size:13px" hidden>New radio</button>
         <button class="btn primary" id="btnNewMdt" style="padding:7px 14px;font-size:13px" hidden>New MDT</button>
+        <button class="btn primary" id="btnNewSite" style="padding:7px 14px;font-size:13px" hidden>New site</button>
       </span>
     </div>
     <div class="tabs">
       <button class="active" id="tabAccounts">Accounts</button>
       <button id="tabRadios">Radios</button>
       <button id="tabMdts">MDTs</button>
+      <button id="tabSites">Sites</button>
     </div>
 
     <div id="viewAccounts">
@@ -129,6 +131,13 @@
       </div>
       <div id="mTableWrap"></div>
     </div>
+
+    <div id="viewSites" class="hide">
+      <div class="toolbar">
+        <input id="sSearch" placeholder="Search site name, address…">
+      </div>
+      <div id="sTableWrap"></div>
+    </div>
   </div>
 </main>
 
@@ -156,14 +165,14 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', RADIO_USER: 'Radio user', MDT_USER: 'MDT user' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : '');
 
-let allUsers = [], allRadios = [], allMdts = [], allCallsigns = [], allTalkgroups = [];
+let allUsers = [], allRadios = [], allMdts = [], allCallsigns = [], allTalkgroups = [], allSites = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allRadios, allMdts, allCallsigns, allTalkgroups] = await Promise.all([
+  [allUsers, allRadios, allMdts, allCallsigns, allTalkgroups, allSites] = await Promise.all([
     api('GET', '/api/users'), api('GET', '/api/radios'), api('GET', '/api/mdts'),
-    api('GET', '/api/callsigns'), api('GET', '/api/talkgroups'),
+    api('GET', '/api/callsigns'), api('GET', '/api/talkgroups'), api('GET', '/api/sites'),
   ]);
-  paint(); paintRadios(); paintMdts();
+  paint(); paintRadios(); paintMdts(); paintSites();
 }
 
 /* ---------- tabs ---------- */
@@ -171,16 +180,20 @@ function showTab(name) {
   el('#tabAccounts').classList.toggle('active', name === 'accounts');
   el('#tabRadios').classList.toggle('active', name === 'radios');
   el('#tabMdts').classList.toggle('active', name === 'mdts');
+  el('#tabSites').classList.toggle('active', name === 'sites');
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewRadios').classList.toggle('hide', name !== 'radios');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
+  el('#viewSites').classList.toggle('hide', name !== 'sites');
   el('#btnNewUser').hidden = name !== 'accounts';
   el('#btnNewRadio').hidden = name !== 'radios';
   el('#btnNewMdt').hidden = name !== 'mdts';
+  el('#btnNewSite').hidden = name !== 'sites';
 }
 el('#tabAccounts').onclick = () => showTab('accounts');
 el('#tabRadios').onclick = () => showTab('radios');
 el('#tabMdts').onclick = () => showTab('mdts');
+el('#tabSites').onclick = () => showTab('sites');
 function linkedTerminal(u) {
   if (u.radio_id) { const r = allRadios.find((x) => x.id === u.radio_id); return r ? `Radio ${esc(r.alias || r.issi)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -441,6 +454,114 @@ function mdtModal(m) {
   });
 }
 el('#btnNewMdt').onclick = () => mdtModal(null);
+
+/* ---------- sites ---------- */
+function paintSites() {
+  const q = el('#sSearch').value.trim().toLowerCase();
+  let rows = allSites.slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (q) rows = rows.filter((s) => s.name.toLowerCase().includes(q) || (s.address || '').toLowerCase().includes(q));
+  el('#sTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Name</th><th>Address</th><th style="width:160px">Contact email</th><th style="width:110px">Checklist</th><th style="width:70px"></th></tr></thead>
+      <tbody>${rows.map((s) => `<tr class="clickable" data-site="${s.id}">
+        <td>${esc(s.name)}</td>
+        <td class="dim">${esc(s.address || '—')}</td>
+        <td class="dim">${esc(s.contact_email || '—')}</td>
+        <td class="dim">${s.checklist && s.checklist.length ? `${s.checklist.length} item${s.checklist.length === 1 ? '' : 's'}` : 'default template'}</td>
+        <td><button class="btn danger" data-delsite="${s.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No sites yet.</p>';
+  els('#sTableWrap [data-site]').forEach((row) => row.addEventListener('click', (e) => {
+    if (e.target.closest('[data-delsite]')) return;
+    siteModal(allSites.find((s) => s.id === Number(row.dataset.site)));
+  }));
+  els('#sTableWrap [data-delsite]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteSite(Number(b.dataset.delsite)); }));
+}
+el('#sSearch').addEventListener('input', paintSites);
+
+async function deleteSite(id) {
+  const s = allSites.find((x) => x.id === id);
+  if (!s || !confirm(`Delete site ${s.name}? This cannot be undone.`)) return;
+  try { await api('DELETE', `/api/sites/${id}`); closeModal(); await load(); showTab('sites'); }
+  catch (e) { alert(e.message); }
+}
+
+/** Checklist rows are edited as a plain list of title/instructions pairs —
+ * kept in a local array and re-rendered on every add/remove rather than
+ * reading the DOM back apart, since drag-free add/remove is all this needs. */
+function checklistEditor(items) {
+  let rows = items.map((it) => ({ id: it.id, title: it.title, instructions: it.instructions || '' }));
+  function render() {
+    const host = el('#siteChecklistRows');
+    if (!host) return;
+    host.innerHTML = rows.length ? rows.map((r, i) => `
+      <div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px;padding:10px;border:1px solid var(--line);border-radius:8px">
+        <div style="flex:1">
+          <input data-ct-title="${i}" placeholder="Task title" value="${esc(r.title)}" style="margin-bottom:6px">
+          <textarea data-ct-instr="${i}" placeholder="Instructions" rows="2" style="width:100%;box-sizing:border-box;resize:vertical;font-family:var(--font);font-size:13px;padding:8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--ink)">${esc(r.instructions)}</textarea>
+        </div>
+        <button type="button" class="btn danger" data-ct-remove="${i}" style="padding:6px 10px;font-size:11px">Remove</button>
+      </div>`).join('') : '<p class="dim" style="font-size:13px">No custom tasks — this site uses the default checklist template until you add one.</p>';
+    els('#siteChecklistRows [data-ct-title]').forEach((inp) => inp.addEventListener('input', () => { rows[Number(inp.dataset.ctTitle)].title = inp.value; }));
+    els('#siteChecklistRows [data-ct-instr]').forEach((inp) => inp.addEventListener('input', () => { rows[Number(inp.dataset.ctInstr)].instructions = inp.value; }));
+    els('#siteChecklistRows [data-ct-remove]').forEach((b) => (b.onclick = () => { rows.splice(Number(b.dataset.ctRemove), 1); render(); }));
+  }
+  render();
+  return {
+    get: () => rows.filter((r) => r.title.trim()).map((r) => ({ id: r.id, title: r.title.trim(), instructions: r.instructions.trim() })),
+    add: () => { rows.push({ title: '', instructions: '' }); render(); },
+  };
+}
+
+function siteForm(s) {
+  const isNew = !s;
+  return `
+    <form class="stack" id="sForm">
+      <label>Name</label>
+      <input id="nsName" autocomplete="off" value="${isNew ? '' : esc(s.name)}">
+      <label>Address</label>
+      <input id="nsAddress" autocomplete="off" value="${isNew ? '' : esc(s.address || '')}">
+      <label>Keyholder</label>
+      <input id="nsKeyholder" autocomplete="off" value="${isNew ? '' : esc(s.keyholder || '')}">
+      <label>Contact email (resolution reports are sent here)</label>
+      <input id="nsEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(s.contact_email || '')}">
+      <label>On-scene checklist</label>
+      <div id="siteChecklistRows"></div>
+      <button type="button" class="btn" id="sAddTask" style="align-self:flex-start;padding:6px 12px;font-size:12px">+ Add task</button>
+      <p class="dim" id="sError" style="min-height:16px;margin:0"></p>
+    </form>`;
+}
+function siteModal(s) {
+  modal(s ? `Edit — ${s.name}` : 'New site', siteForm(s), () => {
+    const editor = checklistEditor(s ? (s.checklist || []) : []);
+    el('#sAddTask').onclick = () => editor.add();
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${s ? '<button class="btn danger" id="sDelete">Delete site</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="sCancel">Cancel</button>
+          <button class="btn primary" id="sSave">${s ? 'Save changes' : 'Create site'}</button>
+        </span>
+      </div>`;
+    el('#sCancel').onclick = closeModal;
+    if (el('#sDelete')) el('#sDelete').onclick = () => deleteSite(s.id);
+    el('#sSave').onclick = async () => {
+      const name = el('#nsName').value.trim();
+      if (!name) { el('#sError').textContent = 'name is required'; return; }
+      const body = {
+        name, address: el('#nsAddress').value.trim(), keyholder: el('#nsKeyholder').value.trim(),
+        contact_email: el('#nsEmail').value.trim(), checklist: editor.get(),
+      };
+      try {
+        if (s) await api('PATCH', `/api/sites/${s.id}`, body);
+        else { const created = await api('POST', '/api/sites', body); if (body.checklist.length) await api('PATCH', `/api/sites/${created.id}`, { checklist: body.checklist }); }
+        closeModal(); await load(); showTab('sites');
+      } catch (e) { el('#sError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewSite').onclick = () => siteModal(null);
 
 CCCS.bus((up) => {
   const n = el('#net');
