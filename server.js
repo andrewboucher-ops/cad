@@ -2040,7 +2040,13 @@ const MQTT_USERNAME = process.env.MQTT_USERNAME || '';
 const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
 const MQTT_TOPIC = process.env.MQTT_TOPIC || 'arc/rx/cccs';
 const AURA_ACCT = process.env.AURA_ACCT || '8581'; // Echelon Control Centre
-const MQTT_HEARTBEAT_S = Number(process.env.MQTT_HEARTBEAT_S || 60);
+const MQTT_HEARTBEAT_S = Number(process.env.MQTT_HEARTBEAT_S || 60); // cadence of the SIA "automatic test" event below — an operator-visible signal, not the connection keep-alive (see MQTT_ACK_* just below)
+// Separate from the SIA periodic test above: GuardM8 also wants a plain
+// connection keep-alive on its own topic, independent of anything
+// operator-visible. Content doesn't matter to GuardM8 for this one (their
+// own words) -- a timestamp, just so it's not literally empty.
+const MQTT_ACK_TOPIC = process.env.MQTT_ACK_TOPIC || 'guardm8/ack/cccs';
+const MQTT_ACK_INTERVAL_S = Number(process.env.MQTT_ACK_INTERVAL_S || 180);
 // JSON over this topic was confirmed not to parse at all (see above) — hold
 // publishing behind this flag until a real SIA DC-09 send has been checked
 // against AURA at least once, same reasoning as before: a wrong guess here
@@ -2052,6 +2058,9 @@ if (MQTT_HOST) {
     setInterval(() => {
       mqttPublishNow(MQTT_TOPIC, buildSia({ acct: AURA_ACCT, data: 'Nri0/RP0000' })); // RP = SIA "automatic test report" — the standard periodic test/heartbeat code, not a real alarm. Matches the confirmed-working example exactly.
     }, MQTT_HEARTBEAT_S * 1000).unref?.();
+    setInterval(() => {
+      mqttPublishNow(MQTT_ACK_TOPIC, new Date().toISOString());
+    }, MQTT_ACK_INTERVAL_S * 1000).unref?.();
   }
 }
 // SIA's zone field is numeric-only (4 digits in every confirmed example) —
