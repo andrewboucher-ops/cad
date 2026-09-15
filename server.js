@@ -9,6 +9,7 @@
 'use strict';
 
 const http = require('http');
+const https = require('https');
 const net = require('net');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -748,7 +749,7 @@ const MIME = {
   '.apk': 'application/vnd.android.package-archive',
 };
 
-const server = http.createServer(async (req, res) => {
+const requestHandler = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const send = (status, body, headers = {}) => {
     const payload = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body);
@@ -809,9 +810,28 @@ const server = http.createServer(async (req, res) => {
     if (err) return send(404, 'Not found', { 'content-type': 'text/plain' });
     send(200, data, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
   });
-});
+};
 
-server.on('upgrade', (req, socket) => {
+const server = http.createServer(requestHandler);
+
+// Direct HTTPS/WSS listener for clients that reach this host over IPv6
+// (bypassing the IPv4-only edge proxy — see the certbot setup this was
+// provisioned alongside). Only created when a certificate actually exists,
+// so a fresh checkout without one still runs fine on plain HTTP behind the
+// edge exactly as before.
+const TLS_CERT_DIR = process.env.TLS_CERT_DIR || `/etc/letsencrypt/live/${process.env.TLS_DOMAIN || 'comms.echeloncic.com'}`;
+let httpsServer = null;
+try {
+  const tlsOptions = {
+    cert: fs.readFileSync(path.join(TLS_CERT_DIR, 'fullchain.pem')),
+    key: fs.readFileSync(path.join(TLS_CERT_DIR, 'privkey.pem')),
+  };
+  httpsServer = https.createServer(tlsOptions, requestHandler);
+} catch {
+  // No certificate on disk — direct HTTPS stays off, edge-proxied HTTP is unaffected.
+}
+
+function handleUpgrade(req, socket) {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname !== '/ws') return socket.destroy();
   const user = authFrom(req, url);
@@ -824,7 +844,9 @@ server.on('upgrade', (req, socket) => {
   socket.setNoDelay(true);
   const conn = new Conn(socket, user);
   conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, radio_id: user.radio_id, mdt_id: user.mdt_id } });
-});
+}
+server.on('upgrade', handleUpgrade);
+httpsServer?.on('upgrade', handleUpgrade);
 
 /* ------------------------------------------------------------------ *
  * REST API
@@ -2676,6 +2698,17 @@ function start() {
     console.log(`  Storage      : ${store.enabled ? store.file : 'in memory only (PERSISTENCE=off)'}`);
     console.log(`  Microsoft SSO: ${MS_ENABLED ? 'enabled (tenant ' + MS_TENANT_ID + ')' : 'not configured — set MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET/MS_REDIRECT_URI'}\n`);
   });
+  if (httpsServer) {
+    const tlsPort = Number(process.env.TLS_PORT || 443);
+    // Never let a problem with this secondary listener (e.g. permission to
+    // bind a low port) take down the primary HTTP server the edge depends on.
+    httpsServer.on('error', (e) => console.error(`  Direct HTTPS listener failed to start (${e.code || e.message}) — continuing on HTTP only`));
+    // '::' not HOST -- HOST defaults to the IPv4-only 0.0.0.0 for the
+    // edge-facing HTTP server above; this listener's only job is serving
+    // the IPv6 clients that bypass the edge, so it needs the IPv6 wildcard.
+    const tlsHost = process.env.TLS_HOST || '::';
+    httpsServer.listen(tlsPort, tlsHost, () => console.log(`  Direct HTTPS : https://comms.echeloncic.com:${tlsPort} (IPv6 clients, bypasses the edge)`));
+  }
 }
 
 if (require.main === module) start();
