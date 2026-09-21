@@ -4,7 +4,7 @@
     android:layout_height="match_parent"
     android:background="#0a0b12">
 
-    <!-- Shown once, on first launch — the token this produces is kept in
+    <!-- Shown once, on first launch. The token this produces is kept in
          SharedPreferences and reused on every later launch, same as a real
          handset gets provisioned once, not re-logged-in every power-cycle. -->
     <LinearLayout
@@ -13,21 +13,19 @@
         android:layout_height="match_parent"
         android:orientation="vertical"
         android:gravity="center"
-        android:padding="24dp">
+        android:padding="16dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="CCCS RADIO"
-            android:textColor="#ffffff"
-            android:textStyle="bold"
-            android:textSize="20sp"
-            android:paddingBottom="24dp" />
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="34dp"
+            android:src="@drawable/echelon_wordmark"
+            android:scaleType="fitCenter"
+            android:contentDescription="Echelon"
+            android:layout_marginBottom="16dp" />
 
-        <!-- No username/password on this device: pick this radio's ISSI
+        <!-- No username or password on this device: pick this radio's ISSI
              from the list control already knows about, then its PIN. Both
-             set from the control-room Admin screen, not typed here beyond
-             the PIN itself. -->
+             set from the control-room Admin screen. -->
         <Spinner
             android:id="@+id/loginIssi"
             android:layout_width="match_parent"
@@ -37,21 +35,21 @@
             android:id="@+id/loginPin"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="8dp"
             android:hint="PIN"
             android:textColor="#ffffff"
             android:textColorHint="#5b6472"
             android:inputType="numberPassword"
             android:maxLength="6"
             android:gravity="center"
-            android:textSize="22sp"
+            android:textSize="20sp"
             android:singleLine="true" />
 
         <Button
             android:id="@+id/loginButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="10dp"
             android:text="SIGN IN"
             android:textColor="#ffffff"
             android:background="#1d4ed8" />
@@ -60,8 +58,9 @@
             android:id="@+id/loginError"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="8dp"
             android:textColor="#ef4444"
+            android:textSize="11sp"
             android:gravity="center" />
     </LinearLayout>
 
@@ -70,20 +69,28 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
-        android:padding="16dp"
+        android:padding="10dp"
         android:visibility="gone">
+
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="26dp"
+            android:src="@drawable/echelon_wordmark"
+            android:scaleType="fitCenter"
+            android:contentDescription="Echelon"
+            android:layout_marginBottom="8dp" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:paddingBottom="12dp">
+            android:paddingBottom="6dp">
 
             <View
                 android:id="@+id/statusLed"
-                android:layout_width="16dp"
-                android:layout_height="16dp"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
                 android:background="#4b5563" />
 
             <TextView
@@ -91,10 +98,10 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="10dp"
+                android:layout_marginStart="8dp"
                 android:text="LINK DOWN"
                 android:textColor="#8b93a3"
-                android:textSize="12sp" />
+                android:textSize="11sp" />
 
             <TextView
                 android:id="@+id/callsignLabel"
@@ -113,8 +120,8 @@
             android:gravity="center"
             android:text="no talkgroup"
             android:textColor="#8b93a3"
-            android:textSize="13sp"
-            android:paddingBottom="16dp" />
+            android:textSize="12sp"
+            android:paddingBottom="6dp" />
 
         <TextView
             android:id="@+id/statusLabel"
@@ -124,41 +131,39 @@
             android:text="OFFLINE"
             android:textColor="#22c55e"
             android:textStyle="bold"
-            android:textSize="18sp"
-            android:paddingBottom="24dp" />
+            android:textSize="20sp"
+            android:paddingBottom="2dp" />
 
-        <Button
-            android:id="@+id/pttButton"
+        <TextView
+            android:id="@+id/hintLabel"
             android:layout_width="match_parent"
-            android:layout_height="140dp"
-            android:text="HOLD TO TALK"
-            android:textSize="22sp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:text="OK = change status   MENU = settings"
+            android:textColor="#5b6472"
+            android:textSize="10sp"
+            android:paddingBottom="8dp" />
+
+        <TextView
+            android:id="@+id/pttState"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:padding="10dp"
+            android:text="READY"
+            android:textSize="18sp"
             android:textStyle="bold"
             android:textColor="#ffffff"
-            android:background="#1d4ed8" />
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="16dp" />
-
-        <Button
-            android:id="@+id/panicButton"
-            android:layout_width="match_parent"
-            android:layout_height="80dp"
-            android:text="EMERGENCY"
-            android:textSize="18sp"
-            android:textStyle="bold"
-            android:textColor="#ef4444"
-            android:background="#2a0f0f" />
+            android:background="#1f2937" />
 
         <TextView
             android:id="@+id/logView"
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="8dp"
             android:textColor="#5b6472"
-            android:textSize="11sp"
+            android:textSize="10sp"
             android:fontFamily="monospace"
             android:scrollbars="vertical" />
 

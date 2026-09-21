@@ -126,6 +126,12 @@ object Api {
         return postAuthed("/api/emergency", token, body)
     }
 
+    /** Same status codes the web radio uses (server STATUS_CODES): the server
+     * maps a code to the status and syncs any linked job. The result comes
+     * back to the app over the WebSocket as radio.status_changed. */
+    fun setStatus(token: String, issi: String, code: String): JSONObject =
+        postAuthed("/api/radios/$issi/status", token, JSONObject().put("code", code))
+
     fun acknowledgeJob(token: String, jobId: Int): JSONObject =
         postAuthed("/api/jobs/$jobId/ack", token, JSONObject())
 }

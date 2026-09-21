@@ -63,8 +63,10 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     private lateinit var callsignLabel: TextView
     private lateinit var talkgroupLabel: TextView
     private lateinit var statusLabel: TextView
-    private lateinit var pttButton: Button
-    private lateinit var panicButton: Button
+    private lateinit var pttState: TextView
+    private var panicBusy = false
+    private var pttKey = -1
+    private var panicKey = -1
     private lateinit var logView: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,8 +80,8 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         Log.onLine = { line -> main.post { appendLog(line) } }
 
         loginButton.setOnClickListener { doLogin() }
-        pttButton.setOnTouchListener { _, event -> onPttTouch(event) }
-        panicButton.setOnClickListener { doPanic() }
+        pttKey = prefs.getInt(KEY_PTT_KEY, -1)
+        panicKey = prefs.getInt(KEY_PANIC_KEY, -1)
 
         token = prefs.getString(KEY_TOKEN, null)
         issi = prefs.getString(KEY_ISSI, null)
@@ -109,8 +111,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         callsignLabel = findViewById(R.id.callsignLabel)
         talkgroupLabel = findViewById(R.id.talkgroupLabel)
         statusLabel = findViewById(R.id.statusLabel)
-        pttButton = findViewById(R.id.pttButton)
-        panicButton = findViewById(R.id.panicButton)
+        pttState = findViewById(R.id.pttState)
         logView = findViewById(R.id.logView)
     }
 
@@ -285,22 +286,25 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
             "ptt.granted" -> {
                 pttGranted = true
                 if (pttHeld) {
-                    pttButton.text = "TRANSMITTING"
+                    pttState.text = "TRANSMITTING"
+                    pttState.setBackgroundColor(android.graphics.Color.parseColor("#b91c1c"))
                     audio.startCapture { chunk -> ws?.sendBinary(chunk) }
                 }
             }
             "ptt.denied" -> {
                 pttGranted = false
                 pttHeld = false
-                pttButton.text = "HOLD TO TALK"
+                setPttIdle()
                 appendLog("PTT DENIED — ${payload.optString("holder", "channel busy")}")
             }
             "radio.ptt_started" -> {
                 if (payload.optString("issi") == issi) return // that's us, handled by ptt.granted
-                appendLog("RX ${payload.optString("callsign", "")}")
+                pttState.text = "RX ${payload.optString("callsign", "")}"
+                pttState.setBackgroundColor(android.graphics.Color.parseColor("#15803d"))
             }
             "radio.ptt_released" -> {
-                // Nothing to do — playback stops naturally when frames stop arriving.
+                // Playback stops naturally when frames stop arriving; just clear the indicator.
+                if (!pttHeld) setPttIdle()
             }
             "emergency.acknowledged" -> {
                 if (payload.optString("issi") == issi) appendLog("EMERGENCY ACKNOWLEDGED BY ${payload.optString("acknowledged_by", "control")}")
@@ -354,23 +358,21 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
 
     // -- PTT ------------------------------------------------------------
 
-    private fun onPttTouch(event: MotionEvent): Boolean {
-        when (event.action) {
-            MotionEvent.ACTION_DOWN -> startPtt()
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> stopPtt()
-        }
-        return true
+    private fun setPttIdle() {
+        pttState.text = "READY"
+        pttState.setBackgroundColor(android.graphics.Color.parseColor("#1f2937"))
     }
 
     private fun startPtt() {
         if (pttHeld || talkgroup == null) return
         pttHeld = true
-        pttButton.text = "REQUESTING…"
+        pttState.text = "REQUESTING…"
+        pttState.setBackgroundColor(android.graphics.Color.parseColor("#b45309"))
         val payload = JSONObject().put("talkgroup", talkgroup).put("as_radio", issi)
         ws?.sendText(JSONObject().put("type", "radio.ptt_start").put("payload", payload).toString())
         main.postDelayed({
             if (pttHeld && !pttGranted) {
-                pttButton.text = "NO RESPONSE"
+                pttState.text = "NO RESPONSE"
                 appendLog("PTT: no answer from server (link ${linkStatus.text})")
             }
         }, PTT_RESPONSE_TIMEOUT_MS)
@@ -379,7 +381,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     private fun stopPtt() {
         if (!pttHeld) return
         pttHeld = false
-        pttButton.text = "HOLD TO TALK"
+        setPttIdle()
         if (pttGranted) {
             audio.stopCapture()
             val payload = JSONObject().put("talkgroup", talkgroup).put("as_radio", issi)
@@ -392,8 +394,9 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
 
     private fun doPanic() {
         val t = token ?: return
-        panicButton.isEnabled = false
-        appendLog("EMERGENCY — sending...")
+        if (panicBusy) return
+        panicBusy = true
+        appendLog("EMERGENCY - sending...")
         // Take a fresh fix if one's already on file from the location
         // listener below; a stale/absent fix isn't worth blocking on since
         // the server falls back to the radio's last known position anyway
@@ -402,9 +405,9 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         Thread {
             try {
                 Api.emergency(t, fix?.latitude, fix?.longitude)
-                main.post { appendLog("EMERGENCY SENT"); panicButton.isEnabled = true }
+                main.post { appendLog("EMERGENCY SENT"); panicBusy = false }
             } catch (e: Exception) {
-                main.post { appendLog("EMERGENCY FAILED: ${e.message}"); panicButton.isEnabled = true }
+                main.post { appendLog("EMERGENCY FAILED: ${e.message}"); panicBusy = false }
             }
         }.start()
     }
@@ -428,36 +431,96 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     // -- Hardware keys ------------------------------------------------------
 
     // Rugged handsets disagree about which keycode their side PTT/panic
-    // buttons send, and this project doesn't have a settings screen to
-    // configure it (unlike the main app — see its MainActivity.kt). Until
-    // this is confirmed against the real device, log every non-OS key so
-    // the right code can be identified, and treat it as PTT by default
-    // since that's the control every handset in this fleet has.
+    // buttons send, so nothing is hardcoded: MENU > "Set PTT button" / "Set
+    // panic button" learns the key by asking for it to be pressed, and stores
+    // it. Until a PTT key has been learned, any non-ordinary key acts as PTT
+    // so a fresh handset is usable straight away. Panic has no fallback on
+    // purpose: an unassigned key must never raise a real emergency.
+    private fun isPttKey(keyCode: Int) = if (pttKey >= 0) keyCode == pttKey else isPttCandidate(keyCode)
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (mainScreen.visibility == View.VISIBLE) {
-            if (event.repeatCount == 0) appendLog("KEY $keyCode")
-            if (shouldHandle(keyCode)) {
-                if (event.repeatCount == 0) startPtt()
-                return true
-            }
-        }
+        if (mainScreen.visibility != View.VISIBLE) return super.onKeyDown(keyCode, event)
+        val first = event.repeatCount == 0
+        if (first) appendLog("KEY $keyCode")
+        if (keyCode == panicKey) { if (first) doPanic(); return true }
+        if (isPttKey(keyCode)) { if (first) startPtt(); return true }
+        if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SOFT_LEFT) { if (first) showMenu(); return true }
+        if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_DPAD_CENTER) { if (first) showStatusMenu(); return true }
         return super.onKeyDown(keyCode, event)
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (mainScreen.visibility == View.VISIBLE && shouldHandle(keyCode)) {
-            appendLog("KEY UP $keyCode")
-            stopPtt()
-            return true
-        }
+        if (mainScreen.visibility == View.VISIBLE && isPttKey(keyCode)) { stopPtt(); return true }
         return super.onKeyUp(keyCode, event)
     }
 
+    // -- Menu, status and key learning ---------------------------------------
+
+    // Same codes as the server's STATUS_CODES (and the web radio's picker).
+    private val statusChoices = listOf(
+        "01" to "Available", "02" to "Busy", "03" to "En route", "04" to "On scene / at site",
+        "05" to "On task", "06" to "Site clear, resuming patrol", "07" to "Meal break", "08" to "Out of service"
+    )
+
+    private fun showMenu() {
+        val items = arrayOf("Change status", "Set PTT button", "Set panic button", "Sign out")
+        AlertDialog.Builder(this).setTitle("Menu").setItems(items) { _, which ->
+            when (which) {
+                0 -> showStatusMenu()
+                1 -> learnKey("PTT")
+                2 -> learnKey("panic")
+                3 -> signOut()
+            }
+        }.show()
+    }
+
+    private fun showStatusMenu() {
+        val t = token ?: return
+        val who = issi ?: return
+        AlertDialog.Builder(this).setTitle("Set status")
+            .setItems(statusChoices.map { it.second }.toTypedArray()) { _, which ->
+                val (code, label) = statusChoices[which]
+                appendLog("STATUS -> $label")
+                Thread {
+                    try { Api.setStatus(t, who, code) }
+                    catch (e: Exception) { main.post { appendLog("STATUS FAILED: ${e.message}") } }
+                }.start()
+            }.show()
+    }
+
+    private fun learnKey(kind: String) {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Set $kind button")
+            .setMessage("Press the $kind button now")
+            .setNegativeButton("Cancel", null)
+            .create()
+        dialog.setOnKeyListener { d, keyCode, event ->
+            if (event.action != KeyEvent.ACTION_DOWN || keyCode == KeyEvent.KEYCODE_BACK) return@setOnKeyListener false
+            if (kind == "PTT") { pttKey = keyCode; prefs.edit().putInt(KEY_PTT_KEY, keyCode).apply() }
+            else { panicKey = keyCode; prefs.edit().putInt(KEY_PANIC_KEY, keyCode).apply() }
+            appendLog("$kind button set to key $keyCode")
+            d.dismiss()
+            true
+        }
+        dialog.show()
+    }
+
+    private fun signOut() {
+        ws?.close()
+        ws = null
+        audio.stopCapture()
+        try { locationManager?.removeUpdates(this) } catch (_: Exception) {}
+        prefs.edit().remove(KEY_TOKEN).remove(KEY_ISSI).remove(KEY_RADIO_ID).remove(KEY_CALLSIGN).apply()
+        token = null; issi = null; radioId = null; callsign = null; talkgroup = null
+        logView.text = ""
+        setPttIdle()
+        showLogin()
+        loadDirectory()
+    }
+
     // Ordinary keypad keys (digits, D-pad, soft keys, call/end, star/hash...)
-    // stay ordinary. Anything else is treated as a PTT candidate and logged,
-    // until the handset's real PTT and panic keycodes are read off the log
-    // and hardcoded.
-    private fun shouldHandle(keyCode: Int): Boolean = when {
+    // are never PTT candidates.
+    private fun isPttCandidate(keyCode: Int): Boolean = when {
         keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> false
         keyCode in setOf(
             KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_APP_SWITCH, KeyEvent.KEYCODE_POWER,
@@ -480,6 +543,8 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         private const val KEY_RADIO_ID = "radio_id"
         private const val KEY_CALLSIGN = "callsign"
         private const val KEY_DISPLAY_NAME = "display_name"
+        private const val KEY_PTT_KEY = "ptt_keycode"
+        private const val KEY_PANIC_KEY = "panic_keycode"
         private const val PERMISSION_REQUEST = 4001
         private const val RECONNECT_DELAY_MS = 4000L
         private const val PTT_RESPONSE_TIMEOUT_MS = 3000L
