@@ -36,6 +36,7 @@ class CccsWebSocket(private val host: String, private val port: Int, private val
     private var socket: Socket? = null
     private var output: OutputStream? = null
     private val running = AtomicBoolean(false)
+    private val closedByUs = AtomicBoolean(false)
     private val writeLock = Any()
 
     fun connect() {
@@ -45,15 +46,20 @@ class CccsWebSocket(private val host: String, private val port: Int, private val
             try {
                 runConnection()
             } catch (e: Exception) {
-                Log.append("ws error: ${e.message}")
+                if (!closedByUs.get()) Log.append("ws error: ${e.message}")
             } finally {
                 running.set(false)
-                listener?.onClosed()
+                // Only report a drop we didn't cause. Reporting our own close()
+                // made the owner schedule a reconnect, which closed the fresh
+                // connection, which reported another close -- a loop that
+                // replaced a healthy connection every few seconds.
+                if (!closedByUs.get()) listener?.onClosed()
             }
         }.start()
     }
 
     fun close() {
+        closedByUs.set(true)
         running.set(false)
         try { socket?.close() } catch (_: Exception) {}
     }
@@ -144,7 +150,7 @@ class CccsWebSocket(private val host: String, private val port: Int, private val
             when (opcode) {
                 0x1 -> listener?.onText(String(payload, Charsets.UTF_8))
                 0x2 -> listener?.onBinary(payload)
-                0x8 -> { close(); return }
+                0x8 -> { try { socket?.close() } catch (_: Exception) {}; return } // server closed: a real drop, so it must still be reported for reconnect
                 0x9 -> writeFrame(payload, 0xa) // reply to server ping with pong
             }
         }

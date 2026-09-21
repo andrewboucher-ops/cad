@@ -368,6 +368,12 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         pttButton.text = "REQUESTING…"
         val payload = JSONObject().put("talkgroup", talkgroup).put("as_radio", issi)
         ws?.sendText(JSONObject().put("type", "radio.ptt_start").put("payload", payload).toString())
+        main.postDelayed({
+            if (pttHeld && !pttGranted) {
+                pttButton.text = "NO RESPONSE"
+                appendLog("PTT: no answer from server (link ${linkStatus.text})")
+            }
+        }, PTT_RESPONSE_TIMEOUT_MS)
     }
 
     private fun stopPtt() {
@@ -428,9 +434,12 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     // the right code can be identified, and treat it as PTT by default
     // since that's the control every handset in this fleet has.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (mainScreen.visibility == View.VISIBLE && shouldHandle(keyCode)) {
-            if (event.repeatCount == 0) { appendLog("KEY DOWN $keyCode"); startPtt() }
-            return true
+        if (mainScreen.visibility == View.VISIBLE) {
+            if (event.repeatCount == 0) appendLog("KEY $keyCode")
+            if (shouldHandle(keyCode)) {
+                if (event.repeatCount == 0) startPtt()
+                return true
+            }
         }
         return super.onKeyDown(keyCode, event)
     }
@@ -444,10 +453,22 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         return super.onKeyUp(keyCode, event)
     }
 
-    private fun shouldHandle(keyCode: Int): Boolean = keyCode !in setOf(
-        KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_APP_SWITCH,
-        KeyEvent.KEYCODE_POWER, KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN
-    )
+    // Ordinary keypad keys (digits, D-pad, soft keys, call/end, star/hash...)
+    // stay ordinary. Anything else is treated as a PTT candidate and logged,
+    // until the handset's real PTT and panic keycodes are read off the log
+    // and hardcoded.
+    private fun shouldHandle(keyCode: Int): Boolean = when {
+        keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> false
+        keyCode in setOf(
+            KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_APP_SWITCH, KeyEvent.KEYCODE_POWER,
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_SEARCH,
+            KeyEvent.KEYCODE_CALL, KeyEvent.KEYCODE_ENDCALL, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_STAR,
+            KeyEvent.KEYCODE_POUND, KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_CLEAR, KeyEvent.KEYCODE_SOFT_LEFT,
+            KeyEvent.KEYCODE_SOFT_RIGHT, KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_CENTER
+        ) -> false
+        else -> true
+    }
 
     private fun appendLog(line: String) {
         logView.append(line + "\n")
@@ -461,6 +482,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         private const val KEY_DISPLAY_NAME = "display_name"
         private const val PERMISSION_REQUEST = 4001
         private const val RECONNECT_DELAY_MS = 4000L
+        private const val PTT_RESPONSE_TIMEOUT_MS = 3000L
         private const val LOCATION_INTERVAL_MS = 15000L
     }
 }
