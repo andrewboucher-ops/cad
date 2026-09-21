@@ -827,6 +827,10 @@ try {
     key: fs.readFileSync(path.join(TLS_CERT_DIR, 'privkey.pem')),
   };
   httpsServer = https.createServer(tlsOptions, requestHandler);
+  // Handshake failures never reach the request handler, so without this an
+  // old client (e.g. Android 4.4 handsets) that can't negotiate just looks
+  // like nothing happened server-side.
+  httpsServer.on('tlsClientError', (err, sock) => console.warn(`[cccs] TLS handshake failed from ${sock && sock.remoteAddress}: ${err.message}`));
 } catch {
   // No certificate on disk — direct HTTPS stays off, edge-proxied HTTP is unaffected.
 }

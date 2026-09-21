@@ -3,6 +3,7 @@ package uk.cccs.radiolegacy
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import javax.net.ssl.HttpsURLConnection
 
 /**
  * Plain HttpURLConnection + org.json — both built into Android since API 1,
@@ -15,6 +16,15 @@ object Api {
     const val HOST = "comms.echeloncic.com"
     const val BASE_URL = "https://$HOST"
 
+    /** Every request goes through the TLS-1.2-enabled factory in Tls.kt —
+     * a stock connection on Android 4.4 only offers TLS 1.0, which the
+     * server refuses. */
+    private fun open(url: URL): HttpURLConnection {
+        val conn = url.openConnection() as HttpsURLConnection
+        conn.sslSocketFactory = Tls.factory
+        return conn
+    }
+
     class LoginResult(val token: String, val role: String, val displayName: String, val radioId: Int?, val issi: String?)
     class DirectoryEntry(val issi: String, val alias: String?, val callsign: String?)
 
@@ -25,7 +35,7 @@ object Api {
      * callers must not call this from the UI thread. */
     fun loginRadio(issi: String, pin: String): LoginResult {
         val url = URL("$BASE_URL/api/auth/radio-login")
-        val conn = url.openConnection() as HttpURLConnection
+        val conn = open(url)
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
@@ -61,7 +71,7 @@ object Api {
      * sign-in screen's radio picker (see /api/radios/directory). */
     fun directory(): List<DirectoryEntry> {
         val url = URL("$BASE_URL/api/radios/directory")
-        val conn = url.openConnection() as HttpURLConnection
+        val conn = open(url)
         conn.requestMethod = "GET"
         conn.connectTimeout = 10000
         conn.readTimeout = 10000
@@ -85,7 +95,7 @@ object Api {
      * on the calling thread, same contract as login(). */
     private fun postAuthed(path: String, token: String, body: JSONObject): JSONObject {
         val url = URL("$BASE_URL$path")
-        val conn = url.openConnection() as HttpURLConnection
+        val conn = open(url)
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")

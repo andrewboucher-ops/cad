@@ -10,7 +10,6 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 
 /**
  * Hand-rolled RFC 6455 client — matches the hand-rolled server in
@@ -73,12 +72,12 @@ class CccsWebSocket(private val host: String, private val port: Int, private val
             // which only exposes the host/port createSocket overloads — the
             // Socket-wrapping one used below exists only on SSLSocketFactory
             // itself, hence the cast.
-            val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-            val ssl = factory.createSocket(plain, host, port, true) as SSLSocket
-            val supported = ssl.supportedProtocols.toSet()
-            val wanted = arrayOf("TLSv1.2", "TLSv1.1").filter { it in supported }
-            if (wanted.isNotEmpty()) ssl.enabledProtocols = wanted.toTypedArray()
+            // Tls.factory already enables TLS 1.2 and adds the Let's Encrypt
+            // roots Android 4.4 lacks; a raw SSLSocket doesn't check the
+            // hostname itself, so that's verified explicitly below.
+            val ssl = Tls.factory.createSocket(plain, host, port, true) as SSLSocket
             ssl.startHandshake()
+            if (!Tls.verifyHostname(host, ssl)) { ssl.close(); throw Exception("certificate does not match $host") }
             ssl
         } else {
             Socket(host, port)
