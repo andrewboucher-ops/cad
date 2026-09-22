@@ -646,7 +646,9 @@ const CCCS = (() => {
 
     async function publishTo(addresses) {
       const stream = await getMic();
-      startRawAudioSend(stream);
+      // A failure here must never stop the WebRTC loop below from running
+      // for modern listeners -- same reasoning as stopPublishing().
+      try { startRawAudioSend(stream); } catch (e) { console.warn('[cccs] startRawAudioSend failed', e); }
       for (const addr of addresses) {
         if (peers.has(addr)) continue;
         const pc = newPeer(addr);
@@ -656,10 +658,18 @@ const CCCS = (() => {
         bus.send('webrtc.signal', { to: addr, data: { sdp: pc.localDescription } });
       }
     }
+    // Callers (control.html's pttUp, radio.html's stopPtt) send
+    // radio.ptt_release right after calling this -- if any step here threw
+    // uncaught, that send never ran, and the talkgroup's floor stuck
+    // "held by CONTROL" forever with nothing left to clear it. Hit this
+    // live: browser-side audio silently broken AND the floor stuck at the
+    // same time was this, not two separate bugs. Each step is now
+    // independent, so a broken one can never block the others or the
+    // caller's release message.
     function stopPublishing() {
-      [...peers.keys()].forEach(drop);
-      stopRawAudioSend();
-      releaseMic();
+      try { [...peers.keys()].forEach(drop); } catch (e) { console.warn('[cccs] stopPublishing: dropping peers failed', e); }
+      try { stopRawAudioSend(); } catch (e) { console.warn('[cccs] stopPublishing: stopRawAudioSend failed', e); }
+      try { releaseMic(); } catch (e) { console.warn('[cccs] stopPublishing: releaseMic failed', e); }
     }
 
     /* ---- Raw PCM bridge for legacy (pre-WebRTC) handsets -----------------
