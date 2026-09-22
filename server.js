@@ -437,6 +437,21 @@ class Conn {
       const m = db.mdts.find((x) => x.id === this.mdtId);
       if (m) { m.connected = false; m.status = 'OFFLINE'; broadcast('mdt.status_changed', publicMdt(m)); }
     }
+    // A console/control user holding the floor must release it here too,
+    // or a closed tab (or a refresh, like reloading to pick up a new
+    // build) mid-transmission leaves the talkgroup permanently stuck
+    // "held by CONTROL" — nothing else ever clears it. Same
+    // no-other-connection-left guard as the radio/MDT cases above, so one
+    // of several open tabs from the same user doesn't release a floor the
+    // others still legitimately hold.
+    if (this.user && isControlRole(this.user.role) && !Array.from(sockets).some((c) => c.user && c.user.id === this.user.id)) {
+      for (const tg of db.talkgroups) {
+        if (tg.floor_console_user_id === this.user.id) {
+          tg.floor_console_user_id = null; tg.floor_since = null;
+          broadcast('radio.ptt_released', { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: null, callsign: 'CONTROL' });
+        }
+      }
+    }
   }
 }
 
