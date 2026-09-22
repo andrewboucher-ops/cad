@@ -67,6 +67,9 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     private lateinit var talkgroupLabel: TextView
     private lateinit var statusLabel: TextView
     private lateinit var pttState: TextView
+    private lateinit var lockIcon: TextView
+    private lateinit var clockLabel: TextView
+    private lateinit var dateLabel: TextView
     private var panicBusy = false
     private var pttKey = -1
     private var panicKey = -1
@@ -78,6 +81,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
         bindViews()
+        main.post(clockRunnable)
         requestPermissions()
 
         Log.onLine = { line -> main.post { appendLog(line) } }
@@ -104,6 +108,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        main.removeCallbacks(clockRunnable)
         ws?.close()
         audio.stopCapture()
         audio.releasePlayback()
@@ -123,7 +128,25 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         talkgroupLabel = findViewById(R.id.talkgroupLabel)
         statusLabel = findViewById(R.id.statusLabel)
         pttState = findViewById(R.id.pttState)
+        lockIcon = findViewById(R.id.lockIcon)
+        clockLabel = findViewById(R.id.clockLabel)
+        dateLabel = findViewById(R.id.dateLabel)
         logView = findViewById(R.id.logView)
+    }
+
+    // Ticks once a second regardless of which screen is showing -- trivial
+    // cost, and it means the clock is never stale the moment mainScreen
+    // appears. Time-only precision is fine; a live seconds display isn't
+    // worth the extra churn on a screen this small.
+    private val clockFormat = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+    private val dateFormat = java.text.SimpleDateFormat("EEE, d MMM", java.util.Locale.getDefault())
+    private val clockRunnable = object : Runnable {
+        override fun run() {
+            val now = java.util.Date()
+            clockLabel.text = clockFormat.format(now)
+            dateLabel.text = dateFormat.format(now)
+            main.postDelayed(this, 1000L)
+        }
     }
 
     /** Runtime permission prompts don't exist before API 23 — on the real
@@ -541,6 +564,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         lockHolding = false
         locked = !locked
         dialBuffer = ""
+        lockIcon.text = if (locked) "🔒" else "🔓"
         appendLog(if (locked) "LOCKED" else "UNLOCKED")
         setPttIdle()
     }

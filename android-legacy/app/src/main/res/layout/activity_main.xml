@@ -64,33 +64,39 @@
             android:gravity="center" />
     </LinearLayout>
 
+    <!-- Styled after a real TETRA handset's screen (status icons, clock,
+         group name, a highlighted mode bar, labelled soft keys) rather
+         than a generic app layout — this is what the crew are used to
+         reading at a glance on the radios they already carry. -->
     <LinearLayout
         android:id="@+id/mainScreen"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:orientation="vertical"
-        android:padding="10dp"
+        android:background="#0d1117"
         android:visibility="gone">
-
-        <ImageView
-            android:layout_width="match_parent"
-            android:layout_height="26dp"
-            android:src="@drawable/echelon_wordmark"
-            android:scaleType="fitCenter"
-            android:contentDescription="Echelon"
-            android:layout_marginBottom="8dp" />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:paddingBottom="6dp">
+            android:background="#161b22"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="6dp">
+
+            <TextView
+                android:id="@+id/lockIcon"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🔓"
+                android:textSize="13sp" />
 
             <View
                 android:id="@+id/statusLed"
-                android:layout_width="14dp"
-                android:layout_height="14dp"
+                android:layout_width="10dp"
+                android:layout_height="10dp"
+                android:layout_marginStart="10dp"
                 android:background="#4b5563" />
 
             <TextView
@@ -98,7 +104,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="6dp"
                 android:text="LINK DOWN"
                 android:textColor="#8b93a3"
                 android:textSize="11sp" />
@@ -113,57 +119,134 @@
                 android:textSize="14sp" />
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/talkgroupLabel"
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:text="no talkgroup"
-            android:textColor="#8b93a3"
-            android:textSize="12sp"
-            android:paddingBottom="6dp" />
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingHorizontal="16dp"
+            android:paddingTop="8dp">
 
+            <TextView
+                android:id="@+id/clockLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:text="--:--"
+                android:textColor="#3b82f6"
+                android:textStyle="bold"
+                android:textSize="34sp" />
+
+            <TextView
+                android:id="@+id/dateLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:text=""
+                android:textColor="#5b6472"
+                android:textSize="12sp"
+                android:paddingBottom="14dp" />
+
+            <ImageView
+                android:layout_width="26dp"
+                android:layout_height="18dp"
+                android:src="@drawable/echelon_wordmark"
+                android:scaleType="fitStart"
+                android:contentDescription="Echelon"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:id="@+id/talkgroupLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="👥 no talkgroup"
+                android:textColor="#e5e7eb"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/statusLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="OFFLINE"
+                android:textColor="#22c55e"
+                android:textStyle="bold"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- The one bar every state funnels through: radio status (above)
+             changes rarely, this changes every transmission, so it gets
+             the same visual weight as the reference's highlighted "Secure"
+             bar. -->
         <TextView
-            android:id="@+id/statusLabel"
+            android:id="@+id/pttState"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
-            android:text="OFFLINE"
-            android:textColor="#22c55e"
+            android:padding="14dp"
+            android:text="READY"
+            android:textSize="19sp"
             android:textStyle="bold"
-            android:textSize="20sp"
-            android:paddingBottom="2dp" />
+            android:textColor="#ffffff"
+            android:background="#1f2937" />
 
         <TextView
             android:id="@+id/hintLabel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
-            android:text="soft key=status  hold #=settings  hold 1=call  hold *=lock"
+            android:background="#0d1117"
+            android:paddingVertical="3dp"
+            android:text="hold 1 = call request      hold * = lock"
             android:textColor="#5b6472"
-            android:textSize="10sp"
-            android:paddingBottom="8dp" />
+            android:textSize="10sp" />
 
-        <TextView
-            android:id="@+id/pttState"
+        <!-- Labelled like the physical soft keys under a real TETRA
+             screen — STATUS is the one true tap-a-key action (the left
+             soft key); SETTINGS is reached by holding #, immediately
+             below on the keypad. -->
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="center"
-            android:padding="10dp"
-            android:text="READY"
-            android:textSize="18sp"
-            android:textStyle="bold"
-            android:textColor="#ffffff"
-            android:background="#1f2937" />
+            android:orientation="horizontal"
+            android:background="#1d4ed8"
+            android:weightSum="2">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:padding="10dp"
+                android:text="STATUS"
+                android:textColor="#ffffff"
+                android:textStyle="bold"
+                android:textSize="12sp" />
+
+            <View
+                android:layout_width="1dp"
+                android:layout_height="match_parent"
+                android:background="#3b5bdb" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:padding="10dp"
+                android:text="SETTINGS"
+                android:textColor="#ffffff"
+                android:textStyle="bold"
+                android:textSize="12sp" />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/logView"
             android:layout_width="match_parent"
-            android:layout_height="0dp"
-            android:layout_weight="1"
-            android:layout_marginTop="8dp"
+            android:layout_height="72dp"
+            android:padding="6dp"
             android:textColor="#5b6472"
-            android:textSize="10sp"
+            android:textSize="9sp"
             android:fontFamily="monospace"
             android:scrollbars="vertical" />
 
