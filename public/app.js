@@ -283,12 +283,14 @@ const CCCS = (() => {
   /* ---- WebSocket bus with auto-reconnect ---- */
   function bus(onStatus) {
     const handlers = new Map();
+    const binaryHandlers = [];
     let ws = null, retry = 0, closed = false;
     const queue = [];
 
     function connect() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(session.token)}`);
+      ws.binaryType = 'arraybuffer';
       ws.onopen = () => { retry = 0; onStatus && onStatus(true); while (queue.length) ws.send(queue.shift()); };
       ws.onclose = () => {
         onStatus && onStatus(false);
@@ -298,6 +300,11 @@ const CCCS = (() => {
       };
       ws.onerror = () => { try { ws.close(); } catch {} };
       ws.onmessage = (e) => {
+        // Raw PCM from a legacy handset's floor time (relayAudioFrame in
+        // server.js) — JSON.parse would just throw and silently discard
+        // this on every frame, which is exactly what happened before
+        // binaryType/this check existed.
+        if (e.data instanceof ArrayBuffer) { binaryHandlers.forEach((fn) => fn(e.data)); return; }
         let msg; try { msg = JSON.parse(e.data); } catch { return; }
         (handlers.get(msg.type) || []).forEach((fn) => fn(msg.payload, msg));
         (handlers.get('*') || []).forEach((fn) => fn(msg.payload, msg));
@@ -306,10 +313,15 @@ const CCCS = (() => {
     connect();
     return {
       on(type, fn) { handlers.set(type, [...(handlers.get(type) || []), fn]); return this; },
+      onBinary(fn) { binaryHandlers.push(fn); return this; },
       send(type, payload) {
         const frame = JSON.stringify({ type, payload });
         if (ws && ws.readyState === 1) ws.send(frame); else queue.push(frame);
       },
+      // No queueing here on purpose: audio is perishable, and stale queued
+      // chunks flushed on reconnect would just play back as a burst of
+      // noise well after the fact.
+      sendBinary(data) { if (ws && ws.readyState === 1) ws.send(data); },
       close() { closed = true; try { ws.close(); } catch {} },
     };
   }
@@ -634,6 +646,7 @@ const CCCS = (() => {
 
     async function publishTo(addresses) {
       const stream = await getMic();
+      startRawAudioSend(stream);
       for (const addr of addresses) {
         if (peers.has(addr)) continue;
         const pc = newPeer(addr);
@@ -645,7 +658,79 @@ const CCCS = (() => {
     }
     function stopPublishing() {
       [...peers.keys()].forEach(drop);
+      stopRawAudioSend();
       releaseMic();
+    }
+
+    /* ---- Raw PCM bridge for legacy (pre-WebRTC) handsets -----------------
+       16-bit mono PCM at 8kHz, framed exactly as the legacy Android app
+       sends and expects it (see AudioEngine.kt there) — no codec, on
+       either end, deliberately. Rides the same WebSocket as everything
+       else, relayed server-side by relayAudioFrame() in server.js, which
+       only knows about talkgroup floor time (not private/PSTN calls yet —
+       call() below stays WebRTC-only yet).
+
+       Sending always happens alongside the normal WebRTC publish, whether
+       or not the talkgroup has a legacy member — the server fans it out
+       to whoever's listening either way, and it's cheap to send. Playing
+       it back is gated on radio.ptt_started's raw_audio flag instead of
+       just "any binary frame arrived", so a modern-to-modern transmission
+       (WebRTC handles that) never gets double-played through this path
+       too. */
+    const RAW_SAMPLE_RATE = 8000;
+    let playCtx = null, nextPlayAt = 0, rawAudioExpected = false;
+    let captureCtx = null, captureNode = null, captureSource = null;
+
+    function playPcmChunk(buf) {
+      if (!rawAudioExpected) return;
+      if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const int16 = new Int16Array(buf);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+      const audioBuf = playCtx.createBuffer(1, float32.length, RAW_SAMPLE_RATE);
+      audioBuf.copyToChannel(float32, 0);
+      const src = playCtx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(playCtx.destination);
+      const startAt = Math.max(playCtx.currentTime, nextPlayAt);
+      src.start(startAt);
+      nextPlayAt = startAt + audioBuf.duration;
+    }
+    bus.onBinary(playPcmChunk);
+    bus.on('radio.ptt_started', (ev) => { rawAudioExpected = !!ev.raw_audio; nextPlayAt = 0; });
+    bus.on('radio.ptt_released', () => { rawAudioExpected = false; });
+
+    function startRawAudioSend(stream) {
+      if (captureNode) return;
+      captureCtx = playCtx || (playCtx = new (window.AudioContext || window.webkitAudioContext)());
+      captureSource = captureCtx.createMediaStreamSource(stream);
+      // ScriptProcessorNode is deprecated but needs no separate worklet
+      // module to load, matching this codebase's no-extra-files approach
+      // elsewhere. Must reach .destination for onaudioprocess to fire at
+      // all (a WebAudio quirk) without the caller hearing their own mic
+      // played back, hence routing through a zero-gain node instead of
+      // straight to destination.
+      captureNode = captureCtx.createScriptProcessor(2048, 1, 1);
+      const ratio = captureCtx.sampleRate / RAW_SAMPLE_RATE;
+      captureNode.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        const outLen = Math.floor(input.length / ratio);
+        const out = new Int16Array(outLen);
+        for (let i = 0; i < outLen; i++) {
+          const s = input[Math.floor(i * ratio)];
+          out[i] = Math.max(-32768, Math.min(32767, Math.round(s * 32768)));
+        }
+        bus.sendBinary(out.buffer);
+      };
+      const silentSink = captureCtx.createGain();
+      silentSink.gain.value = 0;
+      captureSource.connect(captureNode);
+      captureNode.connect(silentSink);
+      silentSink.connect(captureCtx.destination);
+    }
+    function stopRawAudioSend() {
+      if (captureNode) { try { captureNode.disconnect(); } catch {} captureNode = null; }
+      if (captureSource) { try { captureSource.disconnect(); } catch {} captureSource = null; }
     }
 
     bus.on('webrtc.signal', async ({ from, data }) => {
