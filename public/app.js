@@ -691,12 +691,19 @@ const CCCS = (() => {
     let playCtx = null, nextPlayAt = 0, rawAudioExpected = false;
     let captureCtx = null, captureNode = null, captureSource = null;
 
+    // Handset mic capture has no gain control on its end (a plain
+    // AudioRecord, no AGC — see AudioEngine.kt), so what arrives is
+    // typically quiet. Boosted here rather than there since this is the
+    // one place it's easy to tune without a new APK build; soft-clipped
+    // with tanh so a boosted loud peak rounds off instead of hard-clipping
+    // into a crackle.
+    const RAW_PLAYBACK_GAIN = 3;
     function playPcmChunk(buf) {
       if (!rawAudioExpected) return;
       if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
       const int16 = new Int16Array(buf);
       const float32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+      for (let i = 0; i < int16.length; i++) float32[i] = Math.tanh((int16[i] / 32768) * RAW_PLAYBACK_GAIN);
       const audioBuf = playCtx.createBuffer(1, float32.length, RAW_SAMPLE_RATE);
       audioBuf.copyToChannel(float32, 0);
       const src = playCtx.createBufferSource();
