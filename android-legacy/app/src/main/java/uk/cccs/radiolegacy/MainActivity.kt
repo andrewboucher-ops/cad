@@ -337,7 +337,8 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
                 pttHeld = false
                 setPttIdle()
                 sound.denied()
-                appendLog("PTT DENIED — ${payload.optString("holder", "channel busy")}")
+                val holder = payload.optString("holder", "")
+                appendLog("PTT DENIED — ${if (holder.isNotEmpty()) holder else payload.optString("reason", "channel busy")}")
             }
             "radio.ptt_started" -> {
                 if (payload.optString("issi") == issi) return // that's us, handled by ptt.granted
@@ -360,7 +361,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
             "call.accepted" -> {
                 if (payload.optInt("id", -1) == activeCallId) {
                     sound.stopRing()
-                    appendLog("CALL CONNECTED (no audio on this handset)"); pttState.text = "ON CALL"
+                    appendLog("CALL CONNECTED — press PTT to talk"); pttState.text = "ON CALL"
                 }
             }
             "call.rejected" -> {
@@ -446,12 +447,23 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         pttState.setBackgroundColor(android.graphics.Color.parseColor("#1f2937"))
     }
 
+    // Captured at the moment PTT is pressed, not read fresh at release --
+    // if the call happens to end mid-transmission, release must still
+    // target the call it actually started on, not fall back to whatever
+    // activeCallId now reads (which stopPtt would otherwise silently
+    // resolve to the talkgroup path, leaving the call's floor stuck until
+    // the timeout backstop).
+    private var pttCallId = -1
+
     private fun startPtt() {
-        if (pttHeld || talkgroup == null) return
+        val inCall = activeCallId >= 0
+        if (pttHeld || (!inCall && talkgroup == null)) return
         pttHeld = true
+        pttCallId = if (inCall) activeCallId else -1
         pttState.text = "REQUESTING…"
         pttState.setBackgroundColor(android.graphics.Color.parseColor("#b45309"))
-        val payload = JSONObject().put("talkgroup", talkgroup).put("as_radio", issi)
+        val payload = JSONObject().put("as_radio", issi)
+        if (pttCallId >= 0) payload.put("call_id", pttCallId) else payload.put("talkgroup", talkgroup)
         ws?.sendText(JSONObject().put("type", "radio.ptt_start").put("payload", payload).toString())
         main.postDelayed({
             if (pttHeld && !pttGranted) {
@@ -468,10 +480,12 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         if (pttGranted) {
             audio.stopCapture()
             sound.released()
-            val payload = JSONObject().put("talkgroup", talkgroup).put("as_radio", issi)
+            val payload = JSONObject().put("as_radio", issi)
+            if (pttCallId >= 0) payload.put("call_id", pttCallId) else payload.put("talkgroup", talkgroup)
             ws?.sendText(JSONObject().put("type", "radio.ptt_release").put("payload", payload).toString())
         }
         pttGranted = false
+        pttCallId = -1
     }
 
     // -- Panic ------------------------------------------------------------
@@ -587,10 +601,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
             try {
                 val result = Api.startPrivateCall(t, toIssi)
                 activeCallId = result.optInt("id", -1)
-                // No audio path for this yet -- see Api.startPrivateCall's
-                // doc comment for why. The call record connects; only its
-                // sound doesn't reach this handset.
-                main.post { appendLog("CALLING $toIssi (no audio on this handset yet)") }
+                main.post { appendLog("CALLING $toIssi") }
             } catch (e: Exception) {
                 main.post { appendLog("CALL FAILED: ${e.message}"); setPttIdle() }
             }

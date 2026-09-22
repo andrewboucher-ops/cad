@@ -140,11 +140,10 @@ object Api {
 
     /** Radio-to-radio, by ISSI. Placing the call and tracking its state
      * (RINGING/CONNECTED/ENDED, over the WebSocket) works the same as the
-     * web radio; there is no audio path for it from this handset yet --
-     * that rides WebRTC on the web app, which this device can't do (see
-     * relayAudioFrame in server.js for why talkgroup PTT uses a different,
-     * server-relayed path instead). Placing calls now, audio is separate
-     * follow-up work. */
+     * web radio. Audio once connected is PTT, not full-duplex like a
+     * modern client's WebRTC call -- this hardware only has the one PTT
+     * button -- and is scoped server-side to just this call's own
+     * participants (see callPttStart in server.js), never the talkgroup. */
     fun startPrivateCall(token: String, toIssi: String): JSONObject =
         postAuthed("/api/calls/private", token, JSONObject().put("to", toIssi))
 

@@ -572,6 +572,17 @@ function releaseFloorFor(radio) {
       broadcast('radio.ptt_released', { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio.id, issi: radio.issi, callsign: callsignOf(radio) });
     }
   }
+  // Same reasoning as the talkgroup case just above -- a radio that drops
+  // mid-transmission on a call must not leave that call's floor stuck.
+  for (const call of db.communications) {
+    if (call.state === 'ACTIVE' && call.floor_holder_radio_id === radio.id) {
+      const otherIds = otherCallRadioIds(call, radio);
+      call.floor_holder_radio_id = null; call.floor_since = null;
+      for (const c of sockets) {
+        if (c.radioId && otherIds.includes(c.radioId)) c.send('radio.ptt_released', { call_id: call.id, radio_id: radio.id, callsign: callsignOf(radio) });
+      }
+    }
+  }
 }
 
 // Third time in one afternoon a talkgroup was found stuck "held by
@@ -594,6 +605,18 @@ function floorTimeoutSweep() {
     console.warn(`[cccs] floor timeout: ${tg.name} force-released, was held by ${who}`);
     tg.floor_holder_radio_id = null; tg.floor_console_user_id = null; tg.floor_since = null;
     broadcast('radio.ptt_released', { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio ? radio.id : null, callsign: who });
+  }
+  for (const call of db.communications) {
+    if (call.state !== 'ACTIVE' || !call.floor_since || now - Date.parse(call.floor_since) < FLOOR_TIMEOUT_MS) continue;
+    const radio = call.floor_holder_radio_id ? db.radios.find((r) => r.id === call.floor_holder_radio_id) : null;
+    const who = radio ? callsignOf(radio) : '?';
+    logEvent('call.ptt_timeout', `${who} FLOOR ON CALL #${call.id} FORCE-RELEASED — held ${Math.round((now - Date.parse(call.floor_since)) / 1000)}s with no release`, { call_id: call.id });
+    console.warn(`[cccs] call floor timeout: call #${call.id} force-released, was held by ${who}`);
+    const otherIds = radio ? otherCallRadioIds(call, radio) : [];
+    call.floor_holder_radio_id = null; call.floor_since = null;
+    for (const c of sockets) {
+      if (c.radioId && otherIds.includes(c.radioId)) c.send('radio.ptt_released', { call_id: call.id, radio_id: radio ? radio.id : null, callsign: who });
+    }
   }
 }
 
@@ -671,6 +694,14 @@ function resolveActor(conn, payload) {
 }
 
 function pttStart(conn, payload) {
+  // A radio mid-call PTTs into the call, not the talkgroup it's still a
+  // member of -- routed separately below, entirely bypassing talkgroup
+  // floor/membership so it can never reach anyone but that call's other
+  // participant(s), control included. See callPttStart() for why this
+  // needed its own path rather than reusing tg.floor_* : a legacy handset
+  // in a call was found still broadcasting PTT to its whole talkgroup,
+  // since nothing here had ever checked for an active call at all.
+  if (payload.call_id) return callPttStart(conn, payload);
   const tg = findTalkgroup(payload.talkgroup_id || payload.talkgroup);
   if (!tg) return conn.send('error', { message: 'unknown talkgroup' });
   const radio = resolveActor(conn, payload);
@@ -701,6 +732,7 @@ function pttStart(conn, payload) {
 }
 
 function pttRelease(conn, payload) {
+  if (payload.call_id) return callPttRelease(conn, payload);
   const tg = findTalkgroup(payload.talkgroup_id || payload.talkgroup);
   if (!tg) return;
   const radio = resolveActor(conn, payload);
@@ -712,6 +744,59 @@ function pttRelease(conn, payload) {
   const ev = { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio ? radio.id : null, callsign: who, duration_s: duration };
   broadcast('radio.ptt_released', ev);
   logEvent('radio.ptt_released', `${who} RX ← ${tg.name} (${duration}s)`, ev);
+}
+
+/** PTT while on an active private/PSTN call: floor and listeners are
+ * scoped to that call's own connected participants only (via
+ * db.communications/communication_participants), completely separate
+ * from talkgroup floor state and never broadcast() (which always
+ * includes control) -- "only between the 2 ISSIs in the call" means
+ * literally that, control included in "everyone" it must NOT reach. */
+function findActiveCallFor(radio, callId) {
+  const call = db.communications.find((c) => c.id === Number(callId));
+  if (!call || call.state !== 'ACTIVE') return null;
+  const mine = db.communication_participants.find((p) => p.communication_id === call.id && p.radio_id === radio.id && p.state === 'CONNECTED');
+  return mine ? call : null;
+}
+function otherCallRadioIds(call, radio) {
+  return db.communication_participants
+    .filter((p) => p.communication_id === call.id && p.radio_id !== radio.id && p.state === 'CONNECTED')
+    .map((p) => p.radio_id);
+}
+function callPttStart(conn, payload) {
+  const radio = resolveActor(conn, payload);
+  if (!radio) return conn.send('error', { message: 'call PTT requires a radio' });
+  const call = findActiveCallFor(radio, payload.call_id);
+  if (!call) return conn.send('ptt.denied', { reason: 'CALL NOT ACTIVE' });
+  if (call.floor_holder_radio_id && call.floor_holder_radio_id !== radio.id) {
+    const holder = db.radios.find((r) => r.id === call.floor_holder_radio_id);
+    return conn.send('ptt.denied', { reason: 'CHANNEL BUSY', holder: holder ? callsignOf(holder) : '?' });
+  }
+  call.floor_holder_radio_id = radio.id;
+  call.floor_since = new Date().toISOString();
+  const who = callsignOf(radio);
+  const ev = { call_id: call.id, radio_id: radio.id, issi: radio.issi, callsign: who, since: call.floor_since, raw_audio: !!conn.rawAudio };
+  conn.send('ptt.granted', { ...ev, listeners: [] });
+  const otherIds = otherCallRadioIds(call, radio);
+  for (const c of sockets) {
+    if (c.radioId && otherIds.includes(c.radioId)) c.send('radio.ptt_started', ev);
+  }
+  logEvent('call.ptt_started', `${who} TX on call #${call.id}`, { call_id: call.id });
+}
+function callPttRelease(conn, payload) {
+  const radio = resolveActor(conn, payload);
+  if (!radio) return;
+  const call = db.communications.find((c) => c.id === Number(payload.call_id));
+  if (!call || call.floor_holder_radio_id !== radio.id) return;
+  const duration = call.floor_since ? Math.round((Date.now() - Date.parse(call.floor_since)) / 1000) : 0;
+  const otherIds = otherCallRadioIds(call, radio);
+  call.floor_holder_radio_id = null; call.floor_since = null;
+  const who = callsignOf(radio);
+  const ev = { call_id: call.id, radio_id: radio.id, callsign: who, duration_s: duration };
+  for (const c of sockets) {
+    if (c.radioId && otherIds.includes(c.radioId)) c.send('radio.ptt_released', ev);
+  }
+  logEvent('call.ptt_released', `${who} RX on call #${call.id} (${duration}s)`, { call_id: call.id });
 }
 
 /** Server-relayed audio, for clients that can't do WebRTC (old-Android
@@ -732,6 +817,20 @@ function pttRelease(conn, payload) {
 let relayLogCounter = 0; // diagnostic only -- browser-to-handset audio confirmed sending but not heard; throttled so a held PTT doesn't flood the log
 function relayAudioFrame(conn, data) {
   const radio = conn.radioId ? db.radios.find((r) => r.id === conn.radioId) : null;
+  // Call floor takes priority over talkgroup floor -- a radio only ever
+  // holds one or the other (callPttStart doesn't touch tg.floor_*), but
+  // checking this first makes that ordering explicit rather than
+  // incidental. Private stays private: only the other call participant(s)
+  // ever see these bytes, control included in who must not.
+  const callFloor = radio ? db.communications.find((c) => c.state === 'ACTIVE' && c.floor_holder_radio_id === radio.id) : null;
+  if (callFloor) {
+    const otherIds = otherCallRadioIds(callFloor, radio);
+    const frame = encodeFrame(data, 0x2);
+    for (const c of sockets) {
+      if (c.radioId && otherIds.includes(c.radioId)) { try { c.socket.write(frame); } catch { c.close(); } }
+    }
+    return;
+  }
   const isConsole = !radio && isControlRole(conn.user.role);
   const tg = db.talkgroups.find((t) => (radio && t.floor_holder_radio_id === radio.id) || (isConsole && t.floor_console_user_id === conn.user.id));
   const logNow = relayLogCounter++ % 50 === 0;

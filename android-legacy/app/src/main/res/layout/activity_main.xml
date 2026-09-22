@@ -155,13 +155,29 @@
                 android:contentDescription="Echelon"
                 android:layout_marginBottom="4dp" />
 
-            <TextView
-                android:id="@+id/talkgroupLabel"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="👥 no talkgroup"
-                android:textColor="#e5e7eb"
-                android:textSize="16sp" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="17dp"
+                    android:layout_marginEnd="6dp"
+                    android:src="@drawable/group_icon"
+                    android:scaleType="fitCenter"
+                    android:contentDescription="Talkgroup" />
+
+                <TextView
+                    android:id="@+id/talkgroupLabel"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="no talkgroup"
+                    android:textColor="#e5e7eb"
+                    android:textSize="16sp" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/statusLabel"
