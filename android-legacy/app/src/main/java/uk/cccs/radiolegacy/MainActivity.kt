@@ -80,7 +80,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         Log.onLine = { line -> main.post { appendLog(line) } }
 
         loginButton.setOnClickListener { doLogin() }
-        pttKey = prefs.getInt(KEY_PTT_KEY, -1)
+        pttKey = prefs.getInt(KEY_PTT_KEY, DEFAULT_PTT_KEY)
         panicKey = prefs.getInt(KEY_PANIC_KEY, DEFAULT_PANIC_KEY)
 
         token = prefs.getString(KEY_TOKEN, null)
@@ -576,7 +576,12 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         private const val KEY_RADIO_ID = "radio_id"
         private const val KEY_CALLSIGN = "callsign"
         private const val KEY_DISPLAY_NAME = "display_name"
-        // Read off the real handset: its physical emergency button sends key 67.
+        // Read off the real handset: its physical PTT button sends key 0
+        // (KEYCODE_UNKNOWN — the OEM never mapped it to a real Android key),
+        // and its emergency button sends key 67. Both are exact matches now
+        // rather than relying on the general non-keypad fallback, so a
+        // future stray/unmapped key elsewhere can't be mistaken for either.
+        private const val DEFAULT_PTT_KEY = 0
         private const val DEFAULT_PANIC_KEY = 67
         private const val PANIC_HOLD_MS = 1500L
         private const val KEY_PTT_KEY = "ptt_keycode"
