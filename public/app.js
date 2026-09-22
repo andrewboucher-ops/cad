@@ -690,7 +690,7 @@ const CCCS = (() => {
        too. */
     const RAW_SAMPLE_RATE = 8000;
     let playCtx = null, nextPlayAt = 0, rawAudioExpected = false;
-    let captureCtx = null, captureNode = null, captureSource = null;
+    let captureCtx = null, captureNode = null, captureSource = null, resumeWatchdog = null;
 
     // Handset mic capture has no gain control on its end (a plain
     // AudioRecord, no AGC — see AudioEngine.kt), so what arrives is
@@ -764,12 +764,31 @@ const CCCS = (() => {
       };
       console.log('[cccs] startRawAudioSend: graph wired, waiting for onaudioprocess to fire...');
       const silentSink = captureCtx.createGain();
-      silentSink.gain.value = 0;
+      // Not literally 0 -- some browsers auto-suspend an AudioContext that
+      // renders true silence for a couple of seconds as a power-saving
+      // "intervention", which kills onaudioprocess with no error and no
+      // event, mid-transmission. 0.00001 is inaudible but not zero.
+      silentSink.gain.value = 0.00001;
       captureSource.connect(captureNode);
       captureNode.connect(silentSink);
       silentSink.connect(captureCtx.destination);
+
+      // Belt-and-braces for the same auto-suspend: if it happens anyway,
+      // catch it within a second and resume, instead of transmission just
+      // silently going dead until the caller lets go of PTT. This is what
+      // was actually happening live -- confirmed via server relay logs
+      // showing exactly one frame forwarded per hold, then nothing until
+      // the floor-timeout backstop force-released it minutes later.
+      if (resumeWatchdog) clearInterval(resumeWatchdog);
+      resumeWatchdog = setInterval(() => {
+        if (captureCtx && captureCtx.state !== 'running') {
+          console.warn('[cccs] raw audio context went', captureCtx.state, '-- resuming');
+          captureCtx.resume().catch((e) => console.warn('[cccs] raw audio resume failed:', e.message));
+        }
+      }, 500);
     }
     function stopRawAudioSend() {
+      if (resumeWatchdog) { clearInterval(resumeWatchdog); resumeWatchdog = null; }
       if (captureNode) { try { captureNode.disconnect(); } catch {} captureNode = null; }
       if (captureSource) { try { captureSource.disconnect(); } catch {} captureSource = null; }
     }
