@@ -65,16 +65,27 @@ class AudioEngine {
     /** Lazily created on first playback and left running — tearing an
      * AudioTrack down between every received chunk would both waste time
      * and risk audible clicks at every chunk boundary. Call releasePlayback()
-     * when the screen goes away, not between individual chunks. */
+     * when the screen goes away, not between individual chunks.
+     *
+     * STREAM_VOICE_CALL (the original choice here) is meant for in-call
+     * telephony audio — on many devices it routes to the earpiece speaker
+     * rather than the loudspeaker unless the app also puts AudioManager
+     * into MODE_IN_COMMUNICATION, which nothing here ever did. This is a
+     * PTT app, not a phone call, so the audio needs to be heard without
+     * being held to the ear — STREAM_MUSIC routes to the loudspeaker by
+     * default, which is what every other test today was actually missing:
+     * the relay was confirmed working server-side, so this was very
+     * likely the last broken link, not a new bug found blind. */
     fun playChunk(data: ByteArray) {
         val t = track ?: run {
             val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, ENCODING)
             if (minBuf <= 0) { Log.append("audio: playback getMinBufferSize failed"); return }
             @Suppress("DEPRECATION")
             val newTrack = AudioTrack(
-                AudioManager.STREAM_VOICE_CALL, SAMPLE_RATE, CHANNEL_OUT, ENCODING,
+                AudioManager.STREAM_MUSIC, SAMPLE_RATE, CHANNEL_OUT, ENCODING,
                 minBuf * 2, AudioTrack.MODE_STREAM
             )
+            try { newTrack.setStereoVolume(1.0f, 1.0f) } catch (_: Exception) {}
             newTrack.play()
             track = newTrack
             newTrack
