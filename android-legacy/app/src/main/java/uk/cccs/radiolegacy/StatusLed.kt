@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import java.io.File
 import java.io.FileOutputStream
+import java.util.concurrent.Executors
 
 /**
  * The handset's physical status LED — plain-Kotlin sibling of
@@ -24,11 +25,20 @@ import java.io.FileOutputStream
  * of just doing nothing, and the actual /sys/class/leds node names are
  * listed once too, since "red"/"green"/"blue" came from a different
  * reference app (BroadNet) and may not be what this hardware calls them.
+ *
+ * Also caused the handset to stop responding to button presses after a
+ * while: breathing's sysfs writes ran on the main thread every 600ms
+ * forever, and if that write is ever slow on this hardware (plausible —
+ * it's also why the colour never confirmed working), it stalls the same
+ * thread key events are dispatched on. Both write paths now run on a
+ * background thread; the main-thread Handler only schedules the next
+ * tick, never does the I/O itself.
  */
 object StatusLed {
     private enum class Colour(val label: String) { RED("red"), GREEN("green"), BLUE("blue") }
 
     private val handler = Handler(Looper.getMainLooper())
+    private val io = Executors.newSingleThreadExecutor()
     private var breatheRunnable: Runnable? = null
     private var breatheOn = false
     private var loggedNodes = false
@@ -38,11 +48,10 @@ object StatusLed {
         stopBreathing()
         val target = colourFor(status.uppercase())
         if (target == null) {
-            for (colour in Colour.entries) setLed(context, colour, false)
+            io.execute { for (colour in Colour.entries) setLed(context, colour, false) }
             return
         }
-        logAvailableNodesOnce()
-        probeSysfsOnce(target)
+        io.execute { logAvailableNodesOnce(); probeSysfsOnce(target) }
         startBreathing(context, target)
     }
 
@@ -57,7 +66,8 @@ object StatusLed {
         breatheOn = true
         val runnable = object : Runnable {
             override fun run() {
-                for (colour in Colour.entries) setLed(context, colour, colour == target && breatheOn)
+                val on = breatheOn
+                io.execute { for (colour in Colour.entries) setLed(context, colour, colour == target && on) }
                 breatheOn = !breatheOn
                 handler.postDelayed(this, BREATHE_INTERVAL_MS)
             }
@@ -71,6 +81,7 @@ object StatusLed {
         breatheRunnable = null
     }
 
+    // Runs on the io executor -- see setStatus().
     private fun logAvailableNodesOnce() {
         if (loggedNodes) return
         loggedNodes = true
@@ -83,7 +94,8 @@ object StatusLed {
     }
 
     // Logged once per colour, not on every breathing on/off toggle, or the
-    // log view would fill with nothing else within a few seconds.
+    // log view would fill with nothing else within a few seconds. Runs on
+    // the io executor -- see setStatus().
     private fun probeSysfsOnce(colour: Colour) {
         if (!probedColours.add(colour)) return
         try {
@@ -94,6 +106,7 @@ object StatusLed {
         }
     }
 
+    // Runs on the io executor, never the caller's thread -- see startBreathing().
     private fun setLed(context: Context, colour: Colour, on: Boolean) {
         try {
             context.sendBroadcast(Intent("com.intent.${colour.label}led.${if (on) "on" else "off"}"))
