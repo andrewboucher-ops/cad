@@ -703,6 +703,11 @@ const CCCS = (() => {
     function startRawAudioSend(stream) {
       if (captureNode) return;
       captureCtx = playCtx || (playCtx = new (window.AudioContext || window.webkitAudioContext)());
+      // A freshly-created (or previously auto-suspended) AudioContext never
+      // fires onaudioprocess until explicitly resumed -- easy to miss here
+      // specifically because WebRTC's own audio never touches AudioContext
+      // at all, so this path can be the only one silently broken.
+      if (captureCtx.state === 'suspended') captureCtx.resume().catch((e) => console.warn('[cccs] raw audio context resume failed:', e.message));
       captureSource = captureCtx.createMediaStreamSource(stream);
       // ScriptProcessorNode is deprecated but needs no separate worklet
       // module to load, matching this codebase's no-extra-files approach
