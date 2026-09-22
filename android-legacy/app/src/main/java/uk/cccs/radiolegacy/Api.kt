@@ -157,4 +157,58 @@ object Api {
         postAuthed("/api/calls/$callId/accept", token, JSONObject())
     fun rejectCall(token: String, callId: Int): JSONObject =
         postAuthed("/api/calls/$callId/reject", token, JSONObject())
+
+    class VersionInfo(val versionCode: Int, val versionName: String, val url: String, val notes: String)
+
+    /** No auth needed -- it's the same publicly-downloadable path the APK
+     * itself already sits at (see /downloads/ on the server), just a
+     * sibling JSON file naming whatever build is currently hosted there.
+     * Server side is a plain static file, updated by hand alongside every
+     * new build -- see the comment on versionCode in build.gradle. */
+    fun checkLatestVersion(): VersionInfo {
+        val url = URL("$BASE_URL/downloads/cccs-radio-legacy-version.json")
+        val conn = open(url)
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 10000
+        conn.readTimeout = 10000
+        val status = conn.responseCode
+        if (status !in 200..299) throw Exception("no version info published (HTTP $status)")
+        val text = conn.inputStream.bufferedReader().use { it.readText() }
+        val json = JSONObject(text)
+        return VersionInfo(
+            versionCode = json.getInt("versionCode"),
+            versionName = json.getString("versionName"),
+            url = json.getString("url"),
+            notes = json.optString("notes", "")
+        )
+    }
+
+    /** Streams the APK to destFile, calling onProgress(0-100) as it goes
+     * when the server sends a Content-Length (it always does for a static
+     * file, but this degrades to no progress callbacks rather than
+     * crashing if that ever changes). Runs on the calling thread -- callers
+     * must not call this from the UI thread. */
+    fun downloadApk(path: String, destFile: java.io.File, onProgress: ((Int) -> Unit)? = null) {
+        val url = URL(if (path.startsWith("http")) path else "$BASE_URL$path")
+        val conn = open(url)
+        conn.requestMethod = "GET"
+        conn.connectTimeout = 10000
+        conn.readTimeout = 30000
+        val status = conn.responseCode
+        if (status !in 200..299) throw Exception("download failed (HTTP $status)")
+        val total = conn.contentLength
+        var written = 0
+        conn.inputStream.use { input ->
+            destFile.outputStream().use { output ->
+                val buf = ByteArray(8192)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    output.write(buf, 0, n)
+                    written += n
+                    if (total > 0) onProgress?.invoke((written * 100L / total).toInt())
+                }
+            }
+        }
+    }
 }

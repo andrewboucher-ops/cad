@@ -14,8 +14,21 @@ android {
         // here at all, precisely so nothing quietly raises this floor again.
         minSdkVersion 19
         targetSdkVersion 33
-        versionCode 1
-        versionName '1.0'
+        // Bump both on every release that goes out the door -- this is what
+        // the in-app update checker (Settings > Check for update) compares
+        // against /downloads/cccs-radio-legacy-version.json to decide
+        // there's something newer. Forgetting to bump this just means the
+        // checker silently reports "up to date" on a stale install, not a
+        // crash, but it needs to actually be a habit.
+        versionCode 2
+        versionName '1.1'
+    }
+
+    // AGP 8+ stopped generating BuildConfig by default -- explicitly back
+    // on for BuildConfig.VERSION_CODE/VERSION_NAME, which the in-app
+    // update checker compares against.
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {

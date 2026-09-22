@@ -4,10 +4,12 @@ import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -716,14 +718,90 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     // Change status isn't here — it's one press of the soft key, not behind
     // this hold-# settings menu.
     private fun showMenu() {
-        val items = arrayOf("Set PTT button", "Set panic button", "Sign out")
+        val items = arrayOf("Set PTT button", "Set panic button", "Check for update", "Sign out")
         AlertDialog.Builder(this).setTitle("Settings").setItems(items) { _, which ->
             when (which) {
                 0 -> learnKey("PTT")
                 1 -> learnKey("panic")
-                2 -> signOut()
+                2 -> checkForUpdate()
+                3 -> signOut()
             }
         }.show()
+    }
+
+    // -- In-app update ----------------------------------------------------
+    // No Play Store on this hardware -- every build until now has been a
+    // manual sideload. Checks a small JSON file next to the APK's own
+    // stable download URL (see Api.checkLatestVersion's doc comment for
+    // why that needs updating by hand alongside every release).
+
+    private fun checkForUpdate() {
+        appendLog("CHECKING FOR UPDATE…")
+        Thread {
+            try {
+                val info = Api.checkLatestVersion()
+                main.post {
+                    if (info.versionCode <= BuildConfig.VERSION_CODE) {
+                        appendLog("UP TO DATE (v${BuildConfig.VERSION_NAME})")
+                    } else {
+                        showUpdateDialog(info)
+                    }
+                }
+            } catch (e: Exception) {
+                main.post { appendLog("UPDATE CHECK FAILED: ${e.message}") }
+            }
+        }.start()
+    }
+
+    private fun showUpdateDialog(info: Api.VersionInfo) {
+        val notes = if (info.notes.isNotEmpty()) "\n\n${info.notes}" else ""
+        AlertDialog.Builder(this)
+            .setTitle("Update available")
+            .setMessage("Version ${info.versionName} (you have ${BuildConfig.VERSION_NAME}).$notes")
+            .setPositiveButton("Download") { _, _ -> downloadAndInstall(info) }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
+    private fun downloadAndInstall(info: Api.VersionInfo) {
+        appendLog("DOWNLOADING UPDATE v${info.versionName}…")
+        Thread {
+            try {
+                val dir = getExternalFilesDir(null) ?: throw Exception("no external storage available")
+                val dest = java.io.File(dir, "cccs-radio-legacy-update.apk")
+                var lastLogged = -20
+                Api.downloadApk(info.url, dest) { pct ->
+                    if (pct >= lastLogged + 20) {
+                        lastLogged = pct
+                        main.post { appendLog("DOWNLOAD $pct%") }
+                    }
+                }
+                main.post {
+                    appendLog("DOWNLOAD COMPLETE — INSTALLING")
+                    installApk(dest)
+                }
+            } catch (e: Exception) {
+                main.post { appendLog("DOWNLOAD FAILED: ${e.message}") }
+            }
+        }.start()
+    }
+
+    /** Uri.fromFile() rather than a FileProvider content:// URI -- the
+     * StrictMode restriction that would require that only exists on API 24+
+     * devices, and this app only ever runs on the API 19 hardware this
+     * whole second app exists for (see minSdkVersion's comment in
+     * build.gradle). "Unknown sources" is already enabled on this device
+     * by definition -- it's how this app itself got installed -- so no
+     * extra permission handling is needed either. */
+    private fun installApk(file: java.io.File) {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW)
+            intent.setDataAndType(Uri.fromFile(file), "application/vnd.android.package-archive")
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            startActivity(intent)
+        } catch (e: Exception) {
+            appendLog("INSTALL FAILED: ${e.message}")
+        }
     }
 
     private fun showStatusMenu() {
