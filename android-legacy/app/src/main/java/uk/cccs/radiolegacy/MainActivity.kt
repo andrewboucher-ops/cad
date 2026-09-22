@@ -648,6 +648,9 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
             }.show()
     }
 
+    private fun isReservedKey(keyCode: Int): Boolean = keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 ||
+        keyCode in setOf(KeyEvent.KEYCODE_STAR, KeyEvent.KEYCODE_POUND, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_SOFT_LEFT, KeyEvent.KEYCODE_BACK)
+
     private fun learnKey(kind: String) {
         val dialog = AlertDialog.Builder(this)
             .setTitle("Set $kind button")
@@ -656,6 +659,14 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
             .create()
         dialog.setOnKeyListener { d, keyCode, event ->
             if (event.action != KeyEvent.ACTION_DOWN || keyCode == KeyEvent.KEYCODE_BACK) return@setOnKeyListener false
+            // A wrong press here (e.g. a digit meant for dialling) would
+            // silently steal that key from whatever it's really for, since
+            // PTT/panic are checked first in onKeyDown -- happened during
+            // testing today. Refuse anything already spoken for instead.
+            if (isReservedKey(keyCode)) {
+                appendLog("$kind: key $keyCode is used for something else, try again")
+                return@setOnKeyListener true
+            }
             if (kind == "PTT") { pttKey = keyCode; prefs.edit().putInt(KEY_PTT_KEY, keyCode).apply() }
             else { panicKey = keyCode; prefs.edit().putInt(KEY_PANIC_KEY, keyCode).apply() }
             appendLog("$kind button set to key $keyCode")
