@@ -444,7 +444,13 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         if (first) appendLog("KEY $keyCode")
         if (keyCode == panicKey) { if (first) beginPanicHold(); return true }
         if (isPttKey(keyCode)) { if (first) startPtt(); return true }
-        if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SOFT_LEFT) { if (first) showMenu(); return true }
+        // Left soft key: status list directly, no intermediate menu -- that's
+        // the one thing worth a single press. Everything else (PTT/panic
+        // assignment, sign out) lives behind a hold on # instead, so it's not
+        // one press away from an accidental status change.
+        if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SOFT_LEFT) { if (first) showStatusMenu(); return true }
+        if (keyCode == KeyEvent.KEYCODE_POUND) { if (first) beginSettingsHold(); return true }
+        if (keyCode == KeyEvent.KEYCODE_1) { if (first) beginCallRequestHold(); return true }
         return super.onKeyDown(keyCode, event)
     }
 
@@ -452,8 +458,51 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         if (mainScreen.visibility == View.VISIBLE) {
             if (keyCode == panicKey) { cancelPanicHold(); return true }
             if (isPttKey(keyCode)) { stopPtt(); return true }
+            if (keyCode == KeyEvent.KEYCODE_POUND) { cancelSettingsHold(); return true }
+            if (keyCode == KeyEvent.KEYCODE_1) { cancelCallRequestHold(); return true }
         }
         return super.onKeyUp(keyCode, event)
+    }
+
+    private val settingsHoldRunnable = Runnable { settingsHolding = false; showMenu() }
+    private var settingsHolding = false
+
+    private fun beginSettingsHold() {
+        if (settingsHolding) return
+        settingsHolding = true
+        main.postDelayed(settingsHoldRunnable, SETTINGS_HOLD_MS)
+    }
+
+    private fun cancelSettingsHold() {
+        if (!settingsHolding) return
+        settingsHolding = false
+        main.removeCallbacks(settingsHoldRunnable)
+    }
+
+    // Not safety-critical like panic, but still deliberate -- a short hold
+    // rather than firing on the first press of a key someone might otherwise
+    // just be passing over while typing.
+    private val callRequestHoldRunnable = Runnable {
+        callRequestHolding = false
+        val t = token ?: return@Runnable
+        appendLog("CALL REQUEST - sending")
+        Thread {
+            try { Api.requestCall(t, false); main.post { appendLog("CALL REQUESTED") } }
+            catch (e: Exception) { main.post { appendLog("CALL REQUEST FAILED: ${e.message}") } }
+        }.start()
+    }
+    private var callRequestHolding = false
+
+    private fun beginCallRequestHold() {
+        if (callRequestHolding) return
+        callRequestHolding = true
+        main.postDelayed(callRequestHoldRunnable, CALL_REQUEST_HOLD_MS)
+    }
+
+    private fun cancelCallRequestHold() {
+        if (!callRequestHolding) return
+        callRequestHolding = false
+        main.removeCallbacks(callRequestHoldRunnable)
     }
 
     // An emergency goes straight to the alarm receiving centre, so a brush
@@ -494,14 +543,15 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         "05" to "On task", "06" to "Site clear, resuming patrol", "07" to "Meal break", "08" to "Out of service"
     )
 
+    // Change status isn't here — it's one press of the soft key, not behind
+    // this hold-# settings menu.
     private fun showMenu() {
-        val items = arrayOf("Change status", "Set PTT button", "Set panic button", "Sign out")
-        AlertDialog.Builder(this).setTitle("Menu").setItems(items) { _, which ->
+        val items = arrayOf("Set PTT button", "Set panic button", "Sign out")
+        AlertDialog.Builder(this).setTitle("Settings").setItems(items) { _, which ->
             when (which) {
-                0 -> showStatusMenu()
-                1 -> learnKey("PTT")
-                2 -> learnKey("panic")
-                3 -> signOut()
+                0 -> learnKey("PTT")
+                1 -> learnKey("panic")
+                2 -> signOut()
             }
         }.show()
     }
@@ -582,6 +632,8 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         // future stray/unmapped key elsewhere can't be mistaken for either.
         private const val DEFAULT_PTT_KEY = 0
         private const val DEFAULT_PANIC_KEY = 67
+        private const val SETTINGS_HOLD_MS = 1200L
+        private const val CALL_REQUEST_HOLD_MS = 800L
         private const val PANIC_HOLD_MS = 1500L
         private const val KEY_PTT_KEY = "ptt_keycode"
         private const val KEY_PANIC_KEY = "panic_keycode"

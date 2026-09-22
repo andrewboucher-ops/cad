@@ -132,6 +132,12 @@ object Api {
     fun setStatus(token: String, issi: String, code: String): JSONObject =
         postAuthed("/api/radios/$issi/status", token, JSONObject().put("code", code))
 
+    /** "Request voice" — asks control for a callback, same endpoint the web
+     * radio uses. A second press while one is already pending escalates it
+     * to priority rather than stacking another request (server-side). */
+    fun requestCall(token: String, priority: Boolean): JSONObject =
+        postAuthed("/api/calls/request", token, JSONObject().put("priority", priority))
+
     fun acknowledgeJob(token: String, jobId: Int): JSONObject =
         postAuthed("/api/jobs/$jobId/ack", token, JSONObject())
 }
