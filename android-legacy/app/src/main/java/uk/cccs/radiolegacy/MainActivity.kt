@@ -85,6 +85,14 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         loginButton.setOnClickListener { doLogin() }
         pttKey = prefs.getInt(KEY_PTT_KEY, DEFAULT_PTT_KEY)
         panicKey = prefs.getInt(KEY_PANIC_KEY, DEFAULT_PANIC_KEY)
+        // Self-heal a key learned before isReservedKey() existed -- a PTT or
+        // panic key that collided with *, #, the soft key or a digit is not
+        // a cosmetic bug: it can make the lock unrecoverable (this happened
+        // today) or, worse, mean the real panic button does nothing in an
+        // actual emergency. Silently repaired on every launch, not just
+        // flagged for the next trip through Settings.
+        if (isReservedKey(pttKey)) { pttKey = DEFAULT_PTT_KEY; prefs.edit().putInt(KEY_PTT_KEY, DEFAULT_PTT_KEY).apply() }
+        if (isReservedKey(panicKey)) { panicKey = DEFAULT_PANIC_KEY; prefs.edit().putInt(KEY_PANIC_KEY, DEFAULT_PANIC_KEY).apply() }
 
         token = prefs.getString(KEY_TOKEN, null)
         issi = prefs.getString(KEY_ISSI, null)
