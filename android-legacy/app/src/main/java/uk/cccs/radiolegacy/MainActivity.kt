@@ -234,6 +234,10 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         val payload = JSONObject()
         radioId?.let { payload.put("radio_id", it) }
         issi?.let { payload.put("issi", it) }
+        // Tells the server this floor time's audio comes as the binary
+        // frames relayAudioFrame() forwards, not a WebRTC offer this app
+        // never sends -- see server.js's radio.attach handler.
+        payload.put("client", "legacy")
         ws?.sendText(JSONObject().put("type", "radio.attach").put("payload", payload).toString())
     }
 

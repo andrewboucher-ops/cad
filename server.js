@@ -589,6 +589,10 @@ function handleWsMessage(conn, msg) {
       if (conn.user.role === 'RADIO_USER' && conn.user.radio_id !== radio.id)
         return conn.send('error', { message: 'not authorised for this radio' });
       conn.radioId = radio.id;
+      // The legacy Android client sends this on radio.attach -- it has no
+      // WebRTC at all, so its floor time is announced as raw-audio to every
+      // listener rather than a WebRTC offer that would never arrive.
+      conn.rawAudio = payload.client === 'legacy';
       radio.connected = true;
       setRadioStatus(radio, payload.status && RADIO_STATUSES.includes(payload.status) ? payload.status : 'AVAILABLE', 'attached');
       broadcast('radio.connected', publicRadio(radio));
@@ -642,7 +646,12 @@ function pttStart(conn, payload) {
   else { tg.floor_console_user_id = conn.user.id; tg.floor_holder_radio_id = null; }
   tg.floor_since = new Date().toISOString();
   const who = radio ? callsignOf(radio) : 'CONTROL';
-  const ev = { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio ? radio.id : null, issi: radio ? radio.issi : null, callsign: who, since: tg.floor_since };
+  // raw_audio tells listeners how this transmission's audio is arriving:
+  // as WebRTC (the normal path) or as the binary frames relayAudioFrame()
+  // forwards (legacy handsets, which never do WebRTC signaling at all).
+  // Web clients hold both capabilities now, gated on this flag so a modern
+  // listener never plays the same transmission twice.
+  const ev = { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio ? radio.id : null, issi: radio ? radio.issi : null, callsign: who, since: tg.floor_since, raw_audio: !!conn.rawAudio };
   // The floor holder publishes audio to every listener; listeners only receive.
   const memberIds = db.talkgroup_members.filter((m) => m.talkgroup_id === tg.id).map((m) => m.radio_id);
   const listeners = [...sockets]
