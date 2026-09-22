@@ -706,19 +706,26 @@ function pttRelease(conn, payload) {
  * a web/WebRTC client on the same talkgroup can't hear each other yet,
  * since that needs real transcoding, not just relaying bytes; both
  * transports work standalone within their own client population. */
+let relayLogCounter = 0; // diagnostic only -- browser-to-handset audio confirmed sending but not heard; throttled so a held PTT doesn't flood the log
 function relayAudioFrame(conn, data) {
   const radio = conn.radioId ? db.radios.find((r) => r.id === conn.radioId) : null;
   const isConsole = !radio && isControlRole(conn.user.role);
   const tg = db.talkgroups.find((t) => (radio && t.floor_holder_radio_id === radio.id) || (isConsole && t.floor_console_user_id === conn.user.id));
-  if (!tg) return; // not currently holding the floor on anything -- drop silently, not an injection vector
+  const logNow = relayLogCounter++ % 50 === 0;
+  if (!tg) { // not currently holding the floor on anything -- drop silently, not an injection vector
+    if (logNow) console.log(`[cccs] relayAudioFrame: no floor held by ${isConsole ? 'console user ' + conn.user.id : radio ? 'radio ' + radio.issi : 'unknown sender (radioId=' + conn.radioId + ')'} -- dropped`);
+    return;
+  }
   const memberIds = db.talkgroup_members.filter((m) => m.talkgroup_id === tg.id).map((m) => m.radio_id);
   const frame = encodeFrame(data, 0x2);
+  let sent = 0;
   for (const c of sockets) {
     if (c === conn) continue;
     const listens = isControlRole(c.user.role) || (c.radioId && memberIds.includes(c.radioId));
     if (!listens) continue;
-    try { c.socket.write(frame); } catch { c.close(); }
+    try { c.socket.write(frame); sent++; } catch { c.close(); }
   }
+  if (logNow) console.log(`[cccs] relayAudioFrame: tg=${tg.name} sender=${isConsole ? 'console' : radio.issi} bytes=${data.length} wrote-to=${sent}/${sockets.size - 1}-other-sockets`);
 }
 
 /* ------------------------------------------------------------------ *
