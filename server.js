@@ -658,7 +658,17 @@ function handleWsMessage(conn, msg) {
       setRadioStatus(radio, payload.status && RADIO_STATUSES.includes(payload.status) ? payload.status : 'AVAILABLE', 'attached');
       broadcast('radio.connected', publicRadio(radio));
       logEvent('radio.connected', `${callsignOf(radio)} (${radio.issi}) CONNECTED`, { radio_id: radio.id });
-      return conn.send('radio.attached', publicRadio(radio));
+      // The registration secret for this radio's own PJSIP extension --
+      // only ever sent here, in a direct reply to the one connection that
+      // just proved it's this radio, never in publicRadio() (broadcast to
+      // everyone) or any other event. Omitted entirely (not just null)
+      // when this radio has no PBX extension provisioned, so a client with
+      // no `sip` field simply never attempts SIP registration.
+      const attached = publicRadio(radio);
+      if (radio.pbx_extension && radio.pbx_secret) {
+        attached.sip = { extension: radio.pbx_extension, secret: radio.pbx_secret };
+      }
+      return conn.send('radio.attached', attached);
     }
     case 'mdt.attach': {
       const mdt = findMdt(payload.mdt_code || payload.mdt_id);
@@ -1295,7 +1305,7 @@ route('POST', '/api/radios', ADMIN, ({ body }) => {
   const tg = body.talkgroup ? findTalkgroup(body.talkgroup) : null;
   const pin = String(body.pin || '').trim();
   if (pin && !/^\d{6}$/.test(pin)) throw httpError(400, 'PIN must be 6 digits');
-  const r = { id: nextId('radios'), issi, alias: body.alias || issi, radio_type: type, status: 'OFFLINE', callsign_id: cs ? cs.id : null, vehicle_id: null, talkgroup_id: tg ? tg.id : null, job_id: null, assigned_user_id: null, battery: 100, signal: 'UNKNOWN', lat: 51.5074, lon: -0.1278, speed: 0, heading: 0, last_seen: null, emergency: false, connected: false, sim_target: null, pbx_extension: body.pbx_extension || null, pin_hash: pin ? hashPassword(pin) : null };
+  const r = { id: nextId('radios'), issi, alias: body.alias || issi, radio_type: type, status: 'OFFLINE', callsign_id: cs ? cs.id : null, vehicle_id: null, talkgroup_id: tg ? tg.id : null, job_id: null, assigned_user_id: null, battery: 100, signal: 'UNKNOWN', lat: 51.5074, lon: -0.1278, speed: 0, heading: 0, last_seen: null, emergency: false, connected: false, sim_target: null, pbx_extension: body.pbx_extension || null, pbx_secret: body.pbx_secret || null, pin_hash: pin ? hashPassword(pin) : null };
   db.radios.push(r);
   if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: r.id });
   broadcast('radio.created', publicRadio(r));
@@ -1313,6 +1323,10 @@ route('PATCH', '/api/radios/:id', ADMIN, ({ params, body }) => {
     r.radio_type = type;
   }
   if ('pbx_extension' in body) r.pbx_extension = body.pbx_extension || null;
+  // Registration secret for that extension's SIP UA -- deliberately never in
+  // publicRadio(), only ever handed to that radio's own connection on
+  // radio.attach (see below). An admin-only write here, same as the PIN.
+  if ('pbx_secret' in body) r.pbx_secret = body.pbx_secret || null;
   if ('callsign' in body) {
     const cs = body.callsign ? findCallsign(body.callsign) : null;
     r.callsign_id = cs ? cs.id : null;
@@ -2707,10 +2721,21 @@ const gateway = createGateway((event, data) => {
   if (event === 'hangup') endCall(call, data.reason || 'REMOTE_CLEARED');
 });
 
+// Asterisk's PJSIP WebSocket transport rides the same mini-HTTP server ARI
+// does, at /ws, by convention (FreePBX's default chan_pjsip wss transport).
+// Derived from ARI_URL's host unless PBX_WS_URL overrides it -- not
+// sensitive (just where to connect), unlike the extension secret, which
+// stays out of this endpoint entirely.
+const PBX_WS_URL = process.env.PBX_WS_URL || (() => {
+  try { const u = new URL(process.env.ARI_URL || ''); return `ws://${u.hostname}:8088/ws`; }
+  catch { return null; }
+})();
+
 route('GET', '/api/config', ALL, () => ({
   iceServers: JSON.parse(process.env.ICE_SERVERS || '[{"urls":"stun:stun.l.google.com:19302"}]'),
   pstn: { prefix: PSTN_PREFIX, driver: gateway.name, media: gateway.mediaCapable },
   audio: process.env.AUDIO !== 'off',
+  sip: gateway.mediaCapable && PBX_WS_URL ? { wsUrl: PBX_WS_URL } : null,
 }));
 
 route('POST', '/api/calls/pstn', ALL, async ({ body, user }) => {

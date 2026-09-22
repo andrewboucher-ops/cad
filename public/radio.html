@@ -142,6 +142,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script src="https://unpkg.com/sip.js@0.21.2/dist/sip.min.js"></script>
 <script src="/app.js"></script>
 <script>
 const { api, el, esc } = CCCS;
@@ -1047,6 +1048,69 @@ function beepTwice() {
 let pstnCfg = { prefix: '9', driver: 'simulated', media: false };
 api('GET', '/api/config').then((c) => (pstnCfg = c.pstn)).catch(() => {});
 
+/* ---- SIP (FreePBX/Asterisk) ---------------------------------------
+ * ARI originates BOTH legs of a PSTN call itself (see pbx.js's dial()) --
+ * this radio's own PJSIP extension is one of them, so this browser only
+ * ever needs to ANSWER an incoming SIP INVITE, never place one. Dialling
+ * out still goes through POST /api/calls/pstn exactly as before; this is
+ * purely the audio path for whatever ARI then bridges to that extension.
+ *
+ * Inert unless radio.attached carried a `sip` block (this radio has a
+ * PBX extension + secret provisioned -- most don't yet) and /api/config
+ * reports a wsUrl. UNTESTED against a live PBX from here -- no way to
+ * place a real SIP call from this environment -- expect to debug this
+ * against the actual FreePBX box, same as pbx.js's own Asterisk driver
+ * already says about itself. */
+let sipUA = null;
+function sipAudioSink() {
+  let a = document.getElementById('sipAudioSink');
+  if (!a) {
+    a = document.createElement('audio');
+    a.id = 'sipAudioSink'; a.autoplay = true; a.style.display = 'none';
+    document.body.appendChild(a);
+  }
+  return a;
+}
+function startSip(sip, wsUrl) {
+  if (sipUA || !window.SIP) { if (!window.SIP) log('SIP: library failed to load, phone calls unavailable'); return; }
+  let host;
+  try { host = new URL(wsUrl).hostname; } catch { log('SIP: bad wsUrl from server config'); return; }
+  const ua = new SIP.UserAgent({
+    uri: SIP.UserAgent.makeURI(`sip:${sip.extension}@${host}`),
+    transportOptions: { server: wsUrl },
+    authorizationUsername: sip.extension,
+    authorizationPassword: sip.secret,
+    delegate: {
+      onInvite(invitation) {
+        log('PHONE RINGING');
+        const n = el('#callState');
+        invitation.accept({ sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false } } })
+          .then(() => {
+            const pc = invitation.sessionDescriptionHandler && invitation.sessionDescriptionHandler.peerConnection;
+            const tracks = pc ? pc.getReceivers().map((r) => r.track).filter(Boolean) : [];
+            const sink = sipAudioSink();
+            sink.srcObject = new MediaStream(tracks);
+            sink.play().catch((e) => log(`PHONE AUDIO BLOCKED: ${e.message}`));
+            if (n) n.textContent = 'CONNECTED';
+            log('PHONE CALL CONNECTED');
+          })
+          .catch((e) => log(`PHONE ANSWER FAILED: ${e.message}`));
+        invitation.stateChange.addListener((state) => {
+          if (state === SIP.SessionState.Terminated) {
+            sipAudioSink().srcObject = null;
+            log('PHONE CALL ENDED');
+          }
+        });
+      },
+    },
+  });
+  ua.start()
+    .then(() => new SIP.Registerer(ua).register())
+    .then(() => log(`SIP REGISTERED as ${sip.extension}`))
+    .catch((e) => log(`SIP REGISTER FAILED: ${e.message}`));
+  sipUA = ua;
+}
+
 bus.on('ptt.granted', async ({ listeners }) => {
   try { await audio.publishTo(listeners); }
   catch (e) { log('MIC DENIED: ' + e.message); }
@@ -1057,6 +1121,10 @@ bus.on('ptt.granted', async ({ listeners }) => {
   const jobs = await api('GET', '/api/jobs');
   currentJob = jobs.find((j) => j.resources.some((x) => x.radio === r.issi) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
   ensureLocationTracking();
+  if (r.sip) {
+    try { const cfg = await api('GET', '/api/config'); if (cfg.sip && cfg.sip.wsUrl) startSip(r.sip, cfg.sip.wsUrl); }
+    catch (e) { log(`SIP CONFIG FETCH FAILED: ${e.message}`); }
+  }
 })
 .on('radio.status_changed', (r) => { if (radio && r.issi === radio.issi) { radio = r; paint(); } })
 .on('radio.location_changed', (r) => { if (radio && r.issi === radio.issi) radio = r; })
