@@ -476,7 +476,14 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         // the one thing worth a single press. Everything else (PTT/panic
         // assignment, sign out) lives behind a hold on # instead, so it's not
         // one press away from an accidental status change.
-        if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SOFT_LEFT) { if (first) showStatusMenu(); return true }
+        //
+        // DPAD_CENTER is here on purpose, not a leftover: earlier testing
+        // said this handset has no separate OK/centre button, so that
+        // wiring was removed as dead code -- turns out the soft key itself
+        // sends DPAD_CENTER's code (23) on this hardware, so removing it
+        // silently broke the soft key too. Confirmed from the real device,
+        // not a guess this time.
+        if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SOFT_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_CENTER) { if (first) showStatusMenu(); return true }
         if (keyCode == KeyEvent.KEYCODE_POUND) { if (first) beginSettingsHold(); return true }
         // 1 is dual-purpose: a tap dials it (see onKeyUp), a hold sends a
         // call request instead -- same tap/hold split as PTT-vs-dial below.
@@ -661,7 +668,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     }
 
     private fun isReservedKey(keyCode: Int): Boolean = keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 ||
-        keyCode in setOf(KeyEvent.KEYCODE_STAR, KeyEvent.KEYCODE_POUND, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_SOFT_LEFT, KeyEvent.KEYCODE_BACK)
+        keyCode in setOf(KeyEvent.KEYCODE_STAR, KeyEvent.KEYCODE_POUND, KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_SOFT_LEFT, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_BACK)
 
     private fun learnKey(kind: String) {
         val dialog = AlertDialog.Builder(this)
