@@ -445,7 +445,6 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         if (keyCode == panicKey) { if (first) beginPanicHold(); return true }
         if (isPttKey(keyCode)) { if (first) startPtt(); return true }
         if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SOFT_LEFT) { if (first) showMenu(); return true }
-        if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_DPAD_CENTER) { if (first) showStatusMenu(); return true }
         return super.onKeyDown(keyCode, event)
     }
 
