@@ -81,7 +81,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
 
         loginButton.setOnClickListener { doLogin() }
         pttKey = prefs.getInt(KEY_PTT_KEY, -1)
-        panicKey = prefs.getInt(KEY_PANIC_KEY, -1)
+        panicKey = prefs.getInt(KEY_PANIC_KEY, DEFAULT_PANIC_KEY)
 
         token = prefs.getString(KEY_TOKEN, null)
         issi = prefs.getString(KEY_ISSI, null)
@@ -405,9 +405,9 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         Thread {
             try {
                 Api.emergency(t, fix?.latitude, fix?.longitude)
-                main.post { appendLog("EMERGENCY SENT"); panicBusy = false }
+                main.post { appendLog("EMERGENCY SENT"); panicBusy = false; showPanicResult("EMERGENCY SENT") }
             } catch (e: Exception) {
-                main.post { appendLog("EMERGENCY FAILED: ${e.message}"); panicBusy = false }
+                main.post { appendLog("EMERGENCY FAILED: ${e.message}"); panicBusy = false; showPanicResult("EMERGENCY FAILED") }
             }
         }.start()
     }
@@ -442,7 +442,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         if (mainScreen.visibility != View.VISIBLE) return super.onKeyDown(keyCode, event)
         val first = event.repeatCount == 0
         if (first) appendLog("KEY $keyCode")
-        if (keyCode == panicKey) { if (first) doPanic(); return true }
+        if (keyCode == panicKey) { if (first) beginPanicHold(); return true }
         if (isPttKey(keyCode)) { if (first) startPtt(); return true }
         if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SOFT_LEFT) { if (first) showMenu(); return true }
         if (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_DPAD_CENTER) { if (first) showStatusMenu(); return true }
@@ -450,8 +450,41 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (mainScreen.visibility == View.VISIBLE && isPttKey(keyCode)) { stopPtt(); return true }
+        if (mainScreen.visibility == View.VISIBLE) {
+            if (keyCode == panicKey) { cancelPanicHold(); return true }
+            if (isPttKey(keyCode)) { stopPtt(); return true }
+        }
         return super.onKeyUp(keyCode, event)
+    }
+
+    // An emergency goes straight to the alarm receiving centre, so a brush
+    // against the button must not raise one: it has to be held.
+    private val panicHoldRunnable = Runnable {
+        panicHolding = false
+        appendLog("EMERGENCY - held, sending")
+        doPanic()
+    }
+    private var panicHolding = false
+
+    private fun beginPanicHold() {
+        if (panicHolding) return
+        panicHolding = true
+        pttState.text = "HOLD FOR EMERGENCY"
+        pttState.setBackgroundColor(android.graphics.Color.parseColor("#b91c1c"))
+        main.postDelayed(panicHoldRunnable, PANIC_HOLD_MS)
+    }
+
+    private fun showPanicResult(text: String) {
+        pttState.text = text
+        pttState.setBackgroundColor(android.graphics.Color.parseColor("#b91c1c"))
+        main.postDelayed({ if (!pttHeld) setPttIdle() }, 6000)
+    }
+
+    private fun cancelPanicHold() {
+        if (!panicHolding) return
+        panicHolding = false
+        main.removeCallbacks(panicHoldRunnable)
+        setPttIdle()
     }
 
     // -- Menu, status and key learning ---------------------------------------
@@ -543,6 +576,9 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         private const val KEY_RADIO_ID = "radio_id"
         private const val KEY_CALLSIGN = "callsign"
         private const val KEY_DISPLAY_NAME = "display_name"
+        // Read off the real handset: its physical emergency button sends key 67.
+        private const val DEFAULT_PANIC_KEY = 67
+        private const val PANIC_HOLD_MS = 1500L
         private const val KEY_PTT_KEY = "ptt_keycode"
         private const val KEY_PANIC_KEY = "panic_keycode"
         private const val PERMISSION_REQUEST = 4001
