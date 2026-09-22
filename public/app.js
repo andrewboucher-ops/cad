@@ -699,7 +699,7 @@ const CCCS = (() => {
     // with tanh so a boosted loud peak rounds off instead of hard-clipping
     // into a crackle.
     const RAW_PLAYBACK_GAIN = 3;
-    const RAW_CAPTURE_GAIN = 8;
+    const RAW_CAPTURE_GAIN = 4;
     function playPcmChunk(buf) {
       if (!rawAudioExpected) return;
       if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
