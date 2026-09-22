@@ -574,6 +574,29 @@ function releaseFloorFor(radio) {
   }
 }
 
+// Third time in one afternoon a talkgroup was found stuck "held by
+// CONTROL" with no radio.ptt_release ever arriving -- each time from a
+// different cause (a closed tab, an exception in the browser's own
+// cleanup, and now this one still unexplained). Chasing every possible
+// client-side trigger individually clearly isn't converging fast enough
+// for a live dispatch system where a stuck floor blocks all
+// communication on that channel. This is the backstop: whatever the
+// cause, nothing should ever be able to hold a floor longer than a real
+// transmission plausibly runs.
+const FLOOR_TIMEOUT_MS = Number(process.env.FLOOR_TIMEOUT_MS || 30000);
+function floorTimeoutSweep() {
+  const now = Date.now();
+  for (const tg of db.talkgroups) {
+    if (!tg.floor_since || now - Date.parse(tg.floor_since) < FLOOR_TIMEOUT_MS) continue;
+    const radio = tg.floor_holder_radio_id ? db.radios.find((r) => r.id === tg.floor_holder_radio_id) : null;
+    const who = radio ? callsignOf(radio) : 'CONTROL';
+    logEvent('radio.ptt_timeout', `${who} FLOOR ON ${tg.name} FORCE-RELEASED — held ${Math.round((now - Date.parse(tg.floor_since)) / 1000)}s with no release`, { talkgroup_id: tg.id });
+    console.warn(`[cccs] floor timeout: ${tg.name} force-released, was held by ${who}`);
+    tg.floor_holder_radio_id = null; tg.floor_console_user_id = null; tg.floor_since = null;
+    broadcast('radio.ptt_released', { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio ? radio.id : null, callsign: who });
+  }
+}
+
 function endCall(call, reason) {
   if (call.state === 'ENDED') return call;
   if (call.kind === 'PSTN' && reason !== 'REMOTE_CLEARED') {
@@ -2729,6 +2752,7 @@ function start() {
   else { seed(); store.flushNow(); }
   if (SIMULATION) setInterval(simulationTick, 2000).unref?.();
   setInterval(welfareTick, WELFARE_TICK_MS).unref?.();
+  setInterval(floorTimeoutSweep, 5000).unref?.();
   if (process.env.RETENTION !== 'off') {
     retentionSweep();
     setInterval(retentionSweep, 6 * 60 * 60 * 1000).unref?.();
