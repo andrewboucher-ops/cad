@@ -699,6 +699,7 @@ const CCCS = (() => {
     // with tanh so a boosted loud peak rounds off instead of hard-clipping
     // into a crackle.
     const RAW_PLAYBACK_GAIN = 3;
+    const RAW_CAPTURE_GAIN = 8;
     function playPcmChunk(buf) {
       if (!rawAudioExpected) return;
       if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -737,21 +738,28 @@ const CCCS = (() => {
       // straight to destination.
       captureNode = captureCtx.createScriptProcessor(2048, 1, 1);
       const ratio = captureCtx.sampleRate / RAW_SAMPLE_RATE;
-      let loggedFirstChunk = false;
+      let chunkCount = 0;
       captureNode.onaudioprocess = (e) => {
         const input = e.inputBuffer.getChannelData(0);
         const outLen = Math.floor(input.length / ratio);
         const out = new Int16Array(outLen);
         let peak = 0;
         for (let i = 0; i < outLen; i++) {
-          const s = input[Math.floor(i * ratio)];
+          // Same reasoning as the playback-side boost: this stream's own
+          // getUserMedia constraints (echoCancellation/autoGainControl)
+          // apply differently when tapped through Web Audio API like this
+          // versus WebRTC's own native path — confirmed live at ~0.0016
+          // peak, near noise floor, well under what a raw mic tap should
+          // read even from a normal speaking voice.
+          const s = Math.tanh(input[Math.floor(i * ratio)] * RAW_CAPTURE_GAIN);
           if (Math.abs(s) > peak) peak = Math.abs(s);
           out[i] = Math.max(-32768, Math.min(32767, Math.round(s * 32768)));
         }
-        if (!loggedFirstChunk) {
-          loggedFirstChunk = true;
-          console.log('[cccs] onaudioprocess: first chunk, samples', outLen, 'peak level', peak.toFixed(4), 'ws state', bus.wsState());
-        }
+        // Every ~2s (2048 samples per callback at 48kHz ≈ 43ms, so ~46
+        // callbacks) rather than every chunk or just the first, so a
+        // genuinely-quiet-throughout mic is distinguishable from a quiet
+        // onset before speech starts.
+        if (chunkCount++ % 46 === 0) console.log('[cccs] onaudioprocess: chunk', chunkCount, 'peak (post-gain)', peak.toFixed(4), 'ws state', bus.wsState());
         bus.sendBinary(out.buffer);
       };
       console.log('[cccs] startRawAudioSend: graph wired, waiting for onaudioprocess to fire...');
