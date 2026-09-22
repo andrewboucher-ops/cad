@@ -139,7 +139,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
-            android:text="soft key = status   hold # = settings   hold 1 = call"
+            android:text="soft key=status  hold #=settings  hold 1=call  hold *=lock"
             android:textColor="#5b6472"
             android:textSize="10sp"
             android:paddingBottom="8dp" />

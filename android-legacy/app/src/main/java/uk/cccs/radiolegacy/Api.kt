@@ -138,6 +138,16 @@ object Api {
     fun requestCall(token: String, priority: Boolean): JSONObject =
         postAuthed("/api/calls/request", token, JSONObject().put("priority", priority))
 
+    /** Radio-to-radio, by ISSI. Placing the call and tracking its state
+     * (RINGING/CONNECTED/ENDED, over the WebSocket) works the same as the
+     * web radio; there is no audio path for it from this handset yet --
+     * that rides WebRTC on the web app, which this device can't do (see
+     * relayAudioFrame in server.js for why talkgroup PTT uses a different,
+     * server-relayed path instead). Placing calls now, audio is separate
+     * follow-up work. */
+    fun startPrivateCall(token: String, toIssi: String): JSONObject =
+        postAuthed("/api/calls/private", token, JSONObject().put("to", toIssi))
+
     fun acknowledgeJob(token: String, jobId: Int): JSONObject =
         postAuthed("/api/jobs/$jobId/ack", token, JSONObject())
 }

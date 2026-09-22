@@ -47,6 +47,9 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     private var callsign: String? = null
     private var talkgroup: String? = null
     private var lastFix: Location? = null
+    private var locked = false
+    private var dialBuffer = ""
+    private var activeCallId = -1
 
     private var pttHeld = false
     private var pttGranted = false
@@ -306,6 +309,15 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
                 // Playback stops naturally when frames stop arriving; just clear the indicator.
                 if (!pttHeld) setPttIdle()
             }
+            "call.accepted" -> {
+                if (payload.optInt("id", -1) == activeCallId) { appendLog("CALL CONNECTED (no audio on this handset)"); pttState.text = "ON CALL" }
+            }
+            "call.rejected" -> {
+                if (payload.optInt("id", -1) == activeCallId) { appendLog("CALL DECLINED"); activeCallId = -1; setPttIdle() }
+            }
+            "call.ended" -> {
+                if (payload.optInt("id", -1) == activeCallId) { appendLog("CALL ENDED"); activeCallId = -1; setPttIdle() }
+            }
             "emergency.acknowledged" -> {
                 if (payload.optString("issi") == issi) appendLog("EMERGENCY ACKNOWLEDGED BY ${payload.optString("acknowledged_by", "control")}")
             }
@@ -442,15 +454,22 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         if (mainScreen.visibility != View.VISIBLE) return super.onKeyDown(keyCode, event)
         val first = event.repeatCount == 0
         if (first) appendLog("KEY $keyCode")
+        // PTT, panic and the lock toggle itself always work, locked or not --
+        // a locked keypad in a pocket must never block transmit or emergency.
         if (keyCode == panicKey) { if (first) beginPanicHold(); return true }
-        if (isPttKey(keyCode)) { if (first) startPtt(); return true }
+        if (isPttKey(keyCode)) { if (first) { if (dialBuffer.isNotEmpty()) placeCall() else startPtt() }; return true }
+        if (keyCode == KeyEvent.KEYCODE_STAR) { if (first) beginLockHold(); return true }
+        if (locked) { if (first) appendLog("LOCKED - hold * to unlock"); return true }
         // Left soft key: status list directly, no intermediate menu -- that's
         // the one thing worth a single press. Everything else (PTT/panic
         // assignment, sign out) lives behind a hold on # instead, so it's not
         // one press away from an accidental status change.
         if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SOFT_LEFT) { if (first) showStatusMenu(); return true }
         if (keyCode == KeyEvent.KEYCODE_POUND) { if (first) beginSettingsHold(); return true }
+        // 1 is dual-purpose: a tap dials it (see onKeyUp), a hold sends a
+        // call request instead -- same tap/hold split as PTT-vs-dial below.
         if (keyCode == KeyEvent.KEYCODE_1) { if (first) beginCallRequestHold(); return true }
+        if (keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9) { if (first) onDialDigit(keyCode); return true }
         return super.onKeyDown(keyCode, event)
     }
 
@@ -458,10 +477,66 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         if (mainScreen.visibility == View.VISIBLE) {
             if (keyCode == panicKey) { cancelPanicHold(); return true }
             if (isPttKey(keyCode)) { stopPtt(); return true }
+            if (keyCode == KeyEvent.KEYCODE_STAR) { cancelLockHold(); return true }
             if (keyCode == KeyEvent.KEYCODE_POUND) { cancelSettingsHold(); return true }
-            if (keyCode == KeyEvent.KEYCODE_1) { cancelCallRequestHold(); return true }
+            // A short tap never reaches the call-request hold threshold --
+            // cancelCallRequestHold() reports that back so it can be treated
+            // as an ordinary dialled digit instead of doing nothing.
+            if (keyCode == KeyEvent.KEYCODE_1) { if (cancelCallRequestHold() && !locked) onDialDigit(keyCode); return true }
         }
         return super.onKeyUp(keyCode, event)
+    }
+
+    // Dialling an ISSI then pressing PTT places a radio-to-radio call (no
+    // lock check needed here -- locked already blocks reaching this code).
+    // 12 digits is generously past any real ISSI, just to stop a stuck key
+    // from growing the buffer forever.
+    private fun onDialDigit(keyCode: Int) {
+        if (dialBuffer.length >= 12) return
+        dialBuffer += (keyCode - KeyEvent.KEYCODE_0).toString()
+        pttState.text = "DIAL $dialBuffer"
+        pttState.setBackgroundColor(android.graphics.Color.parseColor("#1f2937"))
+    }
+
+    private fun placeCall() {
+        val t = token ?: return
+        val toIssi = dialBuffer
+        dialBuffer = ""
+        pttState.text = "CALLING $toIssi"
+        pttState.setBackgroundColor(android.graphics.Color.parseColor("#b45309"))
+        Thread {
+            try {
+                val result = Api.startPrivateCall(t, toIssi)
+                activeCallId = result.optInt("id", -1)
+                // No audio path for this yet -- see Api.startPrivateCall's
+                // doc comment for why. The call record connects; only its
+                // sound doesn't reach this handset.
+                main.post { appendLog("CALLING $toIssi (no audio on this handset yet)") }
+            } catch (e: Exception) {
+                main.post { appendLog("CALL FAILED: ${e.message}"); setPttIdle() }
+            }
+        }.start()
+    }
+
+    private val lockHoldRunnable = Runnable {
+        lockHolding = false
+        locked = !locked
+        dialBuffer = ""
+        appendLog(if (locked) "LOCKED" else "UNLOCKED")
+        setPttIdle()
+    }
+    private var lockHolding = false
+
+    private fun beginLockHold() {
+        if (lockHolding) return
+        lockHolding = true
+        main.postDelayed(lockHoldRunnable, LOCK_HOLD_MS)
+    }
+
+    private fun cancelLockHold() {
+        if (!lockHolding) return
+        lockHolding = false
+        main.removeCallbacks(lockHoldRunnable)
     }
 
     private val settingsHoldRunnable = Runnable { settingsHolding = false; showMenu() }
@@ -499,10 +574,13 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         main.postDelayed(callRequestHoldRunnable, CALL_REQUEST_HOLD_MS)
     }
 
-    private fun cancelCallRequestHold() {
-        if (!callRequestHolding) return
+    /** Returns true if the hold never fired (a short tap), so the caller
+     * can treat it as a dialled digit instead. */
+    private fun cancelCallRequestHold(): Boolean {
+        if (!callRequestHolding) return false
         callRequestHolding = false
         main.removeCallbacks(callRequestHoldRunnable)
+        return true
     }
 
     // An emergency goes straight to the alarm receiving centre, so a brush
@@ -594,6 +672,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         try { locationManager?.removeUpdates(this) } catch (_: Exception) {}
         prefs.edit().remove(KEY_TOKEN).remove(KEY_ISSI).remove(KEY_RADIO_ID).remove(KEY_CALLSIGN).apply()
         token = null; issi = null; radioId = null; callsign = null; talkgroup = null
+        locked = false; dialBuffer = ""; activeCallId = -1
         logView.text = ""
         setPttIdle()
         showLogin()
@@ -634,6 +713,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         private const val DEFAULT_PANIC_KEY = 67
         private const val SETTINGS_HOLD_MS = 1200L
         private const val CALL_REQUEST_HOLD_MS = 800L
+        private const val LOCK_HOLD_MS = 1000L
         private const val PANIC_HOLD_MS = 1500L
         private const val KEY_PTT_KEY = "ptt_keycode"
         private const val KEY_PANIC_KEY = "panic_keycode"
