@@ -38,6 +38,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
     private val prefs by lazy { getSharedPreferences("cccs", Context.MODE_PRIVATE) }
     private val main = Handler(Looper.getMainLooper())
     private val audio = AudioEngine()
+    private val sound = SoundEngine()
     private var ws: CccsWebSocket? = null
     private var locationManager: LocationManager? = null
 
@@ -112,6 +113,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         ws?.close()
         audio.stopCapture()
         audio.releasePlayback()
+        sound.stopRing()
         try { locationManager?.removeUpdates(this) } catch (_: Exception) {}
     }
 
@@ -326,6 +328,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
                 if (pttHeld) {
                     pttState.text = "TRANSMITTING"
                     pttState.setBackgroundColor(android.graphics.Color.parseColor("#b91c1c"))
+                    sound.confirm()
                     audio.startCapture { chunk -> ws?.sendBinary(chunk) }
                 }
             }
@@ -333,6 +336,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
                 pttGranted = false
                 pttHeld = false
                 setPttIdle()
+                sound.denied()
                 appendLog("PTT DENIED — ${payload.optString("holder", "channel busy")}")
             }
             "radio.ptt_started" -> {
@@ -344,14 +348,26 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
                 // Playback stops naturally when frames stop arriving; just clear the indicator.
                 if (!pttHeld) setPttIdle()
             }
+            "call.incoming" -> {
+                // Targeted server-side (broadcast(..., { radioIds })) -- if
+                // this handset received it, the call really is for it.
+                val callId = payload.optInt("id", -1)
+                if (callId < 0) return
+                activeCallId = callId
+                sound.startRing()
+                showIncomingCallDialog(callId, payload.optString("from_label", "Unknown"))
+            }
             "call.accepted" -> {
-                if (payload.optInt("id", -1) == activeCallId) { appendLog("CALL CONNECTED (no audio on this handset)"); pttState.text = "ON CALL" }
+                if (payload.optInt("id", -1) == activeCallId) {
+                    sound.stopRing()
+                    appendLog("CALL CONNECTED (no audio on this handset)"); pttState.text = "ON CALL"
+                }
             }
             "call.rejected" -> {
-                if (payload.optInt("id", -1) == activeCallId) { appendLog("CALL DECLINED"); activeCallId = -1; setPttIdle() }
+                if (payload.optInt("id", -1) == activeCallId) { sound.stopRing(); appendLog("CALL DECLINED"); activeCallId = -1; setPttIdle() }
             }
             "call.ended" -> {
-                if (payload.optInt("id", -1) == activeCallId) { appendLog("CALL ENDED"); activeCallId = -1; setPttIdle() }
+                if (payload.optInt("id", -1) == activeCallId) { sound.stopRing(); appendLog("CALL ENDED"); activeCallId = -1; setPttIdle() }
             }
             "emergency.acknowledged" -> {
                 if (payload.optString("issi") == issi) appendLog("EMERGENCY ACKNOWLEDGED BY ${payload.optString("acknowledged_by", "control")}")
@@ -388,6 +404,26 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
             .setCancelable(false)
             .create()
         dialog.show()
+    }
+
+    private fun showIncomingCallDialog(callId: Int, fromLabel: String) {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("INCOMING CALL")
+            .setMessage(fromLabel)
+            .setCancelable(false)
+            .setPositiveButton("Accept") { _, _ -> answerCall(callId, accept = true) }
+            .setNegativeButton("Decline") { _, _ -> answerCall(callId, accept = false) }
+            .create()
+        dialog.show()
+    }
+
+    private fun answerCall(callId: Int, accept: Boolean) {
+        sound.stopRing()
+        val t = token ?: return
+        Thread {
+            try { if (accept) Api.acceptCall(t, callId) else Api.rejectCall(t, callId) }
+            catch (e: Exception) { main.post { appendLog("CALL ${if (accept) "ACCEPT" else "DECLINE"} FAILED: ${e.message}") } }
+        }.start()
     }
 
     private fun acknowledgeJob(jobId: Int, reference: String) {
@@ -431,6 +467,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         setPttIdle()
         if (pttGranted) {
             audio.stopCapture()
+            sound.released()
             val payload = JSONObject().put("talkgroup", talkgroup).put("as_radio", issi)
             ws?.sendText(JSONObject().put("type", "radio.ptt_release").put("payload", payload).toString())
         }
@@ -565,6 +602,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
         locked = !locked
         dialBuffer = ""
         lockIcon.text = if (locked) "🔒" else "🔓"
+        sound.lockClick(unlocked = !locked)
         appendLog(if (locked) "LOCKED" else "UNLOCKED")
         setPttIdle()
     }
@@ -685,7 +723,7 @@ class MainActivity : Activity(), CccsWebSocket.Listener, LocationListener {
                 val (code, label) = statusChoices[which]
                 appendLog("STATUS -> $label")
                 Thread {
-                    try { Api.setStatus(t, who, code) }
+                    try { Api.setStatus(t, who, code); sound.statusBeep() }
                     catch (e: Exception) { main.post { appendLog("STATUS FAILED: ${e.message}") } }
                 }.start()
             }.show()

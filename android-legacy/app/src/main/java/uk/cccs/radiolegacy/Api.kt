@@ -150,4 +150,12 @@ object Api {
 
     fun acknowledgeJob(token: String, jobId: Int): JSONObject =
         postAuthed("/api/jobs/$jobId/ack", token, JSONObject())
+
+    /** Answering an incoming call.incoming (radio-to-radio or inbound PSTN
+     * targeting this handset). No body needed -- the server resolves this
+     * handset's own radio from the token, same as setStatus/requestCall. */
+    fun acceptCall(token: String, callId: Int): JSONObject =
+        postAuthed("/api/calls/$callId/accept", token, JSONObject())
+    fun rejectCall(token: String, callId: Int): JSONObject =
+        postAuthed("/api/calls/$callId/reject", token, JSONObject())
 }
