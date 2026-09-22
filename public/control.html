@@ -408,7 +408,6 @@ function renderEmergencies() {
   CCCS.els('[data-emgcall]').forEach((b) => (b.onclick = () => callRadio(b.dataset.emgcall)));
   CCCS.els('[data-loc]').forEach((b) => (b.onclick = () => select(b.dataset.loc)));
   CCCS.els('[data-emgjob]').forEach((b) => (b.onclick = () => jobModal(state.jobs.find((j) => j.id === Number(b.dataset.emgjob)))));
-  if (active.some((e) => e.state === 'ACTIVE')) beep();
 }
 
 function renderRequests() {
@@ -428,7 +427,6 @@ function renderRequests() {
   CCCS.els('[data-reqcall]').forEach((b) => (b.onclick = () => callRadio(b.dataset.reqcall)));
   CCCS.els('[data-reqloc]').forEach((b) => (b.onclick = () => select(b.dataset.reqloc)));
   CCCS.els('[data-reqclear]').forEach((b) => (b.onclick = () => api('POST', `/api/calls/requests/${b.dataset.reqclear}/clear`, {})));
-  if (open.some((r) => r.priority)) beep();
   updateCallbackBadge();
 }
 
@@ -441,17 +439,6 @@ function renderLog() {
 }
 
 function select(issi) { state.selected = issi; renderResources(); renderDetail(); }
-
-let audioCtx;
-function beep() {
-  try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-    o.frequency.value = 880; g.gain.value = 0.05;
-    o.connect(g); g.connect(audioCtx.destination); o.start();
-    o.stop(audioCtx.currentTime + 0.18);
-  } catch {}
-}
 
 /* ---------- modals ---------- */
 function modal(title, html, onMount) {
@@ -990,6 +977,58 @@ audio.onPeerAudio = (addr, state) => {
   else if (state === true) b.hidden = true;
 };
 if (el('#audioBlocked')) el('#audioBlocked').onclick = () => { if (audio.resumeAudio()) el('#audioBlocked').hidden = true; };
+
+/* ---------- Console alert tones ------------------------------------
+ * Short synthesised tones, not sampled audio -- nothing to source or
+ * license, ships as code (same reasoning as the legacy handset's
+ * SoundEngine.kt). A separate AudioContext from the mic/WebRTC one in
+ * `audio` above, since these have to work even with no mic involved.
+ * Browsers start an AudioContext suspended until a user gesture --
+ * actx() resumes it on every call rather than once, so it also recovers
+ * if the tab power-saves it back to suspended later. */
+const alertCtx = { current: null };
+function actx() {
+  if (!alertCtx.current) alertCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+  if (alertCtx.current.state === 'suspended') alertCtx.current.resume().catch(() => {});
+  return alertCtx.current;
+}
+function beep(freq, ms, delayMs = 0, gain = 0.25, type = 'sine') {
+  const ctx = actx();
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = type; osc.frequency.value = freq;
+  const start = ctx.currentTime + delayMs / 1000;
+  const end = start + ms / 1000;
+  g.gain.setValueAtTime(0, start);
+  g.gain.linearRampToValueAtTime(gain, start + 0.005);
+  g.gain.setValueAtTime(gain, Math.max(start + 0.005, end - 0.01));
+  g.gain.linearRampToValueAtTime(0, end);
+  osc.connect(g); g.connect(ctx.destination);
+  osc.start(start); osc.stop(end + 0.02);
+}
+const sound = {
+  jobCreated() { beep(1100, 90); beep(1500, 110, 110); },
+  callRequest() { beep(1300, 80); beep(1300, 80, 140); },
+  pttDenied() { beep(320, 130, 0, 0.28, 'square'); beep(320, 130, 170, 0.28, 'square'); },
+  callIncoming() { beep(1000, 100); beep(1000, 100, 190); beep(1000, 100, 380); },
+  _emergencyTimer: null,
+  // Keeps sounding while ANY emergency is still ACTIVE (not yet
+  // acknowledged) -- call after every emergency.* event rather than
+  // just on emergency.activated, so acknowledging silences it and a
+  // second, separate emergency re-triggers it.
+  refreshEmergencyAlarm() {
+    const stillActive = state.emergencies.some((e) => e.state === 'ACTIVE');
+    if (stillActive && !sound._emergencyTimer) {
+      const cycle = () => { beep(880, 220, 0, 0.35, 'square'); beep(660, 220, 260, 0.35, 'square'); };
+      cycle();
+      sound._emergencyTimer = setInterval(cycle, 900);
+    } else if (!stillActive && sound._emergencyTimer) {
+      clearInterval(sound._emergencyTimer);
+      sound._emergencyTimer = null;
+    }
+  },
+};
+
 bus.on('ptt.granted', ({ listeners }) => audio.publishTo(listeners).catch((e) => console.warn('mic', e)))
    .on('call.accepted', (c) => { const other = (c.participants || []).find((p) => p.issi); if (c.kind !== 'PSTN' && other) audio.call(`radio:${other.issi}`).catch(() => {}); })
    .on('call.ended', () => audio.hangUp())
@@ -1004,24 +1043,25 @@ bus.on('ptt.granted', ({ listeners }) => audio.publishTo(listeners).catch((e) =>
    .on('mdt.assigned', (m) => { upsert(state.mdts, m); renderResources(); })
    .on('mdt.crew_changed', (m) => { upsert(state.mdts, m); renderResources(); })
    .on('mdt.deleted', (m) => { state.mdts = state.mdts.filter((x) => x.id !== m.id); renderResources(); })
-   .on('job.created', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); })
+   .on('job.created', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); sound.jobCreated(); })
    .on('job.dispatched', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); })
    .on('job.status_changed', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); renderResources(); })
    .on('job.acknowledged', ({ job }) => { upsert(state.jobs, job); renderJobs(); renderResources(); })
-   .on('emergency.activated', (e) => { upsert(state.emergencies, e); renderEmergencies(); renderResources(); })
+   .on('emergency.activated', (e) => { upsert(state.emergencies, e); renderEmergencies(); renderResources(); sound.refreshEmergencyAlarm(); })
    .on('radio.covert_changed', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
    .on('radio.position_report', (r) => { upsert(state.radios, r); renderMap(); renderDetail(); })
-   .on('call.request', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); })
+   .on('call.request', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); sound.callRequest(); })
    .on('call.request_cleared', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); })
    .on('welfare.started', ({ radio }) => { upsert(state.radios, radio); renderResources(); renderDetail(); })
    .on('welfare.checked_in', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
    .on('welfare.stopped', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
-   .on('emergency.acknowledged', (e) => { upsert(state.emergencies, e); renderEmergencies(); })
-   .on('emergency.resolved', (e) => { upsert(state.emergencies, e); renderEmergencies(); })
+   .on('emergency.acknowledged', (e) => { upsert(state.emergencies, e); renderEmergencies(); sound.refreshEmergencyAlarm(); })
+   .on('emergency.resolved', (e) => { upsert(state.emergencies, e); renderEmergencies(); sound.refreshEmergencyAlarm(); })
    .on('event.logged', (e) => { state.events.push(e); if (state.events.length > 400) state.events.shift(); renderLog(); })
    .on('radio.ptt_started', (p) => { const f = el('#floor'); if (f) f.textContent = `TX ${p.callsign} · ${p.talkgroup}`; })
    .on('radio.ptt_released', (p) => { const f = el('#floor'); if (f) f.textContent = ''; })
-   .on('ptt.denied', (p) => { const f = el('#floor'); if (f) f.textContent = `${p.reason} — ${p.holder} has the floor`; txTg = null; const b = el('#btnPtt'); if (b) { b.classList.remove('danger'); b.textContent = 'Hold to transmit'; } })
+   .on('ptt.denied', (p) => { const f = el('#floor'); if (f) f.textContent = `${p.reason} — ${p.holder} has the floor`; txTg = null; const b = el('#btnPtt'); if (b) { b.classList.remove('danger'); b.textContent = 'Hold to transmit'; } sound.pttDenied(); })
+   .on('call.incoming', () => sound.callIncoming())
    .on('call.accepted', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = 'ACTIVE — connected'; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
    .on('call.rejected', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `DECLINED by ${c.rejected_by}`; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
    .on('call.ended', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `ENDED (${c.end_reason}) after ${c.duration_s}s`; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
@@ -1035,6 +1075,9 @@ async function boot() {
   state.requests = s.call_requests || [];
   if (el('#pttTg')) el('#pttTg').innerHTML = s.talkgroups.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
   renderResources(); renderJobs(); renderMap(); renderEmergencies(); renderRequests(); renderLog();
+  // Covers a page load/reconnect landing mid-emergency -- the alarm
+  // shouldn't depend on having been open when emergency.activated fired.
+  sound.refreshEmergencyAlarm();
 }
 boot();
 </script>
