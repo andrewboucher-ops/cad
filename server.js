@@ -768,6 +768,12 @@ function callPttStart(conn, payload) {
   if (!radio) return conn.send('error', { message: 'call PTT requires a radio' });
   const call = findActiveCallFor(radio, payload.call_id);
   if (!call) return conn.send('ptt.denied', { reason: 'CALL NOT ACTIVE' });
+  // A PSTN leg has no other radio_id to relay to at all -- the far end is
+  // a phone number on the PBX, reached (once a real gateway is connected,
+  // not the current simulated one) via its own SIP path, never through
+  // this WebSocket. Say so rather than granting a floor that plays to
+  // nobody and leaving whoever pressed PTT thinking it worked.
+  if (call.kind === 'PSTN') return conn.send('ptt.denied', { reason: 'PHONE CALLS NOT SUPPORTED ON THIS DEVICE' });
   if (call.floor_holder_radio_id && call.floor_holder_radio_id !== radio.id) {
     const holder = db.radios.find((r) => r.id === call.floor_holder_radio_id);
     return conn.send('ptt.denied', { reason: 'CHANNEL BUSY', holder: holder ? callsignOf(holder) : '?' });

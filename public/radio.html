@@ -150,12 +150,21 @@ const me = CCCS.getSession().user;
 
 const qIssi = new URLSearchParams(location.search).get('issi');
 let radio = null, currentCall = null, currentJob = null, txing = false;
+// Unbounded before this -- a #log div that only ever grows, for the
+// entire life of the tab, prepending one <div> per event with nothing
+// ever removed. Over a long real shift this reaches thousands of nodes;
+// every reflow after that gets slower, and on a memory-constrained phone
+// (reported: iOS Safari) that shows up as everything getting laggier the
+// longer the tab's been open, audio included -- confirmed from how the
+// delay was actually described (builds up over time), not guessed.
+const MAX_LOG_LINES = 200;
 const log = (line) => {
   const host = el('#log');
   if (!host) return;
   const d = document.createElement('div');
   d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`;
   host.prepend(d);
+  while (host.children.length > MAX_LOG_LINES) host.removeChild(host.lastChild);
 };
 
 const AVL_COLOUR = {
