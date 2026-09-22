@@ -62,6 +62,7 @@ class CccsWebSocket(private val host: String, private val port: Int, private val
         closedByUs.set(true)
         running.set(false)
         try { socket?.close() } catch (_: Exception) {}
+        sender.shutdown()
     }
 
     private fun runConnection() {
@@ -156,8 +157,18 @@ class CccsWebSocket(private val host: String, private val port: Int, private val
         }
     }
 
-    fun sendText(text: String) = writeFrame(text.toByteArray(Charsets.UTF_8), 0x1)
-    fun sendBinary(data: ByteArray) = writeFrame(data, 0x2)
+    // Callers include the UI thread (a key press starts PTT), and Android
+    // refuses network writes there (NetworkOnMainThreadException), which
+    // silently dropped every PTT request. Everything queued here is written
+    // in order on one background thread instead.
+    private val sender = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    private fun queue(payload: ByteArray, opcode: Int) {
+        try { sender.execute { writeFrame(payload, opcode) } } catch (_: java.util.concurrent.RejectedExecutionException) {}
+    }
+
+    fun sendText(text: String) = queue(text.toByteArray(Charsets.UTF_8), 0x1)
+    fun sendBinary(data: ByteArray) = queue(data, 0x2)
 
     private fun writeFrame(payload: ByteArray, opcode: Int) {
         val out = output ?: return
