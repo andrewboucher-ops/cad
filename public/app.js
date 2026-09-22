@@ -322,6 +322,7 @@ const CCCS = (() => {
       // chunks flushed on reconnect would just play back as a burst of
       // noise well after the fact.
       sendBinary(data) { if (ws && ws.readyState === 1) ws.send(data); },
+      wsState() { return ws ? ws.readyState : 'no-socket'; },
       close() { closed = true; try { ws.close(); } catch {} },
     };
   }
@@ -718,8 +719,10 @@ const CCCS = (() => {
     bus.on('radio.ptt_released', () => { rawAudioExpected = false; });
 
     function startRawAudioSend(stream) {
+      console.log('[cccs] startRawAudioSend: called, captureNode already set?', !!captureNode);
       if (captureNode) return;
       captureCtx = playCtx || (playCtx = new (window.AudioContext || window.webkitAudioContext)());
+      console.log('[cccs] startRawAudioSend: context state', captureCtx.state, 'sampleRate', captureCtx.sampleRate, 'stream tracks', stream.getAudioTracks().map((t) => `${t.label} enabled=${t.enabled} muted=${t.muted}`));
       // A freshly-created (or previously auto-suspended) AudioContext never
       // fires onaudioprocess until explicitly resumed -- easy to miss here
       // specifically because WebRTC's own audio never touches AudioContext
@@ -734,16 +737,24 @@ const CCCS = (() => {
       // straight to destination.
       captureNode = captureCtx.createScriptProcessor(2048, 1, 1);
       const ratio = captureCtx.sampleRate / RAW_SAMPLE_RATE;
+      let loggedFirstChunk = false;
       captureNode.onaudioprocess = (e) => {
         const input = e.inputBuffer.getChannelData(0);
         const outLen = Math.floor(input.length / ratio);
         const out = new Int16Array(outLen);
+        let peak = 0;
         for (let i = 0; i < outLen; i++) {
           const s = input[Math.floor(i * ratio)];
+          if (Math.abs(s) > peak) peak = Math.abs(s);
           out[i] = Math.max(-32768, Math.min(32767, Math.round(s * 32768)));
+        }
+        if (!loggedFirstChunk) {
+          loggedFirstChunk = true;
+          console.log('[cccs] onaudioprocess: first chunk, samples', outLen, 'peak level', peak.toFixed(4), 'ws state', bus.wsState());
         }
         bus.sendBinary(out.buffer);
       };
+      console.log('[cccs] startRawAudioSend: graph wired, waiting for onaudioprocess to fire...');
       const silentSink = captureCtx.createGain();
       silentSink.gain.value = 0;
       captureSource.connect(captureNode);
