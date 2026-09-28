@@ -658,15 +658,20 @@ function handleWsMessage(conn, msg) {
       setRadioStatus(radio, payload.status && RADIO_STATUSES.includes(payload.status) ? payload.status : 'AVAILABLE', 'attached');
       broadcast('radio.connected', publicRadio(radio));
       logEvent('radio.connected', `${callsignOf(radio)} (${radio.issi}) CONNECTED`, { radio_id: radio.id });
-      // The registration secret for this radio's own PJSIP extension --
-      // only ever sent here, in a direct reply to the one connection that
-      // just proved it's this radio, never in publicRadio() (broadcast to
-      // everyone) or any other event. Omitted entirely (not just null)
-      // when this radio has no PBX extension provisioned, so a client with
-      // no `sip` field simply never attempts SIP registration.
+      // The registration credentials for this radio's own WebRTC SIP
+      // device -- only ever sent here, in a direct reply to the one
+      // connection that just proved it's this radio, never in
+      // publicRadio() (broadcast to everyone) or any other event.
+      // Deliberately a separate device id (pbx_sip_user) from
+      // pbx_extension: confirmed live against FreePBX's own Webrtc module
+      // that the extension you dial (9001) and the actual registrable
+      // PJSIP device behind it (999001, that module's own prefix
+      // convention) are not the same identifier. Omitted entirely (not
+      // just null) when this radio has no PBX device provisioned, so a
+      // client with no `sip` field simply never attempts SIP registration.
       const attached = publicRadio(radio);
-      if (radio.pbx_extension && radio.pbx_secret) {
-        attached.sip = { extension: radio.pbx_extension, secret: radio.pbx_secret };
+      if (radio.pbx_sip_user && radio.pbx_secret) {
+        attached.sip = { extension: radio.pbx_sip_user, secret: radio.pbx_secret };
       }
       return conn.send('radio.attached', attached);
     }
@@ -1305,7 +1310,7 @@ route('POST', '/api/radios', ADMIN, ({ body }) => {
   const tg = body.talkgroup ? findTalkgroup(body.talkgroup) : null;
   const pin = String(body.pin || '').trim();
   if (pin && !/^\d{6}$/.test(pin)) throw httpError(400, 'PIN must be 6 digits');
-  const r = { id: nextId('radios'), issi, alias: body.alias || issi, radio_type: type, status: 'OFFLINE', callsign_id: cs ? cs.id : null, vehicle_id: null, talkgroup_id: tg ? tg.id : null, job_id: null, assigned_user_id: null, battery: 100, signal: 'UNKNOWN', lat: 51.5074, lon: -0.1278, speed: 0, heading: 0, last_seen: null, emergency: false, connected: false, sim_target: null, pbx_extension: body.pbx_extension || null, pbx_secret: body.pbx_secret || null, pin_hash: pin ? hashPassword(pin) : null };
+  const r = { id: nextId('radios'), issi, alias: body.alias || issi, radio_type: type, status: 'OFFLINE', callsign_id: cs ? cs.id : null, vehicle_id: null, talkgroup_id: tg ? tg.id : null, job_id: null, assigned_user_id: null, battery: 100, signal: 'UNKNOWN', lat: 51.5074, lon: -0.1278, speed: 0, heading: 0, last_seen: null, emergency: false, connected: false, sim_target: null, pbx_extension: body.pbx_extension || null, pbx_sip_user: body.pbx_sip_user || null, pbx_secret: body.pbx_secret || null, pin_hash: pin ? hashPassword(pin) : null };
   db.radios.push(r);
   if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: r.id });
   broadcast('radio.created', publicRadio(r));
@@ -1323,9 +1328,12 @@ route('PATCH', '/api/radios/:id', ADMIN, ({ params, body }) => {
     r.radio_type = type;
   }
   if ('pbx_extension' in body) r.pbx_extension = body.pbx_extension || null;
-  // Registration secret for that extension's SIP UA -- deliberately never in
-  // publicRadio(), only ever handed to that radio's own connection on
-  // radio.attach (see below). An admin-only write here, same as the PIN.
+  // The actual registrable SIP device behind pbx_extension -- not the same
+  // identifier (see the radio.attach comment below for why) -- plus its
+  // registration secret. Deliberately never in publicRadio(), only ever
+  // handed to that radio's own connection on radio.attach. Admin-only
+  // writes here, same as the PIN.
+  if ('pbx_sip_user' in body) r.pbx_sip_user = body.pbx_sip_user || null;
   if ('pbx_secret' in body) r.pbx_secret = body.pbx_secret || null;
   if ('callsign' in body) {
     const cs = body.callsign ? findCallsign(body.callsign) : null;
@@ -2723,11 +2731,18 @@ const gateway = createGateway((event, data) => {
 
 // Asterisk's PJSIP WebSocket transport rides the same mini-HTTP server ARI
 // does, at /ws, by convention (FreePBX's default chan_pjsip wss transport).
-// Derived from ARI_URL's host unless PBX_WS_URL overrides it -- not
-// sensitive (just where to connect), unlike the extension secret, which
-// stays out of this endpoint entirely.
+// wss on 8089, not ws on 8088 -- confirmed live that a browser on
+// comms.echeloncic.com (always HTTPS) refuses to open a plain ws://
+// connection at all ("Mixed Content", blocked before it even attempts the
+// handshake, no console option to allow it). Derived from ARI_URL's host
+// unless PBX_WS_URL overrides it -- not sensitive (just where to
+// connect), unlike the extension secret, which stays out of this
+// endpoint entirely. FreePBX's mini-HTTP TLS cert is currently
+// self-signed, so a browser still needs a one-time visit to
+// https://<host>:8089 to accept it before the WSS handshake will
+// succeed -- a real cert is the proper follow-up fix for that.
 const PBX_WS_URL = process.env.PBX_WS_URL || (() => {
-  try { const u = new URL(process.env.ARI_URL || ''); return `ws://${u.hostname}:8088/ws`; }
+  try { const u = new URL(process.env.ARI_URL || ''); return `wss://${u.hostname}:8089/ws`; }
   catch { return null; }
 })();
 

@@ -99,14 +99,26 @@ class AsteriskAriGateway extends PbxGateway {
   }
 
   /**
-   * Originate to the radio's own PJSIP extension, then to the dialled number,
-   * and put both legs in a mixing bridge. The radio's audio path is its
+   * Originate to the radio's own extension, then to the dialled number, and
+   * put both legs in a mixing bridge. The radio's audio path is its
    * registered WebRTC/WSS endpoint on the PBX.
+   *
+   * The radio leg dials through the extension's own dialplan context
+   * (Local/<extension>@from-internal), not PJSIP/<extension> directly --
+   * confirmed live against a real FreePBX 17 box that the actual
+   * registrable PJSIP endpoint for a WebRTC-enabled extension is NOT the
+   * bare extension number (FreePBX's Webrtc module creates it as a
+   * separate device, prefixed, e.g. extension 9001's real endpoint is
+   * 999001, tied together via the user/device ring-group FreePBX's own
+   * dialplan already knows how to expand). Originating to PJSIP/9001
+   * directly would silently miss it. Going through the dialplan means
+   * this also keeps working regardless of whatever device(s) are
+   * actually configured behind that extension, not just this one setup.
    */
   async dial({ callId, number, extension }) {
     if (!extension) throw new Error('radio has no PBX extension configured');
     const bridge = await this.req('POST', '/bridges', { type: 'mixing' });
-    const radioLeg = await this.req('POST', `/channels?endpoint=${encodeURIComponent('PJSIP/' + extension)}&app=${this.app}&callerId=${encodeURIComponent('CCCS')}`);
+    const radioLeg = await this.req('POST', `/channels?endpoint=${encodeURIComponent('Local/' + extension + '@from-internal')}&app=${this.app}&callerId=${encodeURIComponent('CCCS')}`);
     const outLeg = await this.req('POST', `/channels?endpoint=${encodeURIComponent('PJSIP/' + number + '@' + this.trunk)}&app=${this.app}&callerId=${encodeURIComponent(extension)}`);
     await this.req('POST', `/bridges/${bridge.id}/addChannel?channel=${radioLeg.id},${outLeg.id}`);
     this.channels.set(callId, { bridge: bridge.id, legs: [radioLeg.id, outLeg.id] });
