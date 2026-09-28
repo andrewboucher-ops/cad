@@ -1,9 +1,9 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CCCS — log</title>
+<title>CCCS â€” log</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -56,7 +56,6 @@
   <a href="/log.html" class="active" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
 
   <div class="rail-section">Fleet</div>
-  <a href="/control.html" title="Talkgroups"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5M14 8a3 3 0 100-6M18.5 13.7c2 .5 3.5 2.3 3.5 4.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Talkgroups</span></a>
   <a href="/control.html" title="Assignments"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/></svg><span>Assignments</span></a>
 
   <div class="rail-section" id="railSystemSection" hidden>System</div>
@@ -87,7 +86,7 @@
 
     <div id="viewActions">
       <div class="toolbar">
-        <input id="aSearch" placeholder="Search summary…">
+        <input id="aSearch" placeholder="Search summaryâ€¦">
         <select id="aType">
           <option value="">All event types</option>
         </select>
@@ -97,7 +96,7 @@
 
     <div id="viewIncidents" class="hide">
       <div class="toolbar">
-        <input id="iSearch" placeholder="Search reference, location, call sign…">
+        <input id="iSearch" placeholder="Search reference, location, call signâ€¦">
         <select id="iPriority">
           <option value="">All priorities</option>
           <option value="RED">Red</option>
@@ -144,14 +143,14 @@ function showTab(name) {
 el('#tabActions').onclick = () => showTab('actions');
 el('#tabIncidents').onclick = () => showTab('incidents');
 
-/* ---------- actions log: the audit trail — every meaningful action the
+/* ---------- actions log: the audit trail â€” every meaningful action the
  * server took, already recorded via logEvent() server-side for exactly
  * this. Nothing here that isn't already tracked; just a real page to read
  * it on, with search/type filtering, instead of the small scrolling panel
  * on the dashboard. ---------- */
 let allEvents = [];
 async function loadActions() {
-  el('#aTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  el('#aTableWrap').innerHTML = '<p class="empty-note">Loadingâ€¦</p>';
   allEvents = await api('GET', '/api/events?limit=1000');
   const types = [...new Set(allEvents.map((e) => e.type))].sort();
   el('#aType').innerHTML = '<option value="">All event types</option>' + types.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
@@ -173,12 +172,12 @@ function paintActions() {
 el('#aSearch').addEventListener('input', paintActions);
 el('#aType').addEventListener('change', paintActions);
 
-/* ---------- historical incidents: closed jobs — same data the Active Jobs
+/* ---------- historical incidents: closed jobs â€” same data the Active Jobs
  * panel already has, just the completed/cancelled half with no time limit
  * on how far back you can search it. ---------- */
 let allJobs = [];
 async function loadIncidents() {
-  el('#iTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  el('#iTableWrap').innerHTML = '<p class="empty-note">Loadingâ€¦</p>';
   const jobs = await api('GET', '/api/jobs');
   allJobs = jobs.filter((j) => ['COMPLETED', 'CANCELLED'].includes(j.status))
     .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
@@ -201,7 +200,7 @@ function paintIncidents() {
         <td><span class="pri pri-${j.priority}">${j.priority}</span></td>
         <td>${esc(j.incident_type)}</td>
         <td>${esc(j.location)}</td>
-        <td class="dim">${j.resources.map((r) => esc(r.callsign || r.radio || r.mdt)).join(', ') || '—'}</td>
+        <td class="dim">${j.resources.map((r) => esc(r.callsign || r.personnel || r.mdt)).join(', ') || 'â€”'}</td>
         <td class="dim">${esc(j.status)}</td>
         <td class="t-col">${new Date(j.updated_at).toLocaleString()}</td>
       </tr>`).join('')}</tbody>
@@ -219,10 +218,10 @@ function incidentModal(j) {
       <dt>Status</dt><dd>${esc(j.status)}</dd>
       <dt>Type</dt><dd>${esc(j.incident_type)}</dd>
       <dt>Location</dt><dd>${esc(j.location)}</dd>
-      <dt>Caller</dt><dd>${esc(j.caller || '—')}</dd>
-      <dt>Detail</dt><dd>${esc(j.description || '—')}</dd>
-      <dt>Resources</dt><dd>${j.resources.map((r) => esc(r.callsign || r.radio || r.mdt)).join('<br>') || '—'}</dd>
-      <dt>Notes</dt><dd>${esc(j.notes || '—')}</dd>
+      <dt>Caller</dt><dd>${esc(j.caller || 'â€”')}</dd>
+      <dt>Detail</dt><dd>${esc(j.description || 'â€”')}</dd>
+      <dt>Resources</dt><dd>${j.resources.map((r) => esc(r.callsign || r.personnel || r.mdt)).join('<br>') || 'â€”'}</dd>
+      <dt>Notes</dt><dd>${esc(j.notes || 'â€”')}</dd>
       <dt>Created</dt><dd class="mono">${new Date(j.created_at).toLocaleString()}</dd>
       <dt>Closed</dt><dd class="mono">${new Date(j.updated_at).toLocaleString()}</dd>
     </dl>`);

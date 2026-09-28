@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — officer</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Officer">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { display: flex; justify-content: center; min-height: 100vh; padding: 0 0 24px; }
+  .wrap { width: min(480px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 0 12px; }
+
+  .o-topbar {
+    display: flex; align-items: center; gap: 10px; padding: 10px 4px; position: sticky; top: 0; z-index: 5;
+    background: var(--bg, #0a0e14);
+  }
+  .o-topbar img { height: 20px; }
+  .o-topbar .mid { flex: 1; text-align: right; font-size: 11px; }
+  .o-topbar .clock { font-family: var(--mono); font-size: 13px; }
+
+  .emg-btn {
+    width: 100%; height: 64px; border: none; border-radius: 10px; cursor: pointer;
+    background: linear-gradient(180deg, #ef4444, #b91c1c); color: #fff;
+    font-weight: 800; letter-spacing: .12em; font-size: 17px;
+  }
+  .emg-btn.tx { filter: brightness(1.3); }
+
+  .field { margin-bottom: 10px; }
+  .field span { display: block; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); }
+  .field div { font-size: 14.5px; color: var(--ink); }
+
+  .checklist-item {
+    display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line-soft);
+  }
+  .checklist-item:last-child { border-bottom: none; }
+  .checklist-item input[type="checkbox"] { width: 20px; height: 20px; margin-top: 2px; flex: none; accent-color: var(--accent, #22c55e); }
+  .checklist-item .ci-body { flex: 1; min-width: 0; }
+  .checklist-item .ci-title { font-weight: 600; }
+  .checklist-item.done .ci-title { text-decoration: line-through; color: var(--ink-dim); }
+  .checklist-item .ci-instr { font-size: 12.5px; color: var(--ink-dim); margin-top: 2px; }
+  .checklist-item textarea { width: 100%; margin-top: 6px; font-size: 13px; }
+  .ci-photos { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .ci-photos img { width: 52px; height: 52px; object-fit: cover; border-radius: 5px; border: 1px solid var(--line); }
+
+  .welfare-strip {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
+    background: var(--panel-2); border: 1px solid var(--line);
+  }
+  .welfare-strip .count { font-family: var(--mono); font-weight: 700; font-size: 15px; }
+  .welfare-strip.overdue { border-color: var(--emergency); background: rgba(239,68,68,.1); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="o-topbar">
+    <img src="/assets/echelon-wordmark.png" alt="Echelon">
+    <div class="mid">
+      <div class="clock" id="clock">--:--:--</div>
+      <span class="link-net" id="net">link down</span>
+    </div>
+  </div>
+
+  <div id="alertHost"></div>
+
+  <button class="emg-btn" id="bEmg">EMERGENCY</button>
+
+  <div class="welfare-strip hide" id="welfareStrip">
+    <span style="flex:1">Welfare check</span>
+    <span class="count" id="welfareCount"></span>
+    <button class="btn" id="welfareCheckIn" style="padding:4px 10px;font-size:12px">Check in</button>
+  </div>
+
+  <section class="panel">
+    <header>My shift</header>
+    <div class="body" id="whoBody" style="padding:12px"></div>
+  </section>
+
+  <section class="panel">
+    <header>Current job</header>
+    <div class="body" id="jobBody" style="padding:12px">
+      <p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <header>Message control</header>
+    <div class="body" style="padding:12px">
+      <textarea id="note" rows="2" placeholder="Message to control"></textarea>
+      <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="send">Send</button></div>
+      <div class="log" id="txtLog" style="max-height:140px;overflow:auto;margin-top:10px"></div>
+    </div>
+  </section>
+
+  <button class="btn" id="signOut" style="align-self:center">Sign out</button>
+</div>
+
+<div id="modalHost"></div>
+<input type="file" id="photoInput" accept="image/*" capture="environment" class="hide">
+
+<script src="/app.js"></script>
+<script>
+const { api, el, esc } = CCCS;
+if (!CCCS.requireAuth(['FIELD_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
+
+el('#signOut').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+
+let person = null, job = null, pendingPhotoItemId = null;
+
+function modal(title, html, onMount) {
+  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
+  el('#mClose').onclick = closeModal; onMount && onMount();
+}
+const closeModal = () => (el('#modalHost').innerHTML = '');
+
+function paintWho() {
+  if (!person) return;
+  el('#whoBody').innerHTML = `
+    <div class="field"><span>Name</span><div>${esc(person.callsign || person.name)}</div></div>
+    <div class="field"><span>Rank</span><div>${esc(person.rank || '—')}</div></div>
+    <div class="field"><span>Vehicle</span><div>${esc(person.vehicle || '—')}</div></div>`;
+  paintWelfare();
+}
+
+function paintWelfare() {
+  const strip = el('#welfareStrip');
+  if (!person || !person.welfare_due_at) { strip.classList.add('hide'); return; }
+  const left = Math.round((Date.parse(person.welfare_due_at) - Date.now()) / 1000);
+  strip.classList.remove('hide');
+  strip.classList.toggle('overdue', left <= 60);
+  el('#welfareCount').textContent = left > 0
+    ? `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`
+    : 'OVERDUE';
+}
+setInterval(paintWelfare, 1000);
+el('#welfareStrip').addEventListener('click', (e) => {
+  if (e.target.id === 'welfareCheckIn') return;
+  openWelfareModal();
+});
+el('#welfareCheckIn').onclick = async (e) => {
+  e.stopPropagation();
+  person = await api('POST', `/api/personnel/${person.id}/welfare/check`, {});
+  paintWelfare();
+};
+function openWelfareModal() {
+  modal('Welfare timer', `
+  <p class="dim">Set a timer before you go in. Check in before it runs out, or control is alerted with your last known position.</p>
+  <label for="wMin">Check in within</label>
+  <select id="wMin">
+    <option value="300">5 minutes</option><option value="600" selected>10 minutes</option>
+    <option value="900">15 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option>
+  </select>
+  <label for="wNote">What you are doing</label>
+  <input id="wNote" placeholder="Internal check, Meridian Business Park">
+  <div class="btn-row" style="margin-top:12px">
+    <button class="btn ok" id="wStart">Start timer</button>
+    <button class="btn danger" id="wStop">Cancel timer</button>
+  </div>
+  <p class="err" id="wErr"></p>`, () => {
+    const guard = (fn) => async () => { try { await fn(); closeModal(); } catch (e) { el('#wErr').textContent = e.message; } };
+    el('#wStart').onclick = guard(async () => {
+      person = await api('POST', `/api/personnel/${person.id}/welfare`, { interval_s: Number(el('#wMin').value), note: el('#wNote').value });
+      paintWelfare();
+    });
+    el('#wStop').onclick = guard(async () => {
+      person = await api('DELETE', `/api/personnel/${person.id}/welfare`, {});
+      paintWelfare();
+    });
+  });
+}
+
+function paintJob() {
+  if (!job) {
+    el('#jobBody').innerHTML = '<p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>';
+    return;
+  }
+  const mine = job.resources.find((r) => r.personnel === (person && person.name));
+  const checklist = job.checklist || [];
+  el('#jobBody').innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <span class="mono" style="font-weight:700;font-size:16px">${esc(job.reference)}</span>
+      <span class="pri pri-${job.priority}">${job.priority}</span>
+      <span class="mono dim">${esc(job.status.replace('_', ' '))}</span>
+    </div>
+    <div class="field"><span>Incident</span><div>${esc(job.incident_type)}</div></div>
+    <div class="field"><span>Location</span><div>${esc(job.location)}</div></div>
+    <div class="field"><span>Details</span><div>${esc(job.description || '—')}</div></div>
+    <div class="field"><span>Notes</span><div>${esc(job.notes || '—')}</div></div>
+    <div class="btn-row" style="margin:12px 0">
+      ${mine && !mine.acknowledged ? '<button class="btn ok" id="jAck">Accept job</button>' : ''}
+      <button class="btn" id="jEnr">En route</button>
+      <button class="btn" id="jScene">On scene</button>
+      <button class="btn" id="jDone">Completed</button>
+    </div>
+    ${checklist.length ? `<label style="margin-top:10px">Checklist</label><div id="checklistHost"></div>` : ''}
+    <div class="btn-row" style="margin-top:10px"><button class="btn" id="jAddPhoto">Add photo</button></div>`;
+
+  if (checklist.length) {
+    el('#checklistHost').innerHTML = checklist.map((item) => `
+      <div class="checklist-item ${item.status === 'COMPLETE' ? 'done' : ''}" data-item="${item.id}">
+        <input type="checkbox" data-check="${item.id}" ${item.status === 'COMPLETE' ? 'checked' : ''}>
+        <div class="ci-body">
+          <div class="ci-title">${esc(item.title)}</div>
+          ${item.instructions ? `<div class="ci-instr">${esc(item.instructions)}</div>` : ''}
+          <textarea rows="1" placeholder="Notes" data-note="${item.id}">${esc(item.notes || '')}</textarea>
+          <div class="ci-photos">${(job.media || []).filter((m) => m.checklist_item_id === item.id).map((m) => `<img src="${m.url}" alt="">`).join('')}</div>
+          <div class="btn-row" style="margin-top:6px"><button class="btn" style="padding:2px 8px;font-size:11px" data-photofor="${item.id}">Photo</button></div>
+        </div>
+      </div>`).join('');
+    CCCS.els('[data-check]').forEach((cb) => (cb.onchange = async () => {
+      job = await api('PATCH', `/api/jobs/${job.id}/checklist/${cb.dataset.check}`, { status: cb.checked ? 'COMPLETE' : 'PENDING' });
+      paintJob();
+    }));
+    CCCS.els('[data-note]').forEach((ta) => (ta.onblur = async () => {
+      job = await api('PATCH', `/api/jobs/${job.id}/checklist/${ta.dataset.note}`, { notes: ta.value });
+    }));
+    CCCS.els('[data-photofor]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = b.dataset.photofor; el('#photoInput').click(); }));
+  }
+  el('#jAddPhoto').onclick = () => { pendingPhotoItemId = null; el('#photoInput').click(); };
+
+  if (el('#jAck')) el('#jAck').onclick = async () => {
+    const r = await CCCS.send('POST', `/api/jobs/${job.id}/ack`, {}, `acknowledge ${job.reference}`);
+    if (!r.queued) { job = r; paintJob(); }
+  };
+  el('#jEnr').onclick = () => setJobStatus('EN_ROUTE');
+  el('#jScene').onclick = () => setJobStatus('ON_SCENE');
+  el('#jDone').onclick = () => setJobStatus('COMPLETED');
+}
+async function setJobStatus(status) {
+  const r = await CCCS.send('PATCH', `/api/jobs/${job.id}`, { status }, `${job.reference} → ${status}`);
+  if (!r.queued) { job = r; paintJob(); }
+}
+
+el('#photoInput').onchange = async () => {
+  const file = el('#photoInput').files[0];
+  el('#photoInput').value = '';
+  if (!file || !job) return;
+  const mimetype = file.type;
+  const data = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  try {
+    await api('POST', `/api/jobs/${job.id}/media`, { mimetype, data, checklist_item_id: pendingPhotoItemId || undefined });
+    job = await api('GET', `/api/jobs`).then((jobs) => jobs.find((j) => j.id === job.id) || job);
+    paintJob();
+  } catch (e) { alert(e.message); }
+};
+
+el('#send').onclick = async () => {
+  const body = el('#note').value.trim();
+  if (!body) return;
+  const r = await CCCS.send('POST', '/api/messages', { to_control: true, body }, 'message to control');
+  el('#note').value = '';
+  const line = r.queued ? `QUEUED: ${body}` : `SENT: ${body}`;
+  const d = document.createElement('div'); d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`; el('#txtLog').prepend(d);
+};
+
+function freshFix(timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 5000 }
+    );
+  });
+}
+el('#bEmg').onclick = async () => {
+  if (!confirm('Send an emergency alert to control?')) return;
+  const fix = await freshFix();
+  const r = await CCCS.send('POST', '/api/emergency', fix || {}, 'emergency');
+  el('#bEmg').classList.add('tx');
+  setTimeout(() => el('#bEmg').classList.remove('tx'), 3000);
+  if (r.queued) el('#alertHost').innerHTML = '<p class="err">Emergency queued — no link, will send when it returns.</p>';
+};
+
+const bus = CCCS.bus((up) => {
+  el('#net').textContent = up ? 'link up' : 'link down';
+  el('#net').classList.toggle('up', up);
+  if (up) CCCS.outbox.flush();
+});
+
+async function boot() {
+  const all = await api('GET', '/api/personnel');
+  person = all.find((p) => p.id === me.personnel_id) || null;
+  paintWho();
+  const jobs = await api('GET', '/api/jobs');
+  job = jobs.find((j) => j.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
+  paintJob();
+}
+boot();
+
+bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === person.id) { person = personnel; paintWho(); } })
+   .on('welfare.checked_in', (p) => { if (person && p.id === person.id) { person = p; paintWho(); } })
+   .on('welfare.stopped', (p) => { if (person && p.id === person.id) { person = p; paintWho(); } })
+   .on('welfare.due_soon', () => paintWelfare())
+   .on('job.assigned_to_you', (j) => {
+     if (!person || !j.resources.some((r) => r.personnel === person.name)) return;
+     job = j; paintJob();
+     el('#alertHost').innerHTML = `<div class="err" style="border:1px solid var(--priority);border-radius:8px;padding:10px">New job ${esc(j.reference)} — ${esc(j.location)}</div>`;
+   })
+   .on('job.status_changed', (j) => {
+     if (!job || j.id !== job.id) return;
+     const stillMine = person && j.resources.some((r) => r.personnel === person.name);
+     job = stillMine ? j : null;
+     paintJob();
+   })
+   .on('job.stood_down', (j) => {
+     if (!job || j.id !== job.id) return;
+     job = null; el('#alertHost').innerHTML = ''; paintJob();
+   })
+   .on('job.acknowledged', ({ job: j }) => { if (job && j.id === job.id) { job = j; paintJob(); } })
+   .on('emergency.acknowledged', () => { el('#alertHost').innerHTML = '<p class="dim">Emergency acknowledged by control.</p>'; })
+   .on('emergency.resolved', () => { el('#alertHost').innerHTML = ''; })
+   .on('message.received', (m) => {
+     if (!person || m.to_personnel_id !== person.id) return;
+     const d = document.createElement('div'); d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(m.from_label)}: ${esc(m.body)}`; el('#txtLog').prepend(d);
+   })
+   .on('error', () => {});
+</script>
+</body>
+</html>

@@ -64,7 +64,6 @@
   <a href="/log.html" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
 
   <div class="rail-section">Fleet</div>
-  <a href="/control.html" title="Talkgroups"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5M14 8a3 3 0 100-6M18.5 13.7c2 .5 3.5 2.3 3.5 4.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Talkgroups</span></a>
   <a href="/control.html" title="Assignments"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/></svg><span>Assignments</span></a>
 
   <div class="rail-section">System</div>
@@ -91,14 +90,12 @@
       <h1>Admin</h1>
       <span>
         <button class="btn primary" id="btnNewUser" style="padding:7px 14px;font-size:13px">New account</button>
-        <button class="btn primary" id="btnNewRadio" style="padding:7px 14px;font-size:13px" hidden>New radio</button>
         <button class="btn primary" id="btnNewMdt" style="padding:7px 14px;font-size:13px" hidden>New MDT</button>
         <button class="btn primary" id="btnNewSite" style="padding:7px 14px;font-size:13px" hidden>New site</button>
       </span>
     </div>
     <div class="tabs">
       <button class="active" id="tabAccounts">Accounts</button>
-      <button id="tabRadios">Radios</button>
       <button id="tabMdts">MDTs</button>
       <button id="tabSites">Sites</button>
     </div>
@@ -111,18 +108,11 @@
           <option value="SYSTEM_ADMIN">System admin</option>
           <option value="DISPATCHER">Dispatcher</option>
           <option value="SUPERVISOR">Supervisor</option>
-          <option value="RADIO_USER">Radio user</option>
+          <option value="FIELD_USER">Field user</option>
           <option value="MDT_USER">MDT user</option>
         </select>
       </div>
       <div id="uTableWrap"></div>
-    </div>
-
-    <div id="viewRadios" class="hide">
-      <div class="toolbar">
-        <input id="rSearch" placeholder="Search ISSI, alias, callsign…">
-      </div>
-      <div id="rTableWrap"></div>
     </div>
 
     <div id="viewMdts" class="hide">
@@ -162,40 +152,36 @@ function modal(title, html, onMount) {
 const closeModal = () => (el('#modalHost').innerHTML = '');
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', RADIO_USER: 'Radio user', MDT_USER: 'MDT user' };
+const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : '');
 
-let allUsers = [], allRadios = [], allMdts = [], allCallsigns = [], allTalkgroups = [], allSites = [];
+let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allRadios, allMdts, allCallsigns, allTalkgroups, allSites] = await Promise.all([
-    api('GET', '/api/users'), api('GET', '/api/radios'), api('GET', '/api/mdts'),
-    api('GET', '/api/callsigns'), api('GET', '/api/talkgroups'), api('GET', '/api/sites'),
+  [allUsers, allPersonnel, allMdts, allCallsigns, allSites] = await Promise.all([
+    api('GET', '/api/users'), api('GET', '/api/personnel'), api('GET', '/api/mdts'),
+    api('GET', '/api/callsigns'), api('GET', '/api/sites'),
   ]);
-  paint(); paintRadios(); paintMdts(); paintSites();
+  paint(); paintMdts(); paintSites();
 }
 
 /* ---------- tabs ---------- */
 function showTab(name) {
   el('#tabAccounts').classList.toggle('active', name === 'accounts');
-  el('#tabRadios').classList.toggle('active', name === 'radios');
   el('#tabMdts').classList.toggle('active', name === 'mdts');
   el('#tabSites').classList.toggle('active', name === 'sites');
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
-  el('#viewRadios').classList.toggle('hide', name !== 'radios');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
   el('#viewSites').classList.toggle('hide', name !== 'sites');
   el('#btnNewUser').hidden = name !== 'accounts';
-  el('#btnNewRadio').hidden = name !== 'radios';
   el('#btnNewMdt').hidden = name !== 'mdts';
   el('#btnNewSite').hidden = name !== 'sites';
 }
 el('#tabAccounts').onclick = () => showTab('accounts');
-el('#tabRadios').onclick = () => showTab('radios');
 el('#tabMdts').onclick = () => showTab('mdts');
 el('#tabSites').onclick = () => showTab('sites');
 function linkedTerminal(u) {
-  if (u.radio_id) { const r = allRadios.find((x) => x.id === u.radio_id); return r ? `Radio ${esc(r.alias || r.issi)}` : '—'; }
+  if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
   return '—';
 }
@@ -225,10 +211,6 @@ el('#uRole').addEventListener('change', paint);
 function roleOptions(selected) {
   return Object.entries(ROLE_LABEL).map(([v, label]) => `<option value="${v}" ${v === selected ? 'selected' : ''}>${label}</option>`).join('');
 }
-function radioOptions(selected) {
-  return '<option value="">— none —</option>' + allRadios.map((r) =>
-    `<option value="${r.id}" ${r.id === selected ? 'selected' : ''}>${esc(r.alias || r.issi)} (ISSI ${esc(r.issi)})</option>`).join('');
-}
 function mdtOptions(selected) {
   return '<option value="">— none —</option>' + allMdts.map((m) =>
     `<option value="${m.id}" ${m.id === selected ? 'selected' : ''}>${esc(m.mdt_code)}</option>`).join('');
@@ -246,8 +228,6 @@ function userForm(u) {
       <select id="fRole">${roleOptions(isNew ? 'DISPATCHER' : u.role)}</select>
       <label>Email (optional — used for Microsoft SSO matching)</label>
       <input id="fEmail" type="email" value="${isNew ? '' : esc(u.email || '')}" autocomplete="off">
-      <label>Linked radio (for a Radio user account)</label>
-      <select id="fRadio">${radioOptions(isNew ? null : u.radio_id)}</select>
       <label>Linked MDT (for an MDT user account)</label>
       <select id="fMdt">${mdtOptions(isNew ? null : u.mdt_id)}</select>
       <label>${isNew ? 'Password' : 'New password (leave blank to keep current)'}</label>
@@ -279,7 +259,6 @@ function editModal(u) {
         display_name: el('#fDisplay').value.trim(),
         role: el('#fRole').value,
         email: el('#fEmail').value.trim() || null,
-        radio_id: el('#fRadio').value ? Number(el('#fRadio').value) : null,
         mdt_id: el('#fMdt').value ? Number(el('#fMdt').value) : null,
       };
       const password = el('#fPassword').value;
@@ -299,95 +278,6 @@ function editModal(u) {
   });
 }
 el('#btnNewUser').onclick = () => editModal(null);
-
-/* ---------- radios ---------- */
-function paintRadios() {
-  const q = el('#rSearch').value.trim().toLowerCase();
-  let rows = allRadios.slice().sort((a, b) => a.issi.localeCompare(b.issi));
-  if (q) rows = rows.filter((r) =>
-    r.issi.includes(q) || (r.alias || '').toLowerCase().includes(q) || (r.callsign || '').toLowerCase().includes(q));
-  el('#rTableWrap').innerHTML = rows.length ? `
-    <table class="log-table">
-      <thead><tr><th style="width:130px">ISSI</th><th>Alias</th><th style="width:110px">Type</th><th style="width:120px">Callsign</th><th style="width:130px">Talkgroup</th><th style="width:100px">Status</th><th style="width:70px">PIN</th><th style="width:70px"></th></tr></thead>
-      <tbody>${rows.map((r) => `<tr class="clickable" data-radio="${r.id}">
-        <td class="mono">${esc(r.issi)}</td>
-        <td>${esc(r.alias || '—')}</td>
-        <td class="dim">${esc(r.radio_type)}</td>
-        <td class="dim">${esc(r.callsign || '—')}</td>
-        <td class="dim">${esc(r.talkgroup || '—')}</td>
-        <td class="dim">${esc(r.status)}</td>
-        <td class="dim">${r.has_pin ? 'set' : '—'}</td>
-        <td><button class="btn danger" data-delradio="${r.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
-      </tr>`).join('')}</tbody>
-    </table>` : '<p class="empty-note">No radios yet.</p>';
-  els('#rTableWrap [data-radio]').forEach((row) => row.addEventListener('click', (e) => {
-    if (e.target.closest('[data-delradio]')) return;
-    radioModal(allRadios.find((r) => r.id === Number(row.dataset.radio)));
-  }));
-  els('#rTableWrap [data-delradio]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteRadio(Number(b.dataset.delradio)); }));
-}
-el('#rSearch').addEventListener('input', paintRadios);
-
-async function deleteRadio(id) {
-  const r = allRadios.find((x) => x.id === id);
-  if (!r || !confirm(`Delete radio ${r.alias || r.issi} (ISSI ${r.issi})? This cannot be undone.`)) return;
-  try { await api('DELETE', `/api/radios/${id}`); closeModal(); await load(); showTab('radios'); }
-  catch (e) { alert(e.message); }
-}
-
-function radioForm(r) {
-  const isNew = !r;
-  return `
-    <form class="stack" id="rForm">
-      ${isNew ? '' : `<label>ISSI</label><input value="${esc(r.issi)}" disabled>`}
-      <label>Alias</label>
-      <input id="nrAlias" autocomplete="off" value="${isNew ? '' : esc(r.alias || '')}">
-      <label>Radio type</label>
-      <select id="nrType">
-        <option value="HANDHELD" ${!isNew && r.radio_type === 'HANDHELD' ? 'selected' : ''}>Handheld</option>
-        <option value="VEHICLE" ${!isNew && r.radio_type === 'VEHICLE' ? 'selected' : ''}>Vehicle</option>
-        <option value="FIXED" ${!isNew && r.radio_type === 'FIXED' ? 'selected' : ''}>Fixed</option>
-      </select>
-      <label>Callsign (optional)</label>
-      <select id="nrCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${esc(c.name)}" ${!isNew && r.callsign === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
-      <label>Talkgroup (optional)</label>
-      <select id="nrTalkgroup"><option value="">— none —</option>${allTalkgroups.map((t) => `<option value="${esc(t.name)}" ${!isNew && r.talkgroup === t.name ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
-      <label>Sign-in PIN ${!isNew && r.has_pin ? '(set — leave blank to keep)' : '(6 digits — this is how the radio signs in, no separate account needed)'}</label>
-      <input id="nrPin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="off" placeholder="${!isNew && r.has_pin ? '••••••' : 'e.g. 480217'}">
-      <p class="dim" id="rError" style="min-height:16px;margin:0"></p>
-    </form>`;
-}
-function radioModal(r) {
-  modal(r ? `Edit — ${r.issi}` : 'New radio', radioForm(r), () => {
-    const foot = document.querySelector('#modalHost .foot');
-    foot.innerHTML = `
-      <div class="foot-split">
-        <span>${r ? '<button class="btn danger" id="rDelete">Delete radio</button>' : ''}</span>
-        <span class="btn-row" style="margin:0">
-          <button class="btn" id="rCancel">Cancel</button>
-          <button class="btn primary" id="rSave">${r ? 'Save changes' : 'Create radio'}</button>
-        </span>
-      </div>`;
-    el('#rCancel').onclick = closeModal;
-    if (el('#rDelete')) el('#rDelete').onclick = () => deleteRadio(r.id);
-    el('#rSave').onclick = async () => {
-      const pin = el('#nrPin').value.trim();
-      if (pin && !/^\d{6}$/.test(pin)) { el('#rError').textContent = 'PIN must be 6 digits'; return; }
-      const body = {
-        alias: el('#nrAlias').value.trim() || undefined,
-        radio_type: el('#nrType').value, callsign: el('#nrCallsign').value || null,
-        talkgroup: el('#nrTalkgroup').value || null,
-      };
-      if (pin) body.pin = pin;
-      try {
-        if (r) await api('PATCH', `/api/radios/${r.id}`, body);
-        else await api('POST', '/api/radios', body);
-        closeModal(); await load(); showTab('radios');
-      } catch (e) { el('#rError').textContent = e.message; }
-    };
-  });
-}
-el('#btnNewRadio').onclick = () => radioModal(null);
 
 /* ---------- MDTs ---------- */
 function paintMdts() {

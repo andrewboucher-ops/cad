@@ -35,12 +35,11 @@ echo "==> Generating secrets"
 if [[ ! -f /etc/cccs/cccs.env ]]; then
   cat > /etc/cccs/cccs.env <<ENV
 AUTH_SECRET=$(openssl rand -hex 32)
-PBX_SECRET=$(openssl rand -hex 24)
 PORT=4000
 DATA_FILE=$DATA_DIR/cccs.db
 SIMULATION=off
-# Add TURN before you rely on audio over mobile networks:
-# ICE_SERVERS=[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:turn.$DOMAIN:3478","username":"cccs","credential":"CHANGE_ME"}]
+# GuardM8 alarm-receiving integration (POST /api/integrations/guardm8/jobs):
+# GUARDM8_SECRET=
 # Microsoft 365 / Entra ID single sign-on — optional, sits alongside local login.
 # See SSO.md for how to register the app and get these three values. Uncomment
 # all four once you have them; leaving any unset keeps SSO disabled.

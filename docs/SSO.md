@@ -73,8 +73,8 @@ curl -X PATCH https://comms.echeloncic.com/api/users/<user-id> \
 ```
 
 Whatever Microsoft 365 account signs in with that same email/UPN will now log
-into that CCCS account, with whatever role and radio/MDT binding it already
-has. Setting `"email": null` unlinks it again.
+into that CCCS account, with whatever role and personnel/MDT binding it
+already has. Setting `"email": null` unlinks it again.
 
 New accounts can also be given an email at creation time (`POST /api/users`),
 or via `seed.json` — see the `email` field documented in

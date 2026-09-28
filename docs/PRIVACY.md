@@ -9,12 +9,20 @@ review it, particularly the legitimate interest assessment.
 
 | Data | Kept for | Why |
 |---|---|---|
-| Location, every few seconds while on shift | 31 days | Dispatching the nearest unit; locating an officer in an emergency |
+| Vehicle (MDT) location, every few seconds while the terminal is on | 31 days | Dispatching the nearest unit; locating a crew in an emergency |
 | Status changes | 1 year | Operational record, client SLA evidence |
 | Welfare timers and check-ins | 1 year | Lone-worker safety, insurance |
-| Call and message metadata (who, when — no audio) | 180 days | Audit trail |
+| Message metadata (who, when — not the content) | 180 days | Audit trail |
 | Job assignments and outcomes | 2 years | Client reporting, disputes, insurance |
 | Emergency and welfare alarms | 1 year | Safety record |
+
+Officers on foot do not currently carry a device that reports continuous
+location to this system — only vehicle terminals (MDTs) do. An officer's
+position is captured at the moment they raise an emergency (a single GPS
+fix taken then), not tracked continuously. If you add continuous personal
+location tracking for foot officers, treat that as a materially different
+privacy position — it needs its own line in the table above, its own notice
+to staff, and its own legitimate interest assessment.
 
 Retention is enforced in code, not by policy alone: a sweep runs every six hours
 and deletes anything past its window. `GET /api/retention` shows the current
@@ -54,8 +62,9 @@ read: https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/employ
 
 **Access** — export their location history, status changes and job assignments.
 
-**Erasure** — `POST /api/radios/:issi/erase-location-history` (admin only) removes
-an officer's movement history while leaving the operational job record intact.
+**Erasure** — `POST /api/personnel/:id/erase-location-history` (admin only)
+removes a person's movement history while leaving the operational job record
+intact.
 The erasure is itself written to the audit log, which is correct: you need to be
 able to show it happened.
 
@@ -67,14 +76,16 @@ after a few weeks. The job record often is.
 
 ## Draft notice to staff
 
-> **Vehicle and radio tracking — what we record**
+> **Vehicle tracking — what we record**
 >
-> From [date] our radios and vehicle terminals record location while you are
-> signed on shift. This note explains what that means.
+> From [date] our vehicle terminals record location while the terminal is
+> switched on for a shift. This note explains what that means.
 >
-> **What we record.** Your position while you are signed in, the status you set,
-> the jobs you are assigned, welfare check-ins, and a record of calls and
-> messages — who and when, not what was said. We do not record audio.
+> **What we record.** A vehicle's position while its terminal is on, the status
+> you set, the jobs you are assigned, welfare check-ins, and a record of
+> messages — who and when, not the content. We do not continuously track your
+> personal location — only a single position fix is taken if you raise an
+> emergency.
 >
 > **Why.** To send the nearest unit to an incident, to find you quickly if you
 > raise an alarm or miss a welfare check-in, and to show clients what we did at

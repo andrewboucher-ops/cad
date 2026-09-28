@@ -6,7 +6,7 @@
  * on a short interval, and the whole state is restored on boot.
  *
  * Why SQLite and not PostgreSQL: a commercial security operation runs one control
- * room, tens of radios and a few hundred writes a minute. SQLite in WAL mode
+ * room, a modest headcount and a few hundred writes a minute. SQLite in WAL mode
  * handles that with room to spare, needs no daemon, no connection pooling, no
  * separate backup story — the database is one file you can copy. For a single
  * operator that is worth more than anything Postgres adds. `db/schema.sql` remains
@@ -29,15 +29,14 @@ const FLUSH_MS = Number(process.env.FLUSH_MS || 1000);
 
 /** Tables held as whole-collection JSON documents. */
 const TABLES = [
-  'users', 'radios', 'mdts', 'callsigns', 'vehicles', 'personnel', 'sites',
-  'talkgroups', 'talkgroup_members', 'jobs', 'job_assignments',
-  'communications', 'communication_participants', 'messages', 'call_requests',
-  'locations', 'radio_status_history', 'emergency_events', 'audit_logs',
+  'users', 'mdts', 'callsigns', 'vehicles', 'personnel', 'sites',
+  'jobs', 'job_assignments', 'messages', 'call_requests',
+  'locations', 'emergency_events', 'audit_logs',
   'push_subscriptions',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */
-const CAPS = { call_requests: 2000, locations: 20000, audit_logs: 20000, communications: 5000, messages: 5000, radio_status_history: 20000 };
+const CAPS = { call_requests: 2000, locations: 20000, audit_logs: 20000, messages: 5000 };
 
 function createStore(db, seq, opts = {}) {
   const file = opts.file || process.env.DATA_FILE || path.join(__dirname, 'data', 'cccs.db');
@@ -125,24 +124,7 @@ function createStore(db, seq, opts = {}) {
 
     if (restored) {
       // Devices cannot still be connected across a restart, whatever the file says.
-      for (const r of db.radios) { r.connected = false; if (r.status !== 'OUT_OF_SERVICE') r.status = 'OFFLINE'; }
       for (const m of db.mdts) { m.connected = false; m.status = 'OFFLINE'; }
-      for (const t of db.talkgroups) { t.floor_holder_radio_id = null; t.floor_console_user_id = null; t.floor_since = null; }
-      // Calls cannot survive a restart either; close them out honestly. This
-      // must also clear their participants — a radio's "busy" check looks at
-      // communication_participants, not at the call record, so leaving a
-      // RINGING/CONNECTED participant behind locks that radio out of every
-      // future call until someone notices and fixes the row by hand.
-      const endedNow = new Set();
-      for (const c of db.communications) {
-        if (c.state !== 'ENDED') {
-          c.state = 'ENDED'; c.end_reason = 'SERVER_RESTART'; c.ended_at = new Date().toISOString();
-          endedNow.add(c.id);
-        }
-      }
-      for (const p of db.communication_participants) {
-        if (endedNow.has(p.communication_id) && p.state !== 'REJECTED') p.state = 'ENDED';
-      }
     }
     return restored;
   }

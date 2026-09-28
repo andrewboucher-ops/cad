@@ -96,8 +96,9 @@ Caddy proxies WebSockets correctly without extra configuration.
 
 ### Proxying is not optional on TLS
 
-Whatever you use, the browsers need HTTPS or they will refuse microphone access
-and the radios will have no audio at all — no error, just silence.
+Whatever you use, the browsers need HTTPS or they will refuse geolocation
+access — officer and vehicle position reporting silently stops working over
+plain HTTP.
 
 ## 4. Backups off the box
 

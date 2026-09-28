@@ -53,7 +53,6 @@
   .kv { display: grid; grid-template-columns: 92px 1fr; gap: 2px 10px; font-size: 13px; }
   .kv dt { color: var(--ink-dim); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; align-self: center; }
   .kv dd { margin: 0; font-family: var(--mono); }
-  .tg-pill { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
 
   /* ---- terminal / incident cards (replaces the plain text rows) ---- */
   #resList .row, #jobList .row {
@@ -143,20 +142,8 @@
 <div id="glRoot"></div>
 
 <div class="actionbar">
-  <button class="btn primary" id="btnCall">Call radio</button>
-  <button class="btn primary" id="btnGroup">Group call</button>
-  <button class="btn" id="btnMessage">Send message</button>
-  <button class="btn" id="btnTalkgroups">Talkgroups</button>
+  <button class="btn primary" id="btnMessage">Send message</button>
   <button class="btn" id="btnAssign">Assignments</button>
-  <span style="flex:1"></span>
-  <select id="pttTg" style="width:180px"></select>
-  <button class="btn ok" id="btnPtt">Hold to transmit</button>
-  <span class="tg-pill" id="floor"></span>
-  <button class="btn danger" id="audioBlocked" hidden title="The browser blocked incoming audio from playing — click to enable it">🔇 Click to enable audio</button>
-  <span class="tg-pill" id="callBar" hidden style="align-items:center;gap:6px">
-    📞 <span id="callBarNames"></span> <span id="callBarState" class="dim"></span>
-    <button class="btn danger" id="callBarEnd" style="padding:0 8px;font-size:11px">End call</button>
-  </span>
 </div>
 
 <div id="modalHost"></div>
@@ -168,14 +155,13 @@
 
   <div class="rail-section">Operations</div>
   <button id="railIncidents" title="Incidents"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Incidents</span></button>
-  <button id="railTerminals" title="Terminals"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="1.8"/><path d="M9 19h6M12 15v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Terminals</span></button>
+  <button id="railTerminals" title="Personnel & terminals"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="1.8"/><path d="M9 19h6M12 15v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Personnel</span></button>
   <button id="railMap" title="Map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Map</span></button>
   <button id="railMessages" title="Messages"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Messages</span></button>
-  <button id="railCallbacks" title="Callbacks"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3l3 1.5-1.2 3.2a12 12 0 007.5 7.5l3.2-1.2L20 17c0 2-1.6 3.5-3.5 3.3C10 19.7 4.3 14 3.7 7.5 3.5 5.6 5 4 7 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Callbacks</span><span class="badge" id="railCallbackBadge" hidden>0</span></button>
+  <button id="railCallbacks" title="Callback requests"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3l3 1.5-1.2 3.2a12 12 0 007.5 7.5l3.2-1.2L20 17c0 2-1.6 3.5-3.5 3.3C10 19.7 4.3 14 3.7 7.5 3.5 5.6 5 4 7 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Callbacks</span><span class="badge" id="railCallbackBadge" hidden>0</span></button>
   <a id="railLog" title="Log" href="/log.html"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
 
   <div class="rail-section">Fleet</div>
-  <button id="railTalkgroups" title="Talkgroups"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5M14 8a3 3 0 100-6M18.5 13.7c2 .5 3.5 2.3 3.5 4.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Talkgroups</span></button>
   <button id="railAssignments" title="Assignments"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/></svg><span>Assignments</span></button>
 
   <div class="rail-section" id="railSystemSection" hidden>System</div>
@@ -208,63 +194,63 @@ if (!isPopout) {
   setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
   if (me.role === 'SYSTEM_ADMIN') { el('#railSystemSection').hidden = false; el('#railAdmin').hidden = false; }
   // keep welfare countdowns ticking without a server round trip
-  setInterval(() => { if (state.radios.some((r) => r.welfare_due_at)) renderResources(); }, 1000);
+  setInterval(() => { if (state.personnel.some((p) => p.welfare_due_at)) renderResources(); }, 1000);
 }
 
-const state = { radios: [], mdts: [], jobs: [], sites: [], requests: [], talkgroups: [], emergencies: [], events: [], selected: null, calls: new Map() };
+const state = { personnel: [], mdts: [], jobs: [], sites: [], requests: [], emergencies: [], events: [], selected: null };
 let map; // assigned once the 'map' panel is mounted, below
 
 /* ---------- rendering ---------- */
-function welfareLeft(r) {
-  if (!r.welfare_due_at) return '';
-  const left = Math.round((Date.parse(r.welfare_due_at) - Date.now()) / 1000);
+function welfareLeft(p) {
+  if (!p.welfare_due_at) return '';
+  const left = Math.round((Date.parse(p.welfare_due_at) - Date.now()) / 1000);
   if (left <= 0) return 'overdue';
   return `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`;
 }
 
-function pillClass(r) {
-  if (r.emergency) return 'emg';
-  if (r.status === 'AVAILABLE') return 'on';
-  if (['OFFLINE', 'OUT_OF_SERVICE'].includes(r.status)) return 'off';
-  return 'busy';
-}
-
-// A terminal (radio or MDT) working a job shows that job's cycle status,
-// matching what's on its own screen — one status vocabulary end to end,
-// not the terminal's own status label competing with the job's. Falls back
-// to the terminal's own status once the job clears. ACKNOWLEDGED gets
+// A person or terminal working a job shows that job's cycle status, matching
+// what's on their own screen — one status vocabulary end to end, not the
+// resource's own status label competing with the job's. ACKNOWLEDGED gets
 // abbreviated; the pill is tight on width and "EN ROUTE"/"ON SCENE" already
 // read fine at full length.
 const jobStatusLabel = (s) => (s === 'ACKNOWLEDGED' ? 'ACK' : s.replace('_', ' '));
 const jobStatusClass = (s) => ({ EN_ROUTE: 'busy', ON_SCENE: 'busy', TRANSPORTING: 'busy', DISPATCHED: 'busy', ACKNOWLEDGED: 'busy' }[s] || 'on');
 
+function openJobFor(matchFn) {
+  return state.jobs.find((j) => j.resources.some(matchFn) && !['COMPLETED', 'CANCELLED'].includes(j.status));
+}
+function emergencyFor(personnelId) {
+  return state.emergencies.some((e) => e.personnel_id === personnelId && e.state !== 'RESOLVED');
+}
+
 function renderResources() {
   if (!el('#resList')) return;
-  const reqByIssi = new Map(state.requests.filter((r) => r.state === 'PENDING').map((r) => [r.issi, r]));
-  const rows = state.radios.map((r) => {
-    const req = reqByIssi.get(r.issi);
-    const job = state.jobs.find((j) => j.resources.some((x) => x.radio === r.issi) && !['COMPLETED', 'CANCELLED'].includes(j.status));
-    const pillCls = job && !r.emergency ? jobStatusClass(job.status) : pillClass(r);
-    const pillText = r.emergency ? 'EMERGENCY' : job ? jobStatusLabel(job.status) : r.status.replace('_', ' ');
+  const reqByPerson = new Map(state.requests.filter((r) => r.state === 'PENDING').map((r) => [r.personnel_id, r]));
+  const rows = state.personnel.map((p) => {
+    const req = reqByPerson.get(p.id);
+    const emg = emergencyFor(p.id);
+    const job = openJobFor((r) => r.personnel === p.name);
+    const pillCls = emg ? 'emg' : job ? jobStatusClass(job.status) : (p.employment_status === 'ACTIVE' ? 'on' : 'off');
+    const pillText = emg ? 'EMERGENCY' : job ? jobStatusLabel(job.status) : p.employment_status.replace('_', ' ');
     return `
-    <div class="row ${state.selected === r.issi ? 'sel' : ''} ${r.emergency ? 'alarm' : ''}" data-issi="${r.issi}">
+    <div class="row ${state.selected && state.selected.kind === 'p' && state.selected.id === p.id ? 'sel' : ''} ${emg ? 'alarm' : ''}" data-res="p:${p.id}">
       <div class="card-top">
-        <span class="cs">${esc(r.callsign || '—')}</span>
+        <span class="cs">${esc(p.callsign || p.name)}</span>
         <span class="status-pill ${pillCls}">${pillText}</span>
       </div>
       <div class="card-sub">
-        <span class="mono">ISSI ${r.issi}${r.covert ? ' · covert' : ''}</span>
-        <span>${esc(r.talkgroup || '—')}${r.welfare_due_at ? ' · welfare ' + welfareLeft(r) : ''}</span>
+        <span class="mono">${esc(p.rank || 'Officer')}</span>
+        <span>${esc(p.vehicle || '—')}${p.welfare_due_at ? ' · welfare ' + welfareLeft(p) : ''}</span>
       </div>
-      ${req ? `<div class="callback-tag" data-cbcall="${r.issi}">${req.priority ? 'Priority callback requested' : 'Callback requested'}</div>` : ''}
+      ${req ? `<div class="callback-tag" data-cbview="${p.id}">${req.priority ? 'Priority callback requested' : 'Callback requested'}</div>` : ''}
     </div>`;
   }).join('');
   const mdtPillClass = (m, job) => m.emergency ? 'emg' : !m.connected ? 'off' : job ? jobStatusClass(job.status) : m.duty_status === 'BUSY' ? 'busy' : m.duty_status === 'OUT_OF_SERVICE' ? 'off' : 'on';
   const mdtRows = state.mdts.map((m) => {
-    const job = state.jobs.find((j) => j.resources.some((r) => r.mdt === m.mdt_code) && !['COMPLETED', 'CANCELLED'].includes(j.status));
+    const job = openJobFor((r) => r.mdt === m.mdt_code);
     const label = m.emergency ? 'EMERGENCY' : !m.connected ? 'OFFLINE' : job ? jobStatusLabel(job.status) : (m.duty_status || 'AVAILABLE').replace('_', ' ');
     return `
-    <div class="row ${m.emergency ? 'alarm' : ''}" data-mdt="${m.mdt_code}">
+    <div class="row ${state.selected && state.selected.kind === 'm' && state.selected.id === m.id ? 'sel' : ''} ${m.emergency ? 'alarm' : ''}" data-res="m:${m.id}">
       <div class="card-top">
         <span class="cs">${esc(m.mdt_code)}</span>
         <span class="status-pill ${mdtPillClass(m, job)}">${label}</span>
@@ -273,9 +259,12 @@ function renderResources() {
     </div>`;
   }).join('');
   el('#resList').innerHTML = rows + `<div style="padding:10px 8px 4px" class="dim" >Mobile data terminals</div>` + mdtRows;
-  if (el('#resCount')) el('#resCount').textContent = `${state.radios.filter((r) => r.connected).length}/${state.radios.length} on air`;
-  CCCS.els('#resList .row[data-issi]').forEach((n) => n.addEventListener('click', () => select(n.dataset.issi)));
-  CCCS.els('[data-cbcall]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); callRadio(b.dataset.cbcall); }));
+  if (el('#resCount')) el('#resCount').textContent = `${state.personnel.filter((p) => p.employment_status === 'ACTIVE').length}/${state.personnel.length} active`;
+  CCCS.els('#resList .row[data-res]').forEach((n) => n.addEventListener('click', () => {
+    const [kind, id] = n.dataset.res.split(':');
+    select(kind, kind === 'p' ? Number(id) : Number(id));
+  }));
+  CCCS.els('[data-cbview]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); select('p', Number(b.dataset.cbview)); }));
 }
 
 const ASSIGN_ICON = '<svg viewBox="0 0 24 24" fill="none" width="16" height="16"><circle cx="9" cy="8" r="3" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="17" cy="8.5" r="2.4" stroke="currentColor" stroke-width="1.6" opacity=".7"/><path d="M14.5 19c.3-2.4 2-4.2 4-4.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".7"/></svg>';
@@ -297,7 +286,7 @@ function renderJobs() {
       </div>
       <div class="card-sub">
         <span>${esc(j.status.replace('_', ' '))}</span>
-        <span>${esc(j.resources.map((r) => r.callsign || r.radio || r.mdt).join(', ') || 'unassigned')}</span>
+        <span>${esc(j.resources.map((r) => r.callsign || r.personnel || r.mdt).join(', ') || 'unassigned')}</span>
       </div>
     </div>`).join('') : '<p class="dim">No open jobs. Create one to start a dispatch.</p>';
   CCCS.els('#jobList .row').forEach((n) => n.addEventListener('click', () => jobModal(state.jobs.find((j) => j.id === Number(n.dataset.job)))));
@@ -308,14 +297,14 @@ function renderJobs() {
   updateCallbackBadge();
 }
 
-/** Tap a call sign to dispatch every radio and MDT on it — mirrors how a
+/** Tap a call sign to dispatch every person and MDT on it — mirrors how a
  * real dispatch console assigns by call sign rather than by individual
- * device, since a car's radio and its MDT should move together. */
+ * resource, since an officer and their MDT should move together. */
 async function assignModal(job) {
   if (!job) return;
   const callsigns = await api('GET', '/api/callsigns');
   const buttonsHtml = () => callsigns.map((c) => {
-    const n = c.radios.length + c.mdts.length;
+    const n = c.personnel.length + c.mdts.length;
     const already = job.resources.some((r) => r.callsign === c.name);
     return `<button class="btn ${already ? 'ok' : 'primary'}" data-cs="${esc(c.name)}" ${already || !n ? 'disabled' : ''}>${esc(c.name)} ${already ? '— assigned' : `(${n})`}</button>`;
   }).join('') || '<p class="dim">No call signs configured.</p>';
@@ -329,7 +318,7 @@ async function assignModal(job) {
   }
 
   modal(`Assign — ${job.reference}`, `
-    <p class="dim" style="margin:0 0 12px">Tap a call sign to dispatch every radio and MDT on it to ${esc(job.reference)}.</p>
+    <p class="dim" style="margin:0 0 12px">Tap a call sign to dispatch every person and MDT on it to ${esc(job.reference)}.</p>
     <div class="btn-row" id="csButtons"></div>`, paint);
 }
 
@@ -342,49 +331,72 @@ function updateCallbackBadge() {
 
 function renderDetail() {
   if (!el('#detailBody')) return;
-  const r = state.radios.find((x) => x.issi === state.selected);
-  if (!r) return;
-  const job = state.jobs.find((j) => j.id === r.job_id);
+  if (!state.selected) return;
+  if (state.selected.kind === 'p') {
+    const p = state.personnel.find((x) => x.id === state.selected.id);
+    if (!p) return;
+    const emg = emergencyFor(p.id);
+    const job = openJobFor((r) => r.personnel === p.name);
+    el('#detailBody').innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span class="dot ${emg ? 's-EMERGENCY' : ''}"></span>
+        <strong class="mono" style="font-size:18px">${esc(p.callsign || p.name)}</strong>
+        <span>${esc(p.employment_status.replace('_', ' '))}</span>
+      </div>
+      <dl class="kv">
+        <dt>Name</dt><dd>${esc(p.name)}</dd>
+        <dt>Employee no</dt><dd>${esc(p.employee_no || '—')}</dd>
+        <dt>Rank</dt><dd>${esc(p.rank || '—')}</dd>
+        <dt>Phone</dt><dd>${esc(p.contact_phone || '—')}</dd>
+        <dt>Email</dt><dd>${esc(p.contact_email || '—')}</dd>
+        <dt>Vehicle</dt><dd>${esc(p.vehicle || '—')}</dd>
+        <dt>Job</dt><dd>${job ? esc(job.reference) : '—'}</dd>
+        <dt>Login</dt><dd>${p.has_login ? 'yes' : 'no'}</dd>
+        <dt>Welfare</dt><dd>${p.welfare_due_at ? welfareLeft(p) + ' remaining' : 'no timer'}</dd>
+        <dt>Notes</dt><dd>${esc(p.notes || '—')}</dd>
+      </dl>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn primary" id="dMsg">Message</button>
+      </div>`;
+    el('#dMsg').onclick = () => messageModal('p:' + p.id);
+    return;
+  }
+  const m = state.mdts.find((x) => x.id === state.selected.id);
+  if (!m) return;
+  const job = openJobFor((r) => r.mdt === m.mdt_code);
   el('#detailBody').innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <span class="dot s-${r.emergency ? 'EMERGENCY' : r.status}"></span>
-      <strong class="mono" style="font-size:18px">${esc(r.callsign || r.issi)}</strong>
-      <span class="txt-${r.status}">${r.status.replace('_', ' ')}</span>
+      <span class="dot ${m.emergency ? 's-EMERGENCY' : ''}"></span>
+      <strong class="mono" style="font-size:18px">${esc(m.mdt_code)}</strong>
+      <span>${m.connected ? 'online' : 'offline'}</span>
     </div>
     <dl class="kv">
-      <dt>ISSI</dt><dd>${r.issi}</dd>
-      <dt>Type</dt><dd>${r.radio_type}</dd>
-      <dt>Vehicle</dt><dd>${esc(r.vehicle || '—')}</dd>
-      <dt>Talkgroup</dt><dd>${esc(r.talkgroup || '—')}</dd>
+      <dt>Call sign</dt><dd>${esc(m.callsign || '—')}</dd>
+      <dt>Vehicle</dt><dd>${esc(m.vehicle || '—')}</dd>
       <dt>Job</dt><dd>${job ? esc(job.reference) : '—'}</dd>
-      <dt>Crew</dt><dd>${esc(r.personnel.join(', ') || '—')}</dd>
-      <dt>Speed</dt><dd>${r.speed} mph</dd>
-      <dt>Battery</dt><dd>${r.battery}%</dd>
-      <dt>Signal</dt><dd>${esc(r.signal)}</dd>
-      <dt>Position</dt><dd>${r.lat ? r.lat.toFixed(4) + ', ' + r.lon.toFixed(4) : '—'}</dd>
-      <dt>Last seen</dt><dd>${r.last_seen ? new Date(r.last_seen).toLocaleTimeString() : 'never'}</dd>
-      <dt>Welfare</dt><dd>${r.welfare_due_at ? welfareLeft(r) + ' remaining' : 'no timer'}</dd>
-      <dt>Status code</dt><dd>${esc(r.status_code || '—')}</dd>
-      <dt>Covert</dt><dd>${r.covert ? 'ON — will not sound when called' : 'off'}</dd>
+      <dt>Crew</dt><dd>${esc((m.crew || []).map((c) => c.name).join(', ') || '—')}</dd>
+      <dt>Battery</dt><dd>${m.battery != null ? m.battery + '%' : '—'}</dd>
+      <dt>Position</dt><dd>${m.lat != null ? m.lat.toFixed(4) + ', ' + m.lon.toFixed(4) : '—'}</dd>
+      <dt>Duty status</dt><dd>${esc((m.duty_status || 'AVAILABLE').replace('_', ' '))}</dd>
     </dl>
     <div class="btn-row" style="margin-top:10px">
-      <button class="btn primary" id="dCall">Call ${esc(r.callsign || r.issi)}</button>
-      <button class="btn" id="dMsg">Message</button>
+      <button class="btn primary" id="dMsg">Message</button>
     </div>`;
-  el('#dCall').onclick = () => callRadio(r.issi);
-  el('#dMsg').onclick = () => messageModal(r.issi);
+  el('#dMsg').onclick = () => messageModal('m:' + m.mdt_code);
 }
 
 function mapData() {
-  return {
-    units: state.radios.filter((r) => r.connected || r.status !== 'OFFLINE'),
-    jobs: state.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)),
-  };
+  const units = state.mdts.filter((m) => m.lat != null).map((m) => ({
+    ...m,
+    callsign: m.callsign || m.mdt_code,
+    status: m.emergency ? 'EMERGENCY' : (!m.connected ? 'OFFLINE' : (m.duty_status || 'AVAILABLE')),
+  }));
+  return { units, jobs: state.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)) };
 }
 function renderMap() {
   if (!map) return;
   const { units, jobs } = mapData();
-  map.render(units, jobs, (u) => select(u.issi));
+  map.render(units, jobs, (u) => select('m', u.id));
 }
 
 function renderEmergencies() {
@@ -393,20 +405,19 @@ function renderEmergencies() {
   el('#emgWrap').innerHTML = active.map((e) => `
     <div class="emg-banner">
       <strong>${e.kind === 'WELFARE' ? 'WELFARE OVERDUE — NO CHECK-IN' : 'EMERGENCY'}</strong>
-      <span class="mono">${esc(e.callsign)} · ${e.issi ? 'ISSI ' + e.issi : e.mdt_code} · ${e.lat ? e.lat.toFixed(4) + ', ' + e.lon.toFixed(4) : 'no fix'} · ${new Date(e.activated_at).toLocaleTimeString()}</span>
+      <span class="mono">${esc(e.callsign)} · ${e.lat ? e.lat.toFixed(4) + ', ' + e.lon.toFixed(4) : 'no fix'} · ${new Date(e.activated_at).toLocaleTimeString()}</span>
       ${e.note ? `<span class="dim">last task: ${esc(e.note)}</span>` : ''}
       <span class="dim">${e.state === 'ACKNOWLEDGED' ? 'acknowledged by ' + esc(e.acknowledged_by) : ''}</span>
       <span style="flex:1"></span>
       ${e.job_id ? `<button class="btn" data-emgjob="${e.job_id}">Job ${esc((state.jobs.find((j) => j.id === e.job_id) || {}).reference || '')}</button>` : ''}
       ${e.state === 'ACTIVE' ? `<button class="btn danger" data-ack="${e.id}">Acknowledge</button>` : ''}
-      ${e.issi ? `<button class="btn" data-emgcall="${e.issi}">Call radio</button>` : ''}
-      ${e.issi ? `<button class="btn" data-loc="${e.issi}">View location</button>` : ''}
+      ${e.personnel_id ? `<button class="btn" data-loc="p:${e.personnel_id}">View location</button>` : ''}
+      ${e.mdt_id ? `<button class="btn" data-loc="m:${e.mdt_id}">View location</button>` : ''}
       <button class="btn ok" data-res="${e.id}">Reset emergency</button>
     </div>`).join('');
   CCCS.els('[data-ack]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.ack}/ack`)));
   CCCS.els('[data-res]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.res}/resolve`)));
-  CCCS.els('[data-emgcall]').forEach((b) => (b.onclick = () => callRadio(b.dataset.emgcall)));
-  CCCS.els('[data-loc]').forEach((b) => (b.onclick = () => select(b.dataset.loc)));
+  CCCS.els('[data-loc]').forEach((b) => (b.onclick = () => { const [kind, id] = b.dataset.loc.split(':'); select(kind, Number(id)); }));
   CCCS.els('[data-emgjob]').forEach((b) => (b.onclick = () => jobModal(state.jobs.find((j) => j.id === Number(b.dataset.emgjob)))));
 }
 
@@ -414,18 +425,19 @@ function renderRequests() {
   if (!el('#reqWrap')) return; // this chrome doesn't exist in a GL popout window
   const open = state.requests.filter((r) => r.state === 'PENDING')
     .sort((a, b) => (b.priority - a.priority) || (Date.parse(a.requested_at) - Date.parse(b.requested_at)));
-  el('#reqWrap').innerHTML = open.map((r) => `
+  el('#reqWrap').innerHTML = open.map((r) => {
+    const p = state.personnel.find((x) => x.id === r.personnel_id);
+    return `
     <div class="req-bar ${r.priority ? 'pri' : ''}">
-      <strong>${r.priority ? 'PRIORITY CALL REQUEST' : 'CALL REQUEST'}</strong>
-      <span class="mono">${esc(r.callsign)} · ISSI ${r.issi} · ${new Date(r.requested_at).toLocaleTimeString()}</span>
+      <strong>${r.priority ? 'PRIORITY CALLBACK REQUEST' : 'CALLBACK REQUEST'}</strong>
+      <span class="mono">${esc(r.callsign)}${p && p.contact_phone ? ' · ' + esc(p.contact_phone) : ''} · ${new Date(r.requested_at).toLocaleTimeString()}</span>
       ${r.note ? `<span class="dim">${esc(r.note)}</span>` : ''}
       <span style="flex:1"></span>
-      <button class="btn primary" data-reqcall="${r.issi}">Call ${esc(r.callsign)}</button>
-      <button class="btn" data-reqloc="${r.issi}">Locate</button>
-      <button class="btn" data-reqclear="${r.id}">Clear</button>
-    </div>`).join('');
-  CCCS.els('[data-reqcall]').forEach((b) => (b.onclick = () => callRadio(b.dataset.reqcall)));
-  CCCS.els('[data-reqloc]').forEach((b) => (b.onclick = () => select(b.dataset.reqloc)));
+      <button class="btn" data-reqloc="${r.personnel_id}">Locate</button>
+      <button class="btn primary" data-reqclear="${r.id}">Mark answered</button>
+    </div>`;
+  }).join('');
+  CCCS.els('[data-reqloc]').forEach((b) => (b.onclick = () => select('p', Number(b.dataset.reqloc))));
   CCCS.els('[data-reqclear]').forEach((b) => (b.onclick = () => api('POST', `/api/calls/requests/${b.dataset.reqclear}/clear`, {})));
   updateCallbackBadge();
 }
@@ -438,7 +450,7 @@ function renderLog() {
   el('#log').scrollTop = el('#log').scrollHeight;
 }
 
-function select(issi) { state.selected = issi; renderResources(); renderDetail(); }
+function select(kind, id) { state.selected = { kind, id }; renderResources(); renderDetail(); }
 
 /* ---------- modals ---------- */
 function modal(title, html, onMount) {
@@ -449,80 +461,22 @@ function modal(title, html, onMount) {
 const closeModal = () => (el('#modalHost').innerHTML = '');
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-async function callRadio(issi) {
-  try {
-    const call = await api('POST', '/api/calls/private', { to: issi });
-    activeCall(call);
-  } catch (e) { modal('Call failed', `<p class="err">${esc(e.message)}</p>`); }
-}
-
-function activeCall(call) {
-  const names = call.participants.map((p) => p.callsign || p.issi).join(', ');
-  state.calls.set(call.id, call);
-  paintCallBar();
-  modal(`Call #${call.id}`, `
-    <p>To <strong class="mono">${esc(names)}</strong></p>
-    <p id="callState" class="mono">${esc(call.state)}</p>
-    <div class="btn-row"><button class="btn danger" id="endCall">Clear call</button></div>`, () => {
-    el('#endCall').onclick = async () => { await api('POST', `/api/calls/${call.id}/end`); closeModal(); };
-  });
-}
-
-/* Closing the call modal to go look at a job used to lose all trace that a
- * call was still live — no indicator, no way to end it short of finding the
- * radio again and hoping "destination busy" jogs your memory. This survives
- * the modal closing: it's driven off state.calls, not off the modal's DOM. */
-function paintCallBar() {
-  const bar = el('#callBar');
-  if (!bar) return;
-  const live = [...state.calls.values()].filter((c) => !['ENDED', 'REJECTED'].includes(c.state)).pop();
-  if (!live) { bar.hidden = true; bar.style.display = ''; return; }
-  bar.hidden = false;
-  bar.style.display = 'inline-flex';
-  el('#callBarNames').textContent = live.participants.map((p) => p.callsign || p.issi).join(', ') || `#${live.id}`;
-  el('#callBarState').textContent = live.state === 'RINGING' ? 'ringing…' : 'connected';
-  el('#callBarEnd').onclick = async () => { await api('POST', `/api/calls/${live.id}/end`); };
-}
-if (el('#callBar')) el('#callBar').hidden = true;
-
 if (!isPopout) {
-el('#btnCall').onclick = () => modal('Call a radio', `
-  <label for="cTo">Destination radio or ISSI</label>
-  <select id="cTo">${state.radios.map((r) => `<option value="${r.issi}">${esc(r.callsign || r.issi)} — ${r.issi} (${r.connected ? 'on air' : 'offline'})</option>`).join('')}</select>
-  <div style="height:12px"></div><button class="btn primary" id="cGo">Start call</button>`,
-  () => (el('#cGo').onclick = () => callRadio(el('#cTo').value)));
-
-el('#btnGroup').onclick = () => modal('Group call', `
-  <label for="gTg">Talkgroup</label>
-  <select id="gTg"><option value="">— pick individual resources instead —</option>${state.talkgroups.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select>
-  <label for="gList">Or select radios (ctrl/cmd-click for several)</label>
-  <select id="gList" multiple size="6">${state.radios.filter((r) => r.connected).map((r) => `<option value="${r.issi}">${esc(r.callsign)} — ${r.issi}</option>`).join('')}</select>
-  <div style="height:12px"></div><button class="btn primary" id="gGo">Start group call</button>`, () => {
-  el('#gGo').onclick = async () => {
-    const tg = el('#gTg').value;
-    const picks = [...el('#gList').selectedOptions].map((o) => o.value);
-    try {
-      const call = await api('POST', '/api/calls/group', tg ? { talkgroup: Number(tg) } : { to: picks });
-      activeCall(call);
-    } catch (e) { el('#gGo').insertAdjacentHTML('afterend', `<p class="err">${esc(e.message)}</p>`); }
-  };
-});
-
-el('#btnMessage').onclick = () => messageModal(state.selected);
+  el('#btnMessage').onclick = () => messageModal(state.selected ? `${state.selected.kind}:${state.selected.kind === 'p' ? state.selected.id : (state.mdts.find((m) => m.id === state.selected.id) || {}).mdt_code}` : null);
 }
-function messageModal(issi) {
+function messageModal(preselect) {
   modal('Send message', `
     <label for="mTo">Recipient</label>
     <select id="mTo">
-      ${state.radios.map((r) => `<option value="r:${r.issi}" ${r.issi === issi ? 'selected' : ''}>RADIO ${esc(r.callsign || r.issi)} — ${r.issi}</option>`).join('')}
-      ${state.mdts.map((m) => `<option value="m:${m.mdt_code}">MDT ${esc(m.mdt_code)}</option>`).join('')}
+      ${state.personnel.map((p) => `<option value="p:${p.id}" ${preselect === 'p:' + p.id ? 'selected' : ''}>${esc(p.callsign || p.name)}</option>`).join('')}
+      ${state.mdts.map((m) => `<option value="m:${m.mdt_code}" ${preselect === 'm:' + m.mdt_code ? 'selected' : ''}>MDT ${esc(m.mdt_code)}</option>`).join('')}
     </select>
     <label for="mBody">Message</label>
     <textarea id="mBody" rows="3"></textarea>
     <div style="height:12px"></div><button class="btn primary" id="mSend">Send</button>`, () => {
     el('#mSend').onclick = async () => {
       const [kind, id] = el('#mTo').value.split(':');
-      await api('POST', '/api/messages', { [kind === 'r' ? 'to_radio' : 'to_mdt']: id, body: el('#mBody').value });
+      await api('POST', '/api/messages', { [kind === 'p' ? 'to_personnel' : 'to_mdt']: id, body: el('#mBody').value });
       closeModal();
     };
   });
@@ -550,7 +504,7 @@ function openNewJobModal() {
   <label for="jCaller">Caller</label>
   <input id="jCaller" value="Monitoring centre, ref ARC-00000">
   <label for="jRes">Resources to dispatch</label>
-  <select id="jRes" multiple size="6">${state.radios.map((r) => `<option value="${r.callsign || r.issi}">${esc(r.callsign || r.issi)} — ${r.status.replace('_', ' ')}</option>`).join('')}</select>
+  <select id="jRes" multiple size="6">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)} — ${esc(p.employment_status.replace('_', ' '))}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
   <div style="height:12px"></div><button class="btn primary" id="jGo">Create and dispatch</button>`, () => {
   el('#jGo').onclick = async () => {
     try {
@@ -616,8 +570,8 @@ function jobModal(j) {
       <dt>Detail</dt><dd>${esc(j.description || '—')}</dd>
       <dt>Resources</dt><dd>${j.resources.length ? j.resources.map((r) => `
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
-          <span style="flex:1">${esc(r.callsign || r.radio || r.mdt)}${r.acknowledged ? ' ✓' : ''}</span>
-          <button class="btn danger" style="padding:0 6px;font-size:11px" data-standdown="${esc(r.radio ? 'r:' + r.radio : 'm:' + r.mdt)}">Stand down</button>
+          <span style="flex:1">${esc(r.callsign || r.personnel || r.mdt)}${r.acknowledged ? ' ✓' : ''}</span>
+          <button class="btn danger" style="padding:0 6px;font-size:11px" data-standdown="${esc(r.personnel ? 'p:' + r.personnel : 'm:' + r.mdt)}">Stand down</button>
         </div>`).join('') : '—'}</dd>
     </dl>
     <div id="jDetailsEdit" class="hide">
@@ -641,7 +595,7 @@ function jobModal(j) {
     <div class="btn-row" style="margin-top:6px"><button class="btn" id="jSaveNotes">Save notes</button></div>
 
     <label for="jAdd" style="margin-top:12px;display:block">Assign more resources</label>
-    <select id="jAdd" multiple size="4">${state.radios.map((r) => `<option value="${r.callsign || r.issi}">${esc(r.callsign || r.issi)}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
+    <select id="jAdd" multiple size="4">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
     <div class="btn-row" style="margin-top:12px">
       <button class="btn primary" id="jAssign">Dispatch</button>
       <button class="btn ok" id="jDone">Mark completed</button>
@@ -671,7 +625,7 @@ function jobModal(j) {
     CCCS.els('[data-standdown]').forEach((b) => (b.onclick = async () => {
       const [kind, id] = b.dataset.standdown.split(':');
       if (!confirm(`Stand down ${id} from this job?`)) return;
-      await api('POST', `/api/jobs/${j.id}/stand-down`, kind === 'r' ? { radio: id } : { mdt: id });
+      await api('POST', `/api/jobs/${j.id}/stand-down`, kind === 'p' ? { personnel: id } : { mdt: id });
       closeModal();
     }));
     if (el('#jElapsedBig')) {
@@ -681,62 +635,25 @@ function jobModal(j) {
 }
 
 if (!isPopout) {
-el('#btnTalkgroups').onclick = async () => {
-  const tgs = await api('GET', '/api/talkgroups');
-  modal('Talkgroups', tgs.map((t) => `
-    <div style="margin-bottom:14px">
-      <strong class="mono">${esc(t.name)}</strong> <span class="dim">${t.floor_holder ? '· ' + esc(t.floor_holder) + ' has the floor' : ''}</span>
-      <div class="log" style="margin-top:4px">${t.members.map((m) => `<div>${esc(m.callsign)} <span class="txt-${m.status}">${m.status.replace('_', ' ')}</span> <button class="btn" style="padding:0 6px;font-size:11px" data-rm="${t.id}:${m.issi}">remove</button></div>`).join('') || '<div class="dim">no members</div>'}</div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <select data-add="${t.id}" style="flex:1">${state.radios.map((r) => `<option value="${r.issi}">${esc(r.callsign || r.issi)}</option>`).join('')}</select>
-        <button class="btn" data-addbtn="${t.id}">Add</button>
-      </div>
-    </div>`).join('') + `
-    <label for="tgName">New talkgroup name</label>
-    <div style="display:flex;gap:6px"><input id="tgName" placeholder="OPERATIONS"><button class="btn primary" id="tgNew">Create</button></div>`, () => {
-    CCCS.els('[data-rm]').forEach((b) => (b.onclick = async () => {
-      const [id, issi] = b.dataset.rm.split(':');
-      await api('DELETE', `/api/talkgroups/${id}/members`, { radio: issi });
-      el('#btnTalkgroups').click();
-    }));
-    CCCS.els('[data-addbtn]').forEach((b) => (b.onclick = async () => {
-      const sel = document.querySelector(`[data-add="${b.dataset.addbtn}"]`);
-      await api('POST', `/api/talkgroups/${b.dataset.addbtn}/members`, { radio: sel.value });
-      el('#btnTalkgroups').click();
-    }));
-    el('#tgNew').onclick = async () => { await api('POST', '/api/talkgroups', { name: el('#tgName').value }); el('#btnTalkgroups').click(); };
-  });
-};
-}
-
-if (!isPopout) {
 el('#btnAssign').onclick = async () => {
   const cs = await api('GET', '/api/callsigns');
   modal('Call sign assignments', cs.map((c) => `
     <div style="margin-bottom:12px">
       <strong class="mono">${esc(c.name)}</strong> <span class="dim">${esc(c.description || '')}</span>
       <div class="log">
-        ${c.radios.map((r) => `<div>radio ${r.issi} <button class="btn" style="padding:0 6px;font-size:11px" data-unr="${c.id}:${r.issi}">remove</button></div>`).join('')}
         ${c.mdts.map((m) => `<div>${esc(m.mdt_code)} <button class="btn" style="padding:0 6px;font-size:11px" data-unm="${c.id}:${m.mdt_code}">remove</button></div>`).join('')}
-        ${c.personnel.map((p) => `<div class="dim">${esc(p)}</div>`).join('')}
+        ${c.personnel.map((p) => `<div class="dim">${esc(p.name)}</div>`).join('')}
       </div>
       <div style="display:flex;gap:6px;margin-top:6px">
         <select data-pick="${c.id}" style="flex:1">
-          ${state.radios.map((r) => `<option value="r:${r.issi}">radio ${r.issi}</option>`).join('')}
-          ${state.mdts.map((m) => `<option value="m:${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}
+          ${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}
         </select>
-        <button class="btn" data-assign="${c.id}">Assign</button>
+        <button class="btn" data-assign="${c.id}">Assign MDT</button>
       </div>
     </div>`).join(''), () => {
     CCCS.els('[data-assign]').forEach((b) => (b.onclick = async () => {
       const v = document.querySelector(`[data-pick="${b.dataset.assign}"]`).value;
-      const [kind, id] = v.split(':');
-      await api('POST', `/api/callsigns/${b.dataset.assign}/assign`, { [kind === 'r' ? 'radio' : 'mdt']: id });
-      el('#btnAssign').click();
-    }));
-    CCCS.els('[data-unr]').forEach((b) => (b.onclick = async () => {
-      const [id, issi] = b.dataset.unr.split(':');
-      await api('DELETE', `/api/callsigns/${id}/assign`, { radio: issi });
+      await api('POST', `/api/callsigns/${b.dataset.assign}/assign`, { mdt: v });
       el('#btnAssign').click();
     }));
     CCCS.els('[data-unm]').forEach((b) => (b.onclick = async () => {
@@ -746,28 +663,6 @@ el('#btnAssign').onclick = async () => {
     }));
   });
 };
-}
-
-/* ---------- PTT from the console ---------- */
-let txTg = null;
-function pttDown() {
-  const id = Number(el('#pttTg').value);
-  if (!id || txTg) return;
-  txTg = id; bus.send('radio.ptt_start', { talkgroup_id: id });
-  el('#btnPtt').classList.add('danger'); el('#btnPtt').textContent = 'Transmitting';
-}
-function pttUp() {
-  if (!txTg) return;
-  audio.stopPublishing();
-  bus.send('radio.ptt_release', { talkgroup_id: txTg });
-  txTg = null;
-  el('#btnPtt').classList.remove('danger'); el('#btnPtt').textContent = 'Hold to transmit';
-}
-if (!isPopout) {
-  el('#btnPtt').addEventListener('mousedown', pttDown);
-  el('#btnPtt').addEventListener('touchstart', (e) => { e.preventDefault(); pttDown(); });
-  window.addEventListener('mouseup', pttUp);
-  window.addEventListener('touchend', pttUp);
 }
 
 /* ------------------------------------------------------------------ *
@@ -867,7 +762,7 @@ const defaultLayoutConfig = {
 // layout always wins over the default. This is what silently carried an
 // earlier broken config (header.close disabling drag/close) forward even
 // after the code was fixed.
-const LAYOUT_VERSION = 3;
+const LAYOUT_VERSION = 4;
 
 // (isPopout is declared near the top of the script.) The component
 // factories above must still be registered so GL can rebuild whichever one
@@ -951,7 +846,6 @@ el('#railTerminals').onclick = () => openPanel('resources');
 el('#railMessages').onclick = () => el('#btnMessage').click();
 el('#railCallbacks').onclick = () => focusPanel('#reqWrap');
 el('#railMap').onclick = () => openPanel('map');
-el('#railTalkgroups').onclick = () => el('#btnTalkgroups').click();
 el('#railAssignments').onclick = () => el('#btnAssign').click();
 }
 
@@ -968,24 +862,11 @@ const upsert = (list, item, key = 'id') => {
   if (i >= 0) list[i] = item; else list.push(item);
 };
 
-const audio = CCCS.audio(bus);
-window.__cccsAudio = audio; // devtools: await window.__cccsAudio.debugStats()
-audio.onPeerAudio = (addr, state) => {
-  const b = el('#audioBlocked');
-  if (!b) return;
-  if (state === 'blocked') b.hidden = false;
-  else if (state === true) b.hidden = true;
-};
-if (el('#audioBlocked')) el('#audioBlocked').onclick = () => { if (audio.resumeAudio()) el('#audioBlocked').hidden = true; };
-
 /* ---------- Console alert tones ------------------------------------
  * Short synthesised tones, not sampled audio -- nothing to source or
- * license, ships as code (same reasoning as the legacy handset's
- * SoundEngine.kt). A separate AudioContext from the mic/WebRTC one in
- * `audio` above, since these have to work even with no mic involved.
- * Browsers start an AudioContext suspended until a user gesture --
- * actx() resumes it on every call rather than once, so it also recovers
- * if the tab power-saves it back to suspended later. */
+ * license, ships as code. Browsers start an AudioContext suspended until
+ * a user gesture -- actx() resumes it on every call rather than once, so
+ * it also recovers if the tab power-saves it back to suspended later. */
 const alertCtx = { current: null };
 function actx() {
   if (!alertCtx.current) alertCtx.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -1009,8 +890,6 @@ function beep(freq, ms, delayMs = 0, gain = 0.25, type = 'sine') {
 const sound = {
   jobCreated() { beep(1100, 90); beep(1500, 110, 110); },
   callRequest() { beep(1300, 80); beep(1300, 80, 140); },
-  pttDenied() { beep(320, 130, 0, 0.28, 'square'); beep(320, 130, 170, 0.28, 'square'); },
-  callIncoming() { beep(1000, 100); beep(1000, 100, 190); beep(1000, 100, 380); },
   _emergencyTimer: null,
   // Keeps sounding while ANY emergency is still ACTIVE (not yet
   // acknowledged) -- call after every emergency.* event rather than
@@ -1029,51 +908,33 @@ const sound = {
   },
 };
 
-bus.on('ptt.granted', ({ listeners }) => audio.publishTo(listeners).catch((e) => console.warn('mic', e)))
-   .on('call.accepted', (c) => { const other = (c.participants || []).find((p) => p.issi); if (c.kind !== 'PSTN' && other) audio.call(`radio:${other.issi}`).catch(() => {}); })
-   .on('call.ended', () => audio.hangUp())
-   .on('radio.status_changed', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); renderMap(); })
-   .on('radio.connected', (r) => { upsert(state.radios, r); renderResources(); })
-   .on('radio.created', (r) => { upsert(state.radios, r); renderResources(); })
-   .on('radio.assigned', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
-   .on('radio.location_changed', (r) => { upsert(state.radios, r); renderMap(); if (state.selected === r.issi) renderDetail(); })
-   .on('radio.deleted', (r) => { state.radios = state.radios.filter((x) => x.id !== r.id); renderResources(); renderMap(); })
-   .on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderResources(); })
+bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderResources(); renderMap(); })
    .on('mdt.created', (m) => { upsert(state.mdts, m); renderResources(); })
    .on('mdt.assigned', (m) => { upsert(state.mdts, m); renderResources(); })
    .on('mdt.crew_changed', (m) => { upsert(state.mdts, m); renderResources(); })
-   .on('mdt.deleted', (m) => { state.mdts = state.mdts.filter((x) => x.id !== m.id); renderResources(); })
+   .on('mdt.deleted', (m) => { state.mdts = state.mdts.filter((x) => x.id !== m.id); renderResources(); renderMap(); })
    .on('job.created', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); sound.jobCreated(); })
    .on('job.dispatched', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); })
    .on('job.status_changed', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); renderResources(); })
    .on('job.acknowledged', ({ job }) => { upsert(state.jobs, job); renderJobs(); renderResources(); })
+   .on('job.stood_down', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); })
    .on('emergency.activated', (e) => { upsert(state.emergencies, e); renderEmergencies(); renderResources(); sound.refreshEmergencyAlarm(); })
-   .on('radio.covert_changed', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
-   .on('radio.position_report', (r) => { upsert(state.radios, r); renderMap(); renderDetail(); })
    .on('call.request', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); sound.callRequest(); })
    .on('call.request_cleared', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); })
-   .on('welfare.started', ({ radio }) => { upsert(state.radios, radio); renderResources(); renderDetail(); })
-   .on('welfare.checked_in', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
-   .on('welfare.stopped', (r) => { upsert(state.radios, r); renderResources(); renderDetail(); })
+   .on('welfare.started', ({ personnel }) => { upsert(state.personnel, personnel); renderResources(); renderDetail(); })
+   .on('welfare.checked_in', (p) => { upsert(state.personnel, p); renderResources(); renderDetail(); })
+   .on('welfare.stopped', (p) => { upsert(state.personnel, p); renderResources(); renderDetail(); })
    .on('emergency.acknowledged', (e) => { upsert(state.emergencies, e); renderEmergencies(); sound.refreshEmergencyAlarm(); })
    .on('emergency.resolved', (e) => { upsert(state.emergencies, e); renderEmergencies(); sound.refreshEmergencyAlarm(); })
    .on('event.logged', (e) => { state.events.push(e); if (state.events.length > 400) state.events.shift(); renderLog(); })
-   .on('radio.ptt_started', (p) => { const f = el('#floor'); if (f) f.textContent = `TX ${p.callsign} · ${p.talkgroup}`; })
-   .on('radio.ptt_released', (p) => { const f = el('#floor'); if (f) f.textContent = ''; })
-   .on('ptt.denied', (p) => { const f = el('#floor'); if (f) f.textContent = `${p.reason} — ${p.holder} has the floor`; txTg = null; const b = el('#btnPtt'); if (b) { b.classList.remove('danger'); b.textContent = 'Hold to transmit'; } sound.pttDenied(); })
-   .on('call.incoming', () => sound.callIncoming())
-   .on('call.accepted', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = 'ACTIVE — connected'; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
-   .on('call.rejected', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `DECLINED by ${c.rejected_by}`; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
-   .on('call.ended', (c) => { const n = el('#callState'); if (n && state.calls.has(c.id)) n.textContent = `ENDED (${c.end_reason}) after ${c.duration_s}s`; if (state.calls.has(c.id)) { state.calls.set(c.id, c); paintCallBar(); } })
    .on('message.received', () => {});
 
 async function boot() {
   const s = await api('GET', '/api/state');
-  state.radios = s.radios; state.mdts = s.mdts; state.jobs = s.jobs;
-  state.talkgroups = s.talkgroups; state.emergencies = s.emergencies; state.events = s.events;
+  state.mdts = s.mdts; state.jobs = s.jobs; state.personnel = s.personnel;
+  state.emergencies = s.emergencies; state.events = s.events;
   state.sites = s.sites || [];
-  state.requests = s.call_requests || [];
-  if (el('#pttTg')) el('#pttTg').innerHTML = s.talkgroups.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+  state.requests = await api('GET', '/api/calls/requests').catch(() => []);
   renderResources(); renderJobs(); renderMap(); renderEmergencies(); renderRequests(); renderLog();
   // Covers a page load/reconnect landing mid-emergency -- the alarm
   // shouldn't depend on having been open when emergency.activated fired.

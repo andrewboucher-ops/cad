@@ -1,6 +1,6 @@
-# TLS is not optional here: microphone access and WebRTC are blocked on plain
-# HTTP, so without this the radios have no audio. Caddy gets and renews the
-# certificate automatically.
+# TLS is not optional here: geolocation is blocked on plain HTTP, so without
+# this officer and vehicle position reporting silently stops working. Caddy
+# gets and renews the certificate automatically.
 
 __DOMAIN__ {
 	encode zstd gzip
@@ -16,18 +16,8 @@ __DOMAIN__ {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
-		Permissions-Policy "microphone=(self), geolocation=(self), camera=()"
+		Permissions-Policy "geolocation=(self), camera=(self), microphone=()"
 		-Server
-	}
-
-	# The PBX posts inbound calls here. Restrict it to your PBX's address and
-	# inject the shared secret so the dialplan does not have to.
-	@pbx path /api/pbx/*
-	handle @pbx {
-		# @pbx-allowed remote_ip 203.0.113.10        # <- your PBX, uncomment and set
-		reverse_proxy 127.0.0.1:4000 {
-			header_up X-PBX-Secret {env.PBX_SECRET}
-		}
 	}
 
 	log {

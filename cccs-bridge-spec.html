@@ -1,0 +1,303 @@
+<title>CCCS Bridge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg: #f3f4f7;
+    --surface: #ffffff;
+    --surface-2: #eceef3;
+    --line: #dbdfe6;
+    --ink: #10131a;
+    --ink-dim: #5b6472;
+    --ink-faint: #8791a0;
+    --accent-in: #0d8f83;
+    --accent-in-soft: #0d8f831a;
+    --accent-out: #6852d6;
+    --accent-out-soft: #6852d61a;
+    --good: #128a3e;
+    --good-soft: #128a3e1a;
+    --pending: #a5620a;
+    --pending-soft: #a5620a1a;
+    --critical: #c22b2b;
+    --code-bg: #10131a;
+    --code-ink: #e7ebf3;
+    --code-ink-dim: #8791a0;
+    --code-line: #262b36;
+    --code-key: #7fd8cd;
+    --code-str: #f2c078;
+    --code-num: #a89bf5;
+    --font: "IBM Plex Sans", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0a0c11; --surface: #12151c; --surface-2: #171b24; --line: #262b36;
+      --ink: #eef1f6; --ink-dim: #98a1b0; --ink-faint: #626b7a;
+      --accent-in: #2fd4c4; --accent-in-soft: #2fd4c422;
+      --accent-out: #a696f0; --accent-out-soft: #a696f022;
+      --good: #4fd67f; --good-soft: #4fd67f22;
+      --pending: #f0b23e; --pending-soft: #f0b23e22;
+      --critical: #f2726c;
+      --code-bg: #0a0c11; --code-line: #232833;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0c11; --surface: #12151c; --surface-2: #171b24; --line: #262b36;
+    --ink: #eef1f6; --ink-dim: #98a1b0; --ink-faint: #626b7a;
+    --accent-in: #2fd4c4; --accent-in-soft: #2fd4c422;
+    --accent-out: #a696f0; --accent-out-soft: #a696f022;
+    --good: #4fd67f; --good-soft: #4fd67f22;
+    --pending: #f0b23e; --pending-soft: #f0b23e22;
+    --critical: #f2726c;
+    --code-bg: #0a0c11; --code-line: #232833;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--font);
+    font-size: 15.5px; line-height: 1.6; margin: 0;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 56px 24px 100px; }
+
+  header.doc-head { margin-bottom: 40px; }
+  .kicker {
+    display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11.5px;
+    font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 14px;
+  }
+  .kicker svg { width: 14px; height: 14px; flex: none; }
+  h1 {
+    font-size: 34px; font-weight: 700; letter-spacing: -.015em; margin: 0 0 10px; text-wrap: balance;
+  }
+  .dek { color: var(--ink-dim); font-size: 16px; max-width: 58ch; margin: 0 0 26px; }
+
+  .status-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .status-chip {
+    display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 12.5px;
+    font-weight: 500; padding: 7px 12px 7px 10px; border-radius: 20px; border: 1px solid var(--line); background: var(--surface);
+  }
+  .status-chip .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .status-chip.live .dot { background: var(--good); box-shadow: 0 0 0 3px var(--good-soft); }
+  .status-chip.live { color: var(--good); border-color: var(--good-soft); }
+  .status-chip.pending .dot { background: var(--pending); box-shadow: 0 0 0 3px var(--pending-soft); }
+  .status-chip.pending { color: var(--pending); border-color: var(--pending-soft); }
+
+  /* ---- flow diagram ---- */
+  .flow {
+    display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: center; gap: 4px;
+    margin: 34px 0 40px; padding: 22px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  }
+  .flow-node { text-align: center; padding: 6px 4px; }
+  .flow-node .name { font-weight: 600; font-size: 14px; }
+  .flow-node .sub { font-size: 11.5px; color: var(--ink-faint); margin-top: 2px; }
+  .flow-arrow { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0 2px; }
+  .flow-arrow svg { width: 46px; height: 14px; }
+  .flow-arrow .lbl { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); letter-spacing: .02em; white-space: nowrap; }
+  .flow-arrow.in .lbl { color: var(--accent-in); }
+  .flow-arrow.out .lbl { color: var(--accent-out); }
+
+  section.direction { margin: 48px 0; padding-left: 20px; border-left: 3px solid var(--line); }
+  section.direction.in { border-left-color: var(--accent-in); }
+  section.direction.out { border-left-color: var(--accent-out); }
+
+  .dir-eyebrow {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase;
+  }
+  .dir-eyebrow.in { color: var(--accent-in); }
+  .dir-eyebrow.out { color: var(--accent-out); }
+  h2 { font-size: 23px; font-weight: 700; letter-spacing: -.01em; margin: 6px 0 8px; text-wrap: balance; }
+  section.direction > p.lede { color: var(--ink-dim); margin: 0 0 22px; max-width: 60ch; }
+
+  h3 { font-size: 14px; font-weight: 600; margin: 26px 0 10px; }
+
+  .endpoint {
+    display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 13.5px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; flex-wrap: wrap;
+  }
+  .method { font-weight: 700; padding: 2px 8px; border-radius: 5px; font-size: 12px; flex: none; }
+  .method.post { background: var(--accent-in-soft); color: var(--accent-in); }
+  .endpoint .url { color: var(--ink); word-break: break-all; }
+
+  table.kv { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 14px 0 6px; }
+  table.kv th {
+    text-align: left; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint);
+    font-weight: 600; padding: 0 10px 8px 0; border-bottom: 1px solid var(--line);
+  }
+  table.kv td { padding: 9px 10px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.kv tr:last-child td { border-bottom: none; }
+  table.kv code.field { font-family: var(--mono); font-size: 13px; color: var(--ink); }
+  table.kv .req { font-family: var(--mono); font-size: 10.5px; color: var(--critical); font-weight: 600; }
+  table.kv .opt { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+  table.kv .desc { color: var(--ink-dim); }
+
+  pre {
+    background: var(--code-bg); color: var(--code-ink); border: 1px solid var(--code-line); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; font-family: var(--mono); font-size: 12.8px; line-height: 1.65; margin: 14px 0;
+  }
+  pre .k { color: var(--code-key); }
+  pre .s { color: var(--code-str); }
+  pre .n { color: var(--code-num); }
+  pre .c { color: var(--code-ink-dim); font-style: italic; }
+
+  .callout {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 20px 0;
+  }
+  .callout .callout-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; margin-bottom: 8px; }
+  .callout.pending { border-color: var(--pending-soft); background: var(--pending-soft); }
+  .callout.pending .callout-head { color: var(--pending); }
+  .callout ul { margin: 6px 0 0; padding-left: 20px; }
+  .callout li { margin: 5px 0; color: var(--ink-dim); font-size: 13.5px; }
+  .callout li code { color: var(--ink); }
+  .callout p { margin: 6px 0 0; color: var(--ink-dim); font-size: 13.5px; }
+
+  code.inline {
+    font-family: var(--mono); font-size: 0.89em; background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 5px;
+  }
+
+  .err-list { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+  .err-row { display: flex; gap: 10px; align-items: baseline; font-size: 13.5px; }
+  .err-code { font-family: var(--mono); font-weight: 600; color: var(--critical); flex: none; width: 34px; }
+  .err-row .why { color: var(--ink-dim); }
+
+  footer.doc-foot { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--ink-faint); font-size: 12.5px; }
+</style>
+
+<div class="wrap">
+
+  <header class="doc-head">
+    <div class="kicker">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M4 12a8 8 0 0116 0M7 12a5 5 0 0110 0M12 15v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      CCCS integration reference
+    </div>
+    <h1>The GuardM8 ↔ CCCS bridge</h1>
+    <p class="dek">Two data paths between GuardM8/AURA and Echelon's dispatch console: GuardM8 pushing jobs into CCCS, and CCCS pushing emergency-button alerts out to AURA. Written for whoever's wiring up GuardM8's side of both.</p>
+    <div class="status-row">
+      <span class="status-chip live"><span class="dot"></span>Inbound jobs — live &amp; verified</span>
+      <span class="status-chip pending"><span class="dot"></span>Outbound alerts — awaiting schema confirmation</span>
+    </div>
+  </header>
+
+  <div class="flow">
+    <div class="flow-node"><div class="name">GuardM8</div><div class="sub">alarm source</div></div>
+    <div class="flow-arrow in">
+      <svg viewBox="0 0 46 14"><path d="M0 7h40M40 7l-7-6M40 7l-7 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="lbl">HTTPS · REST</span>
+    </div>
+    <div class="flow-node"><div class="name">CCCS</div><div class="sub">dispatch console</div></div>
+    <div class="flow-arrow out">
+      <svg viewBox="0 0 46 14"><path d="M0 7h40M40 7l-7-6M40 7l-7 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="lbl">MQTT · publish</span>
+    </div>
+    <div class="flow-node"><div class="name">AURA</div><div class="sub">alarm receiving centre</div></div>
+  </div>
+
+  <section class="direction in">
+    <div class="dir-eyebrow in">Direction 1 — inbound</div>
+    <h2>Dispatching a job into CCCS</h2>
+    <p class="lede">GuardM8 raises an alarm and wants a unit dispatched. One POST creates a real, dispatchable job in CCCS's queue — same shape a call-taker creates by hand, visible on the control room board immediately.</p>
+
+    <h3>Endpoint</h3>
+    <div class="endpoint">
+      <span class="method post">POST</span>
+      <span class="url">https://comms.echeloncic.com/api/integrations/guardm8/jobs</span>
+    </div>
+
+    <h3>Headers</h3>
+    <table class="kv">
+      <tr><th>Header</th><th>Value</th></tr>
+      <tr><td><code class="field">x-guardm8-secret</code></td><td class="desc"><code class="inline">1c4b8409ce1b604a46d0d5889f1fdf9c3fbb792b580184c5</code></td></tr>
+      <tr><td><code class="field">content-type</code></td><td class="desc"><code class="inline">application/json</code></td></tr>
+    </table>
+
+    <h3>Body</h3>
+    <table class="kv">
+      <tr><th>Field</th><th>Notes</th></tr>
+      <tr><td><code class="field">location</code></td><td><span class="req">required*</span><span class="desc"> — free-text address. *or <code class="inline">site</code>, if the premises is a known CCCS site.</span></td></tr>
+      <tr><td><code class="field">priority</code></td><td><span class="opt">optional</span><span class="desc"> — <code class="inline">RED/AMBER/GREEN/ROUTINE</code> or plain words (<code class="inline">critical</code>, <code class="inline">high</code>…) / P-codes. Defaults to <code class="inline">GREEN</code>.</span></td></tr>
+      <tr><td><code class="field">incident_type</code></td><td><span class="opt">optional</span><span class="desc"> — e.g. <code class="inline">"PANIC ALARM"</code>. Defaults to <code class="inline">ALARM</code>.</span></td></tr>
+      <tr><td><code class="field">description</code></td><td><span class="opt">optional</span></td></tr>
+      <tr><td><code class="field">caller</code></td><td><span class="opt">optional</span><span class="desc"> — defaults to <code class="inline">GuardM8</code>.</span></td></tr>
+      <tr><td><code class="field">external_ref</code></td><td><span class="opt">recommended</span><span class="desc"> — your alarm ID. Resending the same value returns the existing job instead of duplicating it.</span></td></tr>
+      <tr><td><code class="field">lat</code> / <code class="field">lon</code></td><td><span class="opt">optional</span></td></tr>
+      <tr><td><code class="field">required_resources</code></td><td><span class="opt">optional</span><span class="desc"> — defaults to <code class="inline">1</code>.</span></td></tr>
+      <tr><td><code class="field">what3words</code>, <code class="field">notes</code>, <code class="field">keyholder</code></td><td><span class="opt">optional</span></td></tr>
+    </table>
+
+    <h3>Example</h3>
+    <pre>curl -X POST https://comms.echeloncic.com/api/integrations/guardm8/jobs \
+  -H <span class="s">"x-guardm8-secret: 1c4b8409ce1b604a46d0d5889f1fdf9c3fbb792b580184c5"</span> \
+  -H <span class="s">"content-type: application/json"</span> \
+  -d <span class="s">'{
+    "external_ref": "GM8-ALM-9001",
+    "priority": "critical",
+    "incident_type": "PANIC ALARM",
+    "location": "Oakwood DVR 2, Tadcaster",
+    "description": "Panic button activated, zone 3",
+    "caller": "GuardM8 Controller"
+  }'</span></pre>
+
+    <p style="color:var(--ink-dim);font-size:13.5px;margin:16px 0 4px">Response — <span style="font-family:var(--mono);color:var(--good)">201</span> on create, <span style="font-family:var(--mono);color:var(--good)">200</span> when <code class="inline">external_ref</code> replays an existing job:</p>
+    <pre>{
+  <span class="k">"id"</span>: <span class="n">11</span>,
+  <span class="k">"reference"</span>: <span class="s">"INC-2026-00135"</span>,
+  <span class="k">"incident_type"</span>: <span class="s">"PANIC ALARM"</span>,
+  <span class="k">"priority"</span>: <span class="s">"RED"</span>,
+  <span class="k">"location"</span>: <span class="s">"Oakwood DVR 2, Tadcaster"</span>,
+  <span class="k">"status"</span>: <span class="s">"CREATED"</span>,
+  <span class="k">"external_source"</span>: <span class="s">"guardm8"</span>,
+  <span class="k">"external_ref"</span>: <span class="s">"GM8-ALM-9001"</span>,
+  <span class="k">"resources"</span>: []
+  <span class="c">// …plus created_at, caller, description, notes, etc.</span>
+}</pre>
+
+    <h3>Errors</h3>
+    <div class="err-list">
+      <div class="err-row"><span class="err-code">401</span><span class="why">missing or wrong <code class="inline">x-guardm8-secret</code></span></div>
+      <div class="err-row"><span class="err-code">400</span><span class="why">neither <code class="inline">location</code> nor <code class="inline">site</code> given</span></div>
+    </div>
+  </section>
+
+  <section class="direction out">
+    <div class="dir-eyebrow out">Direction 2 — outbound</div>
+    <h2>Receiving emergency alerts in AURA</h2>
+    <p class="lede">When an officer's or MDT's emergency button is pressed, CCCS publishes an alert over MQTT to AURA. The transport is wired and verified reachable — the message <em>shape</em> AURA's parser wants is still being confirmed, so publishing is currently switched off.</p>
+
+    <h3>Transport</h3>
+    <table class="kv">
+      <tr><th>Field</th><th>Value</th></tr>
+      <tr><td>Broker</td><td class="desc"><code class="inline">192.168.7.31:1883</code> · plain TCP, username + password</td></tr>
+      <tr><td>Publish topic</td><td class="desc"><code class="inline">arc/rx/cccs</code> — the "CCCS" provider registered in AURA</td></tr>
+      <tr><td>Connection</td><td class="desc">persistent, one client for the process lifetime, reconnects on drop</td></tr>
+      <tr><td>Trigger</td><td class="desc">any officer/MDT emergency-button press (physical or on-screen)</td></tr>
+      <tr><td>Feed timeout</td><td class="desc">AURA's provider config raises an alarm if this topic is silent for <code class="inline">300s</code></td></tr>
+    </table>
+
+    <h3>Current payload attempt <span style="font-weight:400;color:var(--ink-faint);font-family:var(--mono);font-size:12px">(unconfirmed)</span></h3>
+    <pre>{
+  <span class="k">"acct"</span>: <span class="s">"8581"</span>,          <span class="c">// Echelon Control Centre</span>
+  <span class="k">"zone"</span>: <span class="s">"0"</span>,
+  <span class="k">"event"</span>: <span class="s">"PA"</span>,             <span class="c">// SIA: panic alarm</span>
+  <span class="k">"description"</span>: <span class="s">"Emergency button activated"</span>,
+  <span class="k">"callsign"</span>: <span class="s">"P101"</span>,
+  <span class="k">"lat"</span>: <span class="n">53.601</span>, <span class="k">"lon"</span>: <span class="n">-0.203</span>,
+  <span class="k">"timestamp"</span>: <span class="s">"2026-09-14T13:45:04.003Z"</span>
+}</pre>
+
+    <div class="callout pending">
+      <div class="callout-head">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 9v4m0 4h.01M10.3 3.9L2.5 17a2 2 0 001.7 3h15.6a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        What AURA's side needs to confirm
+      </div>
+      <ul>
+        <li>Exact field names the <code class="inline">arc/rx/cccs</code> provider's parser expects — a first attempt with <code class="inline">acct</code>/<code class="inline">zone</code>/<code class="inline">event</code>/<code class="inline">description</code> still returned an <strong>"Unparsed signal"</strong>.</li>
+        <li>Whether <code class="inline">event</code> should be a SIA code (<code class="inline">PA</code>) or something else in CCCS's own vocabulary.</li>
+        <li>Whether a heartbeat is required to hold the feed-timeout watchdog open between real alerts, and on what cadence.</li>
+      </ul>
+      <p>Two test messages from earlier probing are still sitting un-acknowledged in the AURA queue as <strong>"Unparsed signal via cccs"</strong> — safe to Ack and clear.</p>
+    </div>
+  </section>
+
+  <footer class="doc-foot">CCCS — Critical Communications, Dispatch &amp; Control-Room System · comms.echeloncic.com</footer>
+
+</div>

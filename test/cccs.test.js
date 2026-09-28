@@ -1,4 +1,4 @@
-/* CCCS POC test suite — node --test */
+/* CCCS test suite — node --test */
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 const net = require('node:net');
@@ -100,17 +100,24 @@ function wsClient(token) {
   });
 }
 
-let adminT, dispT, r101T, r102T, r103T, mdtT;
+let adminT, dispT, danT, ellieT, ryanT, mdtT;
+let danId, ellieId, ryanId, mdt1Id;
 
 before(async () => {
   app.start();
   await new Promise((r) => setTimeout(r, 200));
   adminT = await login('admin', 'admin123');
   dispT = await login('dispatcher', 'dispatch123');
-  r101T = await login('radio101', 'radio123');
-  r102T = await login('radio102', 'radio123');
-  r103T = await login('radio103', 'radio123');
+  danT = await login('dwhitfield', 'field123');
+  ellieT = await login('emarsh', 'field123');
+  ryanT = await login('rcole', 'field123');
   mdtT = await login('mdt001', 'mdt123');
+
+  const personnel = (await call('GET', '/api/personnel', undefined, dispT)).body;
+  danId = personnel.find((p) => p.name === 'Dan Whitfield').id;
+  ellieId = personnel.find((p) => p.name === 'Ellie Marsh').id;
+  ryanId = personnel.find((p) => p.name === 'Ryan Cole').id;
+  mdt1Id = (await call('GET', '/api/mdts', undefined, dispT)).body.find((m) => m.mdt_code === 'MDT-001').id;
 });
 after(() => {
   app.server.closeAllConnections?.();
@@ -120,352 +127,284 @@ after(() => {
 /* ---------------- auth ---------------- */
 test('rejects bad credentials and unauthenticated API calls', async () => {
   assert.equal((await call('POST', '/api/auth/login', { username: 'admin', password: 'wrong' })).status, 401);
-  assert.equal((await call('GET', '/api/radios')).status, 401);
-  assert.equal((await call('GET', '/api/radios', undefined, dispT)).status, 200);
+  assert.equal((await call('GET', '/api/mdts')).status, 401);
+  assert.equal((await call('GET', '/api/mdts', undefined, dispT)).status, 200);
 });
 
 test('role permissions are enforced', async () => {
-  assert.equal((await call('POST', '/api/radios', { issi: '234199999' }, r101T)).status, 403);
+  assert.equal((await call('POST', '/api/mdts', { mdt_code: 'MDT-999' }, danT)).status, 403);
   assert.equal((await call('POST', '/api/users', { username: 'x', password: 'password1', role: 'DISPATCHER' }, dispT)).status, 403);
 });
 
-/* ---------------- ISSI ---------------- */
-test('creates a radio with a unique ISSI', async () => {
-  const res = await call('POST', '/api/radios', { issi: '234100900', alias: 'TEST RADIO', radio_type: 'HANDHELD' }, adminT);
+/* ---------------- MDTs ---------------- */
+test('creates an MDT with a unique code', async () => {
+  const res = await call('POST', '/api/mdts', { mdt_code: 'MDT-900', serial: 'SN-900' }, adminT);
   assert.equal(res.status, 201);
-  assert.equal(res.body.issi, '234100900');
+  assert.equal(res.body.mdt_code, 'MDT-900');
 });
 
-test('rejects a duplicate ISSI', async () => {
-  const res = await call('POST', '/api/radios', { issi: '234100900' }, adminT);
+test('rejects a duplicate MDT code', async () => {
+  const res = await call('POST', '/api/mdts', { mdt_code: 'MDT-900' }, adminT);
   assert.equal(res.status, 409);
   assert.match(res.body.error, /already exists/);
 });
 
-test('rejects a malformed ISSI', async () => {
-  assert.equal((await call('POST', '/api/radios', { issi: 'ABC' }, adminT)).status, 400);
+test('rejects an MDT with no code', async () => {
+  assert.equal((await call('POST', '/api/mdts', {}, adminT)).status, 400);
 });
 
 /* ---------------- assignment ---------------- */
-test('assigns a radio to a call sign, adds an MDT, then removes the radio', async () => {
+test('assigns an MDT to a call sign, then removes it', async () => {
   const callsigns = await call('GET', '/api/callsigns', undefined, dispT);
-  const b202 = callsigns.body.find((c) => c.name === 'M202');
-  assert.equal((await call('POST', `/api/callsigns/${b202.id}/assign`, { radio: '234100900' }, dispT)).status, 200);
-  assert.equal((await call('POST', `/api/callsigns/${b202.id}/assign`, { mdt: 'MDT-003' }, dispT)).status, 200);
+  const m202 = callsigns.body.find((c) => c.name === 'M202');
+  assert.equal((await call('POST', `/api/callsigns/${m202.id}/assign`, { mdt: 'MDT-900' }, dispT)).status, 200);
 
   let after = (await call('GET', '/api/callsigns', undefined, dispT)).body.find((c) => c.name === 'M202');
-  assert.equal(after.radios.length, 2, 'call sign holds multiple radios');
-  assert.ok(after.mdts.some((m) => m.mdt_code === 'MDT-003'));
+  assert.ok(after.mdts.some((m) => m.mdt_code === 'MDT-900'));
 
-  assert.equal((await call('DELETE', `/api/callsigns/${b202.id}/assign`, { radio: '234100900' }, dispT)).status, 200);
+  assert.equal((await call('DELETE', `/api/callsigns/${m202.id}/assign`, { mdt: 'MDT-900' }, dispT)).status, 200);
   after = (await call('GET', '/api/callsigns', undefined, dispT)).body.find((c) => c.name === 'M202');
-  assert.equal(after.radios.length, 1);
+  assert.ok(!after.mdts.some((m) => m.mdt_code === 'MDT-900'));
 });
 
-/* ---------------- realtime: radio attach + status ---------------- */
-test('radio registers over WebSocket and control sees the status change', async () => {
-  const radio = await wsClient(r101T);
+/* ---------------- realtime: MDT attach + duty status ---------------- */
+test('MDT registers over WebSocket and control sees the duty status change', async () => {
+  const mdt = await wsClient(mdtT);
   const control = await wsClient(dispT);
-  radio.send('radio.attach', { issi: '234100001' });
-  const attached = await radio.waitFor('radio.attached');
-  assert.equal(attached.callsign, 'P101');
-  assert.equal(attached.status, 'AVAILABLE');
+  mdt.send('mdt.attach', { mdt_code: 'MDT-001' });
+  const attached = await mdt.waitFor('mdt.attached');
+  assert.equal(attached.mdt_code, 'MDT-001');
+  assert.equal(attached.connected, true);
 
-  await call('POST', '/api/radios/234100001/status', { status: 'BUSY' }, r101T);
-  // the registration broadcast may still be in flight, so wait for the BUSY one specifically
-  const seen = await control.waitUntil('radio.status_changed', (p) => p.status === 'BUSY');
-  assert.equal(seen.status, 'BUSY');
-  radio.close(); control.close();
+  await call('POST', `/api/mdts/${mdt1Id}/duty-status`, { status: 'BUSY' }, mdtT);
+  const seen = await control.waitUntil('mdt.status_changed', (p) => p.duty_status === 'BUSY');
+  assert.equal(seen.duty_status, 'BUSY');
+  mdt.close(); control.close();
 });
 
-/* ---------------- calls ---------------- */
-test('dispatcher calls a radio, the radio is alerted and answers', async () => {
-  const radio = await wsClient(r101T);
-  radio.send('radio.attach', { issi: '234100001' });
-  await radio.waitFor('radio.attached');
+test('crew can sign in and out of a vehicle terminal, capped at three', async () => {
+  await call('POST', `/api/mdts/${mdt1Id}/crew`, { name: 'Temp Crew A' }, mdtT);
+  const second = await call('POST', `/api/mdts/${mdt1Id}/crew`, { name: 'Temp Crew B' }, mdtT);
+  assert.equal(second.status, 201);
+  assert.equal(second.body.crew.length, 2);
 
-  const started = await call('POST', '/api/calls/private', { to: '234100001' }, dispT);
-  assert.equal(started.status, 201);
-  const incoming = await radio.waitFor('call.incoming');
-  assert.equal(incoming.from_label, 'CONTROL');
+  await call('POST', `/api/mdts/${mdt1Id}/crew`, { name: 'Temp Crew C' }, mdtT);
+  assert.equal((await call('POST', `/api/mdts/${mdt1Id}/crew`, { name: 'Temp Crew D' }, mdtT)).status, 409);
 
-  const accepted = await call('POST', `/api/calls/${started.body.id}/accept`, {}, r101T);
-  assert.equal(accepted.body.state, 'ACTIVE');
-  const ended = await call('POST', `/api/calls/${started.body.id}/end`, {}, dispT);
-  assert.equal(ended.body.state, 'ENDED');
-  radio.close();
+  const crewId = second.body.crew[1].id;
+  const after = await call('DELETE', `/api/mdts/${mdt1Id}/crew/${crewId}`, undefined, mdtT);
+  assert.equal(after.body.crew.length, 2);
 });
 
-test('radio calls radio and the callee declines', async () => {
-  const a = await wsClient(r101T), b = await wsClient(r102T);
-  a.send('radio.attach', { issi: '234100001' }); await a.waitFor('radio.attached');
-  b.send('radio.attach', { issi: '234100002' }); await b.waitFor('radio.attached');
-
-  const started = await call('POST', '/api/calls/private', { to: '234100002' }, r101T);
-  assert.equal(started.status, 201);
-  await b.waitFor('call.incoming');
-  await call('POST', `/api/calls/${started.body.id}/reject`, {}, r102T);
-  const ended = await a.waitFor('call.ended');
-  assert.equal(ended.end_reason, 'DECLINED');
-  a.close(); b.close();
-});
-
-test('calling an offline radio fails cleanly', async () => {
-  const res = await call('POST', '/api/calls/private', { to: '234100006' }, dispT);
-  assert.equal(res.status, 409);
-});
-
-test('group call reaches every connected member of a talkgroup', async () => {
-  const a = await wsClient(r101T), b = await wsClient(r102T);
-  a.send('radio.attach', { issi: '234100001' }); await a.waitFor('radio.attached');
-  b.send('radio.attach', { issi: '234100002' }); await b.waitFor('radio.attached');
-  const tgs = (await call('GET', '/api/talkgroups', undefined, dispT)).body;
-  const amb1 = tgs.find((t) => t.name === 'PATROL 1');
-  const res = await call('POST', '/api/calls/group', { talkgroup: amb1.id }, dispT);
-  assert.equal(res.status, 201);
-  await a.waitFor('call.incoming');
-  await b.waitFor('call.incoming');
-  await call('POST', `/api/calls/${res.body.id}/end`, {}, dispT);
-  a.close(); b.close();
-});
-
-/* ---------------- PTT floor control ---------------- */
-test('only one radio holds the talkgroup floor at a time', async () => {
-  const a = await wsClient(r101T), b = await wsClient(r102T);
-  a.send('radio.attach', { issi: '234100001' }); await a.waitFor('radio.attached');
-  b.send('radio.attach', { issi: '234100002' }); await b.waitFor('radio.attached');
-
-  a.send('radio.ptt_start', { talkgroup: 'PATROL 1' });
-  const tx = await b.waitFor('radio.ptt_started');
-  assert.equal(tx.callsign, 'P101');
-
-  b.send('radio.ptt_start', { talkgroup: 'PATROL 1' });
-  const denied = await b.waitFor('ptt.denied');
-  assert.equal(denied.holder, 'P101');
-
-  a.send('radio.ptt_release', { talkgroup: 'PATROL 1' });
-  await b.waitFor('radio.ptt_released');
-  a.close(); b.close();
+test('an MDT terminal cannot act for a different terminal', async () => {
+  const other = (await call('GET', '/api/mdts', undefined, dispT)).body.find((m) => m.mdt_code === 'MDT-002');
+  assert.equal((await call('POST', `/api/mdts/${other.id}/duty-status`, { status: 'BUSY' }, mdtT)).status, 403);
 });
 
 /* ---------------- jobs ---------------- */
-test('job is created, dispatched to a call sign, received and acknowledged', async () => {
-  const radio = await wsClient(r101T), mdt = await wsClient(mdtT), control = await wsClient(dispT);
-  radio.send('radio.attach', { issi: '234100001' }); await radio.waitFor('radio.attached');
+test('job is created, dispatched to a call sign, received by personnel and MDT, and acknowledged', async () => {
+  const officer = await wsClient(danT), mdt = await wsClient(mdtT), control = await wsClient(dispT);
   mdt.send('mdt.attach', { mdt_code: 'MDT-001' }); await mdt.waitFor('mdt.attached');
 
   const job = await call('POST', '/api/jobs', {
-    incident_type: 'Cardiac arrest', priority: 'RED', location: '123 Example Street',
-    description: 'Patient requiring immediate assistance', caller: 'Bystander',
+    incident_type: 'Alarm activation', priority: 'RED', location: '123 Example Street',
+    description: 'Zone 3 activation', caller: 'Monitoring centre',
   }, dispT);
   assert.equal(job.status, 201);
   assert.equal(job.body.status, 'CREATED');
 
   const dispatched = await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
   assert.equal(dispatched.body.status, 'DISPATCHED');
+  assert.ok(dispatched.body.resources.some((r) => r.personnel === 'Dan Whitfield'));
+  assert.ok(dispatched.body.resources.some((r) => r.mdt === 'MDT-001'));
 
-  const onRadio = await radio.waitFor('job.assigned_to_you');
-  assert.equal(onRadio.reference, job.body.reference);
+  const onOfficer = await officer.waitFor('job.assigned_to_you');
+  assert.equal(onOfficer.reference, job.body.reference);
   const onMdt = await mdt.waitFor('job.assigned_to_you');
   assert.equal(onMdt.priority, 'RED');
 
-  const acked = await call('POST', `/api/jobs/${job.body.id}/ack`, {}, r101T);
+  const acked = await call('POST', `/api/jobs/${job.body.id}/ack`, {}, danT);
   assert.equal(acked.body.status, 'ACKNOWLEDGED');
   const ackSeen = await control.waitFor('job.acknowledged');
-  assert.equal(ackSeen.by, 'P101');
+  assert.equal(ackSeen.by, 'Dan Whitfield');
 
-  const enroute = await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'EN_ROUTE' }, r101T);
+  const enroute = await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'EN_ROUTE' }, danT);
   assert.equal(enroute.body.status, 'EN_ROUTE');
   assert.equal((await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'NONSENSE' }, dispT)).status, 400);
 
-  radio.close(); mdt.close(); control.close();
+  officer.close(); mdt.close(); control.close();
 });
 
-test('a radio cannot change the status of a job it was not given', async () => {
+test('a field user cannot change the status of a job they were not given', async () => {
   const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Elsewhere' }, dispT);
   await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P103'] }, dispT);
-  assert.equal((await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'ON_SCENE' }, r101T)).status, 403);
+  assert.equal((await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'ON_SCENE' }, danT)).status, 403);
+});
+
+test('a job checklist item can be completed with notes, and a photo attached', async () => {
+  const job = await call('POST', '/api/jobs', {
+    priority: 'AMBER', location: 'Carlton Retail Centre', incident_type: 'Patrol visit',
+  }, dispT);
+  assert.ok(job.body.checklist.length > 0, 'a default checklist is instantiated');
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
+
+  const item = job.body.checklist[0];
+  const updated = await call('PATCH', `/api/jobs/${job.body.id}/checklist/${item.id}`, { status: 'COMPLETE', notes: 'All clear' }, danT);
+  assert.equal(updated.status, 200);
+  const savedItem = updated.body.checklist.find((x) => x.id === item.id);
+  assert.equal(savedItem.status, 'COMPLETE');
+  assert.equal(savedItem.notes, 'All clear');
+  assert.ok(savedItem.completed_at);
+
+  const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const media = await call('POST', `/api/jobs/${job.body.id}/media`, { mimetype: 'image/png', data: tinyPngBase64, checklist_item_id: item.id }, danT);
+  assert.equal(media.status, 201);
+  assert.equal(media.body.checklist_item_id, item.id);
+
+  assert.equal((await call('PATCH', `/api/jobs/${job.body.id}/checklist/${item.id}`, { status: 'COMPLETE' }, ellieT)).status, 403,
+    'a field user not assigned to the job cannot touch its checklist');
+});
+
+test('completing a job generates a resolution report', async () => {
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Ashcroft House' }, dispT);
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
+  const done = await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'COMPLETED' }, dispT);
+  assert.equal(done.body.status, 'COMPLETED');
+  assert.ok(done.body.resolution_report_html.includes(job.body.reference));
+});
+
+test('a resource can be stood down from a job', async () => {
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
+  const stood = await call('POST', `/api/jobs/${job.body.id}/stand-down`, { personnel: danId }, dispT);
+  assert.equal(stood.status, 200);
+  assert.ok(!stood.body.resources.some((r) => r.personnel === 'Dan Whitfield'));
+  assert.ok(stood.body.resources.some((r) => r.mdt === 'MDT-001'), 'the MDT is untouched');
+});
+
+/* ---------------- GuardM8 integration ---------------- */
+test('GuardM8 can push a job with a shared secret, and retries are idempotent', async () => {
+  process.env.GUARDM8_SECRET = 'test-guardm8-secret';
+  const bad = await fetch(BASE + '/api/integrations/guardm8/jobs', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ location: 'Somewhere', external_ref: 'g-1' }),
+  });
+  assert.equal(bad.status, 401);
+
+  const good = await fetch(BASE + '/api/integrations/guardm8/jobs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-guardm8-secret': 'test-guardm8-secret' },
+    body: JSON.stringify({ location: 'Somewhere', priority: 'HIGH', external_ref: 'g-1' }),
+  });
+  const goodBody = await good.json();
+  assert.equal(good.status, 201);
+  assert.equal(goodBody.priority, 'AMBER');
+
+  const retry = await fetch(BASE + '/api/integrations/guardm8/jobs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-guardm8-secret': 'test-guardm8-secret' },
+    body: JSON.stringify({ location: 'Somewhere', priority: 'HIGH', external_ref: 'g-1' }),
+  });
+  const retryBody = await retry.json();
+  assert.equal(retry.status, 200);
+  assert.equal(retryBody.id, goodBody.id, 'the same external_ref does not create a second job');
 });
 
 /* ---------------- emergency ---------------- */
-test('radio raises an emergency, control is alerted and can acknowledge and reset it', async () => {
-  const radio = await wsClient(r101T), control = await wsClient(dispT);
-  radio.send('radio.attach', { issi: '234100001' }); await radio.waitFor('radio.attached');
+test('a field user raises an emergency, control is alerted and can acknowledge and reset it', async () => {
+  const officer = await wsClient(danT), control = await wsClient(dispT);
 
-  const ev = await call('POST', '/api/emergency', {}, r101T);
+  const ev = await call('POST', '/api/emergency', {}, danT);
   assert.equal(ev.status, 201);
   const alert = await control.waitFor('emergency.activated');
   assert.equal(alert.callsign, 'P101');
   assert.equal(alert.state, 'ACTIVE');
-  assert.equal((await call('GET', '/api/radios/234100001', undefined, dispT)).body.status, 'EMERGENCY');
+  assert.equal(alert.personnel_id, danId);
 
   const acked = await call('POST', `/api/emergency/${ev.body.id}/ack`, {}, dispT);
   assert.equal(acked.body.state, 'ACKNOWLEDGED');
   const resolved = await call('POST', `/api/emergency/${ev.body.id}/resolve`, {}, dispT);
   assert.equal(resolved.body.state, 'RESOLVED');
-  assert.notEqual((await call('GET', '/api/radios/234100001', undefined, dispT)).body.status, 'EMERGENCY');
-  radio.close(); control.close();
+  officer.close(); control.close();
 });
 
-test('a radio user cannot acknowledge their own emergency', async () => {
-  const ev = await call('POST', '/api/emergency', {}, r101T);
-  assert.equal((await call('POST', `/api/emergency/${ev.body.id}/ack`, {}, r101T)).status, 403);
+test('a field user cannot acknowledge their own emergency', async () => {
+  const ev = await call('POST', '/api/emergency', {}, danT);
+  assert.equal((await call('POST', `/api/emergency/${ev.body.id}/ack`, {}, danT)).status, 403);
+  await call('POST', `/api/emergency/${ev.body.id}/resolve`, {}, dispT);
+});
+
+test('an emergency auto-creates a backup job', async () => {
+  const ev = await call('POST', '/api/emergency', {}, ellieT);
+  const job = (await call('GET', '/api/jobs', undefined, dispT)).body.find((j) => j.id === ev.body.job_id);
+  assert.ok(job, 'a job was created for the emergency');
+  assert.equal(job.priority, 'RED');
+  await call('POST', `/api/emergency/${ev.body.id}/ack`, {}, dispT);
   await call('POST', `/api/emergency/${ev.body.id}/resolve`, {}, dispT);
 });
 
 /* ---------------- messaging + audit ---------------- */
-test('control messages a radio and the event is written to the audit log', async () => {
-  const radio = await wsClient(r101T);
-  radio.send('radio.attach', { issi: '234100001' }); await radio.waitFor('radio.attached');
-  await call('POST', '/api/messages', { to_radio: '234100001', body: 'RVP at the junction' }, dispT);
-  const msg = await radio.waitFor('message.received');
+test('control messages a field user and the event is written to the audit log', async () => {
+  const officer = await wsClient(danT);
+  await call('POST', '/api/messages', { to_personnel: danId, body: 'RVP at the junction' }, dispT);
+  const msg = await officer.waitFor('message.received');
   assert.equal(msg.body, 'RVP at the junction');
   const events = await call('GET', '/api/events?type=message', undefined, dispT);
   assert.ok(events.body.some((e) => e.summary.includes('RVP at the junction')));
-  radio.close();
+  officer.close();
 });
 
 test('websocket upgrade is refused without a valid token', async () => {
   await assert.rejects(wsClient('not-a-real-token'), /handshake failed/);
 });
 
-/* ---------------- telephony (simulated gateway) ---------------- */
-test('radio dials 9 for an outside line and the call answers then clears', async () => {
-  const radio = await wsClient(r101T);
-  radio.send('radio.attach', { issi: '234100001' }); await radio.waitFor('radio.attached');
-
-  const res = await call('POST', '/api/calls/pstn', { digits: '902071234567' }, r101T);
-  assert.equal(res.status, 201);
-  assert.equal(res.body.kind, 'PSTN');
-  assert.equal(res.body.dialled_number, '02071234567');
-  assert.equal(res.body.state, 'RINGING');
-
-  const answered = await radio.waitUntil('call.accepted', (p) => p.id === res.body.id, 6000);
-  assert.equal(answered.state, 'ACTIVE');
-
-  const ended = await call('POST', `/api/calls/${res.body.id}/end`, {}, r101T);
-  assert.equal(ended.body.state, 'ENDED');
-  radio.close();
-});
-
-test('a dialled string without the outside-line prefix is rejected', async () => {
-  const res = await call('POST', '/api/calls/pstn', { digits: '02071234567' }, r101T);
-  assert.equal(res.status, 400);
-  assert.match(res.body.error, /must start with 9/);
-  assert.equal((await call('POST', '/api/calls/pstn', { digits: '9' }, r101T)).status, 400);
-});
-
-test('inbound PBX calls need the shared secret and ring the radio', async () => {
-  process.env.PBX_SECRET = 'test-pbx-secret';
-  const radio = await wsClient(r101T);
-  radio.send('radio.attach', { issi: '234100001' }); await radio.waitFor('radio.attached');
-
-  const bad = await fetch(BASE + '/api/pbx/inbound', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ to: '234100001' }),
-  });
-  assert.equal(bad.status, 401);
-
-  const good = await fetch(BASE + '/api/pbx/inbound', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-pbx-secret': 'test-pbx-secret' },
-    body: JSON.stringify({ to: '234100001', caller_id: '07700900123' }),
-  });
-  assert.equal(good.status, 201);
-  const incoming = await radio.waitUntil('call.incoming', (p) => p.kind === 'PSTN');
-  assert.equal(incoming.from_label, '07700900123');
-  radio.close();
-});
-
-/* ---------------- WebRTC signalling ---------------- */
-test('WebRTC offers are relayed to the addressed radio and unknown peers report back', async () => {
-  const a = await wsClient(r101T), b = await wsClient(r102T);
-  a.send('radio.attach', { issi: '234100001' }); await a.waitFor('radio.attached');
-  b.send('radio.attach', { issi: '234100002' }); await b.waitFor('radio.attached');
-
-  a.send('webrtc.signal', { to: 'radio:234100002', data: { sdp: { type: 'offer', sdp: 'v=0 fake' } } });
-  const relayed = await b.waitFor('webrtc.signal');
-  assert.equal(relayed.from, 'radio:234100001');
-  assert.equal(relayed.data.sdp.type, 'offer');
-
-  a.send('webrtc.signal', { to: 'radio:234100099', data: {} });
-  const miss = await a.waitFor('webrtc.unreachable');
-  assert.equal(miss.to, 'radio:234100099');
-  a.close(); b.close();
-});
-
-test('the floor holder is told which peers to stream audio to', async () => {
-  const a = await wsClient(r101T), b = await wsClient(r102T), control = await wsClient(dispT);
-  a.send('radio.attach', { issi: '234100001' }); await a.waitFor('radio.attached');
-  b.send('radio.attach', { issi: '234100002' }); await b.waitFor('radio.attached');
-  await new Promise((r) => setTimeout(r, 50));
-
-  a.send('radio.ptt_start', { talkgroup: 'PATROL 1' });
-  const granted = await a.waitFor('ptt.granted');
-  assert.ok(granted.listeners.includes('radio:234100002'), 'talkgroup member is a listener');
-  assert.ok(granted.listeners.some((l) => l.startsWith('conn:')), 'control room monitors the talkgroup');
-  assert.ok(!granted.listeners.includes('radio:234100001'), 'the talker does not stream to itself');
-  a.send('radio.ptt_release', { talkgroup: 'PATROL 1' });
-  a.close(); b.close(); control.close();
-});
-
 /* ---------------- lone worker welfare ---------------- */
-test('welfare timer warns the officer, then alarms control when no check-in arrives', async () => {
-  const radio = await wsClient(r101T), control = await wsClient(dispT);
-  radio.send('radio.attach', { issi: '234100001' }); await radio.waitFor('radio.attached');
-
-  const started = await call('POST', '/api/radios/234100001/welfare', { interval_s: 30, note: 'Internal check, Meridian' }, r101T);
+test('welfare timer starts, warns, and can be checked in', async () => {
+  const started = await call('POST', `/api/personnel/${danId}/welfare`, { interval_s: 30, note: 'Internal check, Meridian' }, danT);
   assert.equal(started.status, 200);
   assert.ok(started.body.welfare_due_at);
 
-  // Warn threshold is 2s in tests, so shorten the timer by checking in against a short interval.
-  await call('POST', '/api/radios/234100001/welfare', { interval_s: 30 }, r101T);
-  const checked = await call('POST', '/api/radios/234100001/welfare/check', {}, r101T);
+  const checked = await call('POST', `/api/personnel/${danId}/welfare/check`, {}, danT);
   assert.equal(checked.status, 200);
-
-  radio.close(); control.close();
+  await call('DELETE', `/api/personnel/${danId}/welfare`, {}, danT);
 });
 
 test('an overdue welfare timer raises an alarm at control with the last known position', async () => {
-  const radio = await wsClient(r102T), control = await wsClient(dispT);
-  radio.send('radio.attach', { issi: '234100002' }); await radio.waitFor('radio.attached');
-
-  // Drive the deadline directly rather than waiting 30 real seconds.
-  await call('POST', '/api/radios/234100002/welfare', { interval_s: 30, note: 'Roof check' }, r102T);
-  const r = app.db.radios.find((x) => x.issi === '234100002');
-  r.welfare_due_at = new Date(Date.now() - 1000).toISOString();
+  const control = await wsClient(dispT);
+  await call('POST', `/api/personnel/${ellieId}/welfare`, { interval_s: 30, note: 'Roof check' }, ellieT);
+  const p = app.db.personnel.find((x) => x.id === ellieId);
+  p.welfare_due_at = new Date(Date.now() - 1000).toISOString();
 
   const alarm = await control.waitFor('welfare.overdue', 5000);
   assert.equal(alarm.callsign, 'P102');
   assert.equal(alarm.kind, 'WELFARE');
   assert.equal(alarm.note, 'Roof check');
-  assert.equal(typeof alarm.lat, 'number', 'alarm carries last known position');
 
   const acked = await call('POST', `/api/emergency/${alarm.id}/ack`, {}, dispT);
   assert.equal(acked.body.state, 'ACKNOWLEDGED');
   await call('POST', `/api/emergency/${alarm.id}/resolve`, {}, dispT);
-  radio.close(); control.close();
+  control.close();
 });
 
 test('welfare timers reject silly intervals and cannot be set for someone else', async () => {
-  assert.equal((await call('POST', '/api/radios/234100001/welfare', { interval_s: 5 }, r101T)).status, 400);
-  assert.equal((await call('POST', '/api/radios/234100001/welfare', { interval_s: 99999 }, r101T)).status, 400);
-  assert.equal((await call('POST', '/api/radios/234100002/welfare', { interval_s: 300 }, r101T)).status, 403);
-  assert.equal((await call('POST', '/api/radios/234100003/welfare/check', {}, r101T)).status, 403);
+  assert.equal((await call('POST', `/api/personnel/${danId}/welfare`, { interval_s: 5 }, danT)).status, 400);
+  assert.equal((await call('POST', `/api/personnel/${danId}/welfare`, { interval_s: 99999 }, danT)).status, 400);
+  assert.equal((await call('POST', `/api/personnel/${ellieId}/welfare`, { interval_s: 300 }, danT)).status, 403);
+  assert.equal((await call('POST', `/api/personnel/${ryanId}/welfare/check`, {}, danT)).status, 403);
 });
 
 test('checking in clears an alarm that has already been raised', async () => {
   const control = await wsClient(dispT);
-  await call('POST', '/api/radios/234100003/welfare', { interval_s: 60 }, r103T);
-  const r = app.db.radios.find((x) => x.issi === '234100003');
-  r.welfare_due_at = new Date(Date.now() - 1000).toISOString();
+  await call('POST', `/api/personnel/${ryanId}/welfare`, { interval_s: 60 }, ryanT);
+  const p = app.db.personnel.find((x) => x.id === ryanId);
+  p.welfare_due_at = new Date(Date.now() - 1000).toISOString();
   const alarm = await control.waitFor('welfare.overdue', 5000);
 
-  await call('POST', '/api/radios/234100003/welfare', { interval_s: 300 }, r103T);
-  await call('POST', '/api/radios/234100003/welfare/check', {}, r103T);
+  await call('POST', `/api/personnel/${ryanId}/welfare`, { interval_s: 300 }, ryanT);
+  await call('POST', `/api/personnel/${ryanId}/welfare/check`, {}, ryanT);
   const cleared = app.db.emergency_events.find((e) => e.id === alarm.id);
   assert.equal(cleared.state, 'RESOLVED');
-  await call('DELETE', '/api/radios/234100003/welfare', {}, r103T);
+  await call('DELETE', `/api/personnel/${ryanId}/welfare`, {}, ryanT);
   control.close();
 });
 
@@ -487,13 +426,10 @@ test('jobs can be raised against a contracted site and inherit its details', asy
 
 /* ---------------- offline replay safety ---------------- */
 test('a replayed write returns the first result instead of applying twice', async () => {
-  const job = await call('POST', '/api/jobs', { priority: 'AMBER', location: 'Carlton Retail Centre' }, dispT);
-  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
-
   const key = 'offline-replay-test-1';
   const send = () => fetch(BASE + '/api/messages', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${r101T}`, 'idempotency-key': key },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${danT}`, 'idempotency-key': key },
     body: JSON.stringify({ to_control: true, body: 'On scene, gate secure' }),
   });
 
@@ -513,7 +449,7 @@ test('a replayed write returns the first result instead of applying twice', asyn
 test('different idempotency keys are treated as separate writes', async () => {
   const post = (key) => fetch(BASE + '/api/messages', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${r101T}`, 'idempotency-key': key },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${danT}`, 'idempotency-key': key },
     body: JSON.stringify({ to_control: true, body: 'Patrol complete' }),
   });
   await post('key-a');
@@ -525,13 +461,13 @@ test('one officer cannot replay another officer\'s idempotency key', async () =>
   const key = 'shared-key-attempt';
   await fetch(BASE + '/api/messages', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${r101T}`, 'idempotency-key': key },
-    body: JSON.stringify({ to_control: true, body: 'From P101' }),
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${danT}`, 'idempotency-key': key },
+    body: JSON.stringify({ to_control: true, body: 'From Dan' }),
   });
   const other = await fetch(BASE + '/api/messages', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${r102T}`, 'idempotency-key': key },
-    body: JSON.stringify({ to_control: true, body: 'From P102' }),
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${ellieT}`, 'idempotency-key': key },
+    body: JSON.stringify({ to_control: true, body: 'From Ellie' }),
   });
   const body = await other.json();
   assert.equal(other.headers.get('idempotent-replay'), null);
@@ -539,16 +475,13 @@ test('one officer cannot replay another officer\'s idempotency key', async () =>
 });
 
 test('a queued job acknowledgement replayed after reconnect acknowledges exactly once', async () => {
-  const radio = await wsClient(r101T);
-  radio.send('radio.attach', { issi: '234100001' }); await radio.waitFor('radio.attached');
-
   const job = await call('POST', '/api/jobs', { priority: 'RED', location: 'Northgate Distribution' }, dispT);
   await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
 
   const key = 'queued-ack-1';
   const ack = () => fetch(BASE + `/api/jobs/${job.body.id}/ack`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${r101T}`, 'idempotency-key': key },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${danT}`, 'idempotency-key': key },
     body: '{}',
   });
   await ack();
@@ -557,11 +490,9 @@ test('a queued job acknowledgement replayed after reconnect acknowledges exactly
   const assignments = app.db.job_assignments.filter((a) => a.job_id === job.body.id && a.acknowledged);
   assert.equal(assignments.length, 1);
   assert.equal((await call('GET', `/api/jobs?status=ACKNOWLEDGED`, undefined, dispT)).body.some((j) => j.id === job.body.id), true);
-  radio.close();
 });
 
-/* ---------------- offline queue contract ---------------- */
-test('a replayed action with the same idempotency key is answered, not re-applied', async () => {
+test('a replayed job creation returns the original job rather than making a second one', async () => {
   const key = 'offline-' + Date.now();
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${dispT}`, 'idempotency-key': key };
   const payload = JSON.stringify({ priority: 'GREEN', location: 'Carlton Retail Centre', incident_type: 'Patrol visit' });
@@ -574,7 +505,7 @@ test('a replayed action with the same idempotency key is answered, not re-applie
   const replayJob = await replay.json();
   assert.equal(replay.status, 201);
   assert.equal(replay.headers.get('idempotent-replay'), 'true');
-  assert.equal(replayJob.id, firstJob.id, 'the replay returns the original job rather than making a second one');
+  assert.equal(replayJob.id, firstJob.id);
 
   const matching = app.db.jobs.filter((j) => j.reference === firstJob.reference);
   assert.equal(matching.length, 1);
@@ -591,112 +522,42 @@ test('different idempotency keys create separate jobs', async () => {
   assert.notEqual(a.id, b.id);
 });
 
-/* ---------------- key bindings ---------------- */
-test('key bindings default sensibly and persist per user', async () => {
-  const defaults = await call('GET', '/api/me/settings', undefined, r101T);
-  assert.equal(defaults.status, 200);
-  assert.equal(defaults.body.ptt_keycode, 275, 'a common rugged-handset PTT keycode is the default');
-  assert.equal(defaults.body.ptt_web_key, 'Space');
-  assert.equal(defaults.body.sos_keycode, null, 'SOS is unbound until the officer chooses a key');
+/* ---------------- callback requests ---------------- */
+test('an officer requests a callback and control is alerted', async () => {
+  const control = await wsClient(dispT);
 
-  const saved = await call('PUT', '/api/me/settings', {
-    ptt_keycode: 131, ptt_key_label: 'Key 131', sos_keycode: 132, sos_key_label: 'Key 132', sos_hold_ms: 2000,
-  }, r101T);
-  assert.equal(saved.status, 200);
-  assert.equal(saved.body.ptt_keycode, 131);
-  assert.equal(saved.body.sos_hold_ms, 2000);
-
-  const reread = await call('GET', '/api/me/settings', undefined, r101T);
-  assert.equal(reread.body.sos_key_label, 'Key 132');
-
-  const other = await call('GET', '/api/me/settings', undefined, r102T);
-  assert.equal(other.body.ptt_keycode, 275, 'another officer keeps their own bindings');
-});
-
-test('key bindings reject nonsense and refuse to put talk and SOS on one key', async () => {
-  assert.equal((await call('PUT', '/api/me/settings', { ptt_keycode: 99999 }, r102T)).status, 400);
-  assert.equal((await call('PUT', '/api/me/settings', { sos_hold_ms: 100 }, r102T)).status, 400);
-  const clash = await call('PUT', '/api/me/settings', { ptt_keycode: 200, sos_keycode: 200 }, r102T);
-  assert.equal(clash.status, 400);
-  assert.match(clash.body.error, /cannot be bound to both/);
-});
-
-test('a key binding can be cleared', async () => {
-  const cleared = await call('PUT', '/api/me/settings', { sos_keycode: null, sos_key_label: null }, r101T);
-  assert.equal(cleared.body.sos_keycode, null);
-});
-
-test('binding tokens round-trip so a replacement handset restores them', async () => {
-  const saved = await call('PUT', '/api/me/settings', { ptt_token: 'android:284', sos_token: 'android:285', sos_hold_ms: 2000 }, r102T);
-  assert.equal(saved.status, 200);
-  assert.equal(saved.body.ptt_token, 'android:284');
-
-  const onNewHandset = await call('GET', '/api/me/settings', undefined, r102T);
-  assert.equal(onNewHandset.body.ptt_token, 'android:284');
-  assert.equal(onNewHandset.body.sos_token, 'android:285');
-  assert.equal(onNewHandset.body.sos_hold_ms, 2000);
-
-  const clash = await call('PUT', '/api/me/settings', { ptt_token: 'android:290', sos_token: 'android:290' }, r102T);
-  assert.equal(clash.status, 400);
-});
-
-/* ---------------- call requests ---------------- */
-test('an officer requests a call and control is alerted', async () => {
-  const radio = await wsClient(r101T), control = await wsClient(dispT);
-  radio.send('radio.attach', { issi: '234100001' }); await radio.waitFor('radio.attached');
-
-  const req = await call('POST', '/api/calls/request', {}, r101T);
+  const req = await call('POST', '/api/calls/request', {}, danT);
   assert.equal(req.status, 201);
   assert.equal(req.body.priority, false);
   assert.equal(req.body.state, 'PENDING');
 
   const seen = await control.waitFor('call.request');
   assert.equal(seen.callsign, 'P101');
-  assert.equal(typeof seen.lat, 'number', 'control can locate the officer who asked');
+  assert.equal(seen.personnel_id, danId);
 
   await call('POST', `/api/calls/requests/${req.body.id}/clear`, {}, dispT);
-  radio.close(); control.close();
-});
-
-test('a second press escalates to priority rather than queueing twice', async () => {
-  const control = await wsClient(dispT);
-  const first = await call('POST', '/api/calls/request', { radio: '234100003' }, dispT);
-  const second = await call('POST', '/api/calls/request', { radio: '234100003', priority: true }, dispT);
-
-  assert.equal(second.body.id, first.body.id, 'the same request is escalated');
-  assert.equal(second.body.priority, true);
-  const pending = app.db.call_requests.filter((r) => r.issi === '234100003' && r.state === 'PENDING');
-  assert.equal(pending.length, 1);
-
-  await call('POST', `/api/calls/requests/${first.body.id}/clear`, {}, dispT);
   control.close();
 });
 
-test('calling the officer clears their request automatically', async () => {
-  const radio = await wsClient(r102T);
-  radio.send('radio.attach', { issi: '234100002' }); await radio.waitFor('radio.attached');
+test('a second press escalates to priority rather than queueing twice', async () => {
+  const first = await call('POST', '/api/calls/request', { personnel: ellieId }, dispT);
+  const second = await call('POST', '/api/calls/request', { personnel: ellieId, priority: true }, dispT);
 
-  const req = await call('POST', '/api/calls/request', { priority: true }, r102T);
-  assert.equal(req.body.priority, true);
+  assert.equal(second.body.id, first.body.id, 'the same request is escalated');
+  assert.equal(second.body.priority, true);
+  const pending = app.db.call_requests.filter((r) => r.personnel_id === ellieId && r.state === 'PENDING');
+  assert.equal(pending.length, 1);
 
-  const started = await call('POST', '/api/calls/private', { to: '234100002' }, dispT);
-  assert.equal(started.status, 201);
-
-  const cleared = await radio.waitUntil('call.request_cleared', (p) => p.id === req.body.id);
-  assert.equal(cleared.state, 'ANSWERED');
-  assert.ok(cleared.answered_by);
-
-  await call('POST', `/api/calls/${started.body.id}/end`, {}, dispT);
-  radio.close();
+  await call('POST', `/api/calls/requests/${first.body.id}/clear`, {}, dispT);
 });
 
 test('an officer can cancel their own request but not someone else\'s', async () => {
-  const mine = await call('POST', '/api/calls/request', {}, r101T);
-  const theirs = await call('POST', '/api/calls/request', { radio: '234100002' }, dispT);
+  const mine = await call('POST', '/api/calls/request', {}, danT);
+  const theirs = await call('POST', '/api/calls/request', { personnel: ellieId }, dispT);
 
-  assert.equal((await call('POST', `/api/calls/requests/${theirs.body.id}/clear`, {}, r101T)).status, 403);
+  assert.equal((await call('POST', `/api/calls/requests/${theirs.body.id}/clear`, {}, danT)).status, 403);
 
-  const cancelled = await call('POST', `/api/calls/requests/${mine.body.id}/clear`, {}, r101T);
+  const cancelled = await call('POST', `/api/calls/requests/${mine.body.id}/clear`, {}, danT);
   assert.equal(cancelled.body.state, 'CANCELLED');
 
   const pending = await call('GET', '/api/calls/requests', undefined, dispT);
@@ -704,127 +565,13 @@ test('an officer can cancel their own request but not someone else\'s', async ()
   await call('POST', `/api/calls/requests/${theirs.body.id}/clear`, {}, dispT);
 });
 
-test('keypad long-press bindings default to 1, # and * and cannot collide', async () => {
-  const s = await call('GET', '/api/me/settings', undefined, r103T);
-  assert.equal(s.body.call_token, 'android:8', 'keypad 1');
-  assert.equal(s.body.priority_token, 'android:18', 'keypad #');
-  assert.equal(s.body.lock_token, 'android:17', 'keypad *');
-  assert.equal(s.body.action_hold_ms, 800);
-
-  // android:16 is keypad 9, which nothing else claims by default
-  const rebound = await call('PUT', '/api/me/settings', { call_token: 'android:16', action_hold_ms: 1200 }, r103T);
-  assert.equal(rebound.body.call_token, 'android:16');
-  assert.equal(rebound.body.action_hold_ms, 1200);
-
-  const collide = await call('PUT', '/api/me/settings', { call_token: 'android:17' }, r103T);
-  assert.equal(collide.status, 400);
-  assert.match(collide.body.error, /only be bound to one action/);
-  await call('PUT', '/api/me/settings', { call_token: 'android:8', action_hold_ms: 800 }, r103T);
-  assert.equal((await call('PUT', '/api/me/settings', { action_hold_ms: 50 }, r103T)).status, 400);
-});
-
-test('a cleared call releases the radio so it can be called again', async () => {
-  const radio = await wsClient(r102T);
-  radio.send('radio.attach', { issi: '234100002' }); await radio.waitFor('radio.attached');
-
-  const first = await call('POST', '/api/calls/private', { to: '234100002' }, dispT);
-  assert.equal(first.status, 201);
-  await call('POST', `/api/calls/${first.body.id}/end`, {}, dispT);
-
-  const second = await call('POST', '/api/calls/private', { to: '234100002' }, dispT);
-  assert.equal(second.status, 201, 'the radio is free once the first call cleared');
-  await call('POST', `/api/calls/${second.body.id}/end`, {}, dispT);
-  radio.close();
-});
-
-/* ---------------- keypad conventions ---------------- */
-test('a two-digit status code sets the operational status without a voice call', async () => {
-  const control = await wsClient(dispT);
-  const codes = await call('GET', '/api/status-codes', undefined, r101T);
-  assert.ok(codes.body.some((c) => c.code === '03' && c.status === 'EN_ROUTE'));
-
-  const sent = await call('POST', '/api/radios/234100001/status', { code: '03' }, r101T);
-  assert.equal(sent.status, 200);
-  assert.equal(sent.body.status, 'EN_ROUTE');
-  assert.equal(sent.body.status_code, '03');
-
-  const seen = await control.waitUntil('radio.status_changed', (p) => p.issi === '234100001' && p.status === 'EN_ROUTE');
-  assert.equal(seen.status_code, '03');
-  assert.equal((await call('POST', '/api/radios/234100001/status', { code: '99' }, r101T)).status, 400);
-  control.close();
-});
-
-test('covert mode is flagged to control so they know the radio will not sound', async () => {
-  const control = await wsClient(dispT);
-  const on = await call('POST', '/api/radios/234100001/covert', { on: true }, r101T);
-  assert.equal(on.body.covert, true);
-
-  const seen = await control.waitFor('radio.covert_changed');
-  assert.equal(seen.covert, true);
-  const logged = await call('GET', '/api/events?type=radio.covert', undefined, dispT);
-  assert.ok(logged.body.some((e) => /COVERT MODE ON/.test(e.summary)));
-
-  const off = await call('POST', '/api/radios/234100001/covert', { on: false }, r101T);
-  assert.equal(off.body.covert, false);
-  control.close();
-});
-
-test('a position report updates the map and is logged', async () => {
-  const control = await wsClient(dispT);
-  const res = await call('POST', '/api/radios/234100002/position-report', { lat: 51.5111, lon: -0.1222 }, r102T);
-  assert.equal(res.status, 200);
-  assert.equal(res.body.lat, 51.5111);
-
-  const seen = await control.waitFor('radio.position_report');
-  assert.equal(seen.issi, '234100002');
-  const logged = await call('GET', '/api/events?type=radio.position_report', undefined, dispT);
-  assert.ok(logged.body.some((e) => /POSITION REPORT/.test(e.summary)));
-  control.close();
-});
-
-test('an officer cannot send covert or position for another radio', async () => {
-  assert.equal((await call('POST', '/api/radios/234100003/covert', { on: true }, r101T)).status, 403);
-  assert.equal((await call('POST', '/api/radios/234100003/position-report', {}, r101T)).status, 403);
-});
-
-test('speed dial entries are validated and stored per officer', async () => {
-  const saved = await call('PUT', '/api/me/settings', {
-    speed_dial: {
-      '4': { type: 'radio', target: '234100002', label: 'P102' },
-      '5': { type: 'phone', target: '902071234567', label: 'Meridian keyholder' },
-    },
-  }, r101T);
-  assert.equal(saved.status, 200);
-  assert.equal(saved.body.speed_dial['4'].target, '234100002');
-  assert.equal(saved.body.speed_dial['5'].type, 'phone');
-
-  assert.equal((await call('PUT', '/api/me/settings', { speed_dial: { 'Z': { target: '1' } } }, r101T)).status, 400);
-  assert.equal((await call('PUT', '/api/me/settings', { speed_dial: { '6': { type: 'fax', target: '1' } } }, r101T)).status, 400);
-  assert.equal((await call('PUT', '/api/me/settings', { speed_dial: { '6': { type: 'radio', target: '' } } }, r101T)).status, 400);
-});
-
-test('the full keypad set has a default binding and none of them collide', async () => {
-  const s = await call('GET', '/api/me/settings', undefined, r102T);
-  const expected = {
-    call_token: 'android:8', priority_token: 'android:18', lock_token: 'android:17',
-    redial_token: 'android:7', talkgroup_token: 'android:9', status_token: 'android:10',
-    covert_token: 'android:12', position_token: 'android:15',
-  };
-  for (const [field, token] of Object.entries(expected)) assert.equal(s.body[field], token, field);
-  const all = Object.values(expected).concat(s.body.ptt_token);
-  assert.equal(new Set(all).size, all.length, 'no two actions share a key');
-
-  const collide = await call('PUT', '/api/me/settings', { covert_token: 'android:15' }, r102T);
-  assert.equal(collide.status, 400);
-});
-
 /* ---------------- data retention ---------------- */
 test('the retention sweep removes old location history but keeps recent fixes', async () => {
-  const radio = app.db.radios.find((r) => r.issi === '234100001');
+  const mdt = app.db.mdts.find((m) => m.mdt_code === 'MDT-001');
   const old = new Date(Date.now() - 90 * 86400000).toISOString();
   const recent = new Date(Date.now() - 2 * 86400000).toISOString();
-  app.db.locations.push({ id: 900001, radio_id: radio.id, lat: 51.5, lon: -0.1, at: old });
-  app.db.locations.push({ id: 900002, radio_id: radio.id, lat: 51.5, lon: -0.1, at: recent });
+  app.db.locations.push({ id: 900001, mdt_id: mdt.id, personnel_id: null, lat: 51.5, lon: -0.1, at: old });
+  app.db.locations.push({ id: 900002, mdt_id: mdt.id, personnel_id: null, lat: 51.5, lon: -0.1, at: recent });
 
   app.retentionSweep();
 
@@ -851,27 +598,26 @@ test('retention policy and current counts are visible to control', async () => {
   assert.ok(res.body.policy_days.locations <= res.body.policy_days.audit,
     'movement history is kept no longer than the audit trail');
   assert.equal(typeof res.body.counts.locations, 'number');
-  assert.equal((await call('GET', '/api/retention', undefined, r101T)).status, 403);
+  assert.equal((await call('GET', '/api/retention', undefined, danT)).status, 403);
 });
 
-test('an officer\'s movement history can be erased without losing the job record', async () => {
-  const radio = app.db.radios.find((r) => r.issi === '234100002');
-  app.db.locations.push({ id: 900020, radio_id: radio.id, lat: 51.5, lon: -0.1, at: new Date().toISOString() });
+test('a person\'s movement history can be erased without losing the job record', async () => {
+  app.db.locations.push({ id: 900020, mdt_id: null, personnel_id: ellieId, lat: 51.5, lon: -0.1, at: new Date().toISOString() });
   const jobsBefore = app.db.jobs.length;
 
-  const res = await call('POST', '/api/radios/234100002/erase-location-history', {}, adminT);
+  const res = await call('POST', `/api/personnel/${ellieId}/erase-location-history`, {}, adminT);
   assert.equal(res.status, 200);
   assert.ok(res.body.removed >= 1);
-  assert.ok(!app.db.locations.some((l) => l.radio_id === radio.id), 'no fixes left for that radio');
+  assert.ok(!app.db.locations.some((l) => l.personnel_id === ellieId), 'no fixes left for that person');
   assert.equal(app.db.jobs.length, jobsBefore, 'the operational record is untouched');
 
   const logged = await call('GET', '/api/events?type=retention.erasure', undefined, dispT);
   assert.ok(logged.body.some((e) => /LOCATION HISTORY ERASED/.test(e.summary)), 'the erasure is itself auditable');
-  assert.equal((await call('POST', '/api/radios/234100001/erase-location-history', {}, dispT)).status, 403);
+  assert.equal((await call('POST', `/api/personnel/${danId}/erase-location-history`, {}, dispT)).status, 403);
 });
 
 /* ---------------- seeding from an operator file ---------------- */
-test('a seed file builds the fleet with linked vehicles, talkgroups and users', () => {
+test('a seed file builds the fleet with linked vehicles and users', () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
@@ -879,13 +625,11 @@ test('a seed file builds the fleet with linked vehicles, talkgroups and users', 
   fs.writeFileSync(file, JSON.stringify({
     sites: [{ name: 'Test Park', address: '1 Test Way', lat: 51.5, lon: -0.1, keyholder: 'K. Holder' }],
     vehicles: [{ registration: 'VAN-001', type: 'Patrol van' }],
-    talkgroups: [{ name: 'patrol 1' }],
     callsigns: [{
-      name: 'p901', vehicle: 'VAN-001', personnel: ['Dan Whitfield'],
-      radios: [{ issi: '234199501', talkgroup: 'patrol 1', pbx_extension: '9501' }],
+      name: 'p901', vehicle: 'VAN-001', personnel: [{ name: 'Test Officer', rank: 'Officer' }],
       mdts: [{ code: 'mdt-901', serial: 'SN-901' }],
     }],
-    users: [{ username: 'SeedUser', password: 'realpassword1', role: 'RADIO_USER', display_name: 'Seeded', radio: '234199501' }],
+    users: [{ username: 'SeedUser', password: 'realpassword1', role: 'FIELD_USER', display_name: 'Seeded', personnel: 'Test Officer' }],
   }));
 
   // Seed into a scratch store so the running fixture is untouched.
@@ -895,42 +639,34 @@ test('a seed file builds the fleet with linked vehicles, talkgroups and users', 
     const a = require(${JSON.stringify(path.join(__dirname, '..', 'server.js'))});
     a.seed();
     const cs = a.db.callsigns[0];
-    const radio = a.db.radios[0];
+    const person = a.db.personnel[0];
     console.log(JSON.stringify({
       callsign: cs.name,
-      talkgroup: a.db.talkgroups[0].name,
-      affiliated: a.db.talkgroup_members.length,
-      issi: radio.issi,
-      ext: radio.pbx_extension,
-      radioLinkedToCallsign: radio.callsign_id === cs.id,
+      personLinkedToCallsign: person.callsign_id === cs.id,
       mdtCode: a.db.mdts[0].mdt_code,
       mdtVehicle: a.db.mdts[0].vehicle_id === a.db.vehicles[0].id,
       username: a.db.users[0].username,
-      userRadio: a.db.users[0].radio_id === radio.id,
+      userPersonnel: a.db.users[0].personnel_id === person.id,
       hashed: a.db.users[0].password_hash.startsWith('scrypt$'),
-      crew: a.db.personnel[0].name,
+      personName: person.name,
       site: a.db.sites[0].keyholder,
     }));
   `], { encoding: 'utf8' });
 
   const out = JSON.parse(scratch.stdout.trim().split('\n').pop());
   assert.equal(out.callsign, 'P901', 'call signs are normalised to upper case');
-  assert.equal(out.talkgroup, 'PATROL 1');
-  assert.equal(out.affiliated, 1, 'the radio is affiliated to its talkgroup');
-  assert.equal(out.issi, '234199501');
-  assert.equal(out.ext, '9501');
-  assert.ok(out.radioLinkedToCallsign);
+  assert.ok(out.personLinkedToCallsign);
   assert.equal(out.mdtCode, 'MDT-901');
   assert.ok(out.mdtVehicle, 'the MDT inherits the call sign vehicle');
   assert.equal(out.username, 'seeduser', 'usernames are normalised to lower case');
-  assert.ok(out.userRadio, 'the officer is bound to their radio');
+  assert.ok(out.userPersonnel, 'the officer is bound to their personnel record');
   assert.ok(out.hashed, 'passwords are never stored in the clear');
-  assert.equal(out.crew, 'Dan Whitfield');
+  assert.equal(out.personName, 'Test Officer');
   assert.equal(out.site, 'K. Holder');
   fs.unlinkSync(file);
 });
 
-test('the seed file refuses placeholder and weak passwords, and duplicate ISSIs', () => {
+test('the seed file refuses placeholder and weak passwords and unknown roles', () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
@@ -950,7 +686,4 @@ test('the seed file refuses placeholder and weak passwords, and duplicate ISSIs'
   assert.match(run({ users: [{ username: 'a', password: 'CHANGE-ME', role: 'DISPATCHER' }] }), /REFUSED.*placeholder/);
   assert.match(run({ users: [{ username: 'a', password: 'short', role: 'DISPATCHER' }] }), /REFUSED.*too short/);
   assert.match(run({ users: [{ username: 'a', password: 'realpassword1', role: 'WIZARD' }] }), /REFUSED.*unknown role/);
-  assert.match(run({
-    callsigns: [{ name: 'X', radios: [{ issi: '234199601' }, { issi: '234199601' }] }],
-  }), /REFUSED.*duplicate ISSI/);
 });

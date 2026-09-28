@@ -77,16 +77,13 @@ function verifyToken(token) {
  * In-memory store (mirrors the documented PostgreSQL schema 1:1)
  * ------------------------------------------------------------------ */
 const db = {
-  users: [], radios: [], mdts: [], callsigns: [], vehicles: [], personnel: [], sites: [],
-  talkgroups: [], talkgroup_members: [], jobs: [], job_assignments: [],
-  communications: [], communication_participants: [], messages: [], call_requests: [],
-  locations: [], radio_status_history: [], emergency_events: [], audit_logs: [],
+  users: [], mdts: [], callsigns: [], vehicles: [], personnel: [], sites: [],
+  jobs: [], job_assignments: [], messages: [], call_requests: [],
+  locations: [], emergency_events: [], audit_logs: [],
   push_subscriptions: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
-
-const RADIO_STATUSES = ['OFFLINE', 'AVAILABLE', 'ACKNOWLEDGED', 'BUSY', 'ON_TASK', 'EN_ROUTE', 'ON_SCENE', 'MEAL_BREAK', 'EMERGENCY', 'OUT_OF_SERVICE'];
 const JOB_STATES = ['CREATED', 'DISPATCHED', 'ACKNOWLEDGED', 'EN_ROUTE', 'ON_SCENE', 'TRANSPORTING', 'COMPLETED', 'CANCELLED'];
 // First time a job reaches each of these, stamp it — this is what "time
 // en route" / "time on scene" is computed from client-side, with no separate
@@ -105,20 +102,25 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
 }
 const ON_SCENE_RADIUS_M = 100;
 const EN_ROUTE_DELTA_M = 25;
-/** Called from every radio/MDT location report. Advances a job's status
- * without anyone touching a button: ACKNOWLEDGED -> EN_ROUTE the first time
- * the reported distance to the job meaningfully decreases (actual movement
+/** Called from an MDT's location report. Advances a job's status without
+ * anyone touching a button: ACKNOWLEDGED -> EN_ROUTE the first time the
+ * reported distance to the job meaningfully decreases (actual movement
  * toward it, not GPS jitter), and either of those -> ON_SCENE once within
  * arrival radius. Deliberately does not touch TRANSPORTING/COMPLETED — those
  * stay a human decision. `assignment.last_distance_m` is the only state this
  * needs, and it's meaningless once the job is no longer being tracked, so it
- * is simply left stale rather than cleaned up. */
-function checkAutoJobProgress(radio, mdt, lat, lon) {
-  const jobId = radio ? radio.job_id : mdt.job_id;
+ * is simply left stale rather than cleaned up.
+ *
+ * MDT-only for now: a driving patrol's vehicle terminal is the one thing
+ * that already reports GPS on every move. A foot-patrol officer's own
+ * position (once Phase C's personnel-facing terminal reports it) is a
+ * natural place to extend this, not something to build ahead of that. */
+function checkAutoJobProgress(mdt, lat, lon) {
+  const jobId = mdt.job_id;
   if (!jobId) return;
   const j = db.jobs.find((x) => x.id === jobId);
   if (!j || j.lat == null || ['ON_SCENE', 'TRANSPORTING', 'COMPLETED', 'CANCELLED'].includes(j.status)) return;
-  const a = db.job_assignments.find((x) => x.job_id === j.id && ((radio && x.radio_id === radio.id) || (mdt && x.mdt_id === mdt.id)));
+  const a = db.job_assignments.find((x) => x.job_id === j.id && x.mdt_id === mdt.id);
   if (!a) return;
   const dist = haversineMeters(lat, lon, j.lat, j.lon);
   let newStatus = null;
@@ -127,32 +129,11 @@ function checkAutoJobProgress(radio, mdt, lat, lon) {
   a.last_distance_m = dist;
   if (!newStatus) return;
   j.status = newStatus; stampJobStatus(j, newStatus); j.updated_at = new Date().toISOString();
-  if (radio && radio.connected && !radio.emergency) setRadioStatus(radio, newStatus, `auto — ${newStatus === 'ON_SCENE' ? 'arrived at job location' : 'movement toward job detected'}`);
   broadcast('job.status_changed', publicJob(j));
   logEvent('job.status_changed', `JOB ${j.reference} → ${newStatus} (auto)`, { job_id: j.id });
 }
-
-/** A radio picking EN_ROUTE/ON_SCENE off the AVL status menu (or the
- * equivalent status code) is reporting the same job progress checkAutoJobProgress
- * infers from GPS — but unlike an MDT (whose status buttons PATCH the job
- * directly), a radio only ever touches its own radio.status. The control
- * room dashboard shows a resource's *job* status once it has one, so without
- * this the job stayed stuck on ACKNOWLEDGED while the radio itself claimed
- * EN_ROUTE, and nobody watching the dashboard ever saw it move. Forward-only,
- * same as the auto path — a manual status pick should never regress a job
- * that's already further along (e.g. via the MDT or another crew member). */
-function syncJobFromManualStatus(radio, status) {
-  if (!['EN_ROUTE', 'ON_SCENE'].includes(status)) return;
-  if (!radio.job_id) return;
-  const j = db.jobs.find((x) => x.id === radio.job_id);
-  if (!j || ['TRANSPORTING', 'COMPLETED', 'CANCELLED'].includes(j.status)) return;
-  if (JOB_STATES.indexOf(status) <= JOB_STATES.indexOf(j.status)) return;
-  j.status = status; stampJobStatus(j, status); j.updated_at = new Date().toISOString();
-  broadcast('job.status_changed', publicJob(j));
-  logEvent('job.status_changed', `JOB ${j.reference} → ${status} (manual, ${callsignOf(radio)})`, { job_id: j.id });
-}
 const PRIORITIES = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
-const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'RADIO_USER', 'MDT_USER'];
+const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'FIELD_USER', 'MDT_USER'];
 
 const { createStore } = require('./store.js');
 const store = createStore(db, seq);
@@ -174,14 +155,12 @@ function pushToRoles(roles, payload) {
   pushToUsers(db.users.filter((u) => roles.includes(u.role)).map((u) => u.id), payload);
 }
 
-const findRadio = (idOrIssi) =>
-  db.radios.find((r) => r.id === Number(idOrIssi) || r.issi === String(idOrIssi)) || null;
 const findCallsign = (v) =>
   db.callsigns.find((c) => c.id === Number(v) || c.name === String(v).toUpperCase()) || null;
-const findTalkgroup = (v) =>
-  db.talkgroups.find((t) => t.id === Number(v) || t.name === String(v).toUpperCase()) || null;
 const findMdt = (v) =>
   db.mdts.find((m) => m.id === Number(v) || m.mdt_code === String(v).toUpperCase()) || null;
+const findPersonnel = (v) =>
+  db.personnel.find((p) => p.id === Number(v) || (p.employee_no && p.employee_no === String(v))) || null;
 
 function logEvent(type, summary, data = {}) {
   const ev = { id: nextId('audit_logs'), type, summary, data, at: new Date().toISOString() };
@@ -202,18 +181,14 @@ function logEvent(type, summary, data = {}) {
  */
 function seedFromFile(file) {
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const byName = { vehicles: new Map(), talkgroups: new Map(), callsigns: new Map(), radios: new Map(), mdts: new Map() };
+  const byName = { vehicles: new Map(), callsigns: new Map(), personnel: new Map(), mdts: new Map() };
 
   for (const st of raw.sites || []) {
-    db.sites.push({ id: nextId('sites'), name: st.name, address: st.address || '', lat: st.lat ?? null, lon: st.lon ?? null, keyholder: st.keyholder || '', contract: 'ACTIVE' });
+    db.sites.push({ id: nextId('sites'), name: st.name, address: st.address || '', lat: st.lat ?? null, lon: st.lon ?? null, keyholder: st.keyholder || '', contract: 'ACTIVE', checklist: [] });
   }
   for (const v of raw.vehicles || []) {
-    const rec = { id: nextId('vehicles'), registration: v.registration, type: v.type || 'Vehicle' };
+    const rec = { id: nextId('vehicles'), registration: v.registration, type: v.type || 'Vehicle', make: v.make || '', model: v.model || '', service_due_at: v.service_due_at || null, insurance_due_at: v.insurance_due_at || null, mileage: v.mileage || null, condition: v.condition || '', assigned_personnel_id: null, status: 'ACTIVE', notes: '' };
     db.vehicles.push(rec); byName.vehicles.set(v.registration, rec);
-  }
-  for (const t of raw.talkgroups || []) {
-    const rec = { id: nextId('talkgroups'), name: String(t.name).toUpperCase(), description: t.description || '', floor_holder_radio_id: null, floor_console_user_id: null, floor_since: null };
-    db.talkgroups.push(rec); byName.talkgroups.set(rec.name, rec);
   }
   for (const cs of raw.callsigns || []) {
     const name = String(cs.name).toUpperCase();
@@ -221,25 +196,21 @@ function seedFromFile(file) {
     db.callsigns.push(rec); byName.callsigns.set(name, rec);
     const vehicle = cs.vehicle ? byName.vehicles.get(cs.vehicle) : null;
 
+    // A seed entry can still just be a bare name (older seed.json files),
+    // or a full object once an operator wants to fill in the rest --
+    // never require re-authoring an existing seed file just for this.
     for (const person of cs.personnel || []) {
-      db.personnel.push({ id: nextId('personnel'), name: person, rank: '', callsign_id: rec.id });
-    }
-    for (const r of cs.radios || []) {
-      const issi = String(r.issi);
-      if (db.radios.some((x) => x.issi === issi)) throw new Error(`duplicate ISSI ${issi} in seed file`);
-      const tg = r.talkgroup ? byName.talkgroups.get(String(r.talkgroup).toUpperCase()) : null;
-      const radio = {
-        id: nextId('radios'), issi, alias: r.alias || `${name} RADIO`,
-        radio_type: String(r.type || 'HANDHELD').toUpperCase(), status: 'OFFLINE',
-        callsign_id: rec.id, vehicle_id: vehicle ? vehicle.id : null,
-        talkgroup_id: tg ? tg.id : null, job_id: null, assigned_user_id: null,
-        battery: 100, signal: 'UNKNOWN', lat: r.lat ?? 51.5074, lon: r.lon ?? -0.1278,
-        speed: 0, heading: 0, last_seen: null, emergency: false, connected: false, sim_target: null,
-        pbx_extension: r.pbx_extension || null,
-        welfare_interval_s: null, welfare_due_at: null, welfare_warned: false,
+      const p = typeof person === 'string' ? { name: person } : person;
+      const rec2 = {
+        id: nextId('personnel'), employee_no: p.employee_no || null, name: p.name, rank: p.rank || '',
+        contact_phone: p.contact_phone || '', contact_email: p.contact_email || '',
+        employment_status: p.employment_status || 'ACTIVE', callsign_id: rec.id,
+        user_id: null, vehicle_id: vehicle ? vehicle.id : null,
+        welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: '',
+        notes: p.notes || '',
       };
-      db.radios.push(radio); byName.radios.set(issi, radio);
-      if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: radio.id });
+      db.personnel.push(rec2);
+      if (p.name) byName.personnel.set(p.name, rec2);
     }
     for (const m of cs.mdts || []) {
       const mdt = { id: nextId('mdts'), mdt_code: String(m.code).toUpperCase(), serial: m.serial || m.code, callsign_id: rec.id, vehicle_id: vehicle ? vehicle.id : null, status: 'OFFLINE', duty_status: 'AVAILABLE', job_id: null, battery: 100, network: 'LTE', operator: null, lat: null, lon: null, connected: false, crew: [], emergency: false };
@@ -254,18 +225,20 @@ function seedFromFile(file) {
     }
     if (String(u.password).length < 8) throw new Error(`password for ${username} is too short`);
     if (!ROLES.includes(u.role)) throw new Error(`unknown role ${u.role} for ${username}`);
-    const radio = u.radio ? byName.radios.get(String(u.radio)) : null;
+    const person = u.personnel ? byName.personnel.get(String(u.personnel)) : null;
     const mdt = u.mdt ? byName.mdts.get(String(u.mdt).toUpperCase()) : null;
-    db.users.push({
+    const user = {
       id: nextId('users'), username, password_hash: hashPassword(String(u.password)),
       role: u.role, display_name: u.display_name || username,
-      radio_id: radio ? radio.id : null, mdt_id: mdt ? mdt.id : null,
+      personnel_id: person ? person.id : null, mdt_id: mdt ? mdt.id : null,
       email: u.email ? String(u.email).toLowerCase() : null,
       created_at: new Date().toISOString(),
-    });
+    };
+    db.users.push(user);
+    if (person) person.user_id = user.id;
   }
 
-  logEvent('system.seeded', `Loaded ${db.callsigns.length} call signs, ${db.radios.length} radios and ${db.sites.length} sites from ${path.basename(file)}`);
+  logEvent('system.seeded', `Loaded ${db.callsigns.length} call signs, ${db.personnel.length} personnel and ${db.sites.length} sites from ${path.basename(file)}`);
 }
 
 function seed() {
@@ -276,30 +249,18 @@ function seed() {
   }
   console.warn('[cccs] no seed.json found — loading demo data. Copy seed.example.json to seed.json for your own call signs.');
   const mkUser = (username, password, role, extra = {}) => {
-    const u = { id: nextId('users'), username, password_hash: hashPassword(password), role, display_name: extra.display_name || username, radio_id: null, mdt_id: null, created_at: new Date().toISOString(), ...extra };
+    const u = { id: nextId('users'), username, password_hash: hashPassword(password), role, display_name: extra.display_name || username, personnel_id: null, mdt_id: null, created_at: new Date().toISOString(), ...extra };
     db.users.push(u); return u;
   };
-  const mkVehicle = (reg, type) => { const v = { id: nextId('vehicles'), registration: reg, type }; db.vehicles.push(v); return v; };
+  const mkVehicle = (reg, type) => { const v = { id: nextId('vehicles'), registration: reg, type, make: '', model: '', service_due_at: null, insurance_due_at: null, mileage: null, condition: '', assigned_personnel_id: null, status: 'ACTIVE', notes: '' }; db.vehicles.push(v); return v; };
   const mkCallsign = (name, desc) => { const c = { id: nextId('callsigns'), name, description: desc, active: true }; db.callsigns.push(c); return c; };
-  const mkPerson = (name, rank, callsign_id) => { const p = { id: nextId('personnel'), name, rank, callsign_id }; db.personnel.push(p); return p; };
-  const mkTalkgroup = (name, desc) => { const t = { id: nextId('talkgroups'), name, description: desc, floor_holder_radio_id: null, floor_since: null }; db.talkgroups.push(t); return t; };
-
-  const LON = { lat: 51.5074, lon: -0.1278 };
-  const mkRadio = (issi, alias, type, callsign_id, vehicle_id, tg_id, jitter) => {
-    if (db.radios.some((r) => r.issi === issi)) throw new Error('duplicate ISSI in seed');
-    const r = {
-      id: nextId('radios'), issi, alias, radio_type: type, status: 'OFFLINE',
-      callsign_id, vehicle_id, talkgroup_id: tg_id, job_id: null,
-      assigned_user_id: null, battery: 70 + Math.floor(Math.random() * 30),
-      signal: 'EXCELLENT', lat: LON.lat + jitter[0], lon: LON.lon + jitter[1],
-      speed: 0, heading: Math.floor(Math.random() * 360), last_seen: null,
-      emergency: false, connected: false, sim_target: null,
-      pbx_extension: String(9000 + seq.radios),
-      welfare_interval_s: null, welfare_due_at: null, welfare_warned: false,
+  const mkPerson = (name, rank, callsign_id, vehicle_id = null) => {
+    const p = {
+      id: nextId('personnel'), employee_no: null, name, rank, contact_phone: '', contact_email: '',
+      employment_status: 'ACTIVE', callsign_id, user_id: null, vehicle_id,
+      welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: '', notes: '',
     };
-    db.radios.push(r);
-    if (tg_id) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg_id, radio_id: r.id });
-    return r;
+    db.personnel.push(p); return p;
   };
   const mkMdt = (code, serial, callsign_id, vehicle_id) => {
     const m = { id: nextId('mdts'), mdt_code: code, serial, callsign_id, vehicle_id, status: 'OFFLINE', duty_status: 'AVAILABLE', job_id: null, battery: 80 + Math.floor(Math.random() * 20), network: 'LTE', operator: null, lat: null, lon: null, connected: false, crew: [], emergency: false };
@@ -307,15 +268,9 @@ function seed() {
   };
 
   const mkSite = (name, address, lat, lon, keyholder) => {
-    const st = { id: nextId('sites'), name, address, lat, lon, keyholder, contract: 'ACTIVE' };
+    const st = { id: nextId('sites'), name, address, lat, lon, keyholder, contract: 'ACTIVE', checklist: [] };
     db.sites.push(st); return st;
   };
-
-  const tgPatrol1 = mkTalkgroup('PATROL 1', 'Mobile patrol, north sector');
-  const tgPatrol2 = mkTalkgroup('PATROL 2', 'Mobile patrol, south sector');
-  mkTalkgroup('SUPERVISORS', 'Duty and area supervisors');
-  mkTalkgroup('CONTROL', 'Control room net');
-  mkTalkgroup('INCIDENT', 'Incident and alarm response');
 
   mkSite('Meridian Business Park', 'Unit 4, Meridian Way', 51.5290, -0.0870, 'J. Whitlock 07700 900412');
   mkSite('Carlton Retail Centre', '18 Carlton Road', 51.4930, -0.1620, 'Duty manager 07700 900188');
@@ -336,17 +291,11 @@ function seed() {
   mkCallsign('CONTROL', 'Control room');
   mkCallsign('SUPERVISOR', 'Duty supervisor');
 
-  mkPerson('Dan Whitfield', 'Patrol officer', p101.id);
+  const dan = mkPerson('Dan Whitfield', 'Patrol officer', p101.id, v1.id);
   mkPerson('Sam Oduya', 'Patrol officer', p101.id);
-  mkPerson('Ellie Marsh', 'Patrol officer', p102.id);
-  mkPerson('Ryan Cole', 'Response officer', p103.id);
-
-  const r1 = mkRadio('234100001', 'P101 HANDHELD', 'HANDHELD', p101.id, v1.id, tgPatrol1.id, [0.010, 0.012]);
-  const r2 = mkRadio('234100002', 'P102 HANDHELD', 'HANDHELD', p102.id, v2.id, tgPatrol1.id, [-0.014, 0.021]);
-  const r3 = mkRadio('234100003', 'P103 VEHICLE', 'VEHICLE', p103.id, v3.id, tgPatrol1.id, [0.019, -0.017]);
-  mkRadio('234100004', 'P104 HANDHELD', 'HANDHELD', p104.id, null, tgPatrol1.id, [-0.021, -0.009]);
-  mkRadio('234100005', 'M201 VEHICLE', 'VEHICLE', m201.id, v4.id, tgPatrol2.id, [0.027, 0.030]);
-  mkRadio('234100006', 'M202 HANDHELD', 'HANDHELD', m202.id, null, tgPatrol2.id, [-0.030, 0.026]);
+  const ellie = mkPerson('Ellie Marsh', 'Patrol officer', p102.id, v2.id);
+  const ryan = mkPerson('Ryan Cole', 'Response officer', p103.id, v3.id);
+  mkPerson('Jo Vance', 'Static guard', p104.id);
 
   const m1 = mkMdt('MDT-001', 'SN-MDT-0001', p101.id, v1.id);
   mkMdt('MDT-002', 'SN-MDT-0002', p102.id, v2.id);
@@ -355,9 +304,10 @@ function seed() {
   mkUser('admin', 'admin123', 'SYSTEM_ADMIN', { display_name: 'System Admin' });
   mkUser('dispatcher', 'dispatch123', 'DISPATCHER', { display_name: 'Controller Hale' });
   mkUser('supervisor', 'super123', 'SUPERVISOR', { display_name: 'Supervisor Reid' });
-  mkUser('radio101', 'radio123', 'RADIO_USER', { display_name: 'Dan Whitfield', radio_id: r1.id });
-  mkUser('radio102', 'radio123', 'RADIO_USER', { display_name: 'Ellie Marsh', radio_id: r2.id });
-  mkUser('radio103', 'radio123', 'RADIO_USER', { display_name: 'Ryan Cole', radio_id: r3.id });
+  const uDan = mkUser('dwhitfield', 'field123', 'FIELD_USER', { display_name: 'Dan Whitfield', personnel_id: dan.id });
+  const uEllie = mkUser('emarsh', 'field123', 'FIELD_USER', { display_name: 'Ellie Marsh', personnel_id: ellie.id });
+  const uRyan = mkUser('rcole', 'field123', 'FIELD_USER', { display_name: 'Ryan Cole', personnel_id: ryan.id });
+  dan.user_id = uDan.id; ellie.user_id = uEllie.id; ryan.user_id = uRyan.id;
   mkUser('mdt001', 'mdt123', 'MDT_USER', { display_name: 'MDT-001 Operator', mdt_id: m1.id });
 
   logEvent('system.seeded', 'Demo data loaded');
@@ -386,7 +336,7 @@ class Conn {
   constructor(socket, user) {
     this.socket = socket; this.user = user;
     this.id = crypto.randomUUID();
-    this.radioId = null; this.mdtId = null;
+    this.mdtId = null;
     this.buf = Buffer.alloc(0); this.alive = true;
     this.awaitingPong = false;
     sockets.add(this);
@@ -422,35 +372,15 @@ class Conn {
         try { handleWsMessage(this, JSON.parse(data.toString())); }
         catch (e) { this.send('error', { message: String(e.message || e) }); }
       }
-      if (opcode === 0x2) relayAudioFrame(this, data);
     }
   }
   close() {
     if (!this.alive) return;
     this.alive = false; sockets.delete(this);
     try { this.socket.destroy(); } catch {}
-    if (this.radioId && !Array.from(sockets).some((c) => c.radioId === this.radioId)) {
-      const r = db.radios.find((x) => x.id === this.radioId);
-      if (r) { r.connected = false; setRadioStatus(r, 'OFFLINE', 'link lost'); releaseFloorFor(r); }
-    }
     if (this.mdtId && !Array.from(sockets).some((c) => c.mdtId === this.mdtId)) {
       const m = db.mdts.find((x) => x.id === this.mdtId);
       if (m) { m.connected = false; m.status = 'OFFLINE'; broadcast('mdt.status_changed', publicMdt(m)); }
-    }
-    // A console/control user holding the floor must release it here too,
-    // or a closed tab (or a refresh, like reloading to pick up a new
-    // build) mid-transmission leaves the talkgroup permanently stuck
-    // "held by CONTROL" — nothing else ever clears it. Same
-    // no-other-connection-left guard as the radio/MDT cases above, so one
-    // of several open tabs from the same user doesn't release a floor the
-    // others still legitimately hold.
-    if (this.user && isControlRole(this.user.role) && !Array.from(sockets).some((c) => c.user && c.user.id === this.user.id)) {
-      for (const tg of db.talkgroups) {
-        if (tg.floor_console_user_id === this.user.id) {
-          tg.floor_console_user_id = null; tg.floor_since = null;
-          broadcast('radio.ptt_released', { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: null, callsign: 'CONTROL' });
-        }
-      }
     }
   }
 }
@@ -473,32 +403,13 @@ setInterval(() => {
   }
 }, HEARTBEAT_MS).unref?.();
 
-/* Peer addressing for WebRTC signalling: 'radio:<ISSI>' or 'conn:<uuid>'. */
-function peerAddr(conn) {
-  if (conn.radioId) {
-    const r = db.radios.find((x) => x.id === conn.radioId);
-    if (r) return `radio:${r.issi}`;
-  }
-  return `conn:${conn.id}`;
-}
-function resolvePeers(addr) {
-  if (!addr || typeof addr !== 'string') return [];
-  const [kind, value] = addr.split(':');
-  if (kind === 'radio') {
-    const r = findRadio(value);
-    return r ? [...sockets].filter((c) => c.radioId === r.id) : [];
-  }
-  if (kind === 'conn') return [...sockets].filter((c) => c.id === value);
-  return [];
-}
-
 function broadcast(type, payload, opts = {}) {
-  const targeted = Boolean(opts.radioIds || opts.mdtIds);
+  const targeted = Boolean(opts.mdtIds || opts.personnelIds);
   for (const c of sockets) {
     let deliver = !targeted;
     if (targeted) {
-      if (opts.radioIds && c.radioId && opts.radioIds.includes(c.radioId)) deliver = true;
       if (opts.mdtIds && c.mdtId && opts.mdtIds.includes(c.mdtId)) deliver = true;
+      if (opts.personnelIds && c.user.personnel_id && opts.personnelIds.includes(c.user.personnel_id)) deliver = true;
       if (opts.includeControl !== false && isControlRole(c.user.role)) deliver = true;
     }
     if (deliver) c.send(type, payload);
@@ -509,22 +420,25 @@ const isControlRole = (role) => ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].inc
 /* ------------------------------------------------------------------ *
  * Domain logic
  * ------------------------------------------------------------------ */
-function publicRadio(r) {
-  const cs = db.callsigns.find((c) => c.id === r.callsign_id);
-  const tg = db.talkgroups.find((t) => t.id === r.talkgroup_id);
-  const veh = db.vehicles.find((v) => v.id === r.vehicle_id);
+/** Carries PII (contact_phone/email) unlike the other public* shapers'
+ * source rows, which is why this one exists at all — vehicles/sites are
+ * returned as raw rows elsewhere because they hold nothing sensitive,
+ * personnel no longer can be. welfare_note is kept (control needs to see
+ * it), but nothing here is ever handed to a role that isn't control or
+ * this exact person -- callers gate that themselves. */
+function publicPersonnel(p) {
+  const cs = db.callsigns.find((c) => c.id === p.callsign_id);
+  const veh = db.vehicles.find((v) => v.id === p.vehicle_id);
   return {
-    id: r.id, issi: r.issi, alias: r.alias, radio_type: r.radio_type, status: r.status,
-    callsign: cs ? cs.name : null, callsign_id: r.callsign_id,
-    talkgroup: tg ? tg.name : null, talkgroup_id: r.talkgroup_id,
-    vehicle: veh ? veh.registration : null, job_id: r.job_id,
-    battery: r.battery, signal: r.signal, lat: r.lat, lon: r.lon,
-    speed: r.speed, heading: r.heading, last_seen: r.last_seen,
-    emergency: r.emergency, connected: r.connected, pbx_extension: r.pbx_extension || null,
-    welfare_interval_s: r.welfare_interval_s || null, welfare_due_at: r.welfare_due_at || null,
-    covert: Boolean(r.covert), status_code: r.status_code || null,
-    personnel: db.personnel.filter((p) => p.callsign_id === r.callsign_id).map((p) => p.name),
-    has_pin: Boolean(r.pin_hash),
+    id: p.id, employee_no: p.employee_no, name: p.name, rank: p.rank,
+    contact_phone: p.contact_phone || '', contact_email: p.contact_email || '',
+    employment_status: p.employment_status || 'ACTIVE',
+    callsign: cs ? cs.name : null, callsign_id: p.callsign_id,
+    vehicle: veh ? veh.registration : null, vehicle_id: p.vehicle_id,
+    has_login: Boolean(p.user_id),
+    welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
+    welfare_note: p.welfare_note || null,
+    notes: p.notes || '',
   };
 }
 function publicMdt(m) {
@@ -537,105 +451,14 @@ function publicJob(j) {
   return {
     ...j,
     resources: assigns.map((a) => {
-      const r = a.radio_id ? db.radios.find((x) => x.id === a.radio_id) : null;
+      const p = a.personnel_id ? db.personnel.find((x) => x.id === a.personnel_id) : null;
       const m = a.mdt_id ? db.mdts.find((x) => x.id === a.mdt_id) : null;
       const cs = db.callsigns.find((c) => c.id === a.callsign_id);
-      return { assignment_id: a.id, callsign: cs ? cs.name : null, radio: r ? r.issi : null, mdt: m ? m.mdt_code : null, acknowledged: a.acknowledged, acknowledged_at: a.acknowledged_at };
+      return { assignment_id: a.id, callsign: cs ? cs.name : null, personnel: p ? p.name : null, mdt: m ? m.mdt_code : null, acknowledged: a.acknowledged, acknowledged_at: a.acknowledged_at };
     }),
   };
 }
-function publicCall(c) {
-  return {
-    ...c,
-    participants: db.communication_participants.filter((p) => p.communication_id === c.id).map((p) => {
-      const r = db.radios.find((x) => x.id === p.radio_id);
-      return { radio_id: p.radio_id, issi: r ? r.issi : null, callsign: r ? (db.callsigns.find((cs) => cs.id === r.callsign_id) || {}).name : null, role: p.role, state: p.state };
-    }),
-  };
-}
-
-function setRadioStatus(radio, status, reason = '') {
-  if (!RADIO_STATUSES.includes(status)) throw httpError(400, `invalid status ${status}`);
-  const prev = radio.status;
-  radio.status = status;
-  radio.last_seen = new Date().toISOString();
-  db.radio_status_history.push({ id: nextId('radio_status_history'), radio_id: radio.id, from_status: prev, to_status: status, at: radio.last_seen, reason });
-  broadcast('radio.status_changed', publicRadio(radio));
-  logEvent('radio.status_changed', `${callsignOf(radio)} STATUS → ${status}`, { radio_id: radio.id, issi: radio.issi, from: prev, to: status });
-}
-const callsignOf = (r) => { const c = db.callsigns.find((x) => x.id === r.callsign_id); return c ? c.name : (r.issi || r.mdt_code); };
-
-function releaseFloorFor(radio) {
-  for (const tg of db.talkgroups) {
-    if (tg.floor_holder_radio_id === radio.id) {
-      tg.floor_holder_radio_id = null; tg.floor_since = null;
-      broadcast('radio.ptt_released', { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio.id, issi: radio.issi, callsign: callsignOf(radio) });
-    }
-  }
-  // Same reasoning as the talkgroup case just above -- a radio that drops
-  // mid-transmission on a call must not leave that call's floor stuck.
-  for (const call of db.communications) {
-    if (call.state === 'ACTIVE' && call.floor_holder_radio_id === radio.id) {
-      const otherIds = otherCallRadioIds(call, radio);
-      call.floor_holder_radio_id = null; call.floor_since = null;
-      for (const c of sockets) {
-        if (c.radioId && otherIds.includes(c.radioId)) c.send('radio.ptt_released', { call_id: call.id, radio_id: radio.id, callsign: callsignOf(radio) });
-      }
-    }
-  }
-}
-
-// Third time in one afternoon a talkgroup was found stuck "held by
-// CONTROL" with no radio.ptt_release ever arriving -- each time from a
-// different cause (a closed tab, an exception in the browser's own
-// cleanup, and now this one still unexplained). Chasing every possible
-// client-side trigger individually clearly isn't converging fast enough
-// for a live dispatch system where a stuck floor blocks all
-// communication on that channel. This is the backstop: whatever the
-// cause, nothing should ever be able to hold a floor longer than a real
-// transmission plausibly runs.
-const FLOOR_TIMEOUT_MS = Number(process.env.FLOOR_TIMEOUT_MS || 30000);
-function floorTimeoutSweep() {
-  const now = Date.now();
-  for (const tg of db.talkgroups) {
-    if (!tg.floor_since || now - Date.parse(tg.floor_since) < FLOOR_TIMEOUT_MS) continue;
-    const radio = tg.floor_holder_radio_id ? db.radios.find((r) => r.id === tg.floor_holder_radio_id) : null;
-    const who = radio ? callsignOf(radio) : 'CONTROL';
-    logEvent('radio.ptt_timeout', `${who} FLOOR ON ${tg.name} FORCE-RELEASED — held ${Math.round((now - Date.parse(tg.floor_since)) / 1000)}s with no release`, { talkgroup_id: tg.id });
-    console.warn(`[cccs] floor timeout: ${tg.name} force-released, was held by ${who}`);
-    tg.floor_holder_radio_id = null; tg.floor_console_user_id = null; tg.floor_since = null;
-    broadcast('radio.ptt_released', { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio ? radio.id : null, callsign: who });
-  }
-  for (const call of db.communications) {
-    if (call.state !== 'ACTIVE' || !call.floor_since || now - Date.parse(call.floor_since) < FLOOR_TIMEOUT_MS) continue;
-    const radio = call.floor_holder_radio_id ? db.radios.find((r) => r.id === call.floor_holder_radio_id) : null;
-    const who = radio ? callsignOf(radio) : '?';
-    logEvent('call.ptt_timeout', `${who} FLOOR ON CALL #${call.id} FORCE-RELEASED — held ${Math.round((now - Date.parse(call.floor_since)) / 1000)}s with no release`, { call_id: call.id });
-    console.warn(`[cccs] call floor timeout: call #${call.id} force-released, was held by ${who}`);
-    const otherIds = radio ? otherCallRadioIds(call, radio) : [];
-    call.floor_holder_radio_id = null; call.floor_since = null;
-    for (const c of sockets) {
-      if (c.radioId && otherIds.includes(c.radioId)) c.send('radio.ptt_released', { call_id: call.id, radio_id: radio ? radio.id : null, callsign: who });
-    }
-  }
-}
-
-function endCall(call, reason) {
-  if (call.state === 'ENDED') return call;
-  if (call.kind === 'PSTN' && reason !== 'REMOTE_CLEARED') {
-    try { gateway.hangup({ callId: call.id }); } catch (e) { console.warn('[pbx] hangup failed', e.message); }
-  }
-  call.state = 'ENDED'; call.ended_at = new Date().toISOString(); call.end_reason = reason;
-  call.duration_s = Math.round((Date.parse(call.ended_at) - Date.parse(call.started_at)) / 1000);
-  // Release every leg, or the radio stays "busy" forever and cannot be called again.
-  for (const p of db.communication_participants.filter((x) => x.communication_id === call.id)) {
-    if (p.state !== 'REJECTED') p.state = 'ENDED';
-  }
-  const radioIds = db.communication_participants.filter((p) => p.communication_id === call.id).map((p) => p.radio_id).filter(Boolean);
-  broadcast('call.ended', publicCall(call), { radioIds });
-  logEvent('call.ended', `CALL #${call.id} ENDED (${reason}) ${call.duration_s}s`, { call_id: call.id });
-  return call;
-}
+const callsignOf = (r) => { const c = db.callsigns.find((x) => x.id === r.callsign_id); return c ? c.name : (r.mdt_code || r.name); };
 
 /* ------------------------------------------------------------------ *
  * WebSocket message handling
@@ -644,37 +467,6 @@ function handleWsMessage(conn, msg) {
   const { type, payload = {} } = msg;
   switch (type) {
     case 'ping': return conn.send('pong', {});
-    case 'radio.attach': {
-      const radio = findRadio(payload.issi || payload.radio_id);
-      if (!radio) return conn.send('error', { message: 'unknown radio' });
-      if (conn.user.role === 'RADIO_USER' && conn.user.radio_id !== radio.id)
-        return conn.send('error', { message: 'not authorised for this radio' });
-      conn.radioId = radio.id;
-      // The legacy Android client sends this on radio.attach -- it has no
-      // WebRTC at all, so its floor time is announced as raw-audio to every
-      // listener rather than a WebRTC offer that would never arrive.
-      conn.rawAudio = payload.client === 'legacy';
-      radio.connected = true;
-      setRadioStatus(radio, payload.status && RADIO_STATUSES.includes(payload.status) ? payload.status : 'AVAILABLE', 'attached');
-      broadcast('radio.connected', publicRadio(radio));
-      logEvent('radio.connected', `${callsignOf(radio)} (${radio.issi}) CONNECTED`, { radio_id: radio.id });
-      // The registration credentials for this radio's own WebRTC SIP
-      // device -- only ever sent here, in a direct reply to the one
-      // connection that just proved it's this radio, never in
-      // publicRadio() (broadcast to everyone) or any other event.
-      // Deliberately a separate device id (pbx_sip_user) from
-      // pbx_extension: confirmed live against FreePBX's own Webrtc module
-      // that the extension you dial (9001) and the actual registrable
-      // PJSIP device behind it (999001, that module's own prefix
-      // convention) are not the same identifier. Omitted entirely (not
-      // just null) when this radio has no PBX device provisioned, so a
-      // client with no `sip` field simply never attempts SIP registration.
-      const attached = publicRadio(radio);
-      if (radio.pbx_sip_user && radio.pbx_secret) {
-        attached.sip = { extension: radio.pbx_sip_user, secret: radio.pbx_secret };
-      }
-      return conn.send('radio.attached', attached);
-    }
     case 'mdt.attach': {
       const mdt = findMdt(payload.mdt_code || payload.mdt_id);
       if (!mdt) return conn.send('error', { message: 'unknown MDT' });
@@ -686,189 +478,8 @@ function handleWsMessage(conn, msg) {
       logEvent('mdt.connected', `${mdt.mdt_code} CONNECTED`, { mdt_id: mdt.id });
       return conn.send('mdt.attached', publicMdt(mdt));
     }
-    case 'webrtc.signal': {
-      // Opaque relay: SDP offers/answers and ICE candidates pass through untouched.
-      const targets = resolvePeers(payload.to);
-      if (!targets.length) return conn.send('webrtc.unreachable', { to: payload.to });
-      for (const t of targets) t.send('webrtc.signal', { from: peerAddr(conn), data: payload.data });
-      return;
-    }
-    case 'radio.ptt_start': return pttStart(conn, payload);
-    case 'radio.ptt_release': return pttRelease(conn, payload);
     default: return conn.send('error', { message: `unknown message ${type}` });
   }
-}
-
-function resolveActor(conn, payload) {
-  if (conn.radioId) return db.radios.find((r) => r.id === conn.radioId);
-  if (isControlRole(conn.user.role)) {
-    if (payload.as_radio) return findRadio(payload.as_radio);
-    return null; // control operates as CONTROL console
-  }
-  return null;
-}
-
-function pttStart(conn, payload) {
-  // A radio mid-call PTTs into the call, not the talkgroup it's still a
-  // member of -- routed separately below, entirely bypassing talkgroup
-  // floor/membership so it can never reach anyone but that call's other
-  // participant(s), control included. See callPttStart() for why this
-  // needed its own path rather than reusing tg.floor_* : a legacy handset
-  // in a call was found still broadcasting PTT to its whole talkgroup,
-  // since nothing here had ever checked for an active call at all.
-  if (payload.call_id) return callPttStart(conn, payload);
-  const tg = findTalkgroup(payload.talkgroup_id || payload.talkgroup);
-  if (!tg) return conn.send('error', { message: 'unknown talkgroup' });
-  const radio = resolveActor(conn, payload);
-  const holderId = tg.floor_holder_radio_id;
-  const consoleHold = tg.floor_console_user_id;
-  if ((holderId && holderId !== (radio && radio.id)) || (consoleHold && consoleHold !== (!radio ? conn.user.id : null))) {
-    const holder = db.radios.find((r) => r.id === holderId);
-    return conn.send('ptt.denied', { talkgroup: tg.name, reason: 'CHANNEL BUSY', holder: holder ? callsignOf(holder) : 'CONTROL' });
-  }
-  if (radio) { tg.floor_holder_radio_id = radio.id; tg.floor_console_user_id = null; }
-  else { tg.floor_console_user_id = conn.user.id; tg.floor_holder_radio_id = null; }
-  tg.floor_since = new Date().toISOString();
-  const who = radio ? callsignOf(radio) : 'CONTROL';
-  // raw_audio tells listeners how this transmission's audio is arriving:
-  // as WebRTC (the normal path) or as the binary frames relayAudioFrame()
-  // forwards (legacy handsets, which never do WebRTC signaling at all).
-  // Web clients hold both capabilities now, gated on this flag so a modern
-  // listener never plays the same transmission twice.
-  const ev = { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio ? radio.id : null, issi: radio ? radio.issi : null, callsign: who, since: tg.floor_since, raw_audio: !!conn.rawAudio };
-  // The floor holder publishes audio to every listener; listeners only receive.
-  const memberIds = db.talkgroup_members.filter((m) => m.talkgroup_id === tg.id).map((m) => m.radio_id);
-  const listeners = [...sockets]
-    .filter((c) => c !== conn && (isControlRole(c.user.role) || (c.radioId && memberIds.includes(c.radioId))))
-    .map(peerAddr);
-  conn.send('ptt.granted', { ...ev, listeners: [...new Set(listeners)] });
-  broadcast('radio.ptt_started', ev);
-  logEvent('radio.ptt_started', `${who} TX → ${tg.name}`, ev);
-}
-
-function pttRelease(conn, payload) {
-  if (payload.call_id) return callPttRelease(conn, payload);
-  const tg = findTalkgroup(payload.talkgroup_id || payload.talkgroup);
-  if (!tg) return;
-  const radio = resolveActor(conn, payload);
-  const mine = radio ? tg.floor_holder_radio_id === radio.id : tg.floor_console_user_id === conn.user.id;
-  if (!mine) return;
-  const who = radio ? callsignOf(radio) : 'CONTROL';
-  const duration = tg.floor_since ? Math.round((Date.now() - Date.parse(tg.floor_since)) / 1000) : 0;
-  tg.floor_holder_radio_id = null; tg.floor_console_user_id = null; tg.floor_since = null;
-  const ev = { talkgroup_id: tg.id, talkgroup: tg.name, radio_id: radio ? radio.id : null, callsign: who, duration_s: duration };
-  broadcast('radio.ptt_released', ev);
-  logEvent('radio.ptt_released', `${who} RX ← ${tg.name} (${duration}s)`, ev);
-}
-
-/** PTT while on an active private/PSTN call: floor and listeners are
- * scoped to that call's own connected participants only (via
- * db.communications/communication_participants), completely separate
- * from talkgroup floor state and never broadcast() (which always
- * includes control) -- "only between the 2 ISSIs in the call" means
- * literally that, control included in "everyone" it must NOT reach. */
-function findActiveCallFor(radio, callId) {
-  const call = db.communications.find((c) => c.id === Number(callId));
-  if (!call || call.state !== 'ACTIVE') return null;
-  const mine = db.communication_participants.find((p) => p.communication_id === call.id && p.radio_id === radio.id && p.state === 'CONNECTED');
-  return mine ? call : null;
-}
-function otherCallRadioIds(call, radio) {
-  return db.communication_participants
-    .filter((p) => p.communication_id === call.id && p.radio_id !== radio.id && p.state === 'CONNECTED')
-    .map((p) => p.radio_id);
-}
-function callPttStart(conn, payload) {
-  const radio = resolveActor(conn, payload);
-  if (!radio) return conn.send('error', { message: 'call PTT requires a radio' });
-  const call = findActiveCallFor(radio, payload.call_id);
-  if (!call) return conn.send('ptt.denied', { reason: 'CALL NOT ACTIVE' });
-  // A PSTN leg has no other radio_id to relay to at all -- the far end is
-  // a phone number on the PBX, reached (once a real gateway is connected,
-  // not the current simulated one) via its own SIP path, never through
-  // this WebSocket. Say so rather than granting a floor that plays to
-  // nobody and leaving whoever pressed PTT thinking it worked.
-  if (call.kind === 'PSTN') return conn.send('ptt.denied', { reason: 'PHONE CALLS NOT SUPPORTED ON THIS DEVICE' });
-  if (call.floor_holder_radio_id && call.floor_holder_radio_id !== radio.id) {
-    const holder = db.radios.find((r) => r.id === call.floor_holder_radio_id);
-    return conn.send('ptt.denied', { reason: 'CHANNEL BUSY', holder: holder ? callsignOf(holder) : '?' });
-  }
-  call.floor_holder_radio_id = radio.id;
-  call.floor_since = new Date().toISOString();
-  const who = callsignOf(radio);
-  const ev = { call_id: call.id, radio_id: radio.id, issi: radio.issi, callsign: who, since: call.floor_since, raw_audio: !!conn.rawAudio };
-  conn.send('ptt.granted', { ...ev, listeners: [] });
-  const otherIds = otherCallRadioIds(call, radio);
-  for (const c of sockets) {
-    if (c.radioId && otherIds.includes(c.radioId)) c.send('radio.ptt_started', ev);
-  }
-  logEvent('call.ptt_started', `${who} TX on call #${call.id}`, { call_id: call.id });
-}
-function callPttRelease(conn, payload) {
-  const radio = resolveActor(conn, payload);
-  if (!radio) return;
-  const call = db.communications.find((c) => c.id === Number(payload.call_id));
-  if (!call || call.floor_holder_radio_id !== radio.id) return;
-  const duration = call.floor_since ? Math.round((Date.now() - Date.parse(call.floor_since)) / 1000) : 0;
-  const otherIds = otherCallRadioIds(call, radio);
-  call.floor_holder_radio_id = null; call.floor_since = null;
-  const who = callsignOf(radio);
-  const ev = { call_id: call.id, radio_id: radio.id, callsign: who, duration_s: duration };
-  for (const c of sockets) {
-    if (c.radioId && otherIds.includes(c.radioId)) c.send('radio.ptt_released', ev);
-  }
-  logEvent('call.ptt_released', `${who} RX on call #${call.id} (${duration}s)`, { call_id: call.id });
-}
-
-/** Server-relayed audio, for clients that can't do WebRTC (old-Android
- * native handsets — see StatusLedPlugin's doc comment for why: their
- * WebView predates WebRTC entirely, so this codebase's normal audio path
- * doesn't reach them). Rather than build a second peer-to-peer transport
- * for them, they send their own encoded audio as plain binary WebSocket
- * frames on the same connection already used for PTT signalling
- * (radio.ptt_start / radio.ptt_release, unchanged), and the server
- * forwards each frame verbatim to whoever's currently listening on that
- * talkgroup — a relay, not a mesh, and it reuses the exact same
- * floor/membership rules pttStart already computes its WebRTC listener
- * list from, so the two transports agree on who's allowed to talk and who
- * hears them. It does NOT bridge to WebRTC clients — a native handset and
- * a web/WebRTC client on the same talkgroup can't hear each other yet,
- * since that needs real transcoding, not just relaying bytes; both
- * transports work standalone within their own client population. */
-let relayLogCounter = 0; // diagnostic only -- browser-to-handset audio confirmed sending but not heard; throttled so a held PTT doesn't flood the log
-function relayAudioFrame(conn, data) {
-  const radio = conn.radioId ? db.radios.find((r) => r.id === conn.radioId) : null;
-  // Call floor takes priority over talkgroup floor -- a radio only ever
-  // holds one or the other (callPttStart doesn't touch tg.floor_*), but
-  // checking this first makes that ordering explicit rather than
-  // incidental. Private stays private: only the other call participant(s)
-  // ever see these bytes, control included in who must not.
-  const callFloor = radio ? db.communications.find((c) => c.state === 'ACTIVE' && c.floor_holder_radio_id === radio.id) : null;
-  if (callFloor) {
-    const otherIds = otherCallRadioIds(callFloor, radio);
-    const frame = encodeFrame(data, 0x2);
-    for (const c of sockets) {
-      if (c.radioId && otherIds.includes(c.radioId)) { try { c.socket.write(frame); } catch { c.close(); } }
-    }
-    return;
-  }
-  const isConsole = !radio && isControlRole(conn.user.role);
-  const tg = db.talkgroups.find((t) => (radio && t.floor_holder_radio_id === radio.id) || (isConsole && t.floor_console_user_id === conn.user.id));
-  const logNow = relayLogCounter++ % 50 === 0;
-  if (!tg) { // not currently holding the floor on anything -- drop silently, not an injection vector
-    if (logNow) console.log(`[cccs] relayAudioFrame: no floor held by ${isConsole ? 'console user ' + conn.user.id : radio ? 'radio ' + radio.issi : 'unknown sender (radioId=' + conn.radioId + ')'} -- dropped`);
-    return;
-  }
-  const memberIds = db.talkgroup_members.filter((m) => m.talkgroup_id === tg.id).map((m) => m.radio_id);
-  const frame = encodeFrame(data, 0x2);
-  let sent = 0;
-  for (const c of sockets) {
-    if (c === conn) continue;
-    const listens = isControlRole(c.user.role) || (c.radioId && memberIds.includes(c.radioId));
-    if (!listens) continue;
-    try { c.socket.write(frame); sent++; } catch { c.close(); }
-  }
-  if (logNow) console.log(`[cccs] relayAudioFrame: tg=${tg.name} sender=${isConsole ? 'console' : radio.issi} bytes=${data.length} wrote-to=${sent}/${sockets.size - 1}-other-sockets`);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1021,7 +632,7 @@ function handleUpgrade(req, socket) {
   socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${wsAccept(key)}`, '\r\n'].join('\r\n'));
   socket.setNoDelay(true);
   const conn = new Conn(socket, user);
-  conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, radio_id: user.radio_id, mdt_id: user.mdt_id } });
+  conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, personnel_id: user.personnel_id, mdt_id: user.mdt_id } });
 }
 server.on('upgrade', handleUpgrade);
 httpsServer?.on('upgrade', handleUpgrade);
@@ -1033,7 +644,7 @@ const ALL = ROLES;
 const CONTROL = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
 const ADMIN = ['SYSTEM_ADMIN'];
 
-const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, radio_id: u.radio_id, mdt_id: u.mdt_id, email: u.email || null });
+const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, email: u.email || null });
 
 route('POST', '/api/auth/login', null, ({ body }) => {
   const user = db.users.find((u) => u.username === String(body.username || '').toLowerCase());
@@ -1047,54 +658,11 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   return { token, user: publicUser(user) };
 });
 
-/* ---- Radio sign-in by ISSI + PIN --------------------------------------
- * Radios don't have individually managed usernames/passwords — a radio IS
- * its ISSI (auto-assigned at creation, see nextIssi()), and control
- * assigns it a callsign, same as any other radio admin. The backing
- * db.users row this still needs internally (every permission check in
- * this file keys off user.radio_id) is provisioned transparently here on
- * first sign-in, never surfaced as a thing admin has to manage. */
-function findOrCreateRadioUser(radio) {
-  let u = db.users.find((x) => x.radio_id === radio.id && x.role === 'RADIO_USER');
-  if (!u) {
-    u = {
-      id: nextId('users'), username: `radio-${radio.issi}`,
-      password_hash: hashPassword(crypto.randomBytes(24).toString('hex')), // unusable via /api/auth/login — PIN is the only way in
-      role: 'RADIO_USER', display_name: radio.alias || radio.issi,
-      radio_id: radio.id, mdt_id: null, created_at: new Date().toISOString(),
-    };
-    db.users.push(u);
-  }
-  return u;
-}
-
-// Unauthenticated, deliberately minimal — just enough for the sign-in
-// screen's ISSI picker. No location, status, battery or emergency state.
-route('GET', '/api/radios/directory', null, () =>
-  db.radios.map((r) => {
-    const cs = db.callsigns.find((c) => c.id === r.callsign_id);
-    return { issi: r.issi, alias: r.alias, callsign: cs ? cs.name : null };
-  }));
-
-route('POST', '/api/auth/radio-login', null, ({ body }) => {
-  const radio = findRadio(body.issi);
-  if (!radio) throw httpError(404, 'unknown radio');
-  if (!radio.pin_hash) throw httpError(409, 'this radio has no PIN set — ask control to set one in Admin');
-  if (!verifyPassword(String(body.pin || ''), radio.pin_hash)) {
-    logEvent('auth.failed', `Failed PIN sign-in for radio ${radio.issi}`, { radio_id: radio.id });
-    throw httpError(401, 'incorrect PIN');
-  }
-  const user = findOrCreateRadioUser(radio);
-  const token = sign({ sub: user.id, role: user.role, exp: Date.now() + TOKEN_TTL_MS });
-  logEvent('auth.login', `Radio ${radio.issi} signed in`, { user_id: user.id, radio_id: radio.id });
-  return { token, user: publicUser(user) };
-});
-
 /* ---- Microsoft Entra ID (Azure AD) single sign-on --------------------
  * Alongside local username/password, never replacing it. A Microsoft sign-in
  * only succeeds if its email/UPN matches an existing CCCS account's `email`
  * field — SSO never creates an account, it only unlocks one an admin already
- * set up, so role and radio/MDT bindings stay under admin control. */
+ * set up, so role and personnel/MDT bindings stay under admin control. */
 const ssoState = new Map();   // csrf nonce -> created-at, cleared on use
 const ssoExchange = new Map(); // one-time code -> { token, user, created }
 const SSO_TTL_MS = 5 * 60 * 1000;
@@ -1176,98 +744,6 @@ route('GET', '/api/auth/microsoft/session', null, ({ query }) => {
   ssoExchange.delete(code);
   return { token: entry.token, user: entry.user };
 });
-const DEFAULT_SETTINGS = {
-  // Android keycodes. 275 is the dedicated PTT key on several rugged handsets,
-  // but it varies by vendor — the Settings screen lets the officer press their
-  // own key and bind whatever it actually sends.
-  ptt_keycode: 275,
-  ptt_key_label: 'Side key (default)',
-  sos_keycode: null,
-  sos_key_label: null,
-  sos_hold_ms: 1500,
-  // Desktop equivalents, used when running the console in a browser.
-  ptt_web_key: 'Space',
-  sos_web_key: null,
-  // Canonical binding tokens as the handset reports them: 'Space' in a browser,
-  // 'android:284' on a device. Stored per user so a replacement handset picks up
-  // the officer's own bindings at first sign-in.
-  ptt_token: 'Space',
-  sos_token: null,
-  // Long-press keypad actions. Defaults are the Android keycodes for 1, # and *.
-  call_token: 'android:8',        // hold 1
-  priority_token: 'android:18',   // hold #
-  lock_token: 'android:17',       // hold *
-  redial_token: 'android:7',      // hold 0
-  talkgroup_token: 'android:9',   // hold 2
-  status_token: 'android:10',     // hold 3
-  covert_token: 'android:12',     // hold 5
-  position_token: 'android:15',   // hold 8
-  action_hold_ms: 800,
-  speed_dial: {},                 // keypad character -> { type, target, label }
-};
-
-route('GET', '/api/me/settings', ALL, ({ user }) => ({ ...DEFAULT_SETTINGS, ...(user.settings || {}) }));
-route('PUT', '/api/me/settings', ALL, ({ user, body }) => {
-  const next = { ...DEFAULT_SETTINGS, ...(user.settings || {}) };
-  const num = (v) => (v === null || v === '' ? null : Number(v));
-
-  if ('ptt_keycode' in body) {
-    const k = num(body.ptt_keycode);
-    if (k !== null && (!Number.isInteger(k) || k < 0 || k > 1000)) throw httpError(400, 'ptt_keycode out of range');
-    next.ptt_keycode = k;
-  }
-  if ('sos_keycode' in body) {
-    const k = num(body.sos_keycode);
-    if (k !== null && (!Number.isInteger(k) || k < 0 || k > 1000)) throw httpError(400, 'sos_keycode out of range');
-    next.sos_keycode = k;
-  }
-  if (next.ptt_keycode !== null && next.ptt_keycode === next.sos_keycode) {
-    throw httpError(400, 'the same key cannot be bound to both talk and SOS');
-  }
-  if ('sos_hold_ms' in body) {
-    const ms = num(body.sos_hold_ms);
-    if (!Number.isInteger(ms) || ms < 500 || ms > 10000) throw httpError(400, 'sos_hold_ms must be between 500 and 10000');
-    next.sos_hold_ms = ms;
-  }
-  if ('action_hold_ms' in body) {
-    const ms = Number(body.action_hold_ms);
-    if (!Number.isInteger(ms) || ms < 300 || ms > 5000) throw httpError(400, 'action_hold_ms must be between 300 and 5000');
-    next.action_hold_ms = ms;
-  }
-  if ('speed_dial' in body) {
-    const map = body.speed_dial || {};
-    if (typeof map !== 'object' || Array.isArray(map)) throw httpError(400, 'speed_dial must be an object');
-    const cleaned = {};
-    for (const [ch, entry] of Object.entries(map).slice(0, 12)) {
-      if (!/^[0-9*#]$/.test(ch)) throw httpError(400, `speed dial key ${ch} is not a keypad character`);
-      if (!entry) continue;
-      const type = String(entry.type || 'radio');
-      if (!['radio', 'phone'].includes(type)) throw httpError(400, 'speed dial entries must be radio or phone');
-      const target = String(entry.target || '').replace(/[^0-9*#+]/g, '');
-      if (!target) throw httpError(400, `speed dial ${ch} has no number`);
-      cleaned[ch] = { type, target, label: String(entry.label || target).slice(0, 40) };
-    }
-    next.speed_dial = cleaned;
-  }
-  for (const field of ['ptt_token', 'sos_token', 'call_token', 'priority_token', 'lock_token',
-                       'redial_token', 'talkgroup_token', 'status_token', 'covert_token', 'position_token']) {
-    if (field in body) next[field] = body[field] === null ? null : String(body[field]).slice(0, 40);
-  }
-  const bound = ['ptt_token', 'sos_token', 'call_token', 'priority_token', 'lock_token',
-                 'redial_token', 'talkgroup_token', 'status_token', 'covert_token', 'position_token']
-    .map((f) => next[f]).filter(Boolean);
-  if (new Set(bound).size !== bound.length) {
-    throw httpError(400, 'each key can only be bound to one action');
-  }
-  for (const field of ['ptt_key_label', 'sos_key_label', 'ptt_web_key', 'sos_web_key']) {
-    if (field in body) next[field] = body[field] === null ? null : String(body[field]).slice(0, 60);
-  }
-  user.settings = next;
-  store.flushNow();
-  logEvent('settings.updated', `${user.username} UPDATED KEY BINDINGS`, { user_id: user.id });
-  return next;
-});
-
 route('GET', '/api/me', ALL, ({ user }) => publicUser(user));
 
 // Web Push — lets a phone with the console added to its home screen get
@@ -1287,115 +763,6 @@ route('DELETE', '/api/push/subscribe', ALL, ({ body, user }) => {
   return { ok: true };
 });
 
-// Radios
-route('GET', '/api/radios', ALL, () => db.radios.map(publicRadio));
-route('GET', '/api/radios/:id', ALL, ({ params }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
-  return publicRadio(r);
-});
-/** ISSIs are allocated, not chosen — an admin picking their own risks a typo
- * that collides with (or is one digit off from) a real unit. Next-after-
- * highest keeps them looking like the existing block instead of starting a
- * new numbering scheme every time. */
-function nextIssi() {
-  const nums = db.radios.map((r) => parseInt(r.issi, 10)).filter((n) => !isNaN(n));
-  const base = nums.length ? Math.max(...nums) : 234100000;
-  return String(base + 1).padStart(9, '0');
-}
-route('POST', '/api/radios', ADMIN, ({ body }) => {
-  const issi = nextIssi();
-  const type = String(body.radio_type || 'HANDHELD').toUpperCase();
-  if (!['HANDHELD', 'VEHICLE', 'FIXED', 'MDT'].includes(type)) throw httpError(400, 'invalid radio_type');
-  const cs = body.callsign ? findCallsign(body.callsign) : null;
-  const tg = body.talkgroup ? findTalkgroup(body.talkgroup) : null;
-  const pin = String(body.pin || '').trim();
-  if (pin && !/^\d{6}$/.test(pin)) throw httpError(400, 'PIN must be 6 digits');
-  const r = { id: nextId('radios'), issi, alias: body.alias || issi, radio_type: type, status: 'OFFLINE', callsign_id: cs ? cs.id : null, vehicle_id: null, talkgroup_id: tg ? tg.id : null, job_id: null, assigned_user_id: null, battery: 100, signal: 'UNKNOWN', lat: 51.5074, lon: -0.1278, speed: 0, heading: 0, last_seen: null, emergency: false, connected: false, sim_target: null, pbx_extension: body.pbx_extension || null, pbx_sip_user: body.pbx_sip_user || null, pbx_secret: body.pbx_secret || null, pin_hash: pin ? hashPassword(pin) : null };
-  db.radios.push(r);
-  if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: r.id });
-  broadcast('radio.created', publicRadio(r));
-  logEvent('radio.created', `RADIO ${issi} CREATED`, { radio_id: r.id });
-  return { __status: 201, __body: publicRadio(r) };
-});
-route('PATCH', '/api/radios/:id', ADMIN, ({ params, body }) => {
-  const r = findRadio(params.id);
-  if (!r) throw httpError(404, 'radio not found');
-  // ISSI is allocated at creation and not editable here — see nextIssi().
-  if ('alias' in body) r.alias = String(body.alias || '').trim() || r.issi;
-  if ('radio_type' in body) {
-    const type = String(body.radio_type || '').toUpperCase();
-    if (!['HANDHELD', 'VEHICLE', 'FIXED', 'MDT'].includes(type)) throw httpError(400, 'invalid radio_type');
-    r.radio_type = type;
-  }
-  if ('pbx_extension' in body) r.pbx_extension = body.pbx_extension || null;
-  // The actual registrable SIP device behind pbx_extension -- not the same
-  // identifier (see the radio.attach comment below for why) -- plus its
-  // registration secret. Deliberately never in publicRadio(), only ever
-  // handed to that radio's own connection on radio.attach. Admin-only
-  // writes here, same as the PIN.
-  if ('pbx_sip_user' in body) r.pbx_sip_user = body.pbx_sip_user || null;
-  if ('pbx_secret' in body) r.pbx_secret = body.pbx_secret || null;
-  if ('callsign' in body) {
-    const cs = body.callsign ? findCallsign(body.callsign) : null;
-    r.callsign_id = cs ? cs.id : null;
-  }
-  if ('talkgroup' in body) {
-    db.talkgroup_members = db.talkgroup_members.filter((m) => m.radio_id !== r.id);
-    const tg = body.talkgroup ? findTalkgroup(body.talkgroup) : null;
-    r.talkgroup_id = tg ? tg.id : null;
-    if (tg) db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: tg.id, radio_id: r.id });
-  }
-  if ('pin' in body) {
-    const pin = String(body.pin || '').trim();
-    if (pin) {
-      if (!/^\d{6}$/.test(pin)) throw httpError(400, 'PIN must be 6 digits');
-      r.pin_hash = hashPassword(pin);
-    } else {
-      r.pin_hash = null; // explicit clear — sign-in with this ISSI is refused until a new PIN is set
-    }
-  }
-  broadcast('radio.status_changed', publicRadio(r));
-  logEvent('radio.updated', `RADIO ${r.issi} UPDATED`, { radio_id: r.id });
-  return publicRadio(r);
-});
-route('DELETE', '/api/radios/:id', ADMIN, ({ params }) => {
-  const r = findRadio(params.id);
-  if (!r) throw httpError(404, 'radio not found');
-  if (r.job_id) throw httpError(409, 'radio is assigned to an open job — stand it down first');
-  if (db.users.some((u) => u.radio_id === r.id)) throw httpError(409, 'an account is still linked to this radio — unlink it from the account first');
-  db.talkgroup_members = db.talkgroup_members.filter((m) => m.radio_id !== r.id);
-  db.radios = db.radios.filter((x) => x.id !== r.id);
-  broadcast('radio.deleted', { id: r.id, issi: r.issi });
-  logEvent('radio.deleted', `RADIO ${r.issi} DELETED`, { radio_id: r.id });
-  return { ok: true };
-});
-route('POST', '/api/radios/:id/status', ALL, ({ params, body, user }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
-
-  let status = String(body.status || '').toUpperCase();
-  let reason = body.reason || `set by ${user.username}`;
-  if (body.code !== undefined) {
-    const code = String(body.code).padStart(2, '0');
-    const entry = STATUS_CODES[code];
-    if (!entry) throw httpError(400, `unknown status code ${code}`);
-    status = entry.status;
-    reason = `status ${code} — ${entry.label}`;
-    r.status_code = code;
-  }
-  setRadioStatus(r, status, reason);
-  syncJobFromManualStatus(r, status);
-  return publicRadio(r);
-});
-route('POST', '/api/radios/:id/location', ALL, ({ params, body, user }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
-  Object.assign(r, { lat: Number(body.lat), lon: Number(body.lon), speed: Number(body.speed || 0), heading: Number(body.heading || 0), last_seen: new Date().toISOString() });
-  db.locations.push({ id: nextId('locations'), radio_id: r.id, lat: r.lat, lon: r.lon, speed: r.speed, heading: r.heading, at: r.last_seen });
-  checkAutoJobProgress(r, null, r.lat, r.lon);
-  broadcast('radio.location_changed', publicRadio(r));
-  return publicRadio(r);
-});
 
 // MDTs, vehicles, personnel
 route('GET', '/api/mdts', ALL, () => db.mdts.map(publicMdt));
@@ -1448,7 +815,12 @@ route('POST', '/api/mdts/:id/location', MDT_CREW, ({ params, body, user }) => {
   const m = db.mdts.find((x) => x.id === Number(params.id)); if (!m) throw httpError(404, 'MDT not found');
   if (user.role === 'MDT_USER' && user.mdt_id !== m.id) throw httpError(403, 'not your terminal');
   m.lat = Number(body.lat); m.lon = Number(body.lon);
-  checkAutoJobProgress(null, m, m.lat, m.lon);
+  // This never wrote to db.locations at all before -- confirmed live during
+  // the radio removal, only the (now-deleted) radio location route did.
+  // Adding the write here rather than leaving GPS history/retention-sweep
+  // silently empty for every terminal going forward.
+  db.locations.push({ id: nextId('locations'), mdt_id: m.id, personnel_id: null, lat: m.lat, lon: m.lon, speed: null, heading: null, at: new Date().toISOString() });
+  checkAutoJobProgress(m, m.lat, m.lon);
   broadcast('mdt.status_changed', publicMdt(m));
   return publicMdt(m);
 });
@@ -1497,15 +869,14 @@ route('DELETE', '/api/mdts/:id', ADMIN, ({ params }) => {
   return { ok: true };
 });
 route('GET', '/api/vehicles', ALL, () => db.vehicles);
-route('GET', '/api/personnel', ALL, () => db.personnel);
+route('GET', '/api/personnel', ALL, () => db.personnel.map(publicPersonnel));
 
 // Call signs
 route('GET', '/api/callsigns', ALL, () => db.callsigns.map((c) => ({
   ...c,
-  radios: db.radios.filter((r) => r.callsign_id === c.id).map((r) => ({ id: r.id, issi: r.issi, status: r.status, type: r.radio_type })),
   mdts: db.mdts.filter((m) => m.callsign_id === c.id).map((m) => ({ id: m.id, mdt_code: m.mdt_code, status: m.status })),
-  personnel: db.personnel.filter((p) => p.callsign_id === c.id).map((p) => p.name),
-  vehicles: [...new Set(db.radios.filter((r) => r.callsign_id === c.id && r.vehicle_id).map((r) => (db.vehicles.find((v) => v.id === r.vehicle_id) || {}).registration))],
+  personnel: db.personnel.filter((p) => p.callsign_id === c.id).map((p) => ({ id: p.id, name: p.name })),
+  vehicles: [...new Set(db.mdts.filter((m) => m.callsign_id === c.id && m.vehicle_id).map((m) => (db.vehicles.find((v) => v.id === m.vehicle_id) || {}).registration))],
 })));
 route('POST', '/api/callsigns', CONTROL, ({ body }) => {
   const name = String(body.name || '').toUpperCase().trim();
@@ -1519,12 +890,6 @@ route('POST', '/api/callsigns', CONTROL, ({ body }) => {
 });
 route('POST', '/api/callsigns/:id/assign', CONTROL, ({ params, body }) => {
   const cs = findCallsign(params.id); if (!cs) throw httpError(404, 'call sign not found');
-  if (body.radio) {
-    const r = findRadio(body.radio); if (!r) throw httpError(404, 'radio not found');
-    r.callsign_id = cs.id;
-    broadcast('radio.assigned', publicRadio(r));
-    logEvent('assignment.radio', `RADIO ${r.issi} → ${cs.name}`, { radio_id: r.id, callsign_id: cs.id });
-  }
   if (body.mdt) {
     const m = findMdt(body.mdt); if (!m) throw httpError(404, 'MDT not found');
     m.callsign_id = cs.id;
@@ -1535,13 +900,6 @@ route('POST', '/api/callsigns/:id/assign', CONTROL, ({ params, body }) => {
 });
 route('DELETE', '/api/callsigns/:id/assign', CONTROL, ({ params, body }) => {
   const cs = findCallsign(params.id); if (!cs) throw httpError(404, 'call sign not found');
-  if (body.radio) {
-    const r = findRadio(body.radio); if (!r) throw httpError(404, 'radio not found');
-    if (r.callsign_id !== cs.id) throw httpError(409, 'radio not assigned to this call sign');
-    r.callsign_id = null;
-    broadcast('radio.assigned', publicRadio(r));
-    logEvent('assignment.radio_removed', `RADIO ${r.issi} REMOVED FROM ${cs.name}`);
-  }
   if (body.mdt) {
     const m = findMdt(body.mdt); if (!m) throw httpError(404, 'MDT not found');
     m.callsign_id = null;
@@ -1551,141 +909,6 @@ route('DELETE', '/api/callsigns/:id/assign', CONTROL, ({ params, body }) => {
   return { ok: true };
 });
 
-// Talkgroups
-route('GET', '/api/talkgroups', ALL, () => db.talkgroups.map((t) => ({
-  id: t.id, name: t.name, description: t.description,
-  floor_holder: t.floor_holder_radio_id ? callsignOf(db.radios.find((r) => r.id === t.floor_holder_radio_id)) : (t.floor_console_user_id ? 'CONTROL' : null),
-  floor_since: t.floor_since,
-  members: db.talkgroup_members.filter((m) => m.talkgroup_id === t.id).map((m) => {
-    const r = db.radios.find((x) => x.id === m.radio_id);
-    return r ? { radio_id: r.id, issi: r.issi, callsign: callsignOf(r), status: r.status, connected: r.connected } : null;
-  }).filter(Boolean),
-})));
-route('POST', '/api/talkgroups', CONTROL, ({ body }) => {
-  const name = String(body.name || '').toUpperCase().trim();
-  if (!name) throw httpError(400, 'name required');
-  if (db.talkgroups.some((t) => t.name === name)) throw httpError(409, 'talkgroup exists');
-  const t = { id: nextId('talkgroups'), name, description: body.description || '', floor_holder_radio_id: null, floor_console_user_id: null, floor_since: null };
-  db.talkgroups.push(t);
-  broadcast('talkgroup.created', t);
-  logEvent('talkgroup.created', `TALKGROUP ${name} CREATED`);
-  return { __status: 201, __body: t };
-});
-route('PATCH', '/api/talkgroups/:id', CONTROL, ({ params, body }) => {
-  const t = findTalkgroup(params.id); if (!t) throw httpError(404, 'talkgroup not found');
-  if (body.name) t.name = String(body.name).toUpperCase();
-  if (body.description !== undefined) t.description = body.description;
-  broadcast('talkgroup.updated', t);
-  logEvent('talkgroup.updated', `TALKGROUP ${t.name} UPDATED`);
-  return t;
-});
-route('POST', '/api/talkgroups/:id/members', ALL, ({ params, body, user }) => {
-  const t = findTalkgroup(params.id); if (!t) throw httpError(404, 'talkgroup not found');
-  const r = findRadio(body.radio); if (!r) throw httpError(404, 'radio not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
-  db.talkgroup_members = db.talkgroup_members.filter((m) => !(m.radio_id === r.id && m.talkgroup_id === t.id));
-  db.talkgroup_members.push({ id: nextId('talkgroup_members'), talkgroup_id: t.id, radio_id: r.id });
-  r.talkgroup_id = t.id;
-  broadcast('talkgroup.membership_changed', { talkgroup_id: t.id, radio: publicRadio(r), action: 'added' });
-  logEvent('talkgroup.affiliated', `${callsignOf(r)} AFFILIATED → ${t.name}`, { radio_id: r.id, talkgroup_id: t.id });
-  return { ok: true };
-});
-route('DELETE', '/api/talkgroups/:id/members', CONTROL, ({ params, body }) => {
-  const t = findTalkgroup(params.id); if (!t) throw httpError(404, 'talkgroup not found');
-  const r = findRadio(body.radio); if (!r) throw httpError(404, 'radio not found');
-  db.talkgroup_members = db.talkgroup_members.filter((m) => !(m.radio_id === r.id && m.talkgroup_id === t.id));
-  if (r.talkgroup_id === t.id) r.talkgroup_id = null;
-  broadcast('talkgroup.membership_changed', { talkgroup_id: t.id, radio: publicRadio(r), action: 'removed' });
-  logEvent('talkgroup.deaffiliated', `${callsignOf(r)} REMOVED FROM ${t.name}`);
-  return { ok: true };
-});
-
-// Calls
-function startCall(kind, fromLabel, fromRadio, targets, initiatorUser) {
-  const call = {
-    id: nextId('communications'), kind, state: 'RINGING',
-    from_radio_id: fromRadio ? fromRadio.id : null, from_label: fromLabel,
-    initiator_user_id: initiatorUser ? initiatorUser.id : null,
-    started_at: new Date().toISOString(), ended_at: null, duration_s: null, end_reason: null,
-    talkgroup_id: null,
-  };
-  db.communications.push(call);
-  if (fromRadio) db.communication_participants.push({ id: nextId('communication_participants'), communication_id: call.id, radio_id: fromRadio.id, role: 'CALLER', state: 'CONNECTED' });
-  for (const t of targets) db.communication_participants.push({ id: nextId('communication_participants'), communication_id: call.id, radio_id: t.id, role: 'CALLEE', state: 'RINGING' });
-  const targetIds = targets.map((t) => t.id);
-  broadcast('call.incoming', publicCall(call), { radioIds: targetIds });
-  pushToUsers(db.users.filter((u) => u.radio_id && targetIds.includes(u.radio_id)).map((u) => u.id),
-    { title: 'Incoming call', body: `${fromLabel || 'Control'} is calling`, url: '/radio.html', tag: 'cccs-call' });
-  // Calling the officer answers whatever they were asking for.
-  for (const t of targets) {
-    const pending = db.call_requests.find((r) => r.radio_id === t.id && r.state === 'PENDING');
-    if (pending) {
-      pending.state = 'ANSWERED'; pending.answered_at = new Date().toISOString();
-      pending.answered_by = initiatorUser ? initiatorUser.display_name : 'CONTROL';
-      broadcast('call.request_cleared', pending);
-    }
-  }
-  logEvent('call.started', `${fromLabel} → ${targets.map(callsignOf).join(', ')} (${kind})`, { call_id: call.id });
-  setTimeout(() => {
-    const c = db.communications.find((x) => x.id === call.id);
-    if (c && c.state === 'RINGING') endCall(c, 'NO_ANSWER');
-  }, 30000).unref?.();
-  return call;
-}
-
-route('POST', '/api/calls/private', ALL, ({ body, user }) => {
-  const to = findRadio(body.to); if (!to) throw httpError(404, 'destination radio not found');
-  if (!to.connected) { logEvent('call.failed', `CALL TO ${to.issi} FAILED — OFFLINE`); throw httpError(409, 'destination radio offline'); }
-  const busy = db.communication_participants.some((p) => p.radio_id === to.id && ['RINGING', 'CONNECTED'].includes(p.state));
-  if (busy) throw httpError(409, 'destination busy');
-  let fromRadio = null, fromLabel = 'CONTROL';
-  if (user.role === 'RADIO_USER') { fromRadio = db.radios.find((r) => r.id === user.radio_id); fromLabel = callsignOf(fromRadio); }
-  else if (body.from) { fromRadio = findRadio(body.from); fromLabel = fromRadio ? callsignOf(fromRadio) : 'CONTROL'; }
-  return { __status: 201, __body: publicCall(startCall('PRIVATE', fromLabel, fromRadio, [to], user)) };
-});
-route('POST', '/api/calls/group', CONTROL, ({ body, user }) => {
-  let targets = [];
-  if (body.talkgroup) {
-    const tg = findTalkgroup(body.talkgroup); if (!tg) throw httpError(404, 'talkgroup not found');
-    targets = db.talkgroup_members.filter((m) => m.talkgroup_id === tg.id).map((m) => db.radios.find((r) => r.id === m.radio_id)).filter((r) => r && r.connected);
-  } else {
-    targets = (body.to || []).map((t) => findRadio(t) || (findCallsign(t) ? db.radios.find((r) => r.callsign_id === findCallsign(t).id) : null)).filter(Boolean);
-  }
-  if (!targets.length) throw httpError(400, 'no reachable recipients');
-  const call = startCall('GROUP', 'CONTROL', null, targets, user);
-  if (body.talkgroup) call.talkgroup_id = findTalkgroup(body.talkgroup).id;
-  return { __status: 201, __body: publicCall(call) };
-});
-route('POST', '/api/calls/:id/accept', ALL, ({ params, user, body }) => {
-  const call = db.communications.find((c) => c.id === Number(params.id)); if (!call) throw httpError(404, 'call not found');
-  const radio = user.role === 'RADIO_USER' ? db.radios.find((r) => r.id === user.radio_id) : findRadio(body.radio);
-  if (!radio) throw httpError(400, 'radio required');
-  const p = db.communication_participants.find((x) => x.communication_id === call.id && x.radio_id === radio.id);
-  if (!p) throw httpError(403, 'not a participant');
-  p.state = 'CONNECTED'; call.state = 'ACTIVE'; call.answered_at = new Date().toISOString();
-  const radioIds = db.communication_participants.filter((x) => x.communication_id === call.id).map((x) => x.radio_id);
-  broadcast('call.accepted', publicCall(call), { radioIds });
-  logEvent('call.accepted', `${callsignOf(radio)} ANSWERED CALL #${call.id}`, { call_id: call.id });
-  return publicCall(call);
-});
-route('POST', '/api/calls/:id/reject', ALL, ({ params, user, body }) => {
-  const call = db.communications.find((c) => c.id === Number(params.id)); if (!call) throw httpError(404, 'call not found');
-  const radio = user.role === 'RADIO_USER' ? db.radios.find((r) => r.id === user.radio_id) : findRadio(body.radio);
-  const p = db.communication_participants.find((x) => x.communication_id === call.id && x.radio_id === (radio || {}).id);
-  if (!p) throw httpError(403, 'not a participant');
-  p.state = 'REJECTED';
-  const radioIds = db.communication_participants.filter((x) => x.communication_id === call.id).map((x) => x.radio_id);
-  broadcast('call.rejected', { ...publicCall(call), rejected_by: callsignOf(radio) }, { radioIds });
-  logEvent('call.rejected', `${callsignOf(radio)} DECLINED CALL #${call.id}`, { call_id: call.id });
-  const remaining = db.communication_participants.filter((x) => x.communication_id === call.id && x.role === 'CALLEE' && ['RINGING', 'CONNECTED'].includes(x.state));
-  if (!remaining.length) endCall(call, 'DECLINED');
-  return publicCall(call);
-});
-route('POST', '/api/calls/:id/end', ALL, ({ params }) => {
-  const call = db.communications.find((c) => c.id === Number(params.id)); if (!call) throw httpError(404, 'call not found');
-  return publicCall(endCall(call, 'CLEARED'));
-});
-route('GET', '/api/calls', ALL, () => db.communications.slice(-100).map(publicCall));
 
 // Jobs
 route('GET', '/api/jobs', ALL, ({ query }) => {
@@ -1792,21 +1015,20 @@ route('POST', '/api/jobs/:id/assign', CONTROL, ({ params, body }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
   const targets = body.resources || body.to || [];
   if (!targets.length) throw httpError(400, 'resources required');
-  const radioIds = [], mdtIds = [];
+  const personnelIds = [], mdtIds = [];
   for (const t of targets) {
     const cs = findCallsign(t);
-    const radios = cs ? db.radios.filter((r) => r.callsign_id === cs.id) : [findRadio(t)].filter(Boolean);
+    const people = cs ? db.personnel.filter((p) => p.callsign_id === cs.id) : [findPersonnel(t)].filter(Boolean);
     const mdts = cs ? db.mdts.filter((m) => m.callsign_id === cs.id) : [findMdt(t)].filter(Boolean);
-    if (!radios.length && !mdts.length) throw httpError(404, `unknown resource ${t}`);
-    for (const r of radios) {
-      if (db.job_assignments.some((a) => a.job_id === j.id && a.radio_id === r.id)) continue;
-      db.job_assignments.push({ id: nextId('job_assignments'), job_id: j.id, radio_id: r.id, mdt_id: null, callsign_id: r.callsign_id, acknowledged: false, acknowledged_at: null, at: new Date().toISOString() });
-      r.job_id = j.id; radioIds.push(r.id);
-      if (['AVAILABLE', 'OFFLINE'].includes(r.status) && r.connected) setRadioStatus(r, 'ON_TASK', 'job assigned');
+    if (!people.length && !mdts.length) throw httpError(404, `unknown resource ${t}`);
+    for (const p of people) {
+      if (db.job_assignments.some((a) => a.job_id === j.id && a.personnel_id === p.id)) continue;
+      db.job_assignments.push({ id: nextId('job_assignments'), job_id: j.id, personnel_id: p.id, mdt_id: null, callsign_id: p.callsign_id, acknowledged: false, acknowledged_at: null, at: new Date().toISOString() });
+      personnelIds.push(p.id);
     }
     for (const m of mdts) {
       if (db.job_assignments.some((a) => a.job_id === j.id && a.mdt_id === m.id)) continue;
-      db.job_assignments.push({ id: nextId('job_assignments'), job_id: j.id, radio_id: null, mdt_id: m.id, callsign_id: m.callsign_id, acknowledged: false, acknowledged_at: null, at: new Date().toISOString() });
+      db.job_assignments.push({ id: nextId('job_assignments'), job_id: j.id, personnel_id: null, mdt_id: m.id, callsign_id: m.callsign_id, acknowledged: false, acknowledged_at: null, at: new Date().toISOString() });
       m.job_id = j.id; mdtIds.push(m.id);
     }
   }
@@ -1814,34 +1036,31 @@ route('POST', '/api/jobs/:id/assign', CONTROL, ({ params, body }) => {
   stampJobStatus(j, 'DISPATCHED');
   const payload = publicJob(j);
   broadcast('job.dispatched', payload);
-  broadcast('job.assigned_to_you', payload, { radioIds, mdtIds });
-  pushToUsers(db.users.filter((u) => (u.radio_id && radioIds.includes(u.radio_id)) || (u.mdt_id && mdtIds.includes(u.mdt_id))).map((u) => u.id),
-    { title: `Job ${j.reference}`, body: `${j.priority} — ${j.location}`, url: '/radio.html', tag: 'cccs-job' });
-  logEvent('job.dispatched', `JOB ${j.reference} DISPATCHED → ${payload.resources.map((r) => r.callsign || r.radio || r.mdt).join(', ')}`, { job_id: j.id });
+  broadcast('job.assigned_to_you', payload, { personnelIds, mdtIds });
+  pushToUsers(db.users.filter((u) => (u.personnel_id && personnelIds.includes(u.personnel_id)) || (u.mdt_id && mdtIds.includes(u.mdt_id))).map((u) => u.id),
+    { title: `Job ${j.reference}`, body: `${j.priority} — ${j.location}`, url: '/officer.html', tag: 'cccs-job' });
+  logEvent('job.dispatched', `JOB ${j.reference} DISPATCHED → ${payload.resources.map((r) => r.callsign || r.personnel || r.mdt).join(', ')}`, { job_id: j.id });
   return payload;
 });
 route('POST', '/api/jobs/:id/ack', ALL, ({ params, user, body }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
   let assignment;
-  if (user.role === 'RADIO_USER') assignment = db.job_assignments.find((a) => a.job_id === j.id && a.radio_id === user.radio_id);
+  if (user.role === 'FIELD_USER') assignment = db.job_assignments.find((a) => a.job_id === j.id && a.personnel_id === user.personnel_id);
   else if (user.role === 'MDT_USER') assignment = db.job_assignments.find((a) => a.job_id === j.id && a.mdt_id === user.mdt_id);
   else {
-    const r = body.radio ? findRadio(body.radio) : null; const m = body.mdt ? findMdt(body.mdt) : null;
-    assignment = db.job_assignments.find((a) => a.job_id === j.id && ((r && a.radio_id === r.id) || (m && a.mdt_id === m.id)));
+    const p = body.personnel ? findPersonnel(body.personnel) : null; const m = body.mdt ? findMdt(body.mdt) : null;
+    assignment = db.job_assignments.find((a) => a.job_id === j.id && ((p && a.personnel_id === p.id) || (m && a.mdt_id === m.id)));
   }
   if (!assignment) throw httpError(404, 'no assignment for this resource');
   assignment.acknowledged = true; assignment.acknowledged_at = new Date().toISOString();
   if (j.status === 'DISPATCHED') { j.status = 'ACKNOWLEDGED'; j.updated_at = assignment.acknowledged_at; }
   stampJobStatus(j, 'ACKNOWLEDGED');
-  const ackRadio = assignment.radio_id ? db.radios.find((r) => r.id === assignment.radio_id) : null;
   const ackMdt = assignment.mdt_id ? db.mdts.find((m) => m.id === assignment.mdt_id) : null;
-  if (ackRadio && ackRadio.connected && !ackRadio.emergency) setRadioStatus(ackRadio, 'ACKNOWLEDGED', 'job acknowledged');
   // Baseline for checkAutoJobProgress's "distance is decreasing" check —
   // without this the first location report after ack has nothing to
   // compare against and can never detect movement toward the job.
-  const ackActor = ackRadio || ackMdt;
-  if (j.lat != null && ackActor && ackActor.lat != null) assignment.last_distance_m = haversineMeters(ackActor.lat, ackActor.lon, j.lat, j.lon);
-  const who = assignment.radio_id ? callsignOf(db.radios.find((r) => r.id === assignment.radio_id)) : (db.mdts.find((m) => m.id === assignment.mdt_id) || {}).mdt_code;
+  if (j.lat != null && ackMdt && ackMdt.lat != null) assignment.last_distance_m = haversineMeters(ackMdt.lat, ackMdt.lon, j.lat, j.lon);
+  const who = assignment.personnel_id ? (db.personnel.find((p) => p.id === assignment.personnel_id) || {}).name : (db.mdts.find((m) => m.id === assignment.mdt_id) || {}).mdt_code;
   broadcast('job.acknowledged', { job: publicJob(j), by: who });
   logEvent('job.acknowledged', `${who} ACKNOWLEDGED JOB ${j.reference}`, { job_id: j.id });
   return publicJob(j);
@@ -1965,7 +1184,6 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
     stampJobStatus(j, s);
     if (['COMPLETED', 'CANCELLED'].includes(s)) {
       for (const a of db.job_assignments.filter((x) => x.job_id === j.id)) {
-        if (a.radio_id) { const r = db.radios.find((x) => x.id === a.radio_id); if (r) { r.job_id = null; if (r.connected && !r.emergency) setRadioStatus(r, 'AVAILABLE', 'job closed'); } }
         if (a.mdt_id) { const m = db.mdts.find((x) => x.id === a.mdt_id); if (m) m.job_id = null; }
       }
     }
@@ -1990,13 +1208,13 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   logEvent('job.status_changed', `JOB ${j.reference} → ${j.status}`, { job_id: j.id });
   return publicJob(j);
 });
-/** Only the assigned radio/MDT (or control) may touch a job's checklist —
+/** Only the assigned personnel/MDT (or control) may touch a job's checklist —
  * same "is this mine" check used by the general job PATCH above, pulled out
  * since both the checklist and media routes need it. */
 function assertJobAccess(j, user) {
   if (isControlRole(user.role)) return;
   const mine = db.job_assignments.some((a) => a.job_id === j.id && (
-    (user.role === 'RADIO_USER' && user.radio_id && a.radio_id === user.radio_id) ||
+    (user.role === 'FIELD_USER' && user.personnel_id && a.personnel_id === user.personnel_id) ||
     (user.role === 'MDT_USER' && user.mdt_id && a.mdt_id === user.mdt_id)));
   if (!mine) throw httpError(403, 'job not assigned to you');
 }
@@ -2060,19 +1278,18 @@ route('GET', '/api/jobs/:id/media/:mediaId', ALL, ({ params, user }) => {
 
 route('POST', '/api/jobs/:id/stand-down', CONTROL, ({ params, body }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
-  const r = body.radio ? findRadio(body.radio) : null;
+  const p = body.personnel ? findPersonnel(body.personnel) : null;
   const m = body.mdt ? findMdt(body.mdt) : null;
-  if (!r && !m) throw httpError(400, 'radio or mdt required');
-  const a = db.job_assignments.find((x) => x.job_id === j.id && ((r && x.radio_id === r.id) || (m && x.mdt_id === m.id)));
+  if (!p && !m) throw httpError(400, 'personnel or mdt required');
+  const a = db.job_assignments.find((x) => x.job_id === j.id && ((p && x.personnel_id === p.id) || (m && x.mdt_id === m.id)));
   if (!a) throw httpError(404, 'that resource is not assigned to this job');
   db.job_assignments = db.job_assignments.filter((x) => x.id !== a.id);
-  const who = r ? callsignOf(r) : m.mdt_code;
-  if (r) { r.job_id = null; if (r.connected && !r.emergency) setRadioStatus(r, 'AVAILABLE', 'stood down'); }
+  const who = p ? p.name : m.mdt_code;
   if (m) { m.job_id = null; broadcast('mdt.status_changed', publicMdt(m)); }
   j.updated_at = new Date().toISOString();
   const payload = publicJob(j);
   broadcast('job.status_changed', payload);
-  broadcast('job.stood_down', payload, { radioIds: r ? [r.id] : [], mdtIds: m ? [m.id] : [] });
+  broadcast('job.stood_down', payload, { personnelIds: p ? [p.id] : [], mdtIds: m ? [m.id] : [] });
   logEvent('job.stood_down', `${who} STOOD DOWN FROM JOB ${j.reference}`, { job_id: j.id });
   return payload;
 });
@@ -2263,32 +1480,32 @@ function forwardEmergencyToAura(ev) {
 }
 
 route('POST', '/api/emergency', ALL, ({ body, user }) => {
-  const radio = user.role === 'RADIO_USER' ? db.radios.find((r) => r.id === user.radio_id) : (body.radio ? findRadio(body.radio) : null);
+  const person = user.role === 'FIELD_USER' ? db.personnel.find((p) => p.id === user.personnel_id) : (body.personnel ? findPersonnel(body.personnel) : null);
   const mdt = user.role === 'MDT_USER' ? db.mdts.find((m) => m.id === user.mdt_id) : (body.mdt ? findMdt(body.mdt) : null);
-  if (!radio && !mdt) throw httpError(404, 'radio or mdt not found');
-  const open = db.emergency_events.find((e) => ((radio && e.radio_id === radio.id) || (mdt && e.mdt_id === mdt.id)) && e.state !== 'RESOLVED');
+  if (!person && !mdt) throw httpError(404, 'personnel or mdt not found');
+  const open = db.emergency_events.find((e) => ((person && e.personnel_id === person.id) || (mdt && e.mdt_id === mdt.id)) && e.state !== 'RESOLVED');
   if (open) return open;
   // The device takes a fresh GPS fix the instant the button is pressed and
   // sends it here — trust that over whatever lat/lon happens to be on file,
-  // since an idle radio/MDT's stored position can be stale (or, before it's
+  // since an idle terminal's stored position can be stale (or, before it's
   // ever reported one, still whatever it was seeded with).
-  const who = radio || mdt;
+  const who = person || mdt;
   if (body.lat != null && body.lon != null) { who.lat = Number(body.lat); who.lon = Number(body.lon); }
-  if (radio) { radio.emergency = true; setRadioStatus(radio, 'EMERGENCY', 'emergency button'); }
   if (mdt) { mdt.emergency = true; broadcast('mdt.status_changed', publicMdt(mdt)); }
+  const callsign = person ? callsignOf(person) : callsignOf(mdt);
   const ev = {
-    id: nextId('emergency_events'), kind: 'EMERGENCY', radio_id: radio ? radio.id : null, mdt_id: mdt ? mdt.id : null,
-    issi: radio ? radio.issi : null, mdt_code: mdt ? mdt.mdt_code : null, callsign: callsignOf(who),
+    id: nextId('emergency_events'), kind: 'EMERGENCY', personnel_id: person ? person.id : null, mdt_id: mdt ? mdt.id : null,
+    mdt_code: mdt ? mdt.mdt_code : null, callsign,
     lat: who.lat, lon: who.lon, state: 'ACTIVE', activated_at: new Date().toISOString(),
     acknowledged_at: null, acknowledged_by: null, resolved_at: null, job_id: null,
   };
   db.emergency_events.push(ev);
   createEmergencyJob(ev);
   broadcast('emergency.activated', ev);
-  pushToRoles(CONTROL, { title: 'EMERGENCY', body: `${ev.callsign} (${ev.issi || ev.mdt_code})`, url: '/control.html', tag: 'cccs-emergency' });
+  pushToRoles(CONTROL, { title: 'EMERGENCY', body: `${ev.callsign}`, url: '/control.html', tag: 'cccs-emergency' });
   forwardEmergencyToAura(ev);
   store.flushNow();
-  logEvent('emergency.activated', `!!! EMERGENCY — ${ev.callsign} (${ev.issi || ev.mdt_code})`, { emergency_id: ev.id, radio_id: ev.radio_id, mdt_id: ev.mdt_id });
+  logEvent('emergency.activated', `!!! EMERGENCY — ${ev.callsign}`, { emergency_id: ev.id, personnel_id: ev.personnel_id, mdt_id: ev.mdt_id });
   return { __status: 201, __body: ev };
 });
 route('GET', '/api/emergency', ALL, () => db.emergency_events.slice(-100));
@@ -2302,8 +1519,6 @@ route('POST', '/api/emergency/:id/ack', CONTROL, ({ params, user }) => {
 route('POST', '/api/emergency/:id/resolve', CONTROL, ({ params, user }) => {
   const ev = db.emergency_events.find((e) => e.id === Number(params.id)); if (!ev) throw httpError(404, 'emergency not found');
   ev.state = 'RESOLVED'; ev.resolved_at = new Date().toISOString();
-  const radio = db.radios.find((r) => r.id === ev.radio_id);
-  if (radio && ev.kind !== 'WELFARE') { radio.emergency = false; setRadioStatus(radio, radio.connected ? 'AVAILABLE' : 'OFFLINE', 'emergency cleared'); }
   const mdt = db.mdts.find((m) => m.id === ev.mdt_id);
   if (mdt) { mdt.emergency = false; broadcast('mdt.status_changed', publicMdt(mdt)); }
   broadcast('emergency.resolved', ev);
@@ -2315,7 +1530,7 @@ route('POST', '/api/emergency/:id/resolve', CONTROL, ({ params, user }) => {
 route('GET', '/api/messages', ALL, ({ user, query }) => {
   const mine = db.messages.filter((m) => {
     if (isControlRole(user.role)) return true;
-    if (user.role === 'RADIO_USER') return m.to_radio_id === user.radio_id || m.from_radio_id === user.radio_id;
+    if (user.role === 'FIELD_USER') return m.to_personnel_id === user.personnel_id || m.from_personnel_id === user.personnel_id;
     if (user.role === 'MDT_USER') return m.to_mdt_id === user.mdt_id || m.from_mdt_id === user.mdt_id;
     return false;
   });
@@ -2323,22 +1538,22 @@ route('GET', '/api/messages', ALL, ({ user, query }) => {
   return mine.slice(-lim);
 });
 route('POST', '/api/messages', ALL, ({ body, user }) => {
-  const toRadio = body.to_radio ? findRadio(body.to_radio) : null;
+  const toPerson = body.to_personnel ? findPersonnel(body.to_personnel) : null;
   const toMdt = body.to_mdt ? findMdt(body.to_mdt) : null;
-  if (!toRadio && !toMdt && !body.to_control) throw httpError(400, 'recipient required');
-  const fromRadio = user.role === 'RADIO_USER' ? db.radios.find((r) => r.id === user.radio_id) : null;
+  if (!toPerson && !toMdt && !body.to_control) throw httpError(400, 'recipient required');
+  const fromPerson = user.role === 'FIELD_USER' ? db.personnel.find((p) => p.id === user.personnel_id) : null;
   const fromMdt = user.role === 'MDT_USER' ? db.mdts.find((m) => m.id === user.mdt_id) : null;
   const msg = {
     id: nextId('messages'), body: String(body.body || '').slice(0, 1000),
-    from_label: fromRadio ? callsignOf(fromRadio) : fromMdt ? fromMdt.mdt_code : 'CONTROL',
-    from_radio_id: fromRadio ? fromRadio.id : null, from_mdt_id: fromMdt ? fromMdt.id : null,
-    to_radio_id: toRadio ? toRadio.id : null, to_mdt_id: toMdt ? toMdt.id : null,
-    to_label: toRadio ? callsignOf(toRadio) : toMdt ? toMdt.mdt_code : 'CONTROL',
+    from_label: fromPerson ? callsignOf(fromPerson) : fromMdt ? fromMdt.mdt_code : 'CONTROL',
+    from_personnel_id: fromPerson ? fromPerson.id : null, from_mdt_id: fromMdt ? fromMdt.id : null,
+    to_personnel_id: toPerson ? toPerson.id : null, to_mdt_id: toMdt ? toMdt.id : null,
+    to_label: toPerson ? callsignOf(toPerson) : toMdt ? toMdt.mdt_code : 'CONTROL',
     state: 'DELIVERED', sent_at: new Date().toISOString(), read_at: null,
   };
   if (!msg.body) throw httpError(400, 'message body required');
   db.messages.push(msg);
-  broadcast('message.received', msg, { radioIds: toRadio ? [toRadio.id] : undefined, mdtIds: toMdt ? [toMdt.id] : undefined });
+  broadcast('message.received', msg, { personnelIds: toPerson ? [toPerson.id] : undefined, mdtIds: toMdt ? [toMdt.id] : undefined });
   logEvent('message.sent', `${msg.from_label} ✉ ${msg.to_label}: ${msg.body.slice(0, 60)}`, { message_id: msg.id });
   return { __status: 201, __body: msg };
 });
@@ -2359,10 +1574,8 @@ route('GET', '/api/events', ALL, ({ query }) => {
   return ev.slice(-Number(query.get('limit') || 200));
 });
 route('GET', '/api/state', ALL, () => ({
-  radios: db.radios.map(publicRadio), mdts: db.mdts.map(publicMdt), jobs: db.jobs.map(publicJob),
-  talkgroups: db.talkgroups.map((t) => ({ id: t.id, name: t.name })),
-  sites: db.sites,
-  call_requests: db.call_requests.filter((r) => r.state === 'PENDING'),
+  mdts: db.mdts.map(publicMdt), jobs: db.jobs.map(publicJob),
+  personnel: db.personnel.map(publicPersonnel), sites: db.sites,
   emergencies: db.emergency_events.filter((e) => e.state !== 'RESOLVED'),
   events: db.audit_logs.slice(-80), server_time: new Date().toISOString(),
 }));
@@ -2385,11 +1598,9 @@ const RETENTION = {
   // Who was where on which job — the audit trail you would need for a client
   // dispute or an insurance claim.
   audit: Number(process.env.RETAIN_AUDIT_DAYS || 365),
-  // Call and message records (metadata; no audio is recorded by this system).
-  communications: Number(process.env.RETAIN_COMMS_DAYS || 180),
+  // Message records.
   messages: Number(process.env.RETAIN_MESSAGES_DAYS || 180),
-  // Status history and closed jobs.
-  status_history: Number(process.env.RETAIN_STATUS_DAYS || 365),
+  // Closed jobs.
   jobs: Number(process.env.RETAIN_JOBS_DAYS || 730),
 };
 
@@ -2408,19 +1619,11 @@ function retentionSweep() {
   const removed = {
     locations: pruneOlderThan('locations', RETENTION.locations, 'at'),
     audit_logs: pruneOlderThan('audit_logs', RETENTION.audit, 'at'),
-    radio_status_history: pruneOlderThan('radio_status_history', RETENTION.status_history, 'at'),
     messages: pruneOlderThan('messages', RETENTION.messages, 'sent_at'),
   };
 
-  // Calls and jobs are only removed once they are finished — an open job is
+  // Jobs are only removed once they are finished — an open job is
   // operational data, not history, however old it is.
-  const commsCutoff = Date.now() - RETENTION.communications * 86400000;
-  const keptCalls = db.communications.filter((c) => c.state !== 'ENDED' || Date.parse(c.started_at) >= commsCutoff);
-  removed.communications = db.communications.length - keptCalls.length;
-  const goneIds = new Set(db.communications.filter((c) => !keptCalls.includes(c)).map((c) => c.id));
-  db.communications = keptCalls;
-  db.communication_participants = db.communication_participants.filter((p) => !goneIds.has(p.communication_id));
-
   const jobCutoff = Date.now() - RETENTION.jobs * 86400000;
   const keptJobs = db.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status) || Date.parse(j.updated_at) >= jobCutoff);
   removed.jobs = db.jobs.length - keptJobs.length;
@@ -2439,7 +1642,7 @@ function retentionSweep() {
 
 route('GET', '/api/retention', CONTROL, () => ({
   policy_days: RETENTION,
-  counts: Object.fromEntries(['locations', 'audit_logs', 'radio_status_history', 'messages', 'communications', 'jobs']
+  counts: Object.fromEntries(['locations', 'audit_logs', 'messages', 'jobs']
     .map((t) => [t, db[t].length])),
   note: 'Location history is the most intrusive data here and is kept for the shortest time.',
 }));
@@ -2449,65 +1652,16 @@ route('POST', '/api/retention/sweep', ADMIN, ({ user }) => {
   return removed;
 });
 
-/* Erasure request: remove one officer's movement history without touching the
+/* Erasure request: remove one person's movement history without touching the
    operational record of jobs, which the business needs to keep. */
-route('POST', '/api/radios/:id/erase-location-history', ADMIN, ({ params, user }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
+route('POST', '/api/personnel/:id/erase-location-history', ADMIN, ({ params, user }) => {
+  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
   const before = db.locations.length;
-  db.locations = db.locations.filter((l) => l.radio_id !== r.id);
+  db.locations = db.locations.filter((l) => l.personnel_id !== p.id);
   const removed = before - db.locations.length;
-  logEvent('retention.erasure', `LOCATION HISTORY ERASED FOR ${callsignOf(r)} (${removed} points) BY ${user.username}`, { radio_id: r.id, removed });
+  logEvent('retention.erasure', `LOCATION HISTORY ERASED FOR ${callsignOf(p)} (${removed} points) BY ${user.username}`, { personnel_id: p.id, removed });
   store.flushNow();
-  return { radio: r.issi, removed };
-});
-
-/* ------------------------------------------------------------------ *
- * Status codes
- *
- * Two-digit status messages are the cheapest thing on a radio network: an
- * officer updates control without occupying the channel or typing. The codes
- * below are a sensible default set for security work — change the table to
- * match whatever your control room already says out loud.
- * ------------------------------------------------------------------ */
-const STATUS_CODES = {
-  '01': { status: 'AVAILABLE', label: 'Available' },
-  '02': { status: 'BUSY', label: 'Busy' },
-  '03': { status: 'EN_ROUTE', label: 'En route' },
-  '04': { status: 'ON_SCENE', label: 'On scene / at site' },
-  '05': { status: 'ON_TASK', label: 'On task' },
-  '06': { status: 'AVAILABLE', label: 'Site clear, resuming patrol' },
-  '07': { status: 'MEAL_BREAK', label: 'Meal break' },
-  '08': { status: 'OUT_OF_SERVICE', label: 'Out of service' },
-};
-route('GET', '/api/status-codes', ALL, () => Object.entries(STATUS_CODES).map(([code, v]) => ({ code, ...v })));
-
-/* ------------------------------------------------------------------ *
- * Covert mode and position reports
- * ------------------------------------------------------------------ */
-route('POST', '/api/radios/:id/covert', ALL, ({ params, body, user }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
-  r.covert = body.on !== false;
-  broadcast('radio.covert_changed', publicRadio(r));
-  // Control must know: a covert radio will not make a sound when called.
-  logEvent('radio.covert', `${callsignOf(r)} COVERT MODE ${r.covert ? 'ON' : 'OFF'}`, { radio_id: r.id });
-  store.flushNow();
-  return publicRadio(r);
-});
-
-route('POST', '/api/radios/:id/position-report', ALL, ({ params, body, user }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
-  if (body.lat !== undefined && body.lon !== undefined) {
-    r.lat = Number(body.lat); r.lon = Number(body.lon);
-  }
-  r.last_seen = new Date().toISOString();
-  db.locations.push({ id: nextId('locations'), radio_id: r.id, lat: r.lat, lon: r.lon, speed: r.speed, heading: r.heading, at: r.last_seen });
-  const payload = publicRadio(r);
-  broadcast('radio.position_report', payload);
-  broadcast('radio.location_changed', payload);
-  logEvent('radio.position_report', `${callsignOf(r)} POSITION REPORT ${r.lat ? r.lat.toFixed(4) + ', ' + r.lon.toFixed(4) : 'no fix'}`, { radio_id: r.id });
-  return payload;
+  return { personnel: p.name, removed };
 });
 
 /* ------------------------------------------------------------------ *
@@ -2519,33 +1673,33 @@ route('POST', '/api/radios/:id/position-report', ALL, ({ params, body, user }) =
  * one step below pressing SOS, and it should be answered in seconds.
  * ------------------------------------------------------------------ */
 route('POST', '/api/calls/request', ALL, ({ body, user }) => {
-  const radio = user.role === 'RADIO_USER'
-    ? db.radios.find((r) => r.id === user.radio_id)
-    : findRadio(body.radio);
-  if (!radio) throw httpError(404, 'radio not found');
+  const person = user.role === 'FIELD_USER'
+    ? db.personnel.find((p) => p.id === user.personnel_id)
+    : findPersonnel(body.personnel);
+  if (!person) throw httpError(404, 'personnel not found');
 
   const priority = body.priority === true || String(body.priority).toUpperCase() === 'PRIORITY';
-  const open = db.call_requests.find((r) => r.radio_id === radio.id && r.state === 'PENDING');
+  const open = db.call_requests.find((r) => r.personnel_id === person.id && r.state === 'PENDING');
   if (open) {
     // A second press escalates rather than stacking another row.
     if (priority && !open.priority) {
       open.priority = true; open.escalated_at = new Date().toISOString();
       broadcast('call.request', open);
-      logEvent('call.request_escalated', `${callsignOf(radio)} ESCALATED CALL REQUEST TO PRIORITY`, { request_id: open.id });
+      logEvent('call.request_escalated', `${callsignOf(person)} ESCALATED CALL REQUEST TO PRIORITY`, { request_id: open.id });
       store.flushNow();
     }
     return open;
   }
 
   const req = {
-    id: nextId('call_requests'), radio_id: radio.id, issi: radio.issi,
-    callsign: callsignOf(radio), priority, note: String(body.note || '').slice(0, 200) || null,
-    lat: radio.lat, lon: radio.lon, state: 'PENDING',
+    id: nextId('call_requests'), personnel_id: person.id,
+    callsign: callsignOf(person), priority, note: String(body.note || '').slice(0, 200) || null,
+    state: 'PENDING',
     requested_at: new Date().toISOString(), answered_at: null, answered_by: null, cancelled_at: null,
   };
   db.call_requests.push(req);
   broadcast('call.request', req);
-  logEvent('call.requested', `${req.callsign} REQUESTS ${priority ? 'PRIORITY ' : ''}CALL`, { request_id: req.id, radio_id: radio.id });
+  logEvent('call.requested', `${req.callsign} REQUESTS ${priority ? 'PRIORITY ' : ''}CALL`, { request_id: req.id, personnel_id: person.id });
   if (priority) store.flushNow();
   return { __status: 201, __body: req };
 });
@@ -2558,9 +1712,9 @@ route('GET', '/api/calls/requests', ALL, ({ query }) => {
 route('POST', '/api/calls/requests/:id/clear', ALL, ({ params, user }) => {
   const req = db.call_requests.find((r) => r.id === Number(params.id));
   if (!req) throw httpError(404, 'request not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== req.radio_id) throw httpError(403, 'not your request');
+  if (user.role === 'FIELD_USER' && user.personnel_id !== req.personnel_id) throw httpError(403, 'not your request');
   if (req.state !== 'PENDING') return req;
-  const byOfficer = user.role === 'RADIO_USER';
+  const byOfficer = user.role === 'FIELD_USER';
   req.state = byOfficer ? 'CANCELLED' : 'ANSWERED';
   req[byOfficer ? 'cancelled_at' : 'answered_at'] = new Date().toISOString();
   if (!byOfficer) req.answered_by = user.display_name;
@@ -2581,85 +1735,85 @@ route('POST', '/api/calls/requests/:id/clear', ALL, ({ params, user }) => {
 const WELFARE_TICK_MS = Number(process.env.WELFARE_TICK_MS || 5000);
 const WELFARE_WARN_S = Number(process.env.WELFARE_WARN_S || 60);
 
-function startWelfare(radio, intervalS, note) {
+function startWelfare(person, intervalS, note) {
   if (!Number.isFinite(intervalS) || intervalS < 30 || intervalS > 8 * 3600) {
     throw httpError(400, 'welfare interval must be between 30 seconds and 8 hours');
   }
-  radio.welfare_interval_s = Math.round(intervalS);
-  radio.welfare_due_at = new Date(Date.now() + radio.welfare_interval_s * 1000).toISOString();
-  radio.welfare_warned = false;
-  radio.welfare_note = note || null;
-  const payload = { radio: publicRadio(radio), note: radio.welfare_note };
+  person.welfare_interval_s = Math.round(intervalS);
+  person.welfare_due_at = new Date(Date.now() + person.welfare_interval_s * 1000).toISOString();
+  person.welfare_warned = false;
+  person.welfare_note = note || null;
+  const payload = { personnel: publicPersonnel(person), note: person.welfare_note };
   broadcast('welfare.started', payload);
-  logEvent('welfare.started', `${callsignOf(radio)} WELFARE TIMER ${radio.welfare_interval_s}s${note ? ' — ' + note : ''}`, { radio_id: radio.id });
-  return radio;
+  logEvent('welfare.started', `${callsignOf(person)} WELFARE TIMER ${person.welfare_interval_s}s${note ? ' — ' + note : ''}`, { personnel_id: person.id });
+  return person;
 }
 
-function checkInWelfare(radio) {
-  if (!radio.welfare_due_at) throw httpError(409, 'no welfare timer running');
-  radio.welfare_due_at = new Date(Date.now() + radio.welfare_interval_s * 1000).toISOString();
-  radio.welfare_warned = false;
-  // Clear any overdue alarm this radio had raised.
+function checkInWelfare(person) {
+  if (!person.welfare_due_at) throw httpError(409, 'no welfare timer running');
+  person.welfare_due_at = new Date(Date.now() + person.welfare_interval_s * 1000).toISOString();
+  person.welfare_warned = false;
+  // Clear any overdue alarm this person had raised.
   for (const ev of db.emergency_events) {
-    if (ev.radio_id === radio.id && ev.kind === 'WELFARE' && ev.state !== 'RESOLVED') {
+    if (ev.personnel_id === person.id && ev.kind === 'WELFARE' && ev.state !== 'RESOLVED') {
       ev.state = 'RESOLVED'; ev.resolved_at = new Date().toISOString();
       broadcast('emergency.resolved', ev);
     }
   }
-  broadcast('welfare.checked_in', publicRadio(radio));
-  logEvent('welfare.checked_in', `${callsignOf(radio)} CHECKED IN`, { radio_id: radio.id });
-  return radio;
+  broadcast('welfare.checked_in', publicPersonnel(person));
+  logEvent('welfare.checked_in', `${callsignOf(person)} CHECKED IN`, { personnel_id: person.id });
+  return person;
 }
 
-function stopWelfare(radio, reason = 'cancelled') {
-  radio.welfare_interval_s = null; radio.welfare_due_at = null; radio.welfare_warned = false; radio.welfare_note = null;
-  broadcast('welfare.stopped', publicRadio(radio));
-  logEvent('welfare.stopped', `${callsignOf(radio)} WELFARE TIMER ${reason.toUpperCase()}`, { radio_id: radio.id });
-  return radio;
+function stopWelfare(person, reason = 'cancelled') {
+  person.welfare_interval_s = null; person.welfare_due_at = null; person.welfare_warned = false; person.welfare_note = null;
+  broadcast('welfare.stopped', publicPersonnel(person));
+  logEvent('welfare.stopped', `${callsignOf(person)} WELFARE TIMER ${reason.toUpperCase()}`, { personnel_id: person.id });
+  return person;
 }
 
 function welfareTick() {
   const now = Date.now();
-  for (const radio of db.radios) {
-    if (!radio.welfare_due_at) continue;
-    const due = Date.parse(radio.welfare_due_at);
+  for (const person of db.personnel) {
+    if (!person.welfare_due_at) continue;
+    const due = Date.parse(person.welfare_due_at);
     if (now >= due) {
-      radio.welfare_due_at = null; radio.welfare_interval_s = null;
+      person.welfare_due_at = null; person.welfare_interval_s = null;
       const ev = {
-        id: nextId('emergency_events'), kind: 'WELFARE', radio_id: radio.id, issi: radio.issi,
-        callsign: callsignOf(radio), lat: radio.lat, lon: radio.lon, state: 'ACTIVE',
-        note: radio.welfare_note || null, last_seen: radio.last_seen,
+        id: nextId('emergency_events'), kind: 'WELFARE', personnel_id: person.id,
+        callsign: callsignOf(person), lat: null, lon: null, state: 'ACTIVE',
+        note: person.welfare_note || null,
         activated_at: new Date().toISOString(), acknowledged_at: null, acknowledged_by: null, resolved_at: null,
       };
       db.emergency_events.push(ev);
       createEmergencyJob(ev);
       broadcast('welfare.overdue', ev);
       broadcast('emergency.activated', ev);
-      pushToRoles(CONTROL, { title: 'Welfare alarm', body: `${ev.callsign} (${ev.issi}) — no check-in`, url: '/control.html', tag: 'cccs-emergency' });
-      logEvent('welfare.overdue', `!!! WELFARE OVERDUE — ${ev.callsign} (${ev.issi}) NO CHECK-IN`, { emergency_id: ev.id, radio_id: radio.id });
+      pushToRoles(CONTROL, { title: 'Welfare alarm', body: `${ev.callsign} — no check-in`, url: '/control.html', tag: 'cccs-emergency' });
+      logEvent('welfare.overdue', `!!! WELFARE OVERDUE — ${ev.callsign} NO CHECK-IN`, { emergency_id: ev.id, personnel_id: person.id });
       store.flushNow();
-    } else if (!radio.welfare_warned && due - now <= WELFARE_WARN_S * 1000) {
-      radio.welfare_warned = true;
-      broadcast('welfare.due_soon', { radio: publicRadio(radio), seconds_left: Math.round((due - now) / 1000) }, { radioIds: [radio.id] });
+    } else if (!person.welfare_warned && due - now <= WELFARE_WARN_S * 1000) {
+      person.welfare_warned = true;
+      broadcast('welfare.due_soon', { personnel: publicPersonnel(person), seconds_left: Math.round((due - now) / 1000) }, { personnelIds: [person.id] });
     }
   }
 }
 
-route('POST', '/api/radios/:id/welfare', ALL, ({ params, body, user }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
-  return publicRadio(startWelfare(r, Number(body.interval_s), body.note));
+route('POST', '/api/personnel/:id/welfare', ALL, ({ params, body, user }) => {
+  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
+  if (user.role === 'FIELD_USER' && user.personnel_id !== p.id) throw httpError(403, 'not you');
+  return publicPersonnel(startWelfare(p, Number(body.interval_s), body.note));
 });
-route('POST', '/api/radios/:id/welfare/check', ALL, ({ params, user }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
-  return publicRadio(checkInWelfare(r));
+route('POST', '/api/personnel/:id/welfare/check', ALL, ({ params, user }) => {
+  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
+  if (user.role === 'FIELD_USER' && user.personnel_id !== p.id) throw httpError(403, 'not you');
+  return publicPersonnel(checkInWelfare(p));
 });
-route('DELETE', '/api/radios/:id/welfare', ALL, ({ params, user }) => {
-  const r = findRadio(params.id); if (!r) throw httpError(404, 'radio not found');
-  if (user.role === 'RADIO_USER' && user.radio_id !== r.id) throw httpError(403, 'not your radio');
-  if (!r.welfare_due_at) throw httpError(409, 'no welfare timer running');
-  return publicRadio(stopWelfare(r, user.role === 'RADIO_USER' ? 'cancelled by officer' : 'cancelled by control'));
+route('DELETE', '/api/personnel/:id/welfare', ALL, ({ params, user }) => {
+  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
+  if (user.role === 'FIELD_USER' && user.personnel_id !== p.id) throw httpError(403, 'not you');
+  if (!p.welfare_due_at) throw httpError(409, 'no welfare timer running');
+  return publicPersonnel(stopWelfare(p, user.role === 'FIELD_USER' ? 'cancelled by officer' : 'cancelled by control'));
 });
 
 /* Sites under contract — what alarm response jobs are attached to. */
@@ -2710,101 +1864,9 @@ route('DELETE', '/api/sites/:id', ADMIN, ({ params }) => {
   return { ok: true };
 });
 
-/* ------------------------------------------------------------------ *
- * Telephony: dial 9 out through the PBX, and inbound DDI to a radio
- * ------------------------------------------------------------------ */
-const { createGateway } = require('./pbx.js');
-const PSTN_PREFIX = process.env.PSTN_PREFIX || '9';
-
-const gateway = createGateway((event, data) => {
-  const call = db.communications.find((c) => c.id === data.callId);
-  if (!call) return;
-  const radioIds = db.communication_participants
-    .filter((p) => p.communication_id === call.id).map((p) => p.radio_id).filter(Boolean);
-  if (event === 'answered' && call.state === 'RINGING') {
-    call.state = 'ACTIVE'; call.answered_at = new Date().toISOString();
-    broadcast('call.accepted', publicCall(call), { radioIds });
-    logEvent('call.accepted', `PSTN CALL #${call.id} ANSWERED (${call.dialled_number})`, { call_id: call.id });
-  }
-  if (event === 'hangup') endCall(call, data.reason || 'REMOTE_CLEARED');
-});
-
-// Asterisk's PJSIP WebSocket transport rides the same mini-HTTP server ARI
-// does, at /ws, by convention (FreePBX's default chan_pjsip wss transport).
-// wss on 8089, not ws on 8088 -- confirmed live that a browser on
-// comms.echeloncic.com (always HTTPS) refuses to open a plain ws://
-// connection at all ("Mixed Content", blocked before it even attempts the
-// handshake, no console option to allow it). Derived from ARI_URL's host
-// unless PBX_WS_URL overrides it -- not sensitive (just where to
-// connect), unlike the extension secret, which stays out of this
-// endpoint entirely. FreePBX's mini-HTTP TLS cert is currently
-// self-signed, so a browser still needs a one-time visit to
-// https://<host>:8089 to accept it before the WSS handshake will
-// succeed -- a real cert is the proper follow-up fix for that.
-const PBX_WS_URL = process.env.PBX_WS_URL || (() => {
-  try { const u = new URL(process.env.ARI_URL || ''); return `wss://${u.hostname}:8089/ws`; }
-  catch { return null; }
-})();
-
 route('GET', '/api/config', ALL, () => ({
-  iceServers: JSON.parse(process.env.ICE_SERVERS || '[{"urls":"stun:stun.l.google.com:19302"}]'),
-  pstn: { prefix: PSTN_PREFIX, driver: gateway.name, media: gateway.mediaCapable },
   audio: process.env.AUDIO !== 'off',
-  sip: gateway.mediaCapable && PBX_WS_URL ? { wsUrl: PBX_WS_URL } : null,
 }));
-
-route('POST', '/api/calls/pstn', ALL, async ({ body, user }) => {
-  const digits = String(body.digits || '').replace(/[^0-9*#+]/g, '');
-  if (!digits.startsWith(PSTN_PREFIX)) throw httpError(400, `outside calls must start with ${PSTN_PREFIX}`);
-  const number = digits.slice(PSTN_PREFIX.length);
-  if (!number) throw httpError(400, 'no number dialled');
-
-  const radio = user.role === 'RADIO_USER'
-    ? db.radios.find((r) => r.id === user.radio_id)
-    : (body.from ? findRadio(body.from) : null);
-  if (user.role === 'RADIO_USER' && !radio) throw httpError(404, 'radio not found');
-
-  const call = {
-    id: nextId('communications'), kind: 'PSTN', state: 'RINGING',
-    from_radio_id: radio ? radio.id : null, from_label: radio ? callsignOf(radio) : 'CONTROL',
-    initiator_user_id: user.id, dialled_number: number, direction: 'OUTBOUND',
-    started_at: new Date().toISOString(), ended_at: null, duration_s: null, end_reason: null, talkgroup_id: null,
-  };
-  db.communications.push(call);
-  if (radio) db.communication_participants.push({ id: nextId('communication_participants'), communication_id: call.id, radio_id: radio.id, role: 'CALLER', state: 'CONNECTED' });
-
-  try {
-    const { channelId } = await gateway.dial({ callId: call.id, number, fromLabel: call.from_label, extension: radio ? radio.pbx_extension : null });
-    call.channel_id = channelId;
-  } catch (e) {
-    endCall(call, 'GATEWAY_FAILED');
-    throw httpError(502, `PBX rejected the call: ${e.message}`);
-  }
-  logEvent('call.pstn_dialled', `${call.from_label} → PSTN ${number}`, { call_id: call.id });
-  broadcast('call.dialling', publicCall(call), { radioIds: radio ? [radio.id] : undefined });
-  return { __status: 201, __body: publicCall(call) };
-});
-
-/* Inbound DDI. Called by the PBX dialplan, authenticated with a shared secret. */
-route('POST', '/api/pbx/inbound', null, ({ body, req }) => {
-  const secret = process.env.PBX_SECRET;
-  if (!secret || req.headers['x-pbx-secret'] !== secret) throw httpError(401, 'bad PBX secret');
-  const radio = findRadio(body.to);
-  if (!radio) throw httpError(404, 'no radio for that destination');
-  if (!radio.connected) throw httpError(409, 'radio not on air');
-  const call = {
-    id: nextId('communications'), kind: 'PSTN', state: 'RINGING',
-    from_radio_id: null, from_label: body.caller_id || 'EXTERNAL CALLER',
-    initiator_user_id: null, dialled_number: body.caller_id || null, direction: 'INBOUND',
-    channel_id: body.channel_id || null,
-    started_at: new Date().toISOString(), ended_at: null, duration_s: null, end_reason: null, talkgroup_id: null,
-  };
-  db.communications.push(call);
-  db.communication_participants.push({ id: nextId('communication_participants'), communication_id: call.id, radio_id: radio.id, role: 'CALLEE', state: 'RINGING' });
-  broadcast('call.incoming', publicCall(call), { radioIds: [radio.id] });
-  logEvent('call.pstn_inbound', `PSTN ${call.from_label} → ${callsignOf(radio)}`, { call_id: call.id });
-  return { __status: 201, __body: publicCall(call) };
-});
 
 route('GET', '/api/openapi.json', null, () => require('./openapi.json'));
 
@@ -2827,7 +1889,7 @@ route('POST', '/api/users', ADMIN, ({ body }) => {
   if (!ROLES.includes(body.role)) throw httpError(400, 'invalid role');
   if (db.users.some((u) => u.username === username)) throw httpError(409, 'username taken');
   const email = normalizeEmail(body.email) ?? null;
-  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, radio_id: body.radio_id || null, mdt_id: body.mdt_id || null, email, created_at: new Date().toISOString() };
+  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: body.personnel_id || null, mdt_id: body.mdt_id || null, email, created_at: new Date().toISOString() };
   db.users.push(u);
   logEvent('user.created', `USER ${username} CREATED (${u.role})`);
   return { __status: 201, __body: { id: u.id, username: u.username, role: u.role } };
@@ -2841,7 +1903,7 @@ route('PATCH', '/api/users/:id', ADMIN, ({ params, body }) => {
     if (!ROLES.includes(body.role)) throw httpError(400, 'invalid role');
     u.role = body.role;
   }
-  if ('radio_id' in body) u.radio_id = body.radio_id || null;
+  if ('personnel_id' in body) u.personnel_id = body.personnel_id || null;
   if ('mdt_id' in body) u.mdt_id = body.mdt_id || null;
   if ('password' in body && body.password) {
     if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
@@ -2863,28 +1925,24 @@ route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
  * GPS simulation
  * ------------------------------------------------------------------ */
 function simulationTick() {
-  for (const r of db.radios) {
-    if (!r.connected) continue;
-    const job = r.job_id ? db.jobs.find((j) => j.id === r.job_id) : null;
-    let target = r.sim_target;
+  for (const m of db.mdts) {
+    if (!m.connected || m.lat == null || m.lon == null) continue;
+    const job = m.job_id ? db.jobs.find((j) => j.id === m.job_id) : null;
+    let target = m.sim_target;
     if (job && ['DISPATCHED', 'ACKNOWLEDGED', 'EN_ROUTE'].includes(job.status)) target = { lat: job.lat, lon: job.lon };
-    if (!target || Math.hypot(target.lat - r.lat, target.lon - r.lon) < 0.0006) {
+    if (!target || Math.hypot(target.lat - m.lat, target.lon - m.lon) < 0.0006) {
       target = { lat: 51.5074 + (Math.random() - 0.5) * 0.08, lon: -0.1278 + (Math.random() - 0.5) * 0.10 };
-      r.sim_target = target;
+      m.sim_target = target;
     }
-    const dLat = target.lat - r.lat, dLon = target.lon - r.lon;
+    const dLat = target.lat - m.lat, dLon = target.lon - m.lon;
     const dist = Math.hypot(dLat, dLon) || 1;
     const step = Math.min(dist, 0.00035 + Math.random() * 0.0004);
-    r.lat += (dLat / dist) * step; r.lon += (dLon / dist) * step;
-    r.heading = Math.round(((Math.atan2(dLon, dLat) * 180) / Math.PI + 360) % 360);
-    r.speed = Math.round(step * 250000);
-    r.last_seen = new Date().toISOString();
-    if (Math.random() < 0.05) r.battery = Math.max(5, r.battery - 1);
-    const mdt = db.mdts.find((m) => m.callsign_id === r.callsign_id);
-    if (mdt) { mdt.lat = r.lat; mdt.lon = r.lon; }
-    db.locations.push({ id: nextId('locations'), radio_id: r.id, lat: r.lat, lon: r.lon, speed: r.speed, heading: r.heading, at: r.last_seen });
+    m.lat += (dLat / dist) * step; m.lon += (dLon / dist) * step;
+    if (Math.random() < 0.05) m.battery = Math.max(5, m.battery - 1);
+    const at = new Date().toISOString();
+    db.locations.push({ id: nextId('locations'), mdt_id: m.id, personnel_id: null, lat: m.lat, lon: m.lon, speed: null, heading: null, at });
     if (db.locations.length > 20000) db.locations.shift();
-    broadcast('radio.location_changed', publicRadio(r));
+    broadcast('mdt.status_changed', publicMdt(m));
   }
 }
 
@@ -2897,7 +1955,6 @@ function start() {
   else { seed(); store.flushNow(); }
   if (SIMULATION) setInterval(simulationTick, 2000).unref?.();
   setInterval(welfareTick, WELFARE_TICK_MS).unref?.();
-  setInterval(floorTimeoutSweep, 5000).unref?.();
   if (process.env.RETENTION !== 'off') {
     retentionSweep();
     setInterval(retentionSweep, 6 * 60 * 60 * 1000).unref?.();
@@ -2905,9 +1962,8 @@ function start() {
   server.listen(PORT, HOST, () => {
     console.log(`\n  CCCS POC — simulation only, not for operational use`);
     console.log(`  Control Room : http://localhost:${PORT}/control.html`);
-    console.log(`  Radio        : http://localhost:${PORT}/radio.html`);
     console.log(`  MDT          : http://localhost:${PORT}/mdt.html`);
-    console.log(`  Demo logins  : dispatcher/dispatch123 · radio101/radio123 · mdt001/mdt123 · admin/admin123`);
+    console.log(`  Demo logins  : dispatcher/dispatch123 · dwhitfield/field123 · mdt001/mdt123 · admin/admin123`);
     console.log(`  Storage      : ${store.enabled ? store.file : 'in memory only (PERSISTENCE=off)'}`);
     console.log(`  Microsoft SSO: ${MS_ENABLED ? 'enabled (tenant ' + MS_TENANT_ID + ')' : 'not configured — set MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET/MS_REDIRECT_URI'}\n`);
   });

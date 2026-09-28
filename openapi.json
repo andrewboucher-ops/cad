@@ -1,9 +1,9 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "CCCS \u2014 Critical Communications, Dispatch & Control-Room System",
-    "version": "0.1.0",
-    "description": "Commercial security dispatch and radio platform. Telephony runs against a simulated PBX driver unless PBX_MODE=asterisk."
+    "title": "CCCS — Critical Communications, Dispatch & Control-Room System",
+    "version": "0.2.0",
+    "description": "Commercial security operations platform: dispatch, patrol/paperwork tracking, HR rota and asset tracking. Radio communications are handled by BroadNet, outside this system."
   },
   "servers": [
     {
@@ -48,73 +48,149 @@
         }
       }
     },
-    "/api/radios": {
+    "/api/mdts": {
       "get": {
-        "summary": "List radios",
+        "summary": "List mobile data terminals",
         "responses": {
           "200": {
-            "description": "radios"
+            "description": "mdts"
           }
         }
       },
       "post": {
-        "summary": "Create a radio (SYSTEM_ADMIN). ISSI is unique.",
+        "summary": "Create an MDT (SYSTEM_ADMIN)",
         "responses": {
           "201": {
             "description": "created"
+          }
+        }
+      }
+    },
+    "/api/mdts/{id}": {
+      "patch": {
+        "summary": "Update an MDT (SYSTEM_ADMIN)",
+        "responses": {
+          "200": {
+            "description": "mdt"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete an MDT (SYSTEM_ADMIN)",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/mdts/{id}/crew": {
+      "post": {
+        "summary": "Sign a crew member into a vehicle terminal (up to 3)",
+        "responses": {
+          "200": {
+            "description": "mdt"
+          }
+        }
+      }
+    },
+    "/api/mdts/{id}/crew/{crewId}": {
+      "delete": {
+        "summary": "Sign a crew member out",
+        "responses": {
+          "200": {
+            "description": "mdt"
+          }
+        }
+      }
+    },
+    "/api/mdts/{id}/duty-status": {
+      "post": {
+        "summary": "Set an MDT's duty status (available/busy/meal break/out of service)",
+        "responses": {
+          "200": {
+            "description": "mdt"
+          }
+        }
+      }
+    },
+    "/api/mdts/{id}/location": {
+      "post": {
+        "summary": "Push a GPS fix for a vehicle terminal",
+        "responses": {
+          "200": {
+            "description": "mdt"
+          }
+        }
+      }
+    },
+    "/api/vehicles": {
+      "get": {
+        "summary": "List fleet vehicles",
+        "responses": {
+          "200": {
+            "description": "vehicles"
+          }
+        }
+      }
+    },
+    "/api/personnel": {
+      "get": {
+        "summary": "List personnel",
+        "responses": {
+          "200": {
+            "description": "personnel"
+          }
+        }
+      }
+    },
+    "/api/personnel/{id}/welfare": {
+      "post": {
+        "summary": "Start or reset a lone-worker welfare timer",
+        "responses": {
+          "200": {
+            "description": "personnel"
+          },
+          "400": {
+            "description": "interval out of range"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Cancel a welfare timer",
+        "responses": {
+          "200": {
+            "description": "personnel"
           },
           "409": {
-            "description": "ISSI already exists"
+            "description": "no timer running"
           }
         }
       }
     },
-    "/api/radios/{id}": {
-      "get": {
-        "summary": "Radio by id or ISSI",
-        "responses": {
-          "200": {
-            "description": "radio"
-          },
-          "404": {
-            "description": "not found"
-          }
-        }
-      }
-    },
-    "/api/radios/{id}/status": {
+    "/api/personnel/{id}/welfare/check": {
       "post": {
-        "summary": "Set operational status",
+        "summary": "Check in against a running welfare timer",
         "responses": {
           "200": {
-            "description": "radio"
+            "description": "personnel"
           }
         }
       }
     },
-    "/api/radios/{id}/location": {
+    "/api/personnel/{id}/erase-location-history": {
       "post": {
-        "summary": "Push a GPS fix",
+        "summary": "Erase a person's stored GPS location history (SYSTEM_ADMIN)",
         "responses": {
           "200": {
-            "description": "radio"
-          }
-        }
-      }
-    },
-    "/api/mdts": {
-      "get": {
-        "summary": "List MDTs",
-        "responses": {
-          "200": {
-            "description": "mdts"
+            "description": "ok"
           }
         }
       }
     },
     "/api/callsigns": {
       "get": {
-        "summary": "List call signs with radios, MDTs, crew",
+        "summary": "List call signs with their MDTs and personnel",
         "responses": {
           "200": {
             "description": "call signs"
@@ -132,7 +208,7 @@
     },
     "/api/callsigns/{id}/assign": {
       "post": {
-        "summary": "Assign a radio and/or MDT to a call sign",
+        "summary": "Assign an MDT to a call sign",
         "responses": {
           "200": {
             "description": "ok"
@@ -140,109 +216,10 @@
         }
       },
       "delete": {
-        "summary": "Remove a radio and/or MDT from a call sign",
+        "summary": "Remove an MDT from a call sign",
         "responses": {
           "200": {
             "description": "ok"
-          }
-        }
-      }
-    },
-    "/api/talkgroups": {
-      "get": {
-        "summary": "List talkgroups, membership and current floor holder",
-        "responses": {
-          "200": {
-            "description": "talkgroups"
-          }
-        }
-      },
-      "post": {
-        "summary": "Create a talkgroup",
-        "responses": {
-          "201": {
-            "description": "created"
-          }
-        }
-      }
-    },
-    "/api/talkgroups/{id}": {
-      "patch": {
-        "summary": "Rename or describe a talkgroup",
-        "responses": {
-          "200": {
-            "description": "talkgroup"
-          }
-        }
-      }
-    },
-    "/api/talkgroups/{id}/members": {
-      "post": {
-        "summary": "Affiliate a radio to a talkgroup",
-        "responses": {
-          "200": {
-            "description": "ok"
-          }
-        }
-      },
-      "delete": {
-        "summary": "Remove a radio from a talkgroup",
-        "responses": {
-          "200": {
-            "description": "ok"
-          }
-        }
-      }
-    },
-    "/api/calls/private": {
-      "post": {
-        "summary": "Start a private call to a radio/ISSI",
-        "responses": {
-          "201": {
-            "description": "call"
-          },
-          "409": {
-            "description": "busy or offline"
-          }
-        }
-      }
-    },
-    "/api/calls/group": {
-      "post": {
-        "summary": "Start a group call to a talkgroup or list of resources",
-        "responses": {
-          "201": {
-            "description": "call"
-          }
-        }
-      }
-    },
-    "/api/calls/{id}/accept": {
-      "post": {
-        "summary": "Answer a call",
-        "responses": {
-          "200": {
-            "description": "call"
-          }
-        }
-      }
-    },
-    "/api/calls/{id}/reject": {
-      "post": {
-        "summary": "Decline a call",
-        "responses": {
-          "200": {
-            "description": "call"
-          }
-        }
-      }
-    },
-    "/api/calls/{id}/end": {
-      "post": {
-        "summary": "Clear a call",
-        "responses": {
-          "200": {
-            "description": "call"
           }
         }
       }
@@ -267,7 +244,7 @@
     },
     "/api/jobs/{id}": {
       "patch": {
-        "summary": "Update job status or notes",
+        "summary": "Update job status, notes or incident details",
         "responses": {
           "200": {
             "description": "job"
@@ -277,7 +254,7 @@
     },
     "/api/jobs/{id}/assign": {
       "post": {
-        "summary": "Dispatch a job to call signs, radios or MDTs",
+        "summary": "Dispatch a job to call signs, personnel or MDTs",
         "responses": {
           "200": {
             "description": "job"
@@ -295,6 +272,66 @@
         }
       }
     },
+    "/api/jobs/{id}/stand-down": {
+      "post": {
+        "summary": "Remove a person or MDT from a job",
+        "responses": {
+          "200": {
+            "description": "job"
+          }
+        }
+      }
+    },
+    "/api/jobs/{id}/checklist/{itemId}": {
+      "patch": {
+        "summary": "Update a job's on-scene checklist item",
+        "responses": {
+          "200": {
+            "description": "job"
+          }
+        }
+      }
+    },
+    "/api/jobs/{id}/media": {
+      "post": {
+        "summary": "Attach a photo to a job (base64, jpeg/png/webp, 8MB max)",
+        "responses": {
+          "201": {
+            "description": "media"
+          },
+          "413": {
+            "description": "photo too large"
+          }
+        }
+      }
+    },
+    "/api/jobs/{id}/media/{mediaId}": {
+      "get": {
+        "summary": "Fetch a job photo",
+        "responses": {
+          "200": {
+            "description": "image bytes"
+          }
+        }
+      }
+    },
+    "/api/integrations/guardm8/jobs": {
+      "post": {
+        "summary": "GuardM8 alarm-receiving integration: create a job (shared-secret auth via X-GuardM8-Secret, not a user session)",
+        "security": [],
+        "responses": {
+          "201": {
+            "description": "created"
+          },
+          "200": {
+            "description": "already created for this external_ref"
+          },
+          "401": {
+            "description": "bad secret"
+          }
+        }
+      }
+    },
     "/api/emergency": {
       "get": {
         "summary": "List emergency events",
@@ -305,7 +342,7 @@
         }
       },
       "post": {
-        "summary": "Activate a radio emergency",
+        "summary": "Activate an officer or vehicle emergency",
         "responses": {
           "201": {
             "description": "event"
@@ -343,7 +380,7 @@
         }
       },
       "post": {
-        "summary": "Send a text message",
+        "summary": "Send a text message to a person, an MDT, or control",
         "responses": {
           "201": {
             "description": "message"
@@ -357,6 +394,39 @@
         "responses": {
           "200": {
             "description": "message"
+          }
+        }
+      }
+    },
+    "/api/calls/request": {
+      "post": {
+        "summary": "Request a callback from control",
+        "responses": {
+          "200": {
+            "description": "existing pending request, possibly escalated"
+          },
+          "201": {
+            "description": "created"
+          }
+        }
+      }
+    },
+    "/api/calls/requests": {
+      "get": {
+        "summary": "List callback requests",
+        "responses": {
+          "200": {
+            "description": "requests"
+          }
+        }
+      }
+    },
+    "/api/calls/requests/{id}/clear": {
+      "post": {
+        "summary": "Clear a callback request (answered by control, or cancelled by the requester)",
+        "responses": {
+          "200": {
+            "description": "request"
           }
         }
       }
@@ -381,6 +451,26 @@
         }
       }
     },
+    "/api/retention": {
+      "get": {
+        "summary": "Current data-retention windows (CONTROL)",
+        "responses": {
+          "200": {
+            "description": "retention"
+          }
+        }
+      }
+    },
+    "/api/retention/sweep": {
+      "post": {
+        "summary": "Run the retention sweep now (SYSTEM_ADMIN)",
+        "responses": {
+          "200": {
+            "description": "counts removed"
+          }
+        }
+      }
+    },
     "/api/users": {
       "get": {
         "summary": "List users (SYSTEM_ADMIN)",
@@ -399,36 +489,20 @@
         }
       }
     },
-    "/api/radios/{id}/welfare": {
-      "post": {
-        "summary": "Start or reset a lone-worker welfare timer",
+    "/api/users/{id}": {
+      "patch": {
+        "summary": "Update a user (SYSTEM_ADMIN)",
         "responses": {
           "200": {
-            "description": "radio"
-          },
-          "400": {
-            "description": "interval out of range"
+            "description": "user"
           }
         }
       },
       "delete": {
-        "summary": "Cancel a welfare timer",
+        "summary": "Delete a user (SYSTEM_ADMIN)",
         "responses": {
           "200": {
-            "description": "radio"
-          },
-          "409": {
-            "description": "no timer running"
-          }
-        }
-      }
-    },
-    "/api/radios/{id}/welfare/check": {
-      "post": {
-        "summary": "Check in against a running welfare timer",
-        "responses": {
-          "200": {
-            "description": "radio"
+            "description": "ok"
           }
         }
       }
@@ -454,39 +528,27 @@
         }
       }
     },
-    "/api/calls/pstn": {
-      "post": {
-        "summary": "Dial an outside number through the PBX (digits must start with the outside-line prefix)",
+    "/api/sites/{id}": {
+      "patch": {
+        "summary": "Update a site, including its on-scene checklist template (SYSTEM_ADMIN)",
         "responses": {
-          "201": {
-            "description": "call"
-          },
-          "400": {
-            "description": "bad dialled string"
-          },
-          "502": {
-            "description": "PBX rejected the call"
+          "200": {
+            "description": "site"
           }
         }
-      }
-    },
-    "/api/pbx/inbound": {
-      "post": {
-        "summary": "Inbound DDI from the PBX dialplan; authenticated with X-PBX-Secret",
-        "security": [],
+      },
+      "delete": {
+        "summary": "Delete a site (SYSTEM_ADMIN)",
         "responses": {
-          "201": {
-            "description": "call"
-          },
-          "401": {
-            "description": "bad secret"
+          "200": {
+            "description": "ok"
           }
         }
       }
     },
     "/api/config": {
       "get": {
-        "summary": "Client bootstrap: ICE servers, outside-line prefix, telephony driver",
+        "summary": "Client bootstrap config",
         "responses": {
           "200": {
             "description": "config"
