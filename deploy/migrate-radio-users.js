@@ -10,8 +10,13 @@
  *
  * WHY IT EXISTS. The new code knows no RADIO_USER role; an account left on it
  * simply fails to sign in, with no clear error. Each one becomes a FIELD_USER
- * tied to a personnel row, keeping its username and password hash, so the
- * officer signs in exactly as before.
+ * tied to a personnel row, keeping its password hash, so the officer's
+ * password is unchanged. The USERNAME changes: 'radio101' names a device
+ * that no longer exists, so the account is renamed after the person (first
+ * initial + surname, e.g. dwhitfield; a digit is added if that is taken, so
+ * it can never collide with or merge into another account). The old name is
+ * kept on the record as previous_username, and every rename is printed —
+ * tell those officers their new username.
  *
  * WHAT ELSE MOVES, and why each matters:
  *   - a RUNNING WELFARE TIMER on a radio moves to the person. The new code
@@ -79,6 +84,17 @@ let nextPersonnelId = Math.max(counters.personnel || 0, ...personnel.map((p) => 
 
 /* ---- 1. accounts --------------------------------------------------- */
 const personForRadio = new Map(); // radio id -> personnel id
+const taken = new Set(users.map((u) => lc(u.username)));
+/** dwhitfield from "Dan Whitfield"; unique among all accounts. */
+function usernameFor(name, fallback) {
+  const parts = String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z\s'-]/g, '').replace(/['-]/g, '').trim().split(/\s+/).filter(Boolean);
+  let base = parts.length >= 2 ? parts[0][0] + parts[parts.length - 1] : (parts[0] || fallback);
+  base = base.slice(0, 30) || fallback;
+  let candidate = base, n = 2;
+  while (taken.has(candidate)) candidate = `${base}${n++}`;
+  taken.add(candidate);
+  return candidate;
+}
 for (const u of users.filter((x) => x.role === 'RADIO_USER')) {
   const radio = radios.find((r) => r.id === u.radio_id) || null;
   const name = u.display_name || u.username;
@@ -90,10 +106,23 @@ for (const u of users.filter((x) => x.role === 'RADIO_USER')) {
     personnel.push(p); how = 'CREATED';
   }
   if (p.user_id && p.user_id !== u.id) throw new Error(`${p.name} is already linked to user ${p.user_id}; resolve by hand before migrating`);
-  note(`account ${u.username}: RADIO_USER → FIELD_USER, person #${p.id} ${p.name} (${how}; radio ${radio ? radio.issi + ' / ' + csName(radio.callsign_id) : 'none'})`);
+  const newName = usernameFor(p.name, `officer${p.id}`);
+  note(`account ${u.username} → ${newName}: RADIO_USER → FIELD_USER, person #${p.id} ${p.name} (${how}; radio ${radio ? radio.issi + ' / ' + csName(radio.callsign_id) : 'none'}) — password unchanged`);
+  u.previous_username = u.username; u.username = newName;
   u.role = 'FIELD_USER'; u.personnel_id = p.id; delete u.radio_id;
   p.user_id = u.id;
   if (radio) personForRadio.set(radio.id, p.id);
+}
+
+// Accounts converted by an earlier version of this script kept their device
+// name (radio101). Rename those too, so a live system migrated before the
+// rename existed ends up the same as one migrated after.
+for (const u of users.filter((x) => x.role === 'FIELD_USER' && /^radio\d+$/i.test(x.username) && !x.previous_username)) {
+  const p = personnel.find((x) => x.id === u.personnel_id);
+  if (!p) { note(`account ${u.username}: FIELD_USER with no person — left as is, fix in Admin`); continue; }
+  const newName = usernameFor(p.name, `officer${p.id}`);
+  note(`account ${u.username} → ${newName} (${p.name}) — password unchanged`);
+  u.previous_username = u.username; u.username = newName;
 }
 
 // Radios without an account: only an unambiguous call sign maps.

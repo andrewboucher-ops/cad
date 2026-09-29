@@ -47,7 +47,10 @@ test('a radio account becomes an officer login on the right person, keeping its 
   const file = oldDb();
   const r = run(file);
   assert.equal(r.status, 0, r.stderr);
-  const u = read(file, 'users').find((x) => x.username === 'radio101');
+  assert.equal(read(file, 'users').find((x) => x.username === 'radio101'), undefined, 'the device-named login is gone');
+  const u = read(file, 'users').find((x) => x.previous_username === 'radio101');
+  assert.equal(u.username, 'dwhitfield', 'renamed after the person');
+  assert.match(r.stdout, /radio101 → dwhitfield/, 'the rename is printed so the officer can be told');
   assert.equal(u.role, 'FIELD_USER');
   assert.equal(u.personnel_id, 1, 'Dan by name on his call sign, not Sam who shares it');
   assert.equal(u.password_hash, 'scrypt$keep$me', 'the officer signs in with the same password');
@@ -58,6 +61,31 @@ test('a radio account becomes an officer login on the right person, keeping its 
   assert.equal(read(file, 'job_assignments')[0].personnel_id, 1, 'open job keeps its officer');
   assert.equal(read(file, 'emergency_events')[0].personnel_id, 1, 'an active emergency keeps its officer');
   assert.match(run(file).stdout, /nothing to change/, 'running again changes nothing');
+  fs.unlinkSync(file);
+});
+
+test('a new username never collides with an existing account', () => {
+  const file = oldDb({ users: [
+    { id: 1, username: 'dwhitfield', role: 'DISPATCHER', password_hash: 'x' },
+    { id: 2, username: 'radio101', role: 'RADIO_USER', display_name: 'Dan Whitfield', radio_id: 1, password_hash: 'y' },
+  ] });
+  assert.equal(run(file).status, 0);
+  const users = read(file, 'users');
+  assert.equal(users.find((x) => x.id === 1).username, 'dwhitfield', 'the existing account is untouched');
+  assert.equal(users.find((x) => x.id === 2).username, 'dwhitfield2');
+  fs.unlinkSync(file);
+});
+
+test('accounts converted earlier but still named radioNNN are renamed on a re-run', () => {
+  const file = oldDb({ users: [
+    { id: 1, username: 'dispatcher', role: 'DISPATCHER', password_hash: 'x' },
+    { id: 2, username: 'radio101', role: 'FIELD_USER', personnel_id: 1, password_hash: 'keep' },
+  ], personnel: [{ id: 1, name: 'Dan Whitfield', callsign_id: 1, user_id: 2 }] });
+  const r = run(file);
+  assert.equal(r.status, 0, r.stderr);
+  const u = read(file, 'users').find((x) => x.id === 2);
+  assert.deepEqual([u.username, u.previous_username, u.password_hash, u.role], ['dwhitfield', 'radio101', 'keep', 'FIELD_USER']);
+  assert.match(run(file).stdout, /nothing to change/);
   fs.unlinkSync(file);
 });
 
