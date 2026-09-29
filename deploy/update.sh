@@ -12,6 +12,13 @@
 # nobody looked at.
 # One short command is harder to get wrong at 2am.
 #
+# Pre-pivot database (RADIO_USER accounts)? The account check below stops
+# and prints what deploy/migrate-radio-users.js would change. Review it, then
+#   MIGRATE=1 bash deploy/update.sh
+# stops the service, backs the database up, migrates it and deploys; if the
+# new code then fails its health check, BOTH the code and the pre-migration
+# database are restored (the old code cannot read migrated accounts).
+#
 # What it does NOT do: merge anything, change /etc/cccs/cccs.env, or turn on
 # SMS_LIVE / AMI_*. New features that need those stay inert (dial falls back
 # to a logged tel: attempt, SMS stays in dry-run) until you set them.
@@ -23,6 +30,9 @@ ENV_FILE="${ENV_FILE:-/etc/cccs/cccs.env}"
 SERVICE="${SERVICE:-cccs}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/cccs}"
 DRY_RUN="${DRY_RUN:-}"
+# MIGRATE=1: convert radio-era accounts (RADIO_USER) as part of this deploy.
+# Never implied — review the dry run it prints first.
+MIGRATE="${MIGRATE:-}"
 STAMP=$(date +%Y%m%d-%H%M%S)
 export NODE_NO_WARNINGS=1   # node:sqlite's "experimental" notice is noise here
 
@@ -67,17 +77,37 @@ if [ -f "$DATA_FILE" ]; then
     const counts = {}; for (const u of users) counts[u.role] = (counts[u.role] || 0) + 1;
     console.log("   " + users.length + " accounts: " + JSON.stringify(counts));
     if (bad.length) { console.log("   UNKNOWN ROLES: " + bad.map((u) => u.username + "=" + u.role).join(", ")); process.exit(3); }
-  ' "$DATA_FILE" 2>/dev/null || die "accounts with a role this code does not recognise (listed above) — migrate them first (see docs/ROADMAP.md, Phase A)"
+  ' "$DATA_FILE" 2>/dev/null || NEEDS_MIGRATION=1
+  if [ -n "${NEEDS_MIGRATION:-}" ]; then
+    echo; echo "   These accounts are from before the radio removal. What the migration would change:"
+    node "$SRC_DIR/deploy/migrate-radio-users.js" --db "$DATA_FILE" --dry-run | sed 's/^/   /' \
+      || die "the migration cannot run on this database (reason above) — resolve it by hand first"
+    if [ -z "$MIGRATE" ] && [ -z "$DRY_RUN" ]; then
+      die "review the changes above; if they are right, run again as:  MIGRATE=1 bash deploy/update.sh"
+    fi
+  fi
 else
   echo "   no database at $DATA_FILE yet — nothing to check"
 fi
 
 say "3/6  Backups"
 run mkdir -p "$BACKUP_DIR"
+DB_BACKUP="$BACKUP_DIR/cccs-predeploy-$STAMP.db"
+MIGRATED=""
+if [ -n "${NEEDS_MIGRATION:-}" ]; then
+  # Stop FIRST: the running service keeps the whole state in memory and
+  # writes it back every second, so a backup or migration under it would be
+  # stale or overwritten. From here until the health check, the console is down.
+  echo "   stopping $SERVICE for the migration (the console is down until step 6)"
+  run systemctl stop "$SERVICE"
+  # Until the full rollback is armed below, a failure must at least bring
+  # the old service straight back — never leave the console down.
+  [ -n "$DRY_RUN" ] || trap 'trap - ERR; systemctl start "$SERVICE"; die "a backup step failed — the previous service was restarted unchanged"' ERR
+fi
 if [ -f "$DATA_FILE" ]; then
   # SQLite's own online backup respects WAL; a plain cp of a live db does not.
-  run node -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1]);d.exec(`VACUUM INTO '"'"'${process.argv[2]}'"'"'`);d.close();' "$DATA_FILE" "$BACKUP_DIR/cccs-predeploy-$STAMP.db"
-  echo "   database → $BACKUP_DIR/cccs-predeploy-$STAMP.db"
+  run node -e 'const {DatabaseSync}=require("node:sqlite");const d=new DatabaseSync(process.argv[1]);d.exec(`VACUUM INTO '"'"'${process.argv[2]}'"'"'`);d.close();' "$DATA_FILE" "$DB_BACKUP"
+  echo "   database → $DB_BACKUP"
 fi
 APP_BACKUP="$BACKUP_DIR/app-predeploy-$STAMP.tar.gz"
 run tar -czf "$APP_BACKUP" -C "$(dirname "$APP_DIR")" "$(basename "$APP_DIR")"
@@ -86,8 +116,17 @@ echo "   code     → $APP_BACKUP"
 rollback() {
   trap - ERR
   printf '\n!!! %s — rolling back to the previous code\n' "$1" >&2
+  systemctl stop "$SERVICE" || true
   rm -rf "$APP_DIR.failed-$STAMP"; mv "$APP_DIR" "$APP_DIR.failed-$STAMP"
   tar -xzf "$APP_BACKUP" -C "$(dirname "$APP_DIR")"
+  if [ -n "$MIGRATED" ]; then
+    # The old code cannot read migrated accounts: the database goes back too.
+    # Nothing is lost by this — the service was stopped from backup to here.
+    echo "!!! restoring the pre-migration database" >&2
+    cp "$DATA_FILE" "$DATA_FILE.failed-$STAMP" 2>/dev/null || true
+    rm -f "$DATA_FILE-wal" "$DATA_FILE-shm"
+    cp "$DB_BACKUP" "$DATA_FILE"; chown "$APP_USER:$APP_USER" "$DATA_FILE" 2>/dev/null || true
+  fi
   systemctl restart "$SERVICE"
   sleep 3
   if systemctl is-active --quiet "$SERVICE"; then
@@ -103,6 +142,14 @@ rollback() {
 # From here on the live folder is being changed: any failure at all rolls
 # back to the backup rather than leaving a half-copied service.
 [ -n "$DRY_RUN" ] || trap 'rollback "a deploy step failed (line $LINENO)"' ERR
+
+if [ -n "${NEEDS_MIGRATION:-}" ]; then
+  say "3b   Migrating radio-era accounts"
+  if [ -n "$DRY_RUN" ]; then echo "   (dry run) would run deploy/migrate-radio-users.js — changes listed in step 2"; else
+    MIGRATED=1
+    node "$SRC_DIR/deploy/migrate-radio-users.js" --db "$DATA_FILE" --service "$SERVICE" | sed 's/^/   /'
+  fi
+fi
 
 say "4/6  Copying code"
 # tar rather than rsync: always present, so this needs no extra package.
@@ -138,6 +185,12 @@ Deployed $(git -C "$SRC_DIR" rev-parse --short HEAD). Now, by hand:
 To roll back to exactly what was running before:
   systemctl stop $SERVICE && mv $APP_DIR $APP_DIR.rolledback-$STAMP \\
     && tar -xzf $APP_BACKUP -C $(dirname "$APP_DIR") && systemctl start $SERVICE
-The pre-deploy database is at $BACKUP_DIR/cccs-predeploy-$STAMP.db (only
-needed if data itself went wrong — restoring it discards anything since).
+The pre-deploy database is at $DB_BACKUP.
 DONE
+if [ -n "$MIGRATED" ]; then cat <<MIG
+THIS DEPLOY MIGRATED THE DATABASE: the old code cannot run on it. A rollback
+must restore the database too — after the tar step above and BEFORE starting:
+  rm -f $DATA_FILE-wal $DATA_FILE-shm && cp $DB_BACKUP $DATA_FILE && chown $APP_USER:$APP_USER $DATA_FILE
+(that discards anything recorded since the deploy — note it down first).
+MIG
+fi
