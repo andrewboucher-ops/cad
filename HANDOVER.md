@@ -1,5 +1,98 @@
 # HANDOVER — contact routes / Twilio SMS / FreePBX dial / control-room redesign
 
+## ▶ Current state — read this first (updated 2026-09-29, late)
+
+Everything below the line is the earlier handover, kept for its history and
+its lessons. **Where it disagrees with this section, this section wins.**
+
+**Nothing is merged or deployed. `master` is still `105cb79`.** The work is a
+stack of branches, each building on the one before:
+
+```
+feat/twilio-sms       SMS module, contact routes (earlier session)
+  └ feat/freepbx-dial   asterisk.js rewritten + contact-route tests
+      └ feat/control-redesign   + feat/forms merged in, + the redesign
+feat/forms            (branched from master; also merged into the redesign)
+```
+
+Merging `feat/control-redesign` alone brings in all of it. Suite on that
+branch: **103/103** (66 original + 12 asterisk + 16 contact + 9 forms).
+
+### Done and verified
+1. **FreePBX: reachable and permitted.** From container 140: port 5038 open,
+   `control-dial` logs in, `ListCommands` lists `Originate`. The server's own
+   `GET /api/contact/pbx-probe` returned `logged_in:true, can_originate:true`.
+   Context: `from-internal` (confirmed live for reaching an extension in
+   commit a86d2da). The GuardM8 block in extensions_custom.conf was never
+   read; only needed if the officer leg turns out to need a custom route.
+2. **asterisk.js rewritten.** The "login dispatch swap" bug in §4 below was
+   **not real** (disproved against a fake AMI server; see bdf0b2a). The real
+   bugs were: an Async Originate reply never carries Uniqueid, so no outcome
+   could ever be recorded; `Dial(<number>)` had no channel technology; no
+   `/n` on the Local channel, so every answered call would log ~0s. Outcome
+   is decided on the `;1` channel's Hangup; operator-leg failures are
+   recorded as such. 12 tests against a scripted fake PBX.
+3. **Contact-route tests** (16). Found and fixed a blocking bug: every real
+   Twilio status callback died with 400 'invalid JSON body' (Twilio posts
+   form-encoded). Form bodies are now accepted on `/api/sms/status` only, and
+   the signature is checked against `SMS_STATUS_CALLBACK_URL` when set.
+4. **Supervisor concepts are settable** — neither was before:
+   `PATCH /api/personnel/:id {supervisor_id}` (admin UI: line-manager picker)
+   and `is_duty_supervisor` on shifts (rota UI: tick box).
+5. **Forms** — server (routes-forms.js, registrar), officer filing with
+   signature pad, reports page (forms.html), admin form builder with named
+   readers. RESTRICTED enforced in projection; a canary leak test searches
+   every response and every raw WebSocket byte other users receive, and was
+   proven to fail when the rule is broken. Patient care defaults to
+   RESTRICTED (health data). Submissions bypass the offline outbox on
+   purpose (see forms-ui.js header).
+6. **Control-room redesign** — map-primary, translucent docked panels,
+   merged Dispatch panel with a "Needs attendance" filter, On-shift panel
+   grouped by shift, zero modals, officer detail with both numbers +
+   Dial/SMS. GoldenLayout removed (and with it multi-monitor popouts). The
+   map is now optional: a Leaflet CDN failure no longer blanks the console.
+
+### NOT yet verified — honest list
+- **A real call has never been placed through asterisk.js.** Next step is
+  the morning test (below). The one thing the fake PBX cannot tell us:
+  whether `control-dial` has `read=call`. If calls connect but every row
+  stays ATTEMPTED, that permission is missing.
+- **Twilio has never sent a real webhook here.** Signatures are tested
+  against the documented algorithm, i.e. self-consistency only.
+- **The redesigned console has only run in headless Chromium** with the map
+  tiles blocked. Needs a look on a real control-room screen, both themes.
+- Forms UI on a real phone (signature pad on touch, camera capture).
+- Nothing near the welfare path changed server-side. The console's
+  rendering of welfare/emergency banners was rewritten and tested
+  end-to-end (real 30s timer → overdue banner → acknowledge), but still
+  deserves a deliberate test on a real device before relying on it.
+
+### Morning test — click-to-dial against the real PBX
+Inside container 140, one line at a time (no heredocs over SSH):
+```
+cd /opt/cccs-src && git fetch origin && git worktree add /tmp/dialtest origin/feat/control-redesign
+cd /tmp/dialtest && read -s -p 'AMI secret: ' AMI_SECRET && echo && export AMI_SECRET AMI_HOST=192.168.7.45 AMI_USERNAME=control-dial PORT=4010 PERSISTENCE=off SIMULATION=off TLS_CERT_DIR=/nonexistent AUTH_SECRET=dialtest && (node server.js > /tmp/dialtest.log 2>&1 &) && sleep 2
+T=$(curl -s localhost:4010/api/auth/login -H 'content-type: application/json' -d '{"username":"admin","password":"admin123"}' | sed 's/.*"token":"\([^"]*\)".*/\1/'); curl -s localhost:4010/api/contact/pbx-probe -H "authorization: Bearer $T"; echo
+curl -s -X PATCH localhost:4010/api/personnel/1 -H "authorization: Bearer $T" -H 'content-type: application/json' -d '{"contact_phone":"07XXXXXXXXX"}' >/dev/null; echo done
+curl -s -X POST localhost:4010/api/contact/dial -H "authorization: Bearer $T" -H 'content-type: application/json' -d '{"personnel":1,"extension":"905"}'; echo
+curl -s localhost:4010/api/personnel/1/contact-log -H "authorization: Bearer $T"; echo
+```
+Three calls: answer and talk ~10s; reject on the mobile; let ext 905 ring
+out. Expect ANSWERED+duration, BUSY (or NO_ANSWER, network-dependent) and
+NO_ANSWER with `OPERATOR_NO_ANSWER`. Clean up after:
+`pkill -f /tmp/dialtest/server.js; cd /opt/cccs-src && git worktree remove --force /tmp/dialtest; unset AMI_SECRET`
+(then `systemctl status cccs` to confirm the live service is untouched).
+
+### Housekeeping owed
+- **Rotate the `control-dial` AMI secret** — it was pasted at a shell prompt
+  on 2026-09-29, so it is in container 140's root shell history and in a chat
+  transcript. Then `history -c && history -w` in the container.
+- `public/log.html` on master has mojibake (`â€”` for `—`); unrelated, untouched.
+- `refactor/split-server` is still marked dead below; delete it when convenient.
+
+---
+
+
 Written at the end of a long session, 2026-09-29, and **corrected the same day**
 after the next session tested a claim in it. Read this before touching anything
 on these branches. It records what is verified, what is broken, and what was
