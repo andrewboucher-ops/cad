@@ -7,7 +7,7 @@
 #
 # Why a script rather than steps to paste: pasting long multi-line commands
 # into an SSH session has already garbled server.js once on this estate.
-# No --delete on the copy (same as install.sh): the live folder may hold
+# The copy only adds and overwrites (like install.sh): the live folder may hold
 # files git doesn't (APK downloads), and a deploy shouldn't remove what
 # nobody looked at.
 # One short command is harder to get wrong at 2am.
@@ -24,6 +24,7 @@ SERVICE="${SERVICE:-cccs}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/cccs}"
 DRY_RUN="${DRY_RUN:-}"
 STAMP=$(date +%Y%m%d-%H%M%S)
+export NODE_NO_WARNINGS=1   # node:sqlite's "experimental" notice is noise here
 
 say() { printf '\n==> %s\n' "$*"; }
 run() { if [ -n "$DRY_RUN" ]; then echo "   (dry run) $*"; else "$@"; fi; }
@@ -83,6 +84,7 @@ run tar -czf "$APP_BACKUP" -C "$(dirname "$APP_DIR")" "$(basename "$APP_DIR")"
 echo "   code     → $APP_BACKUP"
 
 rollback() {
+  trap - ERR
   printf '\n!!! %s — rolling back to the previous code\n' "$1" >&2
   rm -rf "$APP_DIR.failed-$STAMP"; mv "$APP_DIR" "$APP_DIR.failed-$STAMP"
   tar -xzf "$APP_BACKUP" -C "$(dirname "$APP_DIR")"
@@ -98,8 +100,15 @@ rollback() {
   exit 1
 }
 
+# From here on the live folder is being changed: any failure at all rolls
+# back to the backup rather than leaving a half-copied service.
+[ -n "$DRY_RUN" ] || trap 'rollback "a deploy step failed (line $LINENO)"' ERR
+
 say "4/6  Copying code"
-run rsync -a --exclude data --exclude .git --exclude node_modules --exclude 'seed.json' "$SRC_DIR/" "$APP_DIR/"
+# tar rather than rsync: always present, so this needs no extra package.
+if [ -n "$DRY_RUN" ]; then echo "   (dry run) copy $SRC_DIR → $APP_DIR"; else
+  tar -C "$SRC_DIR" --exclude=./data --exclude=./.git --exclude=./node_modules --exclude=./seed.json -cf - . | tar -C "$APP_DIR" -xf -
+fi
 run chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
 say "5/6  Restarting $SERVICE"
@@ -117,6 +126,7 @@ if [ -n "$DRY_RUN" ]; then echo "   (dry run) would poll http://127.0.0.1:$PORT/
   [ -n "$ok" ] || rollback "service did not come back healthy within 20s"
   echo "   service active, pages and API answering"
 fi
+trap - ERR
 
 cat <<DONE
 
