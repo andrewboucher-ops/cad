@@ -144,6 +144,22 @@ That closes every "Extends Sites/Patrols" item except configurable Forms
 (trespass advisals, patient care, safeguarding — the last one needs a
 restricted-visibility design, not just a form builder).
 
+**Control room redesign — done, not yet deployed.** Also not from the
+roadmap list — a direct request. `control.html`'s job and patrol-visit
+detail views (status stepper, resources, notes, assign/complete/cancel,
+checkpoint coverage) moved out of popup modals into the existing Detail
+panel (renamed from "Resource Detail", since it now shows whichever of
+person/MDT/job/visit was last selected), matching how personnel/MDT detail
+already worked. The panel stays live via the same WebSocket events that
+already update the lists, guarded against clobbering an operator's
+in-progress typing (checked via `document.activeElement` before
+re-rendering). Smaller, occasional-action modals (create job/visit, assign
+by call sign, send a message, push notification setup) were deliberately
+left as modals — that's a scope decision, not an oversight; flag it if the
+intent was to remove modals everywhere. `LAYOUT_VERSION` bumped so a saved
+panel layout with the old "Resource Detail" title doesn't linger. Needs the
+same deploy treatment as the rest.
+
 ---
 
 ## Deploying Phase A

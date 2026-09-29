@@ -283,7 +283,7 @@ function renderJobs() {
   const open = state.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)
     || (showClosed && Date.parse(j.updated_at) > dayAgo));
   el('#jobList').innerHTML = open.length ? open.map((j) => `
-    <div class="row ${['COMPLETED', 'CANCELLED'].includes(j.status) ? 'closed' : ''}" data-job="${j.id}">
+    <div class="row ${['COMPLETED', 'CANCELLED'].includes(j.status) ? 'closed' : ''} ${state.selected && state.selected.kind === 'j' && state.selected.id === j.id ? 'sel' : ''}" data-job="${j.id}">
       <div class="card-top">
         <span class="cs">${esc(j.reference)}</span>
         <span style="display:flex;align-items:center;gap:8px">
@@ -296,7 +296,7 @@ function renderJobs() {
         <span>${esc(j.resources.map((r) => r.callsign || r.personnel || r.mdt).join(', ') || 'unassigned')}</span>
       </div>
     </div>`).join('') : '<p class="dim">No open jobs. Create one to start a dispatch.</p>';
-  CCCS.els('#jobList .row').forEach((n) => n.addEventListener('click', () => jobModal(state.jobs.find((j) => j.id === Number(n.dataset.job)))));
+  CCCS.els('#jobList .row').forEach((n) => n.addEventListener('click', () => select('j', Number(n.dataset.job))));
   CCCS.els('[data-assignjob]').forEach((b) => b.addEventListener('click', (e) => {
     e.stopPropagation();
     assignModal(state.jobs.find((j) => j.id === Number(b.dataset.assignjob)));
@@ -315,7 +315,7 @@ function renderVisits() {
     || (showClosed && Date.parse(v.updated_at) > dayAgo));
   open.sort((a, b) => Date.parse(a.scheduled_for) - Date.parse(b.scheduled_for));
   el('#visitList').innerHTML = open.length ? open.map((v) => `
-    <div class="row ${['COMPLETED', 'CANCELLED'].includes(v.status) ? 'closed' : ''} ${v.status === 'MISSED' ? 'alarm' : ''}" data-visit="${v.id}">
+    <div class="row ${['COMPLETED', 'CANCELLED'].includes(v.status) ? 'closed' : ''} ${v.status === 'MISSED' ? 'alarm' : ''} ${state.selected && state.selected.kind === 'v' && state.selected.id === v.id ? 'sel' : ''}" data-visit="${v.id}">
       <div class="card-top">
         <span class="cs">${esc(v.reference)}</span>
         <span class="status-pill ${visitStatusClass(v.status)}">${visitStatusLabel(v.status)}</span>
@@ -325,15 +325,16 @@ function renderVisits() {
         <span>${esc(v.resources.map((r) => r.personnel).join(', ') || 'unassigned')}</span>
       </div>
     </div>`).join('') : '<p class="dim">No open patrol visits.</p>';
-  CCCS.els('#visitList .row').forEach((n) => n.addEventListener('click', () => visitModal(state.site_visits.find((v) => v.id === Number(n.dataset.visit)))));
+  CCCS.els('#visitList .row').forEach((n) => n.addEventListener('click', () => select('v', Number(n.dataset.visit))));
 }
 
 const VISIT_STAGES = [
   ['DISPATCHED', 'Dispatched'], ['ACKNOWLEDGED', 'Acknowledged'], ['EN_ROUTE', 'En route'],
   ['ON_SCENE', 'On scene'], ['COMPLETED', 'Completed'],
 ];
-function visitModal(v) {
-  if (!v) return;
+function renderVisitDetail() {
+  const v = state.site_visits.find((x) => x.id === state.selected.id);
+  if (!v) { el('#detailBody').innerHTML = '<p class="dim">That visit is no longer open.</p>'; return; }
   const stageAt = { DISPATCHED: v.dispatched_at, ACKNOWLEDGED: v.acknowledged_at, EN_ROUTE: v.en_route_at, ON_SCENE: v.on_scene_at, COMPLETED: v.completed_at };
   let lastDoneIdx = -1;
   VISIT_STAGES.forEach(([code], i) => { if (stageAt[code]) lastDoneIdx = i; });
@@ -346,7 +347,7 @@ function visitModal(v) {
       <div><div class="label">${label}</div><div class="time${at ? '' : ' dim'}">${at ? new Date(at).toLocaleTimeString() : 'waiting'}</div></div>
     </div>`;
   }).join('');
-  modal(`Visit ${v.reference}`, `
+  el('#detailBody').innerHTML = `
     <div class="job-head">
       <div>
         <div class="titles"><h3>${esc(v.site_name || 'Site visit')}${v.beat_name ? ` — ${esc(v.beat_name)}` : ''}</h3></div>
@@ -381,20 +382,18 @@ function visitModal(v) {
       <button class="btn primary" id="vAssign">Assign</button>
       <button class="btn ok" id="vDone">Mark completed</button>
       <button class="btn danger" id="vCancel">Cancel visit</button>
-    </div>`, () => {
-    el('#vAssign').onclick = async () => {
-      try { await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vAdd').value) }); closeModal(); }
-      catch (e) { alert(e.message); }
-    };
-    el('#vDone').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }); closeModal(); };
-    el('#vCancel').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }); closeModal(); };
-    el('#vSaveNotes').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { notes: el('#vNotes').value }); closeModal(); };
-    CCCS.els('[data-visitstanddown]').forEach((b) => (b.onclick = async () => {
-      if (!confirm('Stand this person down from the visit?')) return;
-      await api('POST', `/api/site-visits/${v.id}/stand-down`, { personnel: Number(b.dataset.visitstanddown) });
-      closeModal();
-    }));
-  });
+    </div>`;
+  el('#vAssign').onclick = async () => {
+    try { await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vAdd').value) }); }
+    catch (e) { alert(e.message); }
+  };
+  el('#vDone').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }); };
+  el('#vCancel').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }); };
+  el('#vSaveNotes').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { notes: el('#vNotes').value }); };
+  CCCS.els('[data-visitstanddown]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Stand this person down from the visit?')) return;
+    await api('POST', `/api/site-visits/${v.id}/stand-down`, { personnel: Number(b.dataset.visitstanddown) });
+  }));
 }
 
 function openNewVisitModal() {
@@ -446,9 +445,17 @@ function updateCallbackBadge() {
   b.textContent = n; b.hidden = n === 0;
 }
 
+let detailTick = null;
 function renderDetail() {
   if (!el('#detailBody')) return;
-  if (!state.selected) return;
+  // A live panel updates on every matching WS event now that it's not a
+  // modal a local action explicitly closes — but that must never yank a
+  // half-typed notes/edit field out from under whoever's currently in it.
+  if (document.activeElement && el('#detailBody').contains(document.activeElement)) return;
+  if (detailTick) { clearInterval(detailTick); detailTick = null; }
+  if (!state.selected) { el('#detailBody').innerHTML = '<p class="dim">Select a resource, job or patrol visit to see its detail here.</p>'; return; }
+  if (state.selected.kind === 'j') { renderJobDetail(); return; }
+  if (state.selected.kind === 'v') { renderVisitDetail(); return; }
   if (state.selected.kind === 'p') {
     const p = state.personnel.find((x) => x.id === state.selected.id);
     if (!p) return;
@@ -535,7 +542,7 @@ function renderEmergencies() {
   CCCS.els('[data-ack]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.ack}/ack`)));
   CCCS.els('[data-res]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.res}/resolve`)));
   CCCS.els('[data-loc]').forEach((b) => (b.onclick = () => { const [kind, id] = b.dataset.loc.split(':'); select(kind, Number(id)); }));
-  CCCS.els('[data-emgjob]').forEach((b) => (b.onclick = () => jobModal(state.jobs.find((j) => j.id === Number(b.dataset.emgjob)))));
+  CCCS.els('[data-emgjob]').forEach((b) => (b.onclick = () => { select('j', Number(b.dataset.emgjob)); focusPanel('#detailBody'); }));
 }
 
 function renderRequests() {
@@ -567,7 +574,7 @@ function renderLog() {
   el('#log').scrollTop = el('#log').scrollHeight;
 }
 
-function select(kind, id) { state.selected = { kind, id }; renderResources(); renderDetail(); }
+function select(kind, id) { state.selected = { kind, id }; renderResources(); renderJobs(); renderVisits(); renderDetail(); }
 
 /* ---------- modals ---------- */
 function modal(title, html, onMount) {
@@ -652,8 +659,9 @@ const JOB_STAGES = [
   ['DISPATCHED', 'Dispatched'], ['ACKNOWLEDGED', 'Acknowledged'], ['EN_ROUTE', 'En route'],
   ['ON_SCENE', 'On scene'], ['TRANSPORTING', 'Transporting'], ['COMPLETED', 'Completed'],
 ];
-function jobModal(j) {
-  if (!j) return;
+function renderJobDetail() {
+  const j = state.jobs.find((x) => x.id === state.selected.id);
+  if (!j) { el('#detailBody').innerHTML = '<p class="dim">That job is no longer open.</p>'; return; }
   const stageAt = { DISPATCHED: j.dispatched_at, ACKNOWLEDGED: j.acknowledged_at, EN_ROUTE: j.en_route_at, ON_SCENE: j.on_scene_at, TRANSPORTING: j.transporting_at, COMPLETED: j.completed_at };
   let lastDoneIdx = -1;
   JOB_STAGES.forEach(([code], i) => { if (stageAt[code]) lastDoneIdx = i; });
@@ -666,7 +674,7 @@ function jobModal(j) {
       <div><div class="label">${label}</div><div class="time${at ? '' : ' dim'}">${at ? new Date(at).toLocaleTimeString() : 'waiting'}</div></div>
     </div>`;
   }).join('');
-  modal(`Job ${j.reference}`, `
+  el('#detailBody').innerHTML = `
     <div class="job-head">
       <div>
         <div class="titles">
@@ -717,38 +725,34 @@ function jobModal(j) {
       <button class="btn primary" id="jAssign">Dispatch</button>
       <button class="btn ok" id="jDone">Mark completed</button>
       <button class="btn danger" id="jCancel">Cancel job</button>
-    </div>`, () => {
-    el('#jAssign').onclick = async () => {
-      const picks = [...el('#jAdd').selectedOptions].map((o) => o.value);
-      if (picks.length) await api('POST', `/api/jobs/${j.id}/assign`, { resources: picks });
-      closeModal();
-    };
-    el('#jDone').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }); closeModal(); };
-    el('#jCancel').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }); closeModal(); };
-    el('#jSaveNotes').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }); closeModal(); };
-    el('#jEditToggle').onclick = () => {
-      el('#jDetailsView').classList.add('hide');
-      el('#jEditToggle').classList.add('hide');
-      el('#jDetailsEdit').classList.remove('hide');
-    };
-    el('#jCancelEdit').onclick = () => { closeModal(); jobModal(j); };
-    el('#jSaveDetails').onclick = async () => {
-      await api('PATCH', `/api/jobs/${j.id}`, {
-        incident_type: el('#jType').value, location: el('#jLoc').value,
-        what3words: el('#jW3w').value, caller: el('#jCaller').value, description: el('#jDesc').value,
-      });
-      closeModal();
-    };
-    CCCS.els('[data-standdown]').forEach((b) => (b.onclick = async () => {
-      const [kind, id] = b.dataset.standdown.split(':');
-      if (!confirm(`Stand down ${id} from this job?`)) return;
-      await api('POST', `/api/jobs/${j.id}/stand-down`, kind === 'p' ? { personnel: id } : { mdt: id });
-      closeModal();
-    }));
-    if (el('#jElapsedBig')) {
-      const tick = setInterval(() => { const n = el('#jElapsedBig'); if (!n) return clearInterval(tick); n.textContent = fmtElapsed(j.created_at); }, 30000);
-    }
-  });
+    </div>`;
+  el('#jAssign').onclick = async () => {
+    const picks = [...el('#jAdd').selectedOptions].map((o) => o.value);
+    if (picks.length) await api('POST', `/api/jobs/${j.id}/assign`, { resources: picks });
+  };
+  el('#jDone').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }); };
+  el('#jCancel').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }); };
+  el('#jSaveNotes').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }); };
+  el('#jEditToggle').onclick = () => {
+    el('#jDetailsView').classList.add('hide');
+    el('#jEditToggle').classList.add('hide');
+    el('#jDetailsEdit').classList.remove('hide');
+  };
+  el('#jCancelEdit').onclick = () => renderJobDetail();
+  el('#jSaveDetails').onclick = async () => {
+    await api('PATCH', `/api/jobs/${j.id}`, {
+      incident_type: el('#jType').value, location: el('#jLoc').value,
+      what3words: el('#jW3w').value, caller: el('#jCaller').value, description: el('#jDesc').value,
+    });
+  };
+  CCCS.els('[data-standdown]').forEach((b) => (b.onclick = async () => {
+    const [kind, id] = b.dataset.standdown.split(':');
+    if (!confirm(`Stand down ${id} from this job?`)) return;
+    await api('POST', `/api/jobs/${j.id}/stand-down`, kind === 'p' ? { personnel: id } : { mdt: id });
+  }));
+  if (el('#jElapsedBig')) {
+    detailTick = setInterval(() => { const n = el('#jElapsedBig'); if (n) n.textContent = fmtElapsed(j.created_at); }, 30000);
+  }
 }
 
 if (!isPopout) {
@@ -837,7 +841,7 @@ layout.registerComponentFactoryFunction('resources', (container) => {
 });
 
 layout.registerComponentFactoryFunction('detail', (container) => {
-  mount(container, null, '<div class="body" id="detailBody" style="flex:1;overflow:auto"><p class="dim">Select a resource to see its identity, status and location.</p></div>');
+  mount(container, null, '<div class="body" id="detailBody" style="flex:1;overflow:auto"><p class="dim">Select a resource, job or patrol visit to see its detail here.</p></div>');
   renderDetail();
 });
 
@@ -854,7 +858,7 @@ layout.registerComponentFactoryFunction('visits', (container) => {
   renderVisits();
 });
 
-const PANEL_TITLES = { jobs: 'Active Jobs', map: 'Operational Map', resources: 'Resources', detail: 'Resource Detail', visits: 'Patrol Visits' };
+const PANEL_TITLES = { jobs: 'Active Jobs', map: 'Operational Map', resources: 'Resources', detail: 'Detail', visits: 'Patrol Visits' };
 
 const defaultLayoutConfig = {
   // Popout really is useful here — genuinely separate windows for a
@@ -893,7 +897,7 @@ const defaultLayoutConfig = {
 // layout always wins over the default. This is what silently carried an
 // earlier broken config (header.close disabling drag/close) forward even
 // after the code was fixed.
-const LAYOUT_VERSION = 5;
+const LAYOUT_VERSION = 6;
 
 // (isPopout is declared near the top of the script.) The component
 // factories above must still be registered so GL can rebuild whichever one
@@ -1048,16 +1052,16 @@ bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderResources(); 
    .on('mdt.crew_changed', (m) => { upsert(state.mdts, m); renderResources(); })
    .on('mdt.deleted', (m) => { state.mdts = state.mdts.filter((x) => x.id !== m.id); renderResources(); renderMap(); })
    .on('job.created', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); sound.jobCreated(); })
-   .on('job.dispatched', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); })
-   .on('job.status_changed', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); renderResources(); })
-   .on('job.acknowledged', ({ job }) => { upsert(state.jobs, job); renderJobs(); renderResources(); })
-   .on('job.stood_down', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); })
+   .on('job.dispatched', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); renderDetail(); })
+   .on('job.status_changed', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); renderResources(); renderDetail(); })
+   .on('job.acknowledged', ({ job }) => { upsert(state.jobs, job); renderJobs(); renderResources(); renderDetail(); })
+   .on('job.stood_down', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); renderDetail(); })
    .on('site_visit.created', (v) => { upsert(state.site_visits, v); renderVisits(); })
-   .on('site_visit.dispatched', (v) => { upsert(state.site_visits, v); renderVisits(); })
-   .on('site_visit.acknowledged', ({ visit }) => { upsert(state.site_visits, visit); renderVisits(); })
-   .on('site_visit.status_changed', (v) => { upsert(state.site_visits, v); renderVisits(); })
-   .on('site_visit.stood_down', (v) => { upsert(state.site_visits, v); renderVisits(); })
-   .on('site_visit.missed', (v) => { upsert(state.site_visits, v); renderVisits(); })
+   .on('site_visit.dispatched', (v) => { upsert(state.site_visits, v); renderVisits(); renderDetail(); })
+   .on('site_visit.acknowledged', ({ visit }) => { upsert(state.site_visits, visit); renderVisits(); renderDetail(); })
+   .on('site_visit.status_changed', (v) => { upsert(state.site_visits, v); renderVisits(); renderDetail(); })
+   .on('site_visit.stood_down', (v) => { upsert(state.site_visits, v); renderVisits(); renderDetail(); })
+   .on('site_visit.missed', (v) => { upsert(state.site_visits, v); renderVisits(); renderDetail(); })
    .on('emergency.activated', (e) => { upsert(state.emergencies, e); renderEmergencies(); renderResources(); sound.refreshEmergencyAlarm(); })
    .on('call.request', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); sound.callRequest(); })
    .on('call.request_cleared', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); })
