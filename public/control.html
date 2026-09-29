@@ -364,6 +364,11 @@ function visitModal(v) {
           <span style="flex:1">${esc(r.personnel)}${r.primary ? ' (primary)' : ''}</span>
           <button class="btn danger" style="padding:0 6px;font-size:11px" data-visitstanddown="${r.personnel_id}">Stand down</button>
         </div>`).join('') : '—'}</dd>
+      ${(v.waypoints || []).length ? `<dt>Checkpoints</dt><dd>${(() => {
+        const scanned = new Set((v.checkpoint_scans || []).map((s) => s.waypoint_id));
+        return `${v.waypoints.filter((w) => scanned.has(w.id)).length} / ${v.waypoints.length} scanned` +
+          (v.waypoints.some((w) => !scanned.has(w.id)) ? `<div class="dim" style="font-size:11.5px;margin-top:2px">Missing: ${v.waypoints.filter((w) => !scanned.has(w.id)).map((w) => esc(w.title)).join(', ')}</div>` : '');
+      })()}</dd>` : ''}
     </dl>
 
     <label for="vNotes">Notes</label>

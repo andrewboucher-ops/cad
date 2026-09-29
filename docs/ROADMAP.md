@@ -123,6 +123,27 @@ switch, surface knob, and the colour-blind ramp visibly took effect
 immediately and survived a full page reload before this was deployed.
 Needs the same deploy treatment as the rest.
 
+**Guard Tour checkpoint scanning — done, not yet deployed.** The one
+remaining "Extends Sites/Patrols" item that wasn't just a decision away —
+it needed a scanning mechanism chosen first. Went with QR codes (no special
+hardware) plus NFC where the device supports it (`NDEFReader`/Web NFC —
+Android Chrome today, nothing on iOS Safari), rather than geofencing, since
+either QR or NFC gives a real "you were physically there" proof without
+needing beacon infrastructure. A beat waypoint's own id is the scan code —
+`admin.html`'s Beats tab can print it as a QR code or write it to an NFC
+tag; `officer.html` scans it back via camera, NFC, or a typed fallback,
+whichever the device and site support, and rejects a mismatched code before
+it reaches the server. `POST /api/site-visits/:id/checkpoint-scan` records
+the scan; control sees live coverage on the visit, and a completed visit's
+resolution report includes a scan-coverage line. Covered by a new test.
+Verified live in-browser (scan/mismatch/progress round-tripped through
+officer.html and control.html; caught and fixed a real popup-blocked crash
+in the admin print flow along the way). Needs the same deploy treatment.
+
+That closes every "Extends Sites/Patrols" item except configurable Forms
+(trespass advisals, patient care, safeguarding — the last one needs a
+restricted-visibility design, not just a form builder).
+
 ---
 
 ## Deploying Phase A
@@ -227,7 +248,7 @@ tracking's extended roadmap is now fully built out.
 ## The extended roadmap (beyond Phase 3–5, roughly by what it extends)
 
 **Extends Sites/Patrols**
-- Guard Tour checkpoint scanning (NFC/QR/geofence points per site)
+- ~~Guard Tour checkpoint scanning (NFC/QR/geofence points per site)~~ — done, see above (QR + NFC, not geofence)
 - ~~Beats (patrol routes as their own entity)~~ — done, see above
 - ~~Passdown logs (per-site shift-handover notes)~~ — done, see above
 - Forms: trespass advisals, parking citations, vehicle inspections,

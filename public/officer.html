@@ -427,8 +427,28 @@ function paintVisit() {
       <button class="btn" id="vScene">On scene</button>
       <button class="btn" id="vDone">Completed</button>
     </div>
+    ${(visit.waypoints || []).length ? `
+    <label style="margin-top:10px">Checkpoints</label>
+    <div id="checkpointHost"></div>
+    <div class="btn-row" style="margin-top:8px"><button class="btn" id="vScan">Scan checkpoint</button></div>` : ''}
     ${checklist.length ? `<label style="margin-top:10px">Checklist</label><div id="visitChecklistHost"></div>` : ''}
     <div class="btn-row" style="margin-top:10px"><button class="btn" id="vAddPhoto">Add photo</button></div>`;
+
+  if ((visit.waypoints || []).length) {
+    const scans = visit.checkpoint_scans || [];
+    el('#checkpointHost').innerHTML = visit.waypoints.map((w) => {
+      const last = scans.filter((s) => s.waypoint_id === w.id).sort((a, b) => Date.parse(b.scanned_at) - Date.parse(a.scanned_at))[0];
+      return `<div class="checklist-item ${last ? 'done' : ''}">
+        <input type="checkbox" disabled ${last ? 'checked' : ''}>
+        <div class="ci-body">
+          <div class="ci-title">${esc(w.title)}</div>
+          ${w.instructions ? `<div class="ci-instr">${esc(w.instructions)}</div>` : ''}
+          <div class="ci-instr">${last ? `Scanned ${new Date(last.scanned_at).toLocaleTimeString()}` : 'Not yet scanned'}</div>
+        </div>
+      </div>`;
+    }).join('');
+    el('#vScan').onclick = openScanModal;
+  }
 
   if (checklist.length) {
     el('#visitChecklistHost').innerHTML = checklist.map((item) => `
@@ -465,6 +485,81 @@ function paintVisit() {
 async function setVisitStatus(status) {
   const r = await CCCS.send('PATCH', `/api/site-visits/${visit.id}`, { status }, `${visit.reference} → ${status}`);
   if (!r.queued) { visit = r; paintVisit(); }
+}
+
+/* Checkpoint scanning — QR and NFC both just carry a waypoint's own id as
+ * plain text, so however the code arrives (camera, tag, or typed by hand
+ * when neither works), the client's job is the same: match it against
+ * this visit's waypoints and submit. Matching client-side first, rather
+ * than trusting whatever waypoint the officer thinks they tapped, is what
+ * catches "scanned the wrong tag" before it's logged as a real check-in. */
+function openScanModal() {
+  modal('Scan checkpoint', `
+    <p class="dim">Use whichever the site has — a QR code, an NFC tag, or the printed fallback code under either.</p>
+    <div class="btn-row" style="margin-top:10px;flex-direction:column;align-items:stretch;gap:8px">
+      ${'BarcodeDetector' in window ? '<button class="btn" id="scanQr">Scan QR code</button>' : ''}
+      ${'NDEFReader' in window ? '<button class="btn" id="scanNfc">Scan NFC tag</button>' : ''}
+      <button class="btn" id="scanManual">Enter code by hand</button>
+    </div>
+    <p class="err" id="scanErr"></p>`, () => {
+    if (el('#scanQr')) el('#scanQr').onclick = scanViaCamera;
+    if (el('#scanNfc')) el('#scanNfc').onclick = scanViaNfc;
+    el('#scanManual').onclick = () => {
+      const code = prompt('Enter the checkpoint code printed under the QR/tag:');
+      if (code) submitScan(code);
+    };
+  });
+}
+async function scanViaCamera() {
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); }
+  catch (e) { el('#scanErr').textContent = `Camera unavailable: ${e.message}`; return; }
+  modal('Scan QR code', '<video id="scanVideo" autoplay playsinline muted style="width:100%;border-radius:8px;background:#000"></video><p class="err" id="scanErr"></p>', () => {
+    const video = el('#scanVideo');
+    video.srcObject = stream;
+    const stop = () => stream.getTracks().forEach((t) => t.stop());
+    el('#mClose').onclick = () => { stop(); closeModal(); };
+    const detector = new BarcodeDetector({ formats: ['qr_code'] });
+    let done = false;
+    const tick = async () => {
+      if (done) return;
+      try {
+        const codes = await detector.detect(video);
+        if (codes.length) { done = true; stop(); closeModal(); submitScan(codes[0].rawValue); return; }
+      } catch {}
+      requestAnimationFrame(tick);
+    };
+    tick();
+  });
+}
+function scanViaNfc() {
+  const controller = new AbortController();
+  modal('Scan NFC tag', '<p class="dim">Hold the device against the checkpoint tag…</p><p class="err" id="scanErr"></p>', () => {
+    el('#mClose').onclick = () => { controller.abort(); closeModal(); };
+    (async () => {
+      try {
+        const reader = new NDEFReader();
+        await reader.scan({ signal: controller.signal });
+        reader.onreading = (event) => {
+          const record = event.message.records[0];
+          const code = new TextDecoder(record.encoding || 'utf-8').decode(record.data);
+          controller.abort();
+          closeModal();
+          submitScan(code);
+        };
+      } catch (e) { if (el('#scanErr')) el('#scanErr').textContent = e.message; }
+    })();
+  });
+}
+async function submitScan(rawCode) {
+  const code = String(rawCode).trim();
+  const waypoint = (visit.waypoints || []).find((w) => w.id === code);
+  if (!waypoint) { alert('That code does not match a checkpoint on this visit.'); return; }
+  try {
+    const fix = await freshFix(1500);
+    visit = await api('POST', `/api/site-visits/${visit.id}/checkpoint-scan`, { waypoint_id: waypoint.id, lat: fix && fix.lat, lon: fix && fix.lon });
+    paintVisit();
+  } catch (e) { alert(e.message); }
 }
 
 el('#photoInput').onchange = async () => {

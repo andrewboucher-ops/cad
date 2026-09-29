@@ -356,6 +356,21 @@ reference one, and any site visit it generates inherits it. Control room and
 `officer.html` show the beat name alongside the site wherever a visit is
 displayed.
 
+## Guard tour checkpoint scanning
+
+Each waypoint on a beat doubles as a checkpoint: its own id is the scan
+code, printed as a QR code (`admin.html`'s Beats tab — "Print all as QR
+codes") or written to an NFC tag from any device whose browser supports Web
+NFC ("Write NFC tag", quietly disabled elsewhere). `officer.html` shows a
+visit's checkpoints as a checklist and scans against whichever the site has
+— QR via the camera (`BarcodeDetector`), NFC (`NDEFReader`), or the printed
+fallback code typed by hand — each offered only where the device actually
+supports it. Scanning the wrong tag is rejected client-side before it ever
+reaches the server. `POST /api/site-visits/:id/checkpoint-scan` records who,
+when, and (if available) where; control sees live scan coverage ("3 / 5
+scanned, missing: Loading bay") on the visit, and a completed visit's
+resolution report includes the same summary as proof of coverage.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it

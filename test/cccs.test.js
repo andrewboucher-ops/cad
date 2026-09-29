@@ -816,6 +816,37 @@ test('a beat is created against a site, referenced by a patrol schedule and the 
   assert.equal((await call('DELETE', `/api/beats/${beat.body.id}`, undefined, adminT)).status, 200);
 });
 
+/* ---------------- guard tour checkpoint scanning ---------------- */
+test('a checkpoint scan is recorded against the matching waypoint, and only for the assigned officer or control', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const meridian = sites.body.find((x) => x.name === 'Meridian Business Park');
+  const beat = await call('POST', '/api/beats', { site_id: meridian.id, name: 'Scan test beat' }, dispT);
+  await call('PATCH', `/api/beats/${beat.body.id}`, { waypoints: [{ title: 'Gate 1' }, { title: 'Loading bay' }] }, dispT);
+  const gate1 = (await call('GET', `/api/beats?site_id=${meridian.id}`, undefined, dispT)).body.find((b) => b.id === beat.body.id).waypoints.find((w) => w.title === 'Gate 1');
+
+  const visit = await call('POST', '/api/site-visits', { site_id: meridian.id, beat_id: beat.body.id }, dispT);
+  assert.deepEqual(visit.body.waypoints.map((w) => w.title).sort(), ['Gate 1', 'Loading bay']);
+  assert.equal(visit.body.checkpoint_scans.length, 0);
+
+  assert.equal((await call('POST', `/api/site-visits/${visit.body.id}/checkpoint-scan`, { waypoint_id: gate1.id }, ryanT)).status, 403, 'not assigned to this visit');
+
+  await call('POST', `/api/site-visits/${visit.body.id}/assign`, { personnel: danId }, dispT);
+  assert.equal((await call('POST', `/api/site-visits/${visit.body.id}/checkpoint-scan`, { waypoint_id: 'not-a-real-waypoint' }, danT)).status, 404);
+
+  const scanned = await call('POST', `/api/site-visits/${visit.body.id}/checkpoint-scan`, { waypoint_id: gate1.id, lat: 53.6, lon: -0.22 }, danT);
+  assert.equal(scanned.status, 201);
+  assert.equal(scanned.body.checkpoint_scans.length, 1);
+  assert.equal(scanned.body.checkpoint_scans[0].waypoint_title, 'Gate 1');
+  assert.equal(scanned.body.checkpoint_scans[0].scanned_by, danId);
+
+  const list = await call('GET', '/api/site-visits', undefined, dispT);
+  const fresh = list.body.find((v) => v.id === visit.body.id);
+  assert.equal(fresh.checkpoint_scans.length, 1);
+
+  await call('PATCH', `/api/site-visits/${visit.body.id}`, { status: 'CANCELLED' }, dispT);
+  await call('DELETE', `/api/beats/${beat.body.id}`, undefined, adminT);
+});
+
 /* ---------------- UI preferences ---------------- */
 test('a login response includes default ui_prefs, and PATCH /api/me/preferences updates only your own account', async () => {
   const login = await call('POST', '/api/auth/login', { username: 'dwhitfield', password: 'field123' });

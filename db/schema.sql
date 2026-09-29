@@ -102,7 +102,10 @@ CREATE TYPE site_visit_status AS ENUM ('SCHEDULED','DISPATCHED','ACKNOWLEDGED','
 
 -- A named patrol route within a site (e.g. "Perimeter", "Car park sweep"),
 -- for sites where one checklist doesn't describe the work. Purely optional:
--- a patrol schedule or a manually created visit may reference one.
+-- a patrol schedule or a manually created visit may reference one. Each
+-- waypoint's own id doubles as its guard-tour QR scan code (printed at the
+-- physical location) — see site_visits.checkpoint_scans and the Beats tab
+-- in admin.html, which renders the QR image.
 CREATE TABLE beats (
   id           BIGSERIAL PRIMARY KEY,
   site_id      BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
@@ -154,6 +157,7 @@ CREATE TABLE site_visits (
   notes                  TEXT,
   checklist              JSONB NOT NULL DEFAULT '[]'::jsonb,   -- instantiated from the site's template, same shape as jobs.checklist
   media                  JSONB NOT NULL DEFAULT '[]'::jsonb,
+  checkpoint_scans       JSONB NOT NULL DEFAULT '[]'::jsonb,   -- guard-tour QR scans against the beat's waypoints, see server.js
   report_html            TEXT,
   created_by             BIGINT REFERENCES users(id),
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),

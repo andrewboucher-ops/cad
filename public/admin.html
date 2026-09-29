@@ -982,16 +982,58 @@ function beatForm(b) {
       <label>Waypoints</label>
       <div id="beatWaypointRows"></div>
       <button type="button" class="btn" id="beAddWaypoint" style="align-self:flex-start;padding:6px 12px;font-size:12px">+ Add waypoint</button>
+      ${b && (b.waypoints || []).length ? `
+      <label>Checkpoint codes</label>
+      <p class="dim" style="font-size:12px;margin:-4px 0 0">Save changes first if you've just added or renamed a waypoint — codes here are only for ones already saved. Each waypoint's code is scanned in officer.html as a QR code, an NFC tag (where the officer's device supports it), or typed in by hand.</p>
+      <div id="beCheckpointList"></div>
+      <button type="button" class="btn" id="bePrintCodes" style="align-self:flex-start;padding:6px 12px;font-size:12px">Print all as QR codes</button>` : ''}
       <label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;font-weight:500;letter-spacing:0">
         <input type="checkbox" id="nbeActive" ${isNew || b.active ? 'checked' : ''}> Active
       </label>
       <p class="dim" id="beError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
+async function writeNfcTag(code, label) {
+  if (!('NDEFReader' in window)) { alert('This device/browser does not support writing NFC tags.'); return; }
+  try {
+    const writer = new NDEFReader();
+    alert(`Hold a blank NFC tag against this device to write "${label}".`);
+    await writer.write({ records: [{ recordType: 'text', data: code }] });
+    alert('Tag written.');
+  } catch (e) { alert(`Could not write tag: ${e.message}`); }
+}
 function beatModal(b) {
   modal(b ? `Edit — ${b.name}` : 'New beat', beatForm(b), () => {
     const editor = checklistEditor(b ? (b.waypoints || []) : [], 'beatWaypointRows', 'No waypoints yet — a beat works fine as a plain named route without them.');
     el('#beAddWaypoint').onclick = () => editor.add();
+    if (b && (b.waypoints || []).length) {
+      const nfcSupported = 'NDEFReader' in window;
+      el('#beCheckpointList').innerHTML = b.waypoints.map((w) => `
+        <div class="list-row" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line-soft)">
+          <span style="flex:1">${esc(w.title)}</span>
+          <span class="dim mono" style="font-size:10.5px">${esc(w.id.slice(0, 8))}…</span>
+          <button type="button" class="btn" data-nfc="${esc(w.id)}" data-title="${esc(w.title)}" style="padding:4px 10px;font-size:11px" ${nfcSupported ? '' : 'disabled title="Web NFC is not available on this device/browser"'}>Write NFC tag</button>
+        </div>`).join('');
+      els('#beCheckpointList [data-nfc]').forEach((btn) => (btn.onclick = () => writeNfcTag(btn.dataset.nfc, btn.dataset.title)));
+      el('#bePrintCodes').onclick = () => {
+        const win = window.open('', '_blank');
+        if (!win) { alert('Your browser blocked the print window — allow pop-ups for this site and try again.'); return; }
+        win.document.write(`<!doctype html><html><head><title>Checkpoint codes — ${esc(b.name)}</title>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
+          <style>body{font-family:sans-serif;padding:24px} .cp{display:inline-block;text-align:center;margin:0 18px 28px 0;page-break-inside:avoid}
+          .cp .code{font-family:monospace;font-size:10px;color:#555;margin-top:6px;word-break:break-all;max-width:180px}
+          .cp .title{font-weight:700;margin-top:8px}</style></head><body>
+          <h1>${esc(b.name)} — checkpoint codes</h1>
+          ${b.waypoints.map((w) => `<div class="cp"><div id="qr-${esc(w.id)}"></div><div class="title">${esc(w.title)}</div><div class="code">${esc(w.id)}</div></div>`).join('')}
+          <script>
+            window.onload = function () {
+              ${b.waypoints.map((w) => `new QRCode(document.getElementById('qr-${w.id}'), { text: ${JSON.stringify(w.id)}, width: 140, height: 140 });`).join('\n')}
+            };
+          <\/script>
+          </body></html>`);
+        win.document.close();
+      };
+    }
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">

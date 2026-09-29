@@ -489,7 +489,8 @@ function publicSiteVisit(v) {
   return {
     ...v,
     site_name: site ? site.name : null, site_address: site ? site.address : null,
-    beat_name: beat ? beat.name : null,
+    beat_name: beat ? beat.name : null, waypoints: beat ? beat.waypoints : [],
+    checkpoint_scans: v.checkpoint_scans || [],
     lat: site ? site.lat : null, lon: site ? site.lon : null,
     resources: [
       ...(primary ? [{ personnel_id: primary.id, personnel: primary.name, primary: true }] : []),
@@ -2494,6 +2495,7 @@ route('POST', '/api/site-visits', CONTROL, ({ body, user }) => {
     scheduled_for: body.scheduled_for || new Date().toISOString(),
     dispatched_at: null, acknowledged_at: null, en_route_at: null, on_scene_at: null, completed_at: null, cancelled_at: null, missed_at: null,
     notes: body.notes || '', checklist: instantiateChecklist(site), media: [], report_html: null,
+    checkpoint_scans: [],
     created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
   };
   db.site_visits.push(v);
@@ -2546,6 +2548,9 @@ route('PATCH', '/api/site-visits/:id', ALL, ({ params, body, user }) => {
     stampVisitStatus(v, s);
     if (s === 'COMPLETED') {
       const site = db.sites.find((x) => x.id === v.site_id);
+      const beat = v.beat_id ? db.beats.find((x) => x.id === v.beat_id) : null;
+      const waypoints = beat ? beat.waypoints || [] : [];
+      const scannedIds = new Set((v.checkpoint_scans || []).map((sc) => sc.waypoint_id));
       v.report_html = buildResolutionReportHtml({
         reference: v.reference, kindLabel: 'Patrol visit', locationLabel: site ? site.name : 'Site visit', siteId: v.site_id,
         description: '', notes: v.notes,
@@ -2554,6 +2559,7 @@ route('PATCH', '/api/site-visits/:id', ALL, ({ params, body, user }) => {
           ['En route', v.en_route_at], ['On scene', v.on_scene_at], ['Completed', v.completed_at],
         ].filter(([, t]) => t),
         checklist: v.checklist, media: v.media,
+        extraRows: waypoints.length ? [['Checkpoints', `${waypoints.filter((w) => scannedIds.has(w.id)).length} / ${waypoints.length} scanned` + (waypoints.some((w) => !scannedIds.has(w.id)) ? ` (missing: ${waypoints.filter((w) => !scannedIds.has(w.id)).map((w) => w.title).join(', ')})` : '')]] : [],
       });
       sendResolutionReportEmail({
         reference: v.reference, siteId: v.site_id, media: v.media, mediaDir: visitMediaDir(v.id),
@@ -2639,6 +2645,36 @@ route('POST', '/api/site-visits/:id/stand-down', CONTROL, ({ params, body }) => 
   return payload;
 });
 
+/* Guard tour checkpoint scanning — a beat's waypoints (see the Beats
+ * section above) double as checkpoints: each one gets a QR code (just its
+ * own id, printed/posted at the physical location — see admin.html's Beats
+ * tab), and scanning it here is what proves an officer actually reached
+ * that point rather than just clicking through a list from the break room.
+ * Re-scanning the same waypoint is allowed — a real tour sometimes revisits
+ * a point, and the log is a timeline, not a checklist that needs undoing. */
+route('POST', '/api/site-visits/:id/checkpoint-scan', ALL, ({ params, body, user }) => {
+  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
+  assertVisitAccess(v, user);
+  if (['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) throw httpError(409, 'visit is already closed');
+  if (!v.beat_id) throw httpError(400, 'this visit has no beat — nothing to scan against');
+  const beat = db.beats.find((b) => b.id === v.beat_id);
+  const waypoint = beat && (beat.waypoints || []).find((w) => w.id === body.waypoint_id);
+  if (!waypoint) throw httpError(404, 'waypoint not found on this visit\'s beat');
+  const scan = {
+    id: crypto.randomUUID(), waypoint_id: waypoint.id, waypoint_title: waypoint.title,
+    scanned_at: new Date().toISOString(), scanned_by: user.role === 'FIELD_USER' ? user.personnel_id : null,
+    lat: body.lat != null ? Number(body.lat) : null, lon: body.lon != null ? Number(body.lon) : null,
+  };
+  v.checkpoint_scans = v.checkpoint_scans || [];
+  v.checkpoint_scans.push(scan);
+  v.updated_at = new Date().toISOString();
+  const payload = publicSiteVisit(v);
+  broadcast('site_visit.status_changed', payload);
+  const who = user.role === 'FIELD_USER' ? (db.personnel.find((p) => p.id === user.personnel_id) || {}).name : user.display_name;
+  logEvent('site_visit.checkpoint_scanned', `${who} SCANNED "${waypoint.title}" ON VISIT ${v.reference}`, { site_visit_id: v.id, waypoint_id: waypoint.id });
+  return { __status: 201, __body: payload };
+});
+
 /* ---- Patrol scheduling tick ------------------------------------------
  * Turns a due patrol_schedules occurrence into a SCHEDULED site_visits row,
  * and flags a SCHEDULED visit nobody ever dispatched, well past its window,
@@ -2656,6 +2692,7 @@ function createSiteVisitFromSchedule(schedule, scheduledFor) {
     scheduled_for: scheduledFor.toISOString(),
     dispatched_at: null, acknowledged_at: null, en_route_at: null, on_scene_at: null, completed_at: null, cancelled_at: null, missed_at: null,
     notes: '', checklist: instantiateChecklist(site), media: [], report_html: null,
+    checkpoint_scans: [],
     created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
   };
   db.site_visits.push(v);
