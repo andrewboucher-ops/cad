@@ -694,6 +694,37 @@ test('a field officer gains passdown access to a site once they have a shift or 
   assert.equal((await call('DELETE', `/api/passdown-logs/${posted.body.id}`, undefined, adminT)).status, 200);
 });
 
+/* ---------------- fuel logs ---------------- */
+test('a fuel log is created against a vehicle, updates its mileage, and can take a receipt photo', async () => {
+  const vehicles = await call('GET', '/api/vehicles', undefined, dispT);
+  const mdt001 = (await call('GET', '/api/mdts', undefined, dispT)).body.find((m) => m.mdt_code === 'MDT-001');
+  const vehicle = vehicles.body.find((v) => v.registration === mdt001.vehicle);
+  assert.ok(vehicle, 'MDT-001 has a linked vehicle in the demo fleet');
+
+  const created = await call('POST', `/api/vehicles/${vehicle.id}/fuel-logs`, { litres: 42.5, odometer: 55000, cost: 68.2 }, danT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.litres, 42.5);
+  assert.equal(created.body.driver_name, 'Dan Whitfield');
+  assert.equal(created.body.vehicle_registration, vehicle.registration);
+
+  const patchedVehicle = (await call('GET', '/api/vehicles', undefined, dispT)).body.find((v) => v.id === vehicle.id);
+  assert.equal(patchedVehicle.mileage, 55000, 'logging an odometer reading updates the vehicle mileage');
+
+  assert.equal((await call('POST', `/api/vehicles/${vehicle.id}/fuel-logs`, { litres: 0 }, dispT)).status, 400, 'litres must be positive');
+
+  const receipt = await call('POST', `/api/fuel-logs/${created.body.id}/receipt`, { mimetype: 'image/jpeg', data: Buffer.from('fake-jpeg').toString('base64') }, danT);
+  assert.equal(receipt.status, 201);
+  assert.ok(receipt.body.receipt.url.includes(`/api/fuel-logs/${created.body.id}/receipt/`));
+  const photo = await fetch(`${BASE}${receipt.body.receipt.url}`, { headers: { authorization: `Bearer ${danT}` } });
+  assert.equal(photo.status, 200);
+
+  const list = await call('GET', `/api/vehicles/${vehicle.id}/fuel-logs`, undefined, dispT);
+  assert.ok(list.body.some((f) => f.id === created.body.id));
+
+  assert.equal((await call('DELETE', `/api/fuel-logs/${created.body.id}`, undefined, dispT)).status, 403, 'delete is admin-only');
+  assert.equal((await call('DELETE', `/api/fuel-logs/${created.body.id}`, undefined, adminT)).status, 200);
+});
+
 /* ---------------- offline replay safety ---------------- */
 test('a replayed write returns the first result instead of applying twice', async () => {
   const key = 'offline-replay-test-1';

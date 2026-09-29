@@ -580,11 +580,37 @@ function vehicleForm(v) {
       <select id="nvAssigned">${assignedPersonnelOptions(isNew ? null : v.assigned_personnel_id)}</select>
       <label>Notes</label>
       <textarea id="nvNotes" rows="2">${isNew ? '' : esc(v.notes || '')}</textarea>
+      ${v ? `
+      <label>Fuel log</label>
+      <div id="vFuelLog" class="dim">Loading…</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="vfOdo" type="number" min="0" placeholder="Odometer" style="width:110px">
+        <input id="vfLitres" type="number" min="0" step="0.01" placeholder="Litres" style="width:90px">
+        <input id="vfCost" type="number" min="0" step="0.01" placeholder="Cost £" style="width:90px">
+        <button type="button" class="btn" id="vfAdd">Add</button>
+      </div>` : ''}
       <p class="dim" id="vError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
 function vehicleModal(v) {
   modal(v ? `Edit — ${v.registration}` : 'New vehicle', vehicleForm(v), () => {
+    if (v) {
+      const paintFuel = (logs) => {
+        el('#vFuelLog').innerHTML = logs.length
+          ? `<div class="log" style="max-height:160px;overflow:auto">${logs.map((f) => `<div><span class="t">${esc(new Date(f.recorded_at).toLocaleDateString('en-GB'))}</span>${f.litres}L${f.cost != null ? ` · £${f.cost.toFixed(2)}` : ''}${f.odometer != null ? ` · ${f.odometer} mi` : ''}${f.driver_name ? ` · ${esc(f.driver_name)}` : ''}</div>`).join('')}</div>`
+          : '<p class="dim">No fuel logs yet.</p>';
+      };
+      api('GET', `/api/vehicles/${v.id}/fuel-logs`).then(paintFuel).catch(() => (el('#vFuelLog').textContent = 'Failed to load.'));
+      el('#vfAdd').onclick = async () => {
+        const litres = Number(el('#vfLitres').value);
+        if (!litres) return;
+        const logs = await api('POST', `/api/vehicles/${v.id}/fuel-logs`, {
+          litres, odometer: el('#vfOdo').value || null, cost: el('#vfCost').value || null,
+        }).then(() => api('GET', `/api/vehicles/${v.id}/fuel-logs`));
+        el('#vfOdo').value = ''; el('#vfLitres').value = ''; el('#vfCost').value = '';
+        paintFuel(logs);
+      };
+    }
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">

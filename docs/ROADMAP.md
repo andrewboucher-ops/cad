@@ -50,14 +50,24 @@ while an MDT or person is still linked to it) and a new `assets` collection
 person or a site) with the same CRUD shape. `admin.html` has Vehicles and
 Assets tabs. Covered by tests. Live on the container alongside Phases B/C.
 
-**Passdown logs — done, not yet deployed.** The first "Extends
-Sites/Patrols" roadmap item: a `passdown_logs` collection of append-only,
-site-scoped handover notes (`GET`/`POST /api/passdown-logs`, `DELETE`
-admin-only). Control can read/write any site's log; a `FIELD_USER` can
-read/write a site's log only once they've had a shift or site visit there.
-`admin.html`'s site editor shows and adds to a site's log; `officer.html`
-shows the log for the officer's current shift/visit site. Covered by tests.
-Needs the same deploy treatment as Phase A/B/C/D.
+**Passdown logs — done and deployed.** The first "Extends Sites/Patrols"
+roadmap item: a `passdown_logs` collection of append-only, site-scoped
+handover notes (`GET`/`POST /api/passdown-logs`, `DELETE` admin-only).
+Control can read/write any site's log; a `FIELD_USER` can read/write a
+site's log only once they've had a shift or site visit there. `admin.html`'s
+site editor shows and adds to a site's log; `officer.html` shows the log for
+the officer's current shift/visit site. Covered by tests. Live on the
+container.
+
+**Fuel logs — done, not yet deployed.** The first "Extends Asset tracking"
+roadmap item: a `fuel_logs` collection against a vehicle (odometer, litres,
+cost, an optional single receipt photo, driver). `GET`/`POST
+/api/vehicles/:id/fuel-logs`, `POST /api/fuel-logs/:id/receipt`, `DELETE`
+admin-only. Logging one with an odometer reading also updates the vehicle's
+own `mileage`. `admin.html`'s vehicle editor shows and adds to a vehicle's
+fuel log; `officer.html` has a "Log fuel" button next to an officer's
+assigned vehicle. Covered by tests. Needs the same deploy treatment as the
+rest.
 
 ---
 
@@ -186,7 +196,7 @@ else, but not yet a first-class "checked out to X, returned by Y" flow).
   `sites`, an invoice-generation routine
 
 **Extends Asset tracking**
-- Fleet fuel-up reports/records (odometer, litres, cost, receipt photo)
+- ~~Fleet fuel-up reports/records (odometer, litres, cost, receipt photo)~~ — done, see above
 - Vehicle maintenance scheduling
 - Asset checkout/return audit trail
 

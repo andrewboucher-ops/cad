@@ -308,6 +308,16 @@ maintain. `admin.html`'s site editor shows and adds to a site's log;
 `officer.html` shows the log for whichever site the officer's current shift
 or patrol visit puts them at, with a box to add a note before they hand over.
 
+## Fuel logs
+
+A fill-up form against a vehicle — odometer, litres, cost, an optional
+receipt photo, and who was driving. Anyone can log one (whoever's at the
+pump), control can review or delete a mistaken entry from `admin.html`'s
+vehicle editor, and an officer with a vehicle assigned to them gets a "Log
+fuel" button next to it in `officer.html`. Logging one with an odometer
+reading also bumps the vehicle's own mileage field, so it stays current
+without a separate manual update.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it

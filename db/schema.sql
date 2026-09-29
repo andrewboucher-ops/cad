@@ -340,3 +340,24 @@ CREATE TABLE passdown_logs (
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX passdown_logs_site_idx ON passdown_logs(site_id, created_at DESC);
+
+-- Fuel-up records against a vehicle. receipt_* columns hold a single photo,
+-- same one-per-record shape as the app enforces (not an array like job/visit
+-- media — a fuel receipt is one document, not a set of evidence photos).
+CREATE TABLE fuel_logs (
+  id            BIGSERIAL PRIMARY KEY,
+  vehicle_id    BIGINT NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+  personnel_id  BIGINT REFERENCES personnel(id) ON DELETE SET NULL,
+  odometer      INTEGER,
+  litres        NUMERIC(8,2) NOT NULL,
+  cost          NUMERIC(8,2),
+  fuel_type     TEXT,
+  notes         TEXT,
+  receipt_id       TEXT,
+  receipt_filename TEXT,
+  recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by    BIGINT REFERENCES users(id),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (litres > 0)
+);
+CREATE INDEX fuel_logs_vehicle_idx ON fuel_logs(vehicle_id, recorded_at DESC);

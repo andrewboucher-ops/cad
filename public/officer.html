@@ -126,6 +126,7 @@
 
 <div id="modalHost"></div>
 <input type="file" id="photoInput" accept="image/*" capture="environment" class="hide">
+<input type="file" id="fuelPhotoInput" accept="image/*" capture="environment" class="hide">
 
 <script src="/app.js"></script>
 <script>
@@ -149,9 +150,56 @@ function paintWho() {
   el('#whoBody').innerHTML = `
     <div class="field"><span>Name</span><div>${esc(person.callsign || person.name)}</div></div>
     <div class="field"><span>Rank</span><div>${esc(person.rank || '—')}</div></div>
-    <div class="field"><span>Vehicle</span><div>${esc(person.vehicle || '—')}</div></div>`;
+    <div class="field"><span>Vehicle</span><div>${esc(person.vehicle || '—')}${person.vehicle_id ? ' <button class="btn" id="bLogFuel" style="padding:2px 8px;font-size:11px;margin-left:8px">Log fuel</button>' : ''}</div></div>`;
+  if (el('#bLogFuel')) el('#bLogFuel').onclick = openFuelModal;
   paintWelfare();
 }
+let fuelPhotoFile = null;
+function openFuelModal() {
+  if (!person || !person.vehicle_id) return;
+  fuelPhotoFile = null;
+  modal('Log fuel', `
+    <label for="fOdo">Odometer</label>
+    <input id="fOdo" type="number" min="0" inputmode="numeric">
+    <label for="fLitres">Litres</label>
+    <input id="fLitres" type="number" min="0" step="0.01">
+    <label for="fCost">Cost (£)</label>
+    <input id="fCost" type="number" min="0" step="0.01">
+    <label for="fNotes">Notes</label>
+    <textarea id="fNotes" rows="2"></textarea>
+    <div class="btn-row" style="margin-top:10px">
+      <button class="btn" id="fPhotoBtn" type="button">Add receipt photo</button>
+      <span class="dim" id="fPhotoStatus"></span>
+    </div>
+    <div class="btn-row" style="margin-top:12px"><button class="btn ok" id="fSave">Save</button></div>
+    <p class="err" id="fErr"></p>`, () => {
+    el('#fPhotoBtn').onclick = () => el('#fuelPhotoInput').click();
+    el('#fSave').onclick = async () => {
+      const litres = Number(el('#fLitres').value);
+      if (!litres) { el('#fErr').textContent = 'litres is required'; return; }
+      try {
+        const log = await api('POST', `/api/vehicles/${person.vehicle_id}/fuel-logs`, {
+          litres, odometer: el('#fOdo').value || null, cost: el('#fCost').value || null, notes: el('#fNotes').value,
+        });
+        if (fuelPhotoFile) {
+          const data = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(fuelPhotoFile);
+          });
+          await api('POST', `/api/fuel-logs/${log.id}/receipt`, { mimetype: fuelPhotoFile.type, data });
+        }
+        closeModal();
+      } catch (e) { el('#fErr').textContent = e.message; }
+    };
+  });
+}
+el('#fuelPhotoInput').onchange = () => {
+  fuelPhotoFile = el('#fuelPhotoInput').files[0] || null;
+  el('#fuelPhotoInput').value = '';
+  if (el('#fPhotoStatus')) el('#fPhotoStatus').textContent = fuelPhotoFile ? 'Photo attached' : '';
+};
 
 function paintWelfare() {
   const strip = el('#welfareStrip');

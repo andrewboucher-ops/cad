@@ -81,7 +81,7 @@ const db = {
   jobs: [], job_assignments: [], messages: [], call_requests: [],
   locations: [], emergency_events: [], audit_logs: [],
   push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], assets: [],
-  passdown_logs: [],
+  passdown_logs: [], fuel_logs: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -507,6 +507,11 @@ function publicAsset(a) {
 function publicPassdownLog(l) {
   const site = db.sites.find((x) => x.id === l.site_id);
   return { ...l, site_name: site ? site.name : null };
+}
+function publicFuelLog(f) {
+  const v = db.vehicles.find((x) => x.id === f.vehicle_id);
+  const p = f.personnel_id ? db.personnel.find((x) => x.id === f.personnel_id) : null;
+  return { ...f, vehicle_registration: v ? v.registration : null, driver_name: p ? p.name : null };
 }
 const callsignOf = (r) => { const c = db.callsigns.find((x) => x.id === r.callsign_id); return c ? c.name : (r.mdt_code || r.name); };
 
@@ -963,6 +968,66 @@ route('DELETE', '/api/vehicles/:id', ADMIN, ({ params }) => {
   if (db.personnel.some((p) => p.vehicle_id === v.id)) throw httpError(409, 'a person is still linked to this vehicle — unlink them first');
   db.vehicles = db.vehicles.filter((x) => x.id !== v.id);
   logEvent('vehicle.deleted', `VEHICLE ${v.registration} DELETED`, { vehicle_id: v.id });
+  return { ok: true };
+});
+
+/* Fuel-up records against a vehicle — odometer, litres, cost, an optional
+ * receipt photo, and who filled up. Anyone can log one (whoever's driving is
+ * the one at the pump); only admin can delete, for correcting a mistake. */
+const fuelReceiptDir = (fuelLogId) => path.join(UPLOADS_DIR, 'fuel', String(fuelLogId));
+route('GET', '/api/vehicles/:id/fuel-logs', ALL, ({ params }) => {
+  const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
+  return db.fuel_logs.filter((f) => f.vehicle_id === v.id)
+    .sort((a, b) => Date.parse(b.recorded_at) - Date.parse(a.recorded_at))
+    .map(publicFuelLog);
+});
+route('POST', '/api/vehicles/:id/fuel-logs', ALL, ({ params, body, user }) => {
+  const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
+  const litres = Number(body.litres);
+  if (!litres || litres <= 0) throw httpError(400, 'litres required');
+  const odometer = body.odometer != null && body.odometer !== '' ? Number(body.odometer) : null;
+  const cost = body.cost != null && body.cost !== '' ? Number(body.cost) : null;
+  const driver = user.role === 'FIELD_USER' && user.personnel_id
+    ? db.personnel.find((p) => p.id === user.personnel_id)
+    : (body.personnel_id ? db.personnel.find((p) => p.id === Number(body.personnel_id)) : null);
+  const log = {
+    id: nextId('fuel_logs'), vehicle_id: v.id, personnel_id: driver ? driver.id : null,
+    odometer, litres, cost: cost != null && !isNaN(cost) ? cost : null,
+    fuel_type: body.fuel_type || '', notes: body.notes || '', receipt: null,
+    recorded_at: new Date().toISOString(), created_by: user.id, created_at: new Date().toISOString(),
+  };
+  db.fuel_logs.push(log);
+  if (odometer != null && !isNaN(odometer)) v.mileage = odometer;
+  logEvent('fuel_log.created', `FUEL LOG ADDED FOR ${v.registration} — ${litres}L`, { vehicle_id: v.id, fuel_log_id: log.id });
+  return { __status: 201, __body: publicFuelLog(log) };
+});
+route('POST', '/api/fuel-logs/:id/receipt', ALL, ({ params, body }) => {
+  const f = db.fuel_logs.find((x) => x.id === Number(params.id)); if (!f) throw httpError(404, 'fuel log not found');
+  const ext = MEDIA_MIME_EXT[body.mimetype];
+  if (!ext) throw httpError(400, 'mimetype must be image/jpeg, image/png or image/webp');
+  if (!body.data) throw httpError(400, 'data (base64) required');
+  const bytes = Buffer.from(body.data, 'base64');
+  if (bytes.length > 8e6) throw httpError(413, 'photo too large');
+  const dir = fuelReceiptDir(f.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const mediaId = crypto.randomUUID();
+  const filename = `${mediaId}${ext}`;
+  fs.writeFileSync(path.join(dir, filename), bytes);
+  f.receipt = { id: mediaId, url: `/api/fuel-logs/${f.id}/receipt/${mediaId}`, filename };
+  logEvent('fuel_log.receipt_added', `RECEIPT ADDED TO FUEL LOG ${f.id}`, { fuel_log_id: f.id, vehicle_id: f.vehicle_id });
+  return { __status: 201, __body: publicFuelLog(f) };
+});
+route('GET', '/api/fuel-logs/:id/receipt/:mediaId', ALL, ({ params }) => {
+  const f = db.fuel_logs.find((x) => x.id === Number(params.id)); if (!f) throw httpError(404, 'fuel log not found');
+  if (!f.receipt || f.receipt.id !== params.mediaId) throw httpError(404, 'receipt not found');
+  const file = path.join(fuelReceiptDir(f.id), f.receipt.filename);
+  if (!fs.existsSync(file)) throw httpError(404, 'receipt file missing');
+  return { __body: fs.readFileSync(file), __headers: { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'private, max-age=86400' } };
+});
+route('DELETE', '/api/fuel-logs/:id', ADMIN, ({ params }) => {
+  const f = db.fuel_logs.find((x) => x.id === Number(params.id)); if (!f) throw httpError(404, 'fuel log not found');
+  db.fuel_logs = db.fuel_logs.filter((x) => x.id !== f.id);
+  logEvent('fuel_log.deleted', 'FUEL LOG DELETED', { fuel_log_id: f.id, vehicle_id: f.vehicle_id });
   return { ok: true };
 });
 

@@ -32,7 +32,7 @@ const TABLES = [
   'users', 'mdts', 'callsigns', 'vehicles', 'personnel', 'sites',
   'jobs', 'job_assignments', 'messages', 'call_requests',
   'locations', 'emergency_events', 'audit_logs',
-  'push_subscriptions', 'patrol_schedules', 'site_visits', 'shifts', 'assets', 'passdown_logs',
+  'push_subscriptions', 'patrol_schedules', 'site_visits', 'shifts', 'assets', 'passdown_logs', 'fuel_logs',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */
