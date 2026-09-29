@@ -1,9 +1,21 @@
 # HANDOVER — contact routes / Twilio SMS / FreePBX dial / control-room redesign
 
-Written at the end of a long session, 2026-09-29. Read this before touching
-anything on these branches. It records what is verified, what is broken, and
-what was tried and abandoned — including a wrong turn that wasted most of a
-session, so it is not repeated.
+Written at the end of a long session, 2026-09-29, and **corrected the same day**
+after the next session tested a claim in it. Read this before touching anything
+on these branches. It records what is verified, what is broken, and what was
+tried and abandoned — including a wrong turn that wasted most of a session, so
+it is not repeated.
+
+> **Correction, 2026-09-29.** An earlier version of this file claimed
+> `asterisk.js` had a confirmed login bug in which the `dispatch`
+> reassignment did not take effect, so `connect()` could never resolve.
+> **That claim was wrong.** It was written from pattern-memory without the
+> code being run. A fake AMI server showed correct login resolving in 10 ms
+> and a wrong password failing in 4 ms with "Authentication failed" — the
+> swap works, because the data handler looks `dispatch` up by name on each
+> call and therefore sees the reassignment. Closures capture the binding, not
+> the value. The real, smaller problems in `asterisk.js` are listed in §4,
+> and the lesson is in §5.
 
 **Nothing is deployed. `master` is untouched at `105cb79`.** Every change lives
 on a branch. The live service on port 4000 runs `master` and never saw any of
@@ -15,33 +27,39 @@ this.
 
 | Location | What |
 |---|---|
-| **Proxmox host** | `Echelon-Server`, root SSH, `10.8.0.18` seen as last login |
+| **Proxmox host** | `Echelon-Server`, root SSH |
 | **CCCS container** | Proxmox LXC **140** (`cccs`) → `pct enter 140` → `/opt/cccs-src` |
 | **FreePBX VM** | Proxmox VM **130** (`echelon-pbx17`), `192.168.7.45`, SSH is **key-only** |
-| **Repo** | `github.com:andrewboucher-ops/cad`, branch `master` |
-| **AMI user** | `control-dial` — created in the FreePBX GUI; permit route now set |
+| **Repo** | `github.com:andrewboucher-ops/cad`, default branch `master` |
+| **AMI user** | `control-dial` — created in the FreePBX GUI; permit route reported set |
 
 Note: the Proxmox host has **no git and no `/opt/cccs-src`**. Those exist only
 inside container 140. Two separate machines; `pct enter 140` is the way in.
+
+**A cloud-hosted session cannot reach any of this.** FreePBX (5038) and its web
+GUI are on the LAN. Steps needing the PBX must run from container 140, or have
+the config pasted in by hand.
 
 ---
 
 ## 2. Branch state (verified via `git log`, not from memory)
 
 ```
-9b9315c  feat(sms): wire contact routes into server.js      <- HEAD, pushed
-05867f9  feat(sms): contact routes as a registrar
-b1090cb  feat(store): persist dial_log
-9abbe7a  feat(sms): contact routes — dial, SMS, and the Twilio status webhook
-678d7b8  feat(sms): dial_log + supervisor schema, and SMS/PBX env template
-20a8fe5  feat(sms): Twilio SMS module — logging-only by default
+<this commit>  docs: correct a false claim about asterisk.js    <- feat/twilio-sms
+91de507        docs: handover note for the Twilio/FreePBX work
+9b9315c        feat(sms): wire contact routes into server.js
+05867f9        feat(sms): contact routes as a registrar
+b1090cb        feat(store): persist dial_log
+9abbe7a        feat(sms): contact routes — dial, SMS, and the Twilio status webhook
+678d7b8        feat(sms): dial_log + supervisor schema, and SMS/PBX env template
+20a8fe5        feat(sms): Twilio SMS module — logging-only by default
 ```
 
-`feat/freepbx-dial` = `34dece0d`, branched **off `feat/twilio-sms`** (stacked —
+`feat/freepbx-dial` = `34dece0`, branched **off `feat/twilio-sms`** (stacked —
 merging it needs the SMS branch first).
 
-Working tree clean. `server.js.bak` does **not** exist and was never committed
-(an earlier claim in-session that it had been committed was wrong).
+`refactor/split-server` has been deleted, local and remote. **Do not recreate it
+— see §5.**
 
 ---
 
@@ -131,24 +149,43 @@ would look.
 
 ## 4. WHAT IS BROKEN OR UNVERIFIED — do not assume it works
 
-### `asterisk.js` on `feat/freepbx-dial` — HAS A CONFIRMED BUG
-The AMI login path is wrong. Two dispatch functions are defined and then swapped
-with `dispatch = dispatchWithLogin`, but the `socket.on('data')` handler closed
-over the **original** binding, so the reassignment does nothing. The login
-response falls through to the normal path, finds no pending entry, and is
-discarded — **`connect()` can never resolve**; every call hangs to the 5s
-timeout.
+### `asterisk.js` on `feat/freepbx-dial` — three REAL problems
 
-Fix or rewrite. Do not build on it as-is.
+The login path works (see the correction above). What is actually wrong:
+
+1. **A dropped socket does not fail in-flight actions.** After login, if the
+   connection drops, each pending action sits out its own 10-second timeout
+   rather than being rejected immediately. On a dispatch console that is ten
+   seconds of a button appearing to do nothing.
+2. **The login bookkeeping is accidental.** Tracking the login response via a
+   synthetic `'login'` key in the `pending` Map happens to work rather than
+   working by design. Tidy it into one clear path — the previous session's
+   misreading of this code is itself evidence that it is misleading.
+3. **`trackCall` has never seen a real Asterisk event stream.** The
+   answered / no-answer / busy cause-code mapping is written from the protocol
+   docs and is entirely untested. This is the part most likely to be subtly
+   wrong.
 
 It also carries two assumptions that could not be checked:
 - **The dialplan context.** `AMI_DIAL_CONTEXT` defaults to `from-internal`. The
   module rings `Local/<extension>@<context>`, which **must exist** in your
   dialplan. The GuardM8 click-to-dial flow already works, so the right context
-  exists — find its name and use it.
+  exists — find its name and use it. If GuardM8 originates over AMI rather than
+  via a custom context, the context is whatever GuardM8 passes as `Context:`,
+  which lives in GuardM8's own config, not in `extensions_custom.conf`.
 - **AMI permissions.** Whether `control-dial` may `Originate` is a
-  `manager.conf` permission. It surfaces as a clear error on the first real
-  call.
+  `manager.conf` permission (`write=call` or `originate`). It surfaces as a
+  clear error on the first real call.
+
+If a call previously appeared to hang, the more likely cause was network or
+permissions, not the login path — `control-dial`'s `permit=` not covering
+container 140's address, or 5038 unreachable from it. Check from inside the
+container:
+
+```bash
+pct enter 140
+timeout 3 bash -c 'echo > /dev/tcp/192.168.7.45/5038' && echo reachable || echo blocked
+```
 
 ### Untested, listed honestly
 1. **Twilio `verifySignature` / `parseStatusCallback` have never seen a real
@@ -162,8 +199,8 @@ It also carries two assumptions that could not be checked:
    the routes are live. Nothing more.
 5. `/api/personnel/1/contact` returned `phone: null, supervisor: null` in the
    demo seed — correct, because the seed has no `contact_phone` values and no
-   `supervisor_id` set. **The supervisor logic is therefore untested by that
-   request** — both branches of `supervisorFor` returned null.
+   `supervisor_id` set. **The supervisor logic is therefore untested** — both
+   branches of `supervisorFor` returned null. Seed those before testing it.
 
 ---
 
@@ -175,14 +212,10 @@ It also carries two assumptions that could not be checked:
 tool replaces whole files and cannot carry 174 KB, and there is no
 edit-in-place tool. It failed four separate times in one session.
 
-- Branch `refactor/split-server` exists with three modules pushed
-  (`src/bus.js`, `src/config.js`, `src/crypto.js`, plus a `src/state.js`).
-  **Treat it as dead.** Delete it.
-- Do the split in the container with `sed` if you want it, where a 174 KB file
-  moves fine.
+Use `sed` inside container 140 if you want it split, where a 174 KB file moves
+fine.
 
-**The genuinely useful finding that came out of it** — worth keeping even though
-the branch is dead — is the **require cycle**:
+**The genuinely useful finding that came out of it** is the **require cycle**:
 
 ```
 logEvent (state) -> broadcast (realtime) -> isControlRole (state)
@@ -191,8 +224,7 @@ checkAutoJobProgress (state) -> broadcast + publicJob (shapers)
 
 A direct `require` each way resolves to a **partially-populated exports object**
 and fails at the **FIRST EVENT, not at startup** — the worst kind of failure on
-a live dispatch console. The fix is late binding: a `bus.js` that `realtime.js`
-registers into, or passing dependencies in as arguments.
+a live dispatch console.
 
 ### The lesson that actually matters
 **Passing routing helpers in as arguments beats requiring them across a cycle.**
@@ -203,13 +235,19 @@ needs to load new routes, use:
 require('./routes-new.js')({ route, httpError, CONTROL, db, nextId, findPersonnel, logEvent, ... });
 ```
 
-### The heredoc failure — a practical note
-Pasting a large multi-line heredoc into interactive SSH **interleaves
-characters** and the terminator never lands. It produced a garbled fragment and
-inserted truncated code into `server.js`. Recovery was `cp server.js.bak server.js`.
+### Two process lessons worth more than the code
 
-**Use `nano` for edits in the container, or push the file via git and `git pull`.
-Do not paste large heredocs into SSH.**
+**Do not diagnose from pattern-memory.** This file originally reported an
+`asterisk.js` bug — a closure that missed a reassignment — that did not exist.
+It was written confidently, from the shape of a common bug, without the code
+being run. A five-minute test against a fake AMI server disproved it. On a
+system with a welfare path in it, a confident wrong diagnosis is worse than no
+diagnosis: it sends the next person to fix something that is not broken and
+leaves the real fault in place. **Run it before you claim it.**
+
+**Do not paste large heredocs into interactive SSH.** The shell interleaves
+characters and the terminator never lands; it inserted a truncated fragment into
+`server.js`. Use `nano`, or push the file via git and `git pull`.
 
 ---
 
@@ -279,26 +317,29 @@ DIAL_RINGS_OPERATOR_FIRST=on
 ```
 
 Secrets belong in `/etc/cccs/cccs.env`, root-only, per `deploy/install.sh`.
-If you keep them in the repo, use `.env.sms.example` as the template (already
-committed) and never the real file.
+`.env.sms.example` (committed) is the template; never commit the real file.
 
 ---
 
 ## 8. Immediate next steps, in order
 
 1. **Get the FreePBX dialplan context.** GUI → *Settings → Config Edit* →
-   `extensions_custom.conf`. Find the GuardM8 click-to-dial context and its
-   `Originate`/`Dial` structure. Also read `manager.conf` for `control-dial`'s
-   `read`/`write` permissions (`write=call` is required).
-2. **Fix `asterisk.js`** — the login dispatch bug, then set `AMI_DIAL_CONTEXT`
-   to the real context. Test by dialling your own extension before anything
-   else.
-3. **Write tests for the contact routes.** 66/66 currently proves nothing about
-   them. Add cases to `test/cccs.test.js`: dial records an ATTEMPT, SMS in
-   dry-run records ATTEMPTED (not QUEUED), the webhook rejects a bad signature,
-   and a status callback for an unknown SID returns `matched: false`.
+   `extensions_custom.conf`. Find the GuardM8 click-to-dial block — the
+   `[context-name]` header and the `Dial(...)` line. Also read `manager.conf`
+   (or `manager_custom.conf`, where FreePBX usually puts GUI-created users) for
+   `control-dial`'s `read=` / `write=` (needs `call` or `originate`) and
+   `permit=`. If GuardM8 originates over AMI, the context is in GuardM8's own
+   config instead. Also check reachability from container 140 (§4).
+2. **Then** tidy `asterisk.js` (§4 items 1–2), set `AMI_DIAL_CONTEXT` to the
+   real context, and test by dialling an extension — recording the real outcome
+   (`ANSWERED` / `NO_ANSWER` / `BUSY` + duration) onto the `dial_log` row. That
+   is the whole point of the module.
+3. **Write tests for the contact routes.** They currently have none. At minimum:
+   dial records an ATTEMPT, SMS in dry-run records ATTEMPTED (not QUEUED), the
+   webhook rejects a bad signature, and an unknown SID returns `matched: false`.
+   **This does not depend on the PBX and can be done first.**
 4. **Build the Forms slice** (§6) — the actual original request.
-5. **Then** the control-room redesign.
+5. **Then** the control-room redesign (§6).
 
 ### Safety invariants to preserve
 - **Dial can never record an outcome** without a PBX. `outcome` stays
