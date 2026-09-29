@@ -6,8 +6,8 @@
  * it with the pieces it needs:
  *
  *   require('./routes-contact.js')({
- *     route, httpError, CONTROL, db, nextId, findPersonnel, logEvent,
- *     broadcast, publicPersonnel, DIAL_RINGS_OPERATOR_FIRST, sms,
+ *     route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent,
+ *     DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow,
  *   });
  *
  * Why pass them in rather than require server.js: `route` and `httpError` are
@@ -18,10 +18,12 @@
  * sidesteps it entirely.
  *
  * WHY DIAL AND SMS ARE DIFFERENT, in two lines:
- *   dial — the browser gives NO callback. All that can honestly be recorded is
- *          that an operator pressed the button. outcome stays ATTEMPTED, and
- *          nothing here ever writes ANSWERED. That column is filled by the
- *          FreePBX module once a real call is originated over the PBX.
+ *   dial — two paths. With FreePBX configured (asterisk.js), the call is
+ *          originated over the PBX and the row's outcome and duration are
+ *          filled from the PBX's own events — never from anything the
+ *          browser says. Without it, the console falls back to a tel: link,
+ *          which reports NOTHING, so outcome stays ATTEMPTED forever. Only a
+ *          PBX event may ever write ANSWERED/NO_ANSWER/BUSY on a DIAL row.
  *   sms  — Twilio returns a SID synchronously and then calls back with the
  *          delivery outcome, so one row carries the attempt AND the result.
  *          That asymmetry is a property of the two mechanisms, not an
@@ -30,9 +32,10 @@
 'use strict';
 
 module.exports = function registerContactRoutes({
-  route, httpError, CONTROL, db, nextId, findPersonnel, logEvent,
-  DIAL_RINGS_OPERATOR_FIRST, sms,
+  route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent,
+  DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow = () => {},
 }) {
+  const pbxLive = () => Boolean(ami && ami.configured());
 
   /* ---------------------------------------------------------------- *
    * Supervisor resolution
@@ -114,17 +117,19 @@ module.exports = function registerContactRoutes({
   /**
    * Click-to-dial.
    *
-   * Records the attempt, and NO MORE. A tel: link performs the dial itself and
-   * reports nothing back, so an operator who clicked and reached voicemail is
-   * indistinguishable here from one whose call was answered for ten minutes.
-   * That is why outcome is ATTEMPTED and every result field stays null.
+   * With FreePBX configured: rings the operator's extension, connects them to
+   * the officer, and settles this row from the PBX's own events — ANSWERED
+   * with a duration, NO_ANSWER, BUSY, or FAILED with the cause. The reply is
+   * sent as soon as the PBX ACCEPTS the call, with outcome still ATTEMPTED;
+   * the outcome lands later as a 'contact.dial_outcome' event, because the
+   * call has not happened yet when this request returns.
    *
-   * When FreePBX origination is wired in, THIS is the route that calls it: it
-   * already receives the extension to ring first, so the flow becomes
-   * originate(extension) -> bridge to the officer, and the PBX's own call id
-   * and disposition fill outcome/duration_s on the same row.
+   * Without FreePBX: records the attempt and returns a tel: URI for the
+   * browser to open. That path reports nothing back, so the row stays
+   * ATTEMPTED — an operator who reached voicemail and one who talked for ten
+   * minutes look identical, and the log must not pretend otherwise.
    */
-  route('POST', '/api/contact/dial', CONTROL, ({ body, user }) => {
+  route('POST', '/api/contact/dial', CONTROL, async ({ body, user }) => {
     const person = findPersonnel(body.personnel);
     if (!person) throw httpError(404, 'personnel not found');
     const target = body.supervisor ? supervisorFor(person.id) : null;
@@ -135,9 +140,10 @@ module.exports = function registerContactRoutes({
     if (!number) throw httpError(400, `${toPerson.name} has no contact number on record`);
 
     const extension = String(body.extension || '').trim();
-    if (DIAL_RINGS_OPERATOR_FIRST && !extension) {
+    if ((DIAL_RINGS_OPERATOR_FIRST || pbxLive()) && !extension) {
       throw httpError(400, 'set the extension you are working from before dialling');
     }
+    if (pbxLive() && !/^\d{2,6}$/.test(extension)) throw httpError(400, 'extension must be 2-6 digits');
 
     const row = {
       id: nextId('dial_log'),
@@ -150,25 +156,77 @@ module.exports = function registerContactRoutes({
       job_id: body.job_id ? Number(body.job_id) : null,
       site_visit_id: body.site_visit_id ? Number(body.site_visit_id) : null,
       body: null,
-      provider: 'none',
+      provider: pbxLive() ? 'freepbx' : 'none',
       provider_ref: null,
-      // Never anything but ATTEMPTED from here. See the header note.
+      // ATTEMPTED until — and unless — the PBX reports otherwise.
       outcome: 'ATTEMPTED',
       error_code: null,
       duration_s: null,
+      // Which of the two supervisor concepts this call actually reached, so
+      // an incident review can see a call that went to a line manager
+      // because nobody was rostered as duty supervisor.
+      supervisor_source: target ? target.source : null,
       attempted_at: new Date().toISOString(),
       settled_at: null,
     };
-    db.dial_log.push(row);
 
     const via = body.supervisor
       ? ` via ${toPerson.name}${target && target.source === 'LINE_MANAGER' ? ' (line manager — no duty supervisor rostered)' : ' (duty supervisor)'}`
       : '';
-    logEvent('contact.dial', `DIAL ${toPerson.name}${via} — ${number}${extension ? ` from ext ${extension}` : ''}`, {
-      dial_log_id: row.id, personnel_id: toPerson.id, job_id: row.job_id,
-    });
+    const summary = `DIAL ${toPerson.name}${via} — ${number}${extension ? ` from ext ${extension}` : ''}`;
 
-    return { __status: 201, __body: { ...row, dial_uri: `tel:${number}` } };
+    if (!pbxLive()) {
+      db.dial_log.push(row);
+      logEvent('contact.dial', summary, { dial_log_id: row.id, personnel_id: toPerson.id, job_id: row.job_id });
+      return { __status: 201, __body: { ...row, dial_uri: `tel:${number}` } };
+    }
+
+    let placed;
+    try {
+      placed = await ami.originate({ extension, number });
+    } catch (e) {
+      // The PBX was unreachable, refused the login, refused the Originate, or
+      // the number could not be dialled. Nothing rang anywhere; record the
+      // attempt as FAILED with the reason rather than dropping it.
+      row.outcome = 'FAILED';
+      row.error_code = String(e.message || e).slice(0, 200);
+      row.settled_at = new Date().toISOString();
+      db.dial_log.push(row);
+      logEvent('contact.dial', `${summary} — NOT PLACED: ${row.error_code}`, { dial_log_id: row.id, personnel_id: toPerson.id, job_id: row.job_id });
+      flushNow();
+      return { __status: 502, __body: { error: `the PBX did not place the call: ${row.error_code}`, dial_log_id: row.id } };
+    }
+
+    row.provider_ref = placed.action_id;
+    db.dial_log.push(row);
+    logEvent('contact.dial', `${summary} (via PBX, ringing ext ${extension} first)`, { dial_log_id: row.id, personnel_id: toPerson.id, job_id: row.job_id });
+
+    placed.result.then((r) => {
+      // TRACKING_TIMEOUT / AMI_DISCONNECTED before an answer leave the row
+      // ATTEMPTED: the PBX never told us what happened, so neither do we.
+      row.outcome = r.outcome;
+      row.duration_s = r.duration_s;
+      row.error_code = r.cause;
+      row.settled_at = new Date().toISOString();
+      const who = r.leg === 'OPERATOR' ? `operator ext ${extension}` : toPerson.name;
+      const detail = r.outcome === 'ANSWERED'
+        ? (r.duration_s != null ? `ANSWERED, ${r.duration_s}s` : `ANSWERED, duration unknown (${r.cause})`)
+        : `${r.outcome}${r.cause ? ` (${r.cause})` : ''}`;
+      logEvent('contact.dial_outcome', `DIAL ${toPerson.name} — ${who}: ${detail}`, {
+        dial_log_id: row.id, personnel_id: toPerson.id, outcome: r.outcome, duration_s: r.duration_s, leg: r.leg,
+      });
+      flushNow();
+    }).catch((e) => console.warn('[contact] dial outcome handling failed:', e.message));
+
+    return { __status: 201, __body: { ...row, dial_uri: null } };
+  });
+
+  /* Admin diagnostics: can this server reach the PBX, log in, and Originate?
+   * The first thing to run after setting AMI_* in the environment. */
+  route('GET', '/api/contact/pbx-probe', ADMIN, async () => {
+    if (!pbxLive()) return { configured: false };
+    try { return { configured: true, ...(await ami.probe()) }; }
+    catch (e) { return { configured: true, logged_in: false, error: e.message }; }
   });
 
   /**

@@ -34,6 +34,7 @@ const MS_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && M
 const { verifyMicrosoftIdToken } = require('./msauth.js');
 const webpush = require('./webpush.js');
 const sms = require('./sms.js');
+const ami = require('./asterisk.js');
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@echeloncic.com';
 
 let SECRET = process.env.AUTH_SECRET;
@@ -2821,7 +2822,7 @@ route('POST', '/api/shifts/:id/clock-out', ALL, ({ params, user }) => {
   logEvent('shift.clocked_out', `${p ? p.name : 'PERSON'} CLOCKED OUT`, { shift_id: s.id, personnel_id: s.personnel_id });
   return publicShift(s);
 });
-require('./routes-contact.js')({ route, httpError, CONTROL, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms });
+require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow: () => store.flushNow() });
 
 
 route('GET', '/api/config', ALL, () => ({

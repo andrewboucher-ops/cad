@@ -13,18 +13,31 @@
  * outcome (ANSWERED / NO_ANSWER / BUSY) and a duration, the same way Twilio
  * gives SMS its delivery state. That is the whole point of this module.
  *
- * WHAT IT DOES NOT KNOW. The dialplan context is yours, not mine — I cannot
- * see your extensions_custom.conf, so the context name is configuration
- * (AMI_DIAL_CONTEXT) rather than hard-coded. Nor is there a way to verify the
- * AMI user's permissions from here; the module reports clearly at startup
- * what it can and cannot do rather than failing at the first call.
+ * THE CALL SHAPE. Originate rings Local/<operator ext>@<context>/n. When the
+ * operator answers, the other half of that Local channel (the `;1` half,
+ * whose name comes back in OriginateResponse) continues into
+ * <context>,<officer number>,1 — i.e. FreePBX's own outbound routes place the
+ * officer leg, exactly as if the operator had dialled it from the handset.
+ * Every Dial() that half makes is reported as a DialEnd on that channel, and
+ * its Hangup is the end of the call. That one channel name is the whole
+ * correlation story; see createCallTracker().
+ *
+ * `/n` IS LOAD-BEARING. Without it Asterisk optimises the Local channel pair
+ * out of the call once both legs are bridged, and the `;1` half hangs up
+ * seconds into a conversation — which this module would read as the call
+ * ending, recording every answered call with a near-zero duration.
+ *
+ * AMI PERMISSIONS NEEDED (manager.conf): write=originate (or call) to place
+ * the call — verified present for `control-dial` on 2026-09-29 via
+ * ListCommands — and read=call to RECEIVE the DialEnd/Hangup events. Without
+ * read=call the call still connects, but no outcome ever arrives and the row
+ * honestly stays ATTEMPTED.
  *
  * SECURITY. AMI is unencrypted by default — credentials cross the LAN in
- * clear text. That is acceptable on a trusted segment and NOT acceptable over
- * anything routed, which is worth knowing before this is pointed at a host
- * across a VPN. Asterisk supports TLS on AMI (manager.conf `tlsenable`); this
- * client speaks plain TCP only, deliberately, because that is what the
- * default FreePBX install offers.
+ * clear text. Acceptable on a trusted segment, NOT over anything routed.
+ * Every value interpolated into an AMI header is validated against a strict
+ * pattern first: a CR/LF in a personnel phone number would otherwise let
+ * whoever edits that record append arbitrary AMI actions to ours.
  */
 'use strict';
 
@@ -36,16 +49,35 @@ const PORT = Number(process.env.AMI_PORT || 5038);
 const USERNAME = process.env.AMI_USERNAME || '';
 const SECRET = process.env.AMI_SECRET || '';
 
-// The context a console-originated call enters. Not derivable — see header.
+// The context both legs enter. `from-internal` is FreePBX's standard
+// internal context and the one confirmed live on this estate's PBX for
+// reaching an extension (commit a86d2da). It also carries the outbound
+// routes, so the officer's number leaves through the same trunk selection a
+// desk phone would get.
 const DIAL_CONTEXT = process.env.AMI_DIAL_CONTEXT || 'from-internal';
 
-// How long to wait for an AMI login reply before giving up. Short: this is a
-// LAN box, and a slow reply means something is wrong rather than busy.
-const LOGIN_TIMEOUT_MS = Number(process.env.AMI_LOGIN_TIMEOUT_MS || 5000);
+// Prepended to the officer's number before it enters the dialplan — for an
+// outbound route that expects e.g. a 9 for an outside line. Empty by default:
+// FreePBX's UK routes normally match the national 0-format number directly.
+const OUTBOUND_PREFIX = process.env.AMI_OUTBOUND_PREFIX || '';
 
-// How long a click-to-dial is allowed to ring before we stop tracking it. The
-// call itself may ring longer; this only bounds our own listener.
-const CALL_TRACK_MS = Number(process.env.AMI_CALL_TRACK_MS || 120000);
+// Personnel records hold UK numbers either as 07… or +447…; an outbound route
+// that matches 0XXXXXXXXXX will not match +44. Converting is the right
+// default for a UK trunk; set AMI_KEEP_E164=on if your routes want E.164.
+const KEEP_E164 = process.env.AMI_KEEP_E164 === 'on';
+
+const LOGIN_TIMEOUT_MS = Number(process.env.AMI_LOGIN_TIMEOUT_MS || 5000);
+const ACTION_TIMEOUT_MS = Number(process.env.AMI_ACTION_TIMEOUT_MS || 10000);
+
+// How long the operator's own phone rings before Asterisk gives up on it.
+const OPERATOR_RING_S = Number(process.env.AMI_OPERATOR_RING_S || 30);
+
+// Tracking limits. Before an answer, a call that has produced no terminal
+// event in this long is abandoned as ATTEMPTED — honest, never guessed.
+// After an answer, the cap is much longer because conversations are long;
+// hitting it records ANSWERED with an unknown (null) duration.
+const RING_TRACK_MS = Number(process.env.AMI_RING_TRACK_MS || 180000);
+const CALL_MAX_MS = Number(process.env.AMI_CALL_MAX_MS || 4 * 3600 * 1000);
 
 const configured = () => Boolean(HOST && USERNAME && SECRET);
 
@@ -53,10 +85,8 @@ const configured = () => Boolean(HOST && USERNAME && SECRET);
  * Protocol framing
  * ------------------------------------------------------------------ */
 
-/** Parses one AMI block (headers only) into an object. AMI is `Key: Value`
- * lines with a blank line terminating the block. Keys repeat in some events
- * (e.g. two `Channel:` lines in a Bridge), so later duplicates are suffixed
- * rather than overwriting — losing one silently would be worse. */
+/** Parses one AMI block into an object. Keys repeat in some events, so later
+ * duplicates are suffixed (Key2, Key3) rather than silently overwriting. */
 function parseBlock(lines) {
   const out = {};
   for (const line of lines) {
@@ -76,167 +106,215 @@ function parseBlock(lines) {
   return out;
 }
 
+/** Refuses anything that could break out of an AMI header line. */
+function headerSafe(v) {
+  return typeof v === 'string' && !/[\r\n]/.test(v);
+}
+
+/** The officer's number as the dialplan should see it, or null if it is not
+ * something that can safely be dialled. Only digits (and a leading + when
+ * E.164 is kept) ever reach the Exten header. */
+function toDialString(raw) {
+  let n = String(raw || '').replace(/[\s\-().]/g, '');
+  if (!/^\+?\d{3,20}$/.test(n)) return null;
+  if (!KEEP_E164 && n.startsWith('+44')) n = '0' + n.slice(3);
+  if (!KEEP_E164 && n.startsWith('+')) return null; // non-UK E.164 on a national-format trunk: refuse rather than misdial
+  return OUTBOUND_PREFIX + n;
+}
+
 /* ------------------------------------------------------------------ *
  * Connection
  * ------------------------------------------------------------------ */
 
 /**
- * Opens an AMI connection and logs in. Resolves to a small handle:
- *   { sendAction(action, headers), onEvent(fn), close(), actions, events }
+ * Opens an AMI connection and logs in. Resolves to a handle:
+ *   { sendAction(action, headers), onEvent(fn), onClose(fn), close() }
  *
- * `sendAction` resolves with the matching response block, correlated on
- * ActionID — AMI does not guarantee responses arrive in the order they were
- * sent, so correlating on the id rather than on arrival order is the difference
- * between working under load and working only when idle.
+ * Login carries its own ActionID like every other action, so its reply is
+ * correlated through the same single path as everything else. (An earlier
+ * version sent Login without one and swapped in a second dispatcher to catch
+ * the anonymous reply; it worked, but it read as broken to the next person
+ * and cost a session to disprove. One path, no special case.)
+ *
+ * When the socket drops — before or after login — every in-flight action is
+ * rejected immediately and close handlers run, so a caller tracking a live
+ * call learns the link is gone instead of waiting out its timers.
  */
 function connect() {
   return new Promise((resolve, reject) => {
     if (!configured()) return reject(new Error('AMI is not configured (need AMI_HOST, AMI_USERNAME, AMI_SECRET)'));
+    if (!headerSafe(USERNAME) || !headerSafe(SECRET)) return reject(new Error('AMI credentials contain a line break'));
 
     const socket = net.connect({ host: HOST, port: PORT });
     socket.setEncoding('utf8');
 
     let buf = '';
     let loggedIn = false;
-    let settled = false;
-    const pending = new Map();  // ActionID -> { resolve, reject, timer }
+    let closed = false;
+    const pending = new Map();        // ActionID -> { resolve, reject, timer }
     const eventHandlers = new Set();
-    let greetLines = [];
-    let inGreeting = true;
+    const closeHandlers = new Set();
 
-    const fail = (err) => {
-      if (settled) return;
-      settled = true;
+    function write(action, headers) {
+      // A caller may supply its own ActionID when it needs to correlate
+      // later events (OriginateResponse) with this action.
+      const actionId = headers.ActionID || crypto.randomBytes(8).toString('hex');
+      if (!headerSafe(String(actionId))) throw new Error('AMI ActionID contains a line break');
+      const lines = [`Action: ${action}`, `ActionID: ${actionId}`];
+      for (const [k, v] of Object.entries(headers)) {
+        if (k === 'ActionID') continue;
+        const value = String(v);
+        if (!headerSafe(value)) throw new Error(`AMI header ${k} contains a line break`);
+        lines.push(`${k}: ${value}`);
+      }
+      return { actionId, frame: lines.join('\r\n') + '\r\n\r\n' };
+    }
+
+    function send(action, headers, timeoutMs) {
+      return new Promise((res, rej) => {
+        if (closed) return rej(new Error('AMI connection closed'));
+        let framed;
+        try { framed = write(action, headers); } catch (e) { return rej(e); }
+        const timer = setTimeout(() => {
+          pending.delete(framed.actionId);
+          rej(new Error(`AMI ${action} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        pending.set(framed.actionId, { resolve: res, reject: rej, timer });
+        socket.write(framed.frame);
+      });
+    }
+
+    function shutdown(err) {
+      if (closed) return;
+      closed = true;
       for (const p of pending.values()) { clearTimeout(p.timer); p.reject(err); }
       pending.clear();
+      for (const fn of closeHandlers) { try { fn(err); } catch (e) { console.warn('[ami] close handler threw:', e.message); } }
       try { socket.destroy(); } catch {}
-      reject(err);
-    };
-
-    const loginTimer = setTimeout(() => fail(new Error(`AMI login timed out after ${LOGIN_TIMEOUT_MS}ms`)), LOGIN_TIMEOUT_MS);
-
-    function dispatch(block) {
-      // A response carrying ActionID belongs to a pending action. An event
-      // with no ActionID is unsolicited (Hangup, Newchannel) and goes to
-      // every registered handler.
-      const isEvent = block.Event !== undefined;
-      if (isEvent) {
-        for (const fn of eventHandlers) { try { fn(block); } catch (e) { console.warn('[ami] event handler threw:', e.message); } }
-        return;
-      }
-      const id = block.ActionID;
-      if (id && pending.has(id)) {
-        const p = pending.get(id);
-        clearTimeout(p.timer);
-        pending.delete(id);
-        // Response: Success / Error / Follows. 'Success' is the only one that
-        // means the action was accepted — treat anything else as a failure
-        // with the message AMI gave, rather than assuming silence is success.
-        if (block.Response === 'Success') p.resolve(block);
-        else p.reject(new Error(block.Message || `AMI ${block.Response || 'error'}`));
-      }
+      if (!loggedIn) reject(err);
     }
 
     socket.on('data', (chunk) => {
       buf += chunk;
+      // The greeting ("Asterisk Call Manager/x.y") ends with a single CRLF,
+      // not a blank line, so it arrives glued to the front of the first real
+      // block. It has no colon, and parseBlock skips colon-less lines.
       let idx;
       while ((idx = buf.indexOf('\r\n\r\n')) !== -1) {
-        const raw = buf.slice(0, idx);
+        const block = parseBlock(buf.slice(0, idx).split('\r\n'));
         buf = buf.slice(idx + 4);
-        const lines = raw.split('\r\n');
-        const block = parseBlock(lines);
-
-        if (inGreeting && !block.Event && !block.Response) { greetLines = lines; continue; }
-        inGreeting = false;
-
-        // Follows: the response is followed by a `--END COMMAND--`-style
-        // trailer. Only Command actions use it and we never send those, so a
-        // Follows response is treated as terminal rather than hanging.
-        if (block.Response === 'Follows') { dispatch({ ...block, Response: 'Success' }); continue; }
-
-        dispatch(block);
-      }
-    });
-
-    socket.on('error', (err) => fail(new Error(`AMI socket error: ${err.message}`)));
-    socket.on('close', () => {
-      if (!settled) fail(new Error('AMI connection closed'));
-    });
-
-    socket.on('connect', () => {
-      socket.write(
-        'Action: Login\r\n' +
-        `Username: ${USERNAME}\r\n` +
-        `Secret: ${SECRET}\r\n` +
-        'Events: on\r\n' +
-        '\r\n'
-      );
-    });
-
-    // Watch for the login response. It arrives as a normal Response block, so
-    // hook it by re-using the dispatch path with a synthetic id.
-    const realDispatch = dispatch;
-    const loginId = 'login';
-    pending.set(loginId, {
-      resolve: () => {
-        clearTimeout(loginTimer);
-        loggedIn = true;
-        settled = true;
-        resolve(handle);
-      },
-      reject: (e) => fail(e),
-      timer: loginTimer,
-    });
-    // The Login action carries no ActionID of its own, so attach the pending
-    // entry to whatever response arrives first with no Event and no ActionID.
-    let loginHook = true;
-    function dispatchWithLogin(block) {
-      if (loginHook && !block.Event && block.ActionID === undefined) {
-        loginHook = false;
-        const p = pending.get(loginId);
-        pending.delete(loginId);
-        if (p) { clearTimeout(p.timer); }
-        if (block.Response === 'Success') {
-          loginId in pending || (loggedIn = true);
-          clearTimeout(loginTimer);
-          settled = true;
-          resolve(handle);
-          return;
+        if (block.Event !== undefined) {
+          for (const fn of eventHandlers) { try { fn(block); } catch (e) { console.warn('[ami] event handler threw:', e.message); } }
+          continue;
         }
-        fail(new Error(block.Message || 'AMI login rejected'));
-        return;
+        const p = block.ActionID && pending.get(block.ActionID);
+        if (!p) continue;
+        clearTimeout(p.timer);
+        pending.delete(block.ActionID);
+        // 'Success' is the only reply that means the action was accepted.
+        // Silence or anything else is a failure carrying AMI's own message.
+        if (block.Response === 'Success' || block.Response === 'Goodbye') p.resolve(block);
+        else p.reject(new Error(block.Message || `AMI ${block.Response || 'error'}`));
       }
-      realDispatch(block);
-    }
-    // Replace dispatch usage in the data handler.
-    dispatch = dispatchWithLogin;
+    });
+    socket.on('error', (err) => shutdown(new Error(`AMI socket error: ${err.message}`)));
+    socket.on('close', () => shutdown(new Error('AMI connection closed')));
 
     const handle = {
       host: HOST, port: PORT, context: DIAL_CONTEXT,
-      myId: null,
-      /** Sends an action and resolves with its response block. */
-      sendAction(action, headers = {}) {
-        return new Promise((res, rej) => {
-          if (!loggedIn) return rej(new Error('AMI not logged in'));
-          const actionId = headers.ActionID || crypto.randomBytes(8).toString('hex');
-          const lines = [`Action: ${action}`, `ActionID: ${actionId}`];
-          for (const [k, v] of Object.entries(headers)) {
-            if (k === 'ActionID') continue;
-            lines.push(`${k}: ${v}`);
-          }
-          const timer = setTimeout(() => {
-            pending.delete(actionId);
-            rej(new Error(`AMI ${action} timed out`));
-          }, 10000);
-          pending.set(actionId, { resolve: res, reject: rej, timer });
-          socket.write(lines.join('\r\n') + '\r\n\r\n');
-        });
-      },
-      /** Registers an event handler. Returns an unsubscribe function. */
+      sendAction: (action, headers = {}) => (loggedIn ? send(action, headers, ACTION_TIMEOUT_MS) : Promise.reject(new Error('AMI not logged in'))),
       onEvent(fn) { eventHandlers.add(fn); return () => eventHandlers.delete(fn); },
-      close() { try { socket.destroy(); } catch {} },
+      onClose(fn) { closeHandlers.add(fn); return () => closeHandlers.delete(fn); },
+      close() {
+        if (closed) return;
+        // A polite Logoff; the close event that follows runs shutdown().
+        send('Logoff', {}, 1000).catch(() => {}).finally(() => { try { socket.end(); } catch {} });
+      },
     };
+
+    socket.on('connect', () => {
+      send('Login', { Username: USERNAME, Secret: SECRET, Events: 'on' }, LOGIN_TIMEOUT_MS)
+        .then(() => { loggedIn = true; resolve(handle); })
+        .catch((e) => shutdown(e));
+    });
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * Outcome tracking
+ * ------------------------------------------------------------------ */
+
+// OriginateResponse Reason codes (Asterisk's AST_CONTROL_* numbering) for the
+// OPERATOR leg — the officer was never dialled when these arrive.
+const ORIGINATE_REASON = { 0: 'FAILED', 1: 'HANGUP', 3: 'NO_ANSWER', 5: 'BUSY', 8: 'CONGESTION' };
+
+/**
+ * A pure state machine over AMI events for one originated call. Kept free of
+ * sockets and timers so every event sequence can be tested without a PBX.
+ *
+ * feed(event) returns null while the call is live, or a terminal result:
+ *   { outcome, duration_s, cause, leg }
+ *
+ * outcome uses dial_log's vocabulary: ANSWERED | NO_ANSWER | BUSY | FAILED.
+ * `leg` says whose phone the outcome is about: 'OPERATOR' when the operator's
+ * own extension never answered (so the officer was never rung), 'OFFICER'
+ * otherwise. An incident review needs that distinction: "control never
+ * picked up their own phone" and "the officer did not answer" are different
+ * failures with different owners.
+ *
+ * The outcome is decided on the Hangup of the originated `;1` channel, not on
+ * the first DialEnd, because a FreePBX outbound route with trunk failover
+ * emits a DialEnd per trunk tried (CHANUNAVAIL, then ANSWER on the next).
+ * The last DialEnd before hangup is the one that happened.
+ */
+function createCallTracker(actionId, now = Date.now) {
+  let channel = null;       // the ;1 half, known once the operator answers
+  let lastStatus = null;    // most recent DialEnd DialStatus on that channel
+  let answeredAt = null;
+
+  return {
+    get channel() { return channel; },
+    get answered() { return answeredAt !== null; },
+    feed(ev) {
+      if (ev.Event === 'OriginateResponse' && ev.ActionID === actionId) {
+        if (ev.Response !== 'Success') {
+          const reason = ORIGINATE_REASON[Number(ev.Reason)] || `REASON_${ev.Reason}`;
+          const outcome = reason === 'BUSY' ? 'BUSY' : reason === 'NO_ANSWER' ? 'NO_ANSWER' : 'FAILED';
+          return { outcome, duration_s: null, cause: `OPERATOR_${reason}`, leg: 'OPERATOR' };
+        }
+        channel = ev.Channel || null;
+        return null;
+      }
+      if (!channel || ev.Channel !== channel) return null;
+
+      if (ev.Event === 'DialEnd') {
+        lastStatus = ev.DialStatus || null;
+        if (lastStatus === 'ANSWER' && answeredAt === null) answeredAt = now();
+        return null;
+      }
+      if (ev.Event === 'Hangup') {
+        if (answeredAt !== null) {
+          return { outcome: 'ANSWERED', duration_s: Math.max(0, Math.round((now() - answeredAt) / 1000)), cause: null, leg: 'OFFICER' };
+        }
+        const map = { NOANSWER: 'NO_ANSWER', BUSY: 'BUSY' };
+        return {
+          outcome: map[lastStatus] || 'FAILED',
+          duration_s: null,
+          // No DialEnd at all means the number never matched an outbound
+          // route (or the operator hung up before it was dialled).
+          cause: map[lastStatus] ? null : (lastStatus || 'NO_ROUTE'),
+          leg: 'OFFICER',
+        };
+      }
+      return null;
+    },
+    /** What to record if tracking has to stop without a terminal event. */
+    abandon(cause) {
+      return answeredAt !== null
+        ? { outcome: 'ANSWERED', duration_s: null, cause, leg: 'OFFICER' }
+        : { outcome: 'ATTEMPTED', duration_s: null, cause, leg: channel ? 'OFFICER' : 'OPERATOR' };
+    },
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -245,132 +323,89 @@ function connect() {
 
 /**
  * Places a click-to-dial call: rings the OPERATOR's extension first, then
- * bridges them to the officer's number when they answer.
+ * connects them to the officer when they answer.
  *
  * This is the standard ARC console flow, and it is forced by the medium: a
- * browser has no audio path into a PBX, so there is no way for the console to
- * be one end of the call. Someone has to answer a telephone somewhere, and it
- * is the operator's.
+ * browser has no audio path into a PBX, so someone has to answer a telephone
+ * somewhere, and it is the operator's.
  *
- * The implementation rings Local/<extension>@<context>, which answers and
- * then Dial()s the officer — so the operator hears ringback and, on answer,
- * is bridged. The exact context must exist in your dialplan; see
- * DIAL_CONTEXT and the header note.
+ * Opens its own AMI connection for the life of the call and closes it after.
+ * A console places a handful of calls an hour; one connection per call means
+ * no reconnect logic, no shared state between calls, and a dropped link can
+ * only ever affect the call it belonged to.
  *
- * @returns {Promise<{uniqueid, channel, action_id}>} — uniqueid is what the
- *          Hangup event will carry, and is stored on the dial_log row so the
- *          outcome can be matched back to it.
+ * Resolves once Asterisk has ACCEPTED the originate (not once anyone
+ * answered) to { action_id, dial_string, result }, where `result` is a
+ * Promise of the tracker's terminal outcome. Rejects if the PBX is
+ * unreachable, refuses the login, or refuses the Originate — nothing was
+ * dialled in any of those cases.
  */
-async function originate(handle, { extension, number, timeoutS = 45, callerId } = {}) {
-  if (!extension) throw new Error('extension required — the operator must be at a desk');
-  if (!number) throw new Error('destination number required');
+async function originate({ extension, number } = {}) {
+  const ext = String(extension || ''); // not trimmed: refuse malformed input rather than repair it
+  if (!/^\d{2,6}$/.test(ext)) throw new Error('operator extension must be 2-6 digits');
+  const dial = toDialString(number);
+  if (!dial) throw new Error(`not a dialable number: ${number}`);
 
-  const dialString = `Local/${extension}@${DIAL_CONTEXT}`;
-  const headers = {
-    Channel: dialString,
-    Context: DIAL_CONTEXT,
-    Exten: extension,
-    Priority: '1',
-    Timeout: String(timeoutS * 1000),
-    Async: 'true',
+  const handle = await connect();
+  const actionId = crypto.randomBytes(8).toString('hex');
+  const tracker = createCallTracker(actionId);
+
+  let settle;
+  const result = new Promise((res) => { settle = res; });
+  let finished = false;
+  let ringTimer = null, maxTimer = null;
+  const finish = (r) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(ringTimer); clearTimeout(maxTimer);
+    offEvent(); offClose();
+    handle.close();
+    settle(r);
   };
-  // When the operator's leg answers, run Dial() against the officer. Without
-  // Async the Originate call would block until the whole call ended.
-  headers.Application = 'Dial';
-  headers.Data = `${number},${timeoutS}`;
-  if (callerId) headers.CallerID = callerId;
 
-  const res = await handle.sendAction('Originate', headers);
-  return {
-    uniqueid: res.Uniqueid || null,
-    channel: res.Channel || dialString,
-    action_id: res.ActionID || null,
-    raw: res,
-  };
-}
-
-/* ------------------------------------------------------------------ *
- * Outcome tracking
- * ------------------------------------------------------------------ */
-
-/**
- * Watches AMI events for the end of one originated call and reports the
- * disposition. This is what fills dial_log.outcome and duration_s — without
- * it the row would say ATTEMPTED forever, which is exactly the gap this whole
- * module exists to close.
- *
- * Resolves once with { outcome, duration_s, cause } and then detaches, so a
- * long-lived console doesn't accumulate listeners.
- *
- * Asterisk's own vocabulary maps to ours as:
- *   ANSWER + Hangup, cause 16 (normal)  -> ANSWERED
- *   Hangup cause 17 (user busy)         -> BUSY
- *   Hangup cause 19 (no answer)         -> NO_ANSWER
- *   anything else                       -> FAILED, with the cause recorded
- *
- * `cause` is kept verbatim as well as mapped: Asterisk has dozens of cause
- * codes and flattening them all to FAILED would throw away the detail an
- * incident review would want.
- */
-function trackCall(handle, uniqueid, { timeoutMs = CALL_TRACK_MS } = {}) {
-  return new Promise((resolve) => {
-    if (!uniqueid) return resolve({ outcome: 'ATTEMPTED', duration_s: null, cause: null });
-
-    let answeredAt = null;
-    let done = false;
-
-    const finish = (result) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      unsubscribe();
-      resolve(result);
-    };
-
-    const unsubscribe = handle.onEvent((ev) => {
-      const uid = ev.Uniqueid || ev.DestUniqueid || ev.Linkedid;
-      // Match on any of the three ids: which one carries the originated call
-      // varies with the channel type and whether a bridge occurred.
-      if (uid !== uniqueid && ev.Uniqueid !== uniqueid && ev.Linkedid !== uniqueid) return;
-
-      if (ev.Event === 'Answer' && !answeredAt) answeredAt = Date.now();
-
-      if (ev.Event === 'Hangup') {
-        const cause = ev.Cause ? Number(ev.Cause) : null;
-        let outcome;
-        if (answeredAt) outcome = 'ANSWERED';
-        else if (cause === 17) outcome = 'BUSY';
-        else if (cause === 19) outcome = 'NO_ANSWER';
-        else if (cause === 16) outcome = 'NO_ANSWER';   // normal clear, never answered
-        else outcome = 'FAILED';
-
-        finish({
-          outcome,
-          duration_s: answeredAt ? Math.round((Date.now() - answeredAt) / 1000) : null,
-          cause,
-        });
-      }
-    });
-
-    const timer = setTimeout(() => finish({ outcome: 'ATTEMPTED', duration_s: null, cause: null }), timeoutMs);
+  // Subscribed BEFORE the Originate is written: on a LAN the
+  // OriginateResponse can arrive before sendAction's own reply is processed.
+  const offEvent = handle.onEvent((ev) => {
+    const r = tracker.feed(ev);
+    if (r) return finish(r);
+    if (tracker.answered && ringTimer) { clearTimeout(ringTimer); ringTimer = null; }
   });
+  const offClose = handle.onClose(() => finish(tracker.abandon('AMI_DISCONNECTED')));
+  ringTimer = setTimeout(() => { if (!tracker.answered) finish(tracker.abandon('TRACKING_TIMEOUT')); }, RING_TRACK_MS);
+  maxTimer = setTimeout(() => finish(tracker.abandon('TRACKING_TIMEOUT')), CALL_MAX_MS);
+  ringTimer.unref?.(); maxTimer.unref?.();
+
+  try {
+    await handle.sendAction('Originate', {
+      ActionID: actionId,
+      Channel: `Local/${ext}@${DIAL_CONTEXT}/n`,
+      Context: DIAL_CONTEXT,
+      Exten: dial,
+      Priority: '1',
+      Timeout: String(OPERATOR_RING_S * 1000),
+      Async: 'true',
+    });
+  } catch (e) {
+    finish(tracker.abandon('ORIGINATE_REJECTED'));
+    throw e;
+  }
+  return { action_id: actionId, dial_string: dial, result };
 }
 
-/** A one-shot connectivity + permission check, for startup and for an admin
- * diagnostics route. Reports what it can see rather than assuming. */
+/** A one-shot connectivity + permission check, for an admin diagnostics
+ * route. Reports what it can see rather than assuming: ListCommands only
+ * lists the actions this AMI user is permitted, so Originate's presence
+ * there is the permission check. */
 async function probe() {
   const handle = await connect();
   try {
-    const ping = await handle.sendAction('Ping').catch((e) => ({ Response: 'Error', Message: e.message }));
+    const cmds = await handle.sendAction('ListCommands').catch(() => ({}));
     return {
       host: HOST, port: PORT, context: DIAL_CONTEXT,
-      reachable: true,
       logged_in: true,
-      ping_ok: ping.Response === 'Success' || ping.Ping === 'Pong',
-      // Deliberately not asserted: whether this user may Originate is a
-      // manager.conf permission we cannot read from here. It will show up as
-      // a clear error on the first real call if it is missing.
-      can_originate: 'unknown — check manager.conf permissions on the first call',
+      can_originate: 'Originate' in cmds,
+      // read=call cannot be listed the same way; it shows as outcomes
+      // arriving (or never arriving) on the first real call.
     };
   } finally {
     handle.close();
@@ -378,7 +413,6 @@ async function probe() {
 }
 
 module.exports = {
-  connect, originate, trackCall, probe,
-  configured, live: configured(),
-  HOST, PORT, DIAL_CONTEXT,
+  connect, originate, probe, createCallTracker, toDialString, parseBlock,
+  configured, HOST, PORT, DIAL_CONTEXT,
 };

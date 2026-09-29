@@ -51,6 +51,10 @@ CREATE TABLE dial_log (
   outcome           contact_outcome NOT NULL DEFAULT 'ATTEMPTED',
   error_code        TEXT,                      -- Twilio error code, or PBX cause code
   duration_s        INTEGER,                   -- answered calls only; NULL means not known, not zero
+  -- For a call to "the officer's supervisor": which of the two concepts it
+  -- actually reached. A call that went to a line manager because nobody was
+  -- rostered as duty supervisor must be visible as such in a review.
+  supervisor_source TEXT,                      -- 'DUTY_SUPERVISOR' | 'LINE_MANAGER' | NULL
   attempted_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   settled_at        TIMESTAMPTZ                  -- when a terminal outcome arrived
 );
