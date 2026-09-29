@@ -82,6 +82,7 @@ const db = {
   locations: [], emergency_events: [], audit_logs: [],
   push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], assets: [],
   passdown_logs: [], fuel_logs: [], asset_checkouts: [], maintenance_logs: [], beats: [],
+  form_definitions: [], form_submissions: [], form_grants: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -2818,6 +2819,12 @@ route('POST', '/api/shifts/:id/clock-out', ALL, ({ params, user }) => {
   return publicShift(s);
 });
 
+// Configurable forms. Registrar pattern — see routes-forms.js for why.
+const forms = require('./routes-forms.js')({
+  route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
+  assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
+});
+
 route('GET', '/api/config', ALL, () => ({
   audio: process.env.AUDIO !== 'off',
 }));
@@ -2922,6 +2929,11 @@ function start() {
   const restored = store.load();
   if (restored) console.log(`[cccs] state restored from ${store.file}`);
   else { seed(); store.flushNow(); }
+  // Additive and idempotent: installs the standard forms only on a database
+  // that has none, so an existing deployment gets them on first boot of this
+  // version and an admin's own edits are never overwritten.
+  const installed = forms.installDefaults();
+  if (installed) { logEvent('form.defaults_installed', `${installed} STANDARD FORMS INSTALLED`); store.flushNow(); }
   if (SIMULATION) setInterval(simulationTick, 2000).unref?.();
   setInterval(welfareTick, WELFARE_TICK_MS).unref?.();
   patrolScheduleTick();
@@ -2952,4 +2964,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
