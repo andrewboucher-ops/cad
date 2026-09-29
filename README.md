@@ -130,13 +130,27 @@ The call sign is the operational identity, and it is the join point: a call sign
 
 ## C. UI architecture
 
-**Control room** (`public/control.html`) — dark console, three live columns: personnel/MDT resources with status pills, the operational map, and open jobs; below that the event timeline with a live filter and a resource detail panel. Emergencies push a red banner across the top with acknowledge, locate and reset in one row. Pending callback requests get their own bar.
+**Dashboard** (`public/dashboard.html`) — the default landing page for `SYSTEM_ADMIN`/`DISPATCHER`/`SUPERVISOR` after login (control.html is no longer landed on directly — see "Dashboard and theming" below). Live counts (open jobs by priority, active emergencies, open patrol visits, personnel/fleet), a "Fleet & coverage" and "Recent activity" panel, and quick-action buttons into Control room/Rota/Log/Admin. `SYSTEM_ADMIN` additionally gets a "System" panel (account counts by role, sites under contract) — everyone else sees the same operational picture without it.
 
-**Officer terminal** (`public/officer.html`) — the individual-login, personnel-facing terminal: emergency button, welfare timer, current job with on-scene checklist and photo capture, status progression (accept, en route, on scene, completed), and messaging with control.
+**Control room** (`public/control.html`) — dark console, three live columns: personnel/MDT resources with status pills, the operational map, and open jobs; below that the event timeline with a live filter and a resource detail panel. Emergencies push a red banner across the top with acknowledge, locate and reset in one row. Pending callback requests get their own bar. Reached from the Dashboard or the sidebar's "Control room" link — only shown to roles with control access.
+
+**Officer terminal** (`public/officer.html`) — the individual-login, personnel-facing terminal: emergency button, welfare timer, current job with on-scene checklist and photo capture, status progression (accept, en route, on scene, completed), and messaging with control. This is a `FIELD_USER`'s own landing page — already a personal dashboard, not restructured.
 
 **MDT** (`public/mdt.html`) — a vehicle terminal: terminal identity down the left, the current job filling the right with full incident detail and the status progression as buttons.
 
+**My settings** (`public/settings.html`) — every role's own account page: theme, light/dark, surface (field bloom/panels/corners/glow), the priority colour ramp, sound, and reduced motion. See "Dashboard and theming" below.
+
 The map is a Leaflet-based renderer (`CCCS.makeMap`) exposing a `render(units, jobs, onPick)` interface.
+
+## Dashboard and theming
+
+Logging in as `SYSTEM_ADMIN`/`DISPATCHER`/`SUPERVISOR` now opens `dashboard.html`, not `control.html` directly — the control room is a real console you dock into for a shift, not a dashboard, and CommandHub-style competitors treat them as separate things for the same reason. The sidebar carries a "Control room" link for roles that have it; `FIELD_USER`/`MDT_USER` are unaffected, still landing on their own terminal.
+
+Six named themes (Cosmic/Midnight/Harbour/Rosewood/Terminal/Graphite — Harbour is the default, matching GuardM8's), an independent light/dark/system toggle, four surface knobs (field bloom colour, panel translucency, corner radius, glow), and a colour-blind-safe priority ramp, all set from `settings.html` and stored on the user's own record (`ui_prefs`) so they follow a login to any workstation rather than living in browser storage. `PATCH /api/me/preferences` is self-service for every role.
+
+The priority/status colours (`--emergency`/`--priority`/`--available`/`--busy`/`--on-task`/`--offline`) are deliberately outside the theme system — they only change via the colour-blind-safe ramp toggle, never via a theme choice, so a real alarm can never be made to look like a test signal by a chrome preference. `console.css` documents this at the top of its theming section.
+
+A tiny synchronous script, `public/theme-init.js`, runs at the very top of every page's `<head>` (before `console.css` paints) and stamps the cached preference from `localStorage` onto `<html>`, so a page never flashes the default theme before switching to the operator's own. `CCCS.applyTheme()` in `app.js` does the same thing after login and after a live preference change, for instant feedback with no reload.
 
 ## D. Real-time architecture
 
@@ -155,11 +169,14 @@ server.js            REST API, WebSocket server, domain logic, seed data
 openapi.json         API documentation (served at /api/openapi.json)
 public/
   index.html         sign-in and console launcher
+  dashboard.html     landing page for control-access roles
   control.html       dispatcher console
   officer.html       individual officer terminal
   mdt.html           mobile data terminal
+  settings.html      per-operator theme/sound/motion preferences
   app.js             shared client: auth, REST, WS bus, Leaflet map
-  console.css        design tokens and status colours
+  theme-init.js      no-flash theme stamp, runs before console.css paints
+  console.css        design tokens, themes, and status colours
 db/schema.sql        target PostgreSQL schema
 test/cccs.test.js    hand-rolled WebSocket client included
 Dockerfile · docker-compose.yml · .env.example

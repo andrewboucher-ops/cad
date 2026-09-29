@@ -704,7 +704,7 @@ function handleUpgrade(req, socket) {
   socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${wsAccept(key)}`, '\r\n'].join('\r\n'));
   socket.setNoDelay(true);
   const conn = new Conn(socket, user);
-  conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, personnel_id: user.personnel_id, mdt_id: user.mdt_id } });
+  conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, personnel_id: user.personnel_id, mdt_id: user.mdt_id, ui_prefs: normalizeUiPrefs(user.ui_prefs) } });
 }
 server.on('upgrade', handleUpgrade);
 httpsServer?.on('upgrade', handleUpgrade);
@@ -716,7 +716,35 @@ const ALL = ROLES;
 const CONTROL = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
 const ADMIN = ['SYSTEM_ADMIN'];
 
-const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, email: u.email || null });
+/* Per-operator UI preferences (theme, mode, surface, sound) — stored on the
+ * user row so they follow a login to any terminal, not per-browser
+ * localStorage. Lazily defaulted: an existing user row with no ui_prefs at
+ * all reads as DEFAULT_UI_PREFS rather than needing a migration. */
+const THEMES = ['cosmic', 'midnight', 'harbour', 'rosewood', 'terminal', 'graphite'];
+const UI_MODES = ['system', 'dark', 'light'];
+const BLOOMS = ['violet', 'blue', 'teal', 'rose', 'none'];
+const PANEL_STYLES = ['translucent', 'solid'];
+const CORNER_STYLES = ['sharp', 'soft', 'round'];
+const PRIORITY_RAMPS = ['standard', 'cbf'];
+const DEFAULT_UI_PREFS = {
+  theme: 'harbour', mode: 'system', bloom: 'teal', panels: 'translucent', corners: 'soft',
+  glow: false, priority_ramp: 'standard', sound: true, reduce_motion: false,
+};
+function normalizeUiPrefs(p) {
+  p = p || {};
+  return {
+    theme: THEMES.includes(p.theme) ? p.theme : DEFAULT_UI_PREFS.theme,
+    mode: UI_MODES.includes(p.mode) ? p.mode : DEFAULT_UI_PREFS.mode,
+    bloom: BLOOMS.includes(p.bloom) ? p.bloom : DEFAULT_UI_PREFS.bloom,
+    panels: PANEL_STYLES.includes(p.panels) ? p.panels : DEFAULT_UI_PREFS.panels,
+    corners: CORNER_STYLES.includes(p.corners) ? p.corners : DEFAULT_UI_PREFS.corners,
+    glow: Boolean(p.glow),
+    priority_ramp: PRIORITY_RAMPS.includes(p.priority_ramp) ? p.priority_ramp : DEFAULT_UI_PREFS.priority_ramp,
+    sound: p.sound !== false,
+    reduce_motion: Boolean(p.reduce_motion),
+  };
+}
+const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs) });
 
 route('POST', '/api/auth/login', null, ({ body }) => {
   const user = db.users.find((u) => u.username === String(body.username || '').toLowerCase());
@@ -728,6 +756,21 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   const token = sign({ sub: user.id, role: user.role, exp: Date.now() + ttl });
   logEvent('auth.login', `${user.username} signed in (${user.role})`, { user_id: user.id });
   return { token, user: publicUser(user) };
+});
+route('PATCH', '/api/me/preferences', ALL, ({ body, user }) => {
+  const u = db.users.find((x) => x.id === user.id); if (!u) throw httpError(404, 'account not found');
+  const next = normalizeUiPrefs(u.ui_prefs);
+  if ('theme' in body) { if (!THEMES.includes(body.theme)) throw httpError(400, 'invalid theme'); next.theme = body.theme; }
+  if ('mode' in body) { if (!UI_MODES.includes(body.mode)) throw httpError(400, 'invalid mode'); next.mode = body.mode; }
+  if ('bloom' in body) { if (!BLOOMS.includes(body.bloom)) throw httpError(400, 'invalid bloom'); next.bloom = body.bloom; }
+  if ('panels' in body) { if (!PANEL_STYLES.includes(body.panels)) throw httpError(400, 'invalid panels'); next.panels = body.panels; }
+  if ('corners' in body) { if (!CORNER_STYLES.includes(body.corners)) throw httpError(400, 'invalid corners'); next.corners = body.corners; }
+  if ('priority_ramp' in body) { if (!PRIORITY_RAMPS.includes(body.priority_ramp)) throw httpError(400, 'invalid priority_ramp'); next.priority_ramp = body.priority_ramp; }
+  if ('glow' in body) next.glow = Boolean(body.glow);
+  if ('sound' in body) next.sound = Boolean(body.sound);
+  if ('reduce_motion' in body) next.reduce_motion = Boolean(body.reduce_motion);
+  u.ui_prefs = next;
+  return publicUser(u);
 });
 
 /* ---- Microsoft Entra ID (Azure AD) single sign-on --------------------

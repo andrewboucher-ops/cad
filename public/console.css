@@ -1,9 +1,25 @@
 /* CCCS console styling — dark operations room, status-colour driven.
    Loads Inter/JetBrains Mono via <link> tags in each page's <head>, not
-   @import here, so the font request starts in parallel with this file. */
+   @import here, so the font request starts in parallel with this file.
+
+   ---- Theming ----
+   Six named themes (data-theme on <html>), an independent light/dark mode
+   (data-mode, or the OS preference when unset), and four surface knobs
+   (data-bloom / data-panels / data-corners / data-glow) plus a priority
+   colour ramp (data-priority-ramp). See public/settings.html and
+   CCCS.applyTheme() in app.js — the operator's choice is stored on their
+   user row (ui_prefs) so it follows their login to any terminal, applied
+   by a synchronous inline script in each page's <head> (before this
+   stylesheet paints) to avoid a flash of the wrong theme.
+
+   The priority/status ramp (--emergency/--priority/--available/--busy/
+   --on-task/--offline) is deliberately NOT part of any [data-theme] block:
+   it only changes via [data-priority-ramp], the same for every theme. A
+   console where the alarm colour could be set to pale blue by a theme
+   choice is one where a real alarm can be made to look like a test signal. */
 :root {
-  /* Deep slate-navy, not blue-black — matches a real ARC console (Echelon
-     AURA) rather than the neon-glow "ops room" look this started as. */
+  /* ---- Harbour (default) — deep slate-navy, teal accent. Matches a real
+     ARC console (Echelon AURA) rather than a neon-glow "ops room" look. ---- */
   --bg: #0a0b12;
   --bg-2: #0d0e17;
   --panel: #12141f;
@@ -16,6 +32,7 @@
   --accent: #14b8a6;
   --accent-dim: #0d9488;
 
+  /* ---- priority/status ramp — fixed, see note above ---- */
   --available: #22c55e;
   --on-task: #3b82f6;
   --busy: #eab308;
@@ -31,12 +48,91 @@
   --shadow: 0 1px 2px rgba(0,0,0,.35), 0 6px 16px -10px rgba(0,0,0,.55);
   --shadow-lg: 0 2px 4px rgba(0,0,0,.4), 0 20px 40px -16px rgba(0,0,0,.65);
   --ease: cubic-bezier(.2,.7,.3,1);
+
+  /* ---- surface knobs — independent of theme ---- */
+  --bloom-color: #14b8a6;
+  --bloom-opacity: .16;
+  --panel-alpha: .82;
+  --panel-blur: 14px;
+  /* A panel surface, computed once here rather than repeated at every use
+     site — [data-panels] only ever needs to change --panel-alpha/-blur. */
+  --panel-mixed: color-mix(in srgb, var(--panel) calc(var(--panel-alpha) * 100%), transparent);
 }
+
+/* ---- named themes — dark (the default mode; most shifts are night shifts) ---- */
+:root[data-theme="cosmic"]   { --bg:#0d0b1a; --bg-2:#100e20; --panel:#16132a; --panel-2:#1c1836; --panel-3:#241f44; --line:#322a52; --line-soft:rgba(50,42,82,.6); --ink:#f2f0fb; --ink-dim:#9691b8; --accent:#8b5cf6; --accent-dim:#7c3aed; }
+:root[data-theme="midnight"] { --bg:#070a12; --bg-2:#0a0e18; --panel:#0e131f; --panel-2:#131a29; --panel-3:#192233; --line:#212c42; --line-soft:rgba(33,44,66,.6); --ink:#eef1f8; --ink-dim:#7f8bab; --accent:#3b82f6; --accent-dim:#2563eb; }
+:root[data-theme="rosewood"] { --bg:#120c0d; --bg-2:#160f10; --panel:#1d1415; --panel-2:#24191b; --panel-3:#2e2023; --line:#402a2e; --line-soft:rgba(64,42,46,.6); --ink:#f7eeef; --ink-dim:#ab8d90; --accent:#f43f5e; --accent-dim:#e11d48; }
+:root[data-theme="terminal"] { --bg:#0a0d0a; --bg-2:#0d110d; --panel:#10150f; --panel-2:#151c14; --panel-3:#1b241a; --line:#2a3524; --line-soft:rgba(42,53,36,.6); --ink:#eef4ea; --ink-dim:#8a9a83; --accent:#84cc16; --accent-dim:#65a30d; }
+:root[data-theme="graphite"] { --bg:#0b0c0e; --bg-2:#0e0f12; --panel:#131417; --panel-2:#191b1f; --panel-3:#202226; --line:#2a2c31; --line-soft:rgba(42,44,49,.6); --ink:#eef0f2; --ink-dim:#8b8f96; --accent:#94a3b8; --accent-dim:#64748b; }
+
+/* ---- light mode — applies when the OS prefers light and no explicit
+   data-mode="dark" is stamped (an explicit dark choice always beats the
+   OS), and again, unconditionally, when data-mode="light" is stamped (an
+   explicit light choice beats an OS set to dark too). Each theme's light
+   values are written twice for that reason, not duplicated by mistake. ---- */
+@media (prefers-color-scheme: light) {
+  :root:not([data-mode="dark"])                        { --bg:#f4f7f7; --bg-2:#fff; --panel:#fff; --panel-2:#eef3f2; --panel-3:#e3ecea; --line:#d7e2e0; --line-soft:rgba(20,60,55,.12); --ink:#10221f; --ink-dim:#5c6f6c; --accent:#0d9488; --accent-dim:#0f766e; }
+  :root[data-theme="cosmic"]:not([data-mode="dark"])   { --bg:#f6f4fd; --bg-2:#fff; --panel:#fff; --panel-2:#efebfb; --panel-3:#e4ddf7; --line:#ded3f5; --line-soft:rgba(90,60,160,.12); --ink:#1d1633; --ink-dim:#665d8a; --accent:#7c3aed; --accent-dim:#6d28d9; }
+  :root[data-theme="midnight"]:not([data-mode="dark"]) { --bg:#f2f5fb; --bg-2:#fff; --panel:#fff; --panel-2:#e9eff9; --panel-3:#dce6f5; --line:#cddbf1; --line-soft:rgba(40,70,140,.12); --ink:#101a2e; --ink-dim:#56688c; --accent:#2563eb; --accent-dim:#1d4ed8; }
+  :root[data-theme="rosewood"]:not([data-mode="dark"]) { --bg:#fbf3f4; --bg-2:#fff; --panel:#fff; --panel-2:#f8e9eb; --panel-3:#f3dbde; --line:#eecdd1; --line-soft:rgba(160,40,60,.12); --ink:#2b1516; --ink-dim:#8a6467; --accent:#e11d48; --accent-dim:#be123c; }
+  :root[data-theme="terminal"]:not([data-mode="dark"]) { --bg:#f4f7f0; --bg-2:#fff; --panel:#fff; --panel-2:#ecf3e5; --panel-3:#dfead2; --line:#d2e0c4; --line-soft:rgba(60,90,20,.12); --ink:#182310; --ink-dim:#5c6d52; --accent:#65a30d; --accent-dim:#4d7c0f; }
+  :root[data-theme="graphite"]:not([data-mode="dark"]) { --bg:#f4f5f6; --bg-2:#fff; --panel:#fff; --panel-2:#eceef0; --panel-3:#e1e4e7; --line:#d6dade; --line-soft:rgba(70,80,90,.12); --ink:#14171a; --ink-dim:#5b6169; --accent:#64748b; --accent-dim:#475569; }
+}
+:root[data-mode="light"]                        { --bg:#f4f7f7; --bg-2:#fff; --panel:#fff; --panel-2:#eef3f2; --panel-3:#e3ecea; --line:#d7e2e0; --line-soft:rgba(20,60,55,.12); --ink:#10221f; --ink-dim:#5c6f6c; --accent:#0d9488; --accent-dim:#0f766e; }
+:root[data-theme="cosmic"][data-mode="light"]   { --bg:#f6f4fd; --bg-2:#fff; --panel:#fff; --panel-2:#efebfb; --panel-3:#e4ddf7; --line:#ded3f5; --line-soft:rgba(90,60,160,.12); --ink:#1d1633; --ink-dim:#665d8a; --accent:#7c3aed; --accent-dim:#6d28d9; }
+:root[data-theme="midnight"][data-mode="light"] { --bg:#f2f5fb; --bg-2:#fff; --panel:#fff; --panel-2:#e9eff9; --panel-3:#dce6f5; --line:#cddbf1; --line-soft:rgba(40,70,140,.12); --ink:#101a2e; --ink-dim:#56688c; --accent:#2563eb; --accent-dim:#1d4ed8; }
+:root[data-theme="rosewood"][data-mode="light"] { --bg:#fbf3f4; --bg-2:#fff; --panel:#fff; --panel-2:#f8e9eb; --panel-3:#f3dbde; --line:#eecdd1; --line-soft:rgba(160,40,60,.12); --ink:#2b1516; --ink-dim:#8a6467; --accent:#e11d48; --accent-dim:#be123c; }
+:root[data-theme="terminal"][data-mode="light"] { --bg:#f4f7f0; --bg-2:#fff; --panel:#fff; --panel-2:#ecf3e5; --panel-3:#dfead2; --line:#d2e0c4; --line-soft:rgba(60,90,20,.12); --ink:#182310; --ink-dim:#5c6d52; --accent:#65a30d; --accent-dim:#4d7c0f; }
+:root[data-theme="graphite"][data-mode="light"] { --bg:#f4f5f6; --bg-2:#fff; --panel:#fff; --panel-2:#eceef0; --panel-3:#e1e4e7; --line:#d6dade; --line-soft:rgba(70,80,90,.12); --ink:#14171a; --ink-dim:#5b6169; --accent:#64748b; --accent-dim:#475569; }
+
+/* ---- surface: field bloom (independent of theme) ---- */
+:root[data-bloom="violet"] { --bloom-color: #8b5cf6; --bloom-opacity: .16; }
+:root[data-bloom="blue"]   { --bloom-color: #3b82f6; --bloom-opacity: .16; }
+:root[data-bloom="teal"]   { --bloom-color: #14b8a6; --bloom-opacity: .16; }
+:root[data-bloom="rose"]   { --bloom-color: #f43f5e; --bloom-opacity: .16; }
+:root[data-bloom="none"]   { --bloom-opacity: 0; }
+
+/* ---- surface: panels ---- */
+:root[data-panels="translucent"] { --panel-alpha: .82; --panel-blur: 14px; }
+:root[data-panels="solid"]       { --panel-alpha: 1; --panel-blur: 0px; }
+
+/* ---- surface: corners ---- */
+:root[data-corners="sharp"] { --radius: 3px; --radius-sm: 2px; }
+:root[data-corners="soft"]  { --radius: 10px; --radius-sm: 6px; }
+:root[data-corners="round"] { --radius: 18px; --radius-sm: 12px; }
+
+/* ---- priority/status ramp — colour-blind safe alternative (Okabe-Ito
+   palette). Standard's red/green pair (--emergency/--available) is exactly
+   the confusion deuteranopia and protanopia cause, so this ramp replaces
+   green with blue rather than trying to tune two reds or two greens apart.
+   Priority is always colour AND a glyph/label AND position (see .pri, the
+   status dots' distinct positions), so neither ramp is carrying the
+   distinction alone. ---- */
+:root[data-priority-ramp="cbf"] {
+  --emergency: #d7263d;
+  --priority: #e8871e;
+  --available: #0072b2;
+  --busy: #f0e442;
+  --on-task: #56b4e9;
+  --offline: #757575;
+}
+
+/* ---- surface: glow — off by default (flatter, easier on a long night
+   shift); on adds a soft accent-coloured glow to the elements that are
+   already accent-coloured, never introduces the accent anywhere new. ---- */
+:root[data-glow="on"] .btn.primary { box-shadow: 0 0 18px -3px color-mix(in srgb, var(--accent) 55%, transparent); }
+:root[data-glow="on"] .btn.ok { box-shadow: 0 0 18px -3px rgba(16,185,129,.55); }
+:root[data-glow="on"] .icon-rail a.active { box-shadow: inset 3px 0 0 var(--accent), 0 0 22px -6px color-mix(in srgb, var(--accent) 45%, transparent); }
+:root[data-glow="on"] .row.sel { box-shadow: inset 3px 0 0 var(--accent), 0 0 18px -8px color-mix(in srgb, var(--accent) 40%, transparent); }
+
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
   margin: 0; color: var(--ink);
-  background: var(--bg);
+  background:
+    radial-gradient(1100px 550px at 12% -12%, color-mix(in srgb, var(--bloom-color) calc(var(--bloom-opacity) * 100%), transparent), transparent 60%),
+    var(--bg);
   font-family: var(--font); font-size: 14px; line-height: 1.45;
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
 }
@@ -53,7 +149,7 @@ a { color: var(--accent); }
 /* ---- shell ---- */
 .topbar {
   display: flex; align-items: center; gap: 14px;
-  padding: 12px 20px; background: var(--panel);
+  padding: 12px 20px; background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur));
   border-bottom: 1px solid var(--line); position: relative; z-index: 2;
 }
 .topbar .brand {
@@ -102,7 +198,7 @@ a { color: var(--accent); }
 .user-block .who .role { font-size: 10px; letter-spacing: .07em; color: var(--ink-dim); text-transform: uppercase; }
 
 .panel {
-  background: var(--panel);
+  background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur));
   border: 1px solid var(--line); border-radius: var(--radius);
   min-height: 0; display: flex; flex-direction: column;
 }
@@ -127,6 +223,7 @@ a { color: var(--accent); }
 @keyframes dot-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
 @keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 @media (prefers-reduced-motion: reduce) { .s-EMERGENCY, .s-AVAILABLE, .s-ON_TASK, .s-EN_ROUTE, .s-ON_SCENE, .s-ONLINE, .s-BUSY, .s-PRIORITY { animation: none; } }
+:root[data-motion="reduce"] .s-EMERGENCY, :root[data-motion="reduce"] .s-AVAILABLE, :root[data-motion="reduce"] .s-ON_TASK, :root[data-motion="reduce"] .s-EN_ROUTE, :root[data-motion="reduce"] .s-ON_SCENE, :root[data-motion="reduce"] .s-ONLINE, :root[data-motion="reduce"] .s-BUSY, :root[data-motion="reduce"] .s-PRIORITY { animation: none; }
 .txt-AVAILABLE { color: var(--available); }
 .txt-ON_TASK, .txt-EN_ROUTE, .txt-ON_SCENE { color: var(--on-task); }
 .txt-BUSY { color: var(--busy); }
@@ -147,7 +244,7 @@ a { color: var(--accent); }
    look either way. */
 .icon-rail {
   position: fixed; left: 0; top: 0; bottom: 0; width: 228px; z-index: 40;
-  background: var(--panel); border-right: 1px solid var(--line);
+  background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur)); border-right: 1px solid var(--line);
   display: flex; flex-direction: column; padding: 0 0 16px; overflow-y: auto;
 }
 .rail-brand { display: flex; align-items: center; padding: 18px 18px 16px; flex: none; }
@@ -190,6 +287,7 @@ a { color: var(--accent); }
 .row.alarm { background: #2a1113; animation: pulse 1.1s infinite; }
 @keyframes pulse { 50% { background: #431417; } }
 @media (prefers-reduced-motion: reduce) { .row.alarm { animation: none; } }
+:root[data-motion="reduce"] .row.alarm { animation: none; }
 
 /* ---- controls ---- */
 .btn {
@@ -241,7 +339,7 @@ label { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .1e
   animation: fade-in .15s var(--ease);
 }
 .modal {
-  background: var(--panel); border: 1px solid var(--line);
+  background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur)); border: 1px solid var(--line);
   border-radius: var(--radius); width: min(520px, 100%); max-height: 90vh; overflow: auto;
   box-shadow: var(--shadow-lg); animation: modal-in .18s var(--ease);
 }
@@ -251,6 +349,7 @@ label { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .1e
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes modal-in { from { opacity: 0; transform: translateY(6px) scale(.98); } }
 @media (prefers-reduced-motion: reduce) { .modal-back, .modal { animation: none; } }
+:root[data-motion="reduce"] .modal-back, :root[data-motion="reduce"] .modal { animation: none; }
 
 /* ---- map (Leaflet, dark tiles) ---- */
 .map { flex: 1; position: relative; background: #14161c; }

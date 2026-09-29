@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — dashboard</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Dashboard">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { display: flex; height: 100vh; overflow: hidden; padding-left: 228px; }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .page-body { flex: 1; overflow: auto; padding: 24px 28px; }
+  .page-head h1 { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .page-head p { margin: 4px 0 0; color: var(--ink-dim); font-size: 13px; }
+
+  .quick-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 24px; }
+  .qa-btn {
+    display: flex; align-items: center; gap: 10px; background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; text-decoration: none; color: var(--ink);
+    font-weight: 600; font-size: 13px; transition: border-color .12s var(--ease);
+  }
+  .qa-btn:hover { border-color: var(--accent-dim); }
+  .qa-btn svg { width: 18px; height: 18px; color: var(--accent); flex: none; }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  .stat-card { background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur)); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+  .stat-card .label { font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); }
+  .stat-card .num { font-size: 32px; font-weight: 800; letter-spacing: -.02em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .stat-card .num.crit { color: var(--emergency); }
+  .stat-card .sub { color: var(--ink-dim); font-size: 11.5px; margin-top: 2px; }
+  .stat-card .breakdown { display: flex; gap: 4px; margin-top: 12px; height: 6px; border-radius: 3px; overflow: hidden; background: var(--panel-3); }
+  .stat-card .breakdown span { display: block; height: 100%; }
+  .stat-card .legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; font-size: 10.5px; color: var(--ink-dim); }
+  .stat-card .legend b { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 4px; vertical-align: 1px; }
+
+  .cols { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  .section-card { background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur)); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 18px; }
+  .section-card > header { padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); font-weight: 700; }
+  .section-card .body { padding: 4px 16px 12px; }
+  .list-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
+  .list-row:last-child { border-bottom: none; }
+  .list-row .t { color: var(--ink-dim); font-family: var(--mono); font-size: 11px; min-width: 52px; }
+  .empty-note { color: var(--ink-dim); padding: 20px 0; text-align: center; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<div class="icon-rail">
+  <div class="rail-brand">
+    <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon">
+  </div>
+
+  <div class="rail-section">Operations</div>
+  <a href="/dashboard.html" class="active" title="Dashboard"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="3" width="8" height="5" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="10" width="8" height="11" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg><span>Dashboard</span></a>
+  <a href="/control.html" id="railControl" title="Control room" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Control room</span></a>
+  <a href="/log.html" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
+
+  <div class="rail-section">HR</div>
+  <a href="/rota.html" title="Rota"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="17" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 3v3M16 3v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Rota</span></a>
+
+  <div class="rail-section" id="railSystemSection" hidden>System</div>
+  <a href="/admin.html" id="railAdmin" title="Admin" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 4.5l1 1.8 2 .4-1.4 1.5.3 2-1.9-.9-1.9.9.3-2-1.4-1.5 2-.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>Admin</span></a>
+  <a href="/settings.html" title="My settings"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>My settings</span></a>
+</div>
+
+<main>
+  <div class="topbar">
+    <span class="link-net" id="net">link down</span>
+    <span class="spacer"></span>
+    <span class="clock" id="clock">--:--:--</span>
+    <div class="user-block">
+      <span class="avatar" id="avatar"></span>
+      <span class="who">
+        <span class="name" id="whoName"></span>
+        <span class="role" id="whoRole"></span>
+      </span>
+    </div>
+    <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
+  </div>
+
+  <div class="page-body">
+    <div class="page-head">
+      <h1 id="pageTitle">Dashboard</h1>
+      <p id="pageSub"></p>
+    </div>
+
+    <div class="quick-actions" id="quickActions"></div>
+
+    <div class="stat-grid" id="statGrid"></div>
+
+    <div class="cols">
+      <div>
+        <div class="section-card">
+          <header>Fleet &amp; coverage</header>
+          <div class="body" id="fleetBody"></div>
+        </div>
+        <div class="section-card" id="systemCard" style="display:none">
+          <header>System</header>
+          <div class="body" id="systemBody"></div>
+        </div>
+      </div>
+      <div class="section-card">
+        <header>Recent activity</header>
+        <div class="body" id="activityBody"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="/app.js"></script>
+<script>
+const { api, el, esc } = CCCS;
+if (!CCCS.requireAuth(['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+const isAdmin = me.role === 'SYSTEM_ADMIN';
+
+el('#whoName').textContent = me.display_name;
+el('#whoRole').textContent = me.role.replace('_', ' ');
+el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
+el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
+
+el('#railControl').hidden = false;
+if (isAdmin) { el('#railSystemSection').hidden = false; el('#railAdmin').hidden = false; }
+
+el('#pageSub').textContent = isAdmin
+  ? `Welcome back, ${me.display_name} — here's how the whole system looks right now.`
+  : `Welcome back, ${me.display_name} — here's what's live right now.`;
+
+const ICONS = {
+  control: '<path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  rota: '<rect x="3" y="4" width="18" height="17" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 3v3M16 3v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  log: '<path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+  admin: '<path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 4.5l1 1.8 2 .4-1.4 1.5.3 2-1.9-.9-1.9.9.3-2-1.4-1.5 2-.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
+};
+function qaBtn(href, icon, label) {
+  return `<a class="qa-btn" href="${href}"><svg viewBox="0 0 24 24" fill="none">${ICONS[icon]}</svg>${esc(label)}</a>`;
+}
+el('#quickActions').innerHTML = [
+  qaBtn('/control.html', 'control', 'Open control room'),
+  qaBtn('/rota.html', 'rota', 'Rota'),
+  qaBtn('/log.html', 'log', 'Event log'),
+  ...(isAdmin ? [qaBtn('/admin.html', 'admin', 'Admin')] : []),
+].join('');
+
+function statCard(label, num, sub, opts = {}) {
+  const breakdown = opts.breakdown && opts.breakdown.length
+    ? `<div class="breakdown">${opts.breakdown.map((b) => `<span style="background:${b.color};width:${b.pct}%"></span>`).join('')}</div>
+       <div class="legend">${opts.breakdown.map((b) => `<span><b style="background:${b.color}"></b>${esc(b.label)} ${b.value}</span>`).join('')}</div>`
+    : '';
+  return `<div class="stat-card"><div class="label">${esc(label)}</div><div class="num${opts.crit ? ' crit' : ''}">${num}</div><div class="sub">${esc(sub)}</div>${breakdown}</div>`;
+}
+function pct(n, total) { return total ? Math.round((n / total) * 1000) / 10 : 0; }
+
+async function load() {
+  const [state, vehicles, shifts] = await Promise.all([
+    api('GET', '/api/state'),
+    api('GET', '/api/vehicles'),
+    api('GET', `/api/shifts?from=${encodeURIComponent(new Date(new Date().setHours(0, 0, 0, 0)).toISOString())}&to=${encodeURIComponent(new Date(new Date().setHours(23, 59, 59, 999)).toISOString())}`),
+  ]);
+  const users = isAdmin ? await api('GET', '/api/users') : [];
+
+  const openJobs = state.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status));
+  const jobsByPri = { RED: 0, AMBER: 0, GREEN: 0, ROUTINE: 0 };
+  openJobs.forEach((j) => { jobsByPri[j.priority] = (jobsByPri[j.priority] || 0) + 1; });
+  const jobColor = { RED: 'var(--emergency)', AMBER: 'var(--priority)', GREEN: 'var(--available)', ROUTINE: 'var(--offline)' };
+
+  const openVisits = state.site_visits.filter((v) => !['COMPLETED', 'CANCELLED'].includes(v.status));
+  const missedVisits = state.site_visits.filter((v) => v.status === 'MISSED');
+
+  const personnelActive = state.personnel.filter((p) => p.employment_status === 'ACTIVE');
+
+  const mdtByStatus = { online: 0, offline: 0 };
+  state.mdts.forEach((m) => { m.connected ? mdtByStatus.online++ : mdtByStatus.offline++; });
+
+  el('#statGrid').innerHTML = [
+    statCard('Open jobs', openJobs.length, `${state.emergencies.length ? state.emergencies.length + ' emergency' : 'none critical'}`, {
+      breakdown: ['RED', 'AMBER', 'GREEN', 'ROUTINE'].filter((k) => jobsByPri[k]).map((k) => ({ color: jobColor[k], pct: pct(jobsByPri[k], openJobs.length) || 2, label: k, value: jobsByPri[k] })),
+    }),
+    statCard('Active emergencies', state.emergencies.length, state.emergencies.length ? 'needs acknowledgement' : 'all clear', { crit: state.emergencies.length > 0 }),
+    statCard('Open patrol visits', openVisits.length, missedVisits.length ? `${missedVisits.length} missed` : 'on schedule', { crit: missedVisits.length > 0 }),
+    statCard('Personnel', personnelActive.length, `${state.mdts.length} MDTs · ${mdtByStatus.online} online`),
+  ].join('');
+
+  el('#fleetBody').innerHTML = `
+    <div class="list-row"><span style="flex:1">MDTs online</span><b>${mdtByStatus.online} / ${state.mdts.length}</b></div>
+    <div class="list-row"><span style="flex:1">Vehicles in fleet</span><b>${vehicles.length}</b></div>
+    <div class="list-row"><span style="flex:1">Shifts today</span><b>${shifts.length}</b></div>
+    <div class="list-row"><span style="flex:1">Clocked in now</span><b>${shifts.filter((s) => s.status === 'CLOCKED_IN').length}</b></div>`;
+  const overdueVehicles = vehicles.filter((v) => v.service_due_at && Date.parse(v.service_due_at) < Date.now());
+  if (overdueVehicles.length) {
+    el('#fleetBody').innerHTML += `<div class="list-row"><span style="flex:1;color:var(--emergency)">Vehicles overdue for service</span><b style="color:var(--emergency)">${overdueVehicles.length}</b></div>`;
+  }
+
+  el('#activityBody').innerHTML = state.events.length
+    ? state.events.slice(-10).reverse().map((e) => `<div class="list-row"><span class="t">${esc(new Date(e.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}</span><span>${esc(e.summary)}</span></div>`).join('')
+    : '<p class="empty-note">Nothing logged yet today.</p>';
+
+  if (isAdmin) {
+    el('#systemCard').style.display = '';
+    const byRole = {};
+    users.forEach((u) => { byRole[u.role] = (byRole[u.role] || 0) + 1; });
+    el('#systemBody').innerHTML = Object.entries(byRole).map(([role, n]) =>
+      `<div class="list-row"><span style="flex:1">${esc(role.replace('_', ' '))} accounts</span><b>${n}</b></div>`).join('')
+      + `<div class="list-row"><span style="flex:1">Sites under contract</span><b>${state.sites.length}</b></div>`;
+  }
+}
+load().catch((e) => { el('#activityBody').innerHTML = `<p class="empty-note">${esc(e.message)}</p>`; });
+
+CCCS.bus((up) => {
+  const n = el('#net');
+  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
+});
+</script>
+</body>
+</html>

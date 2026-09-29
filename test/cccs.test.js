@@ -816,6 +816,31 @@ test('a beat is created against a site, referenced by a patrol schedule and the 
   assert.equal((await call('DELETE', `/api/beats/${beat.body.id}`, undefined, adminT)).status, 200);
 });
 
+/* ---------------- UI preferences ---------------- */
+test('a login response includes default ui_prefs, and PATCH /api/me/preferences updates only your own account', async () => {
+  const login = await call('POST', '/api/auth/login', { username: 'dwhitfield', password: 'field123' });
+  assert.equal(login.body.user.ui_prefs.theme, 'harbour');
+  assert.equal(login.body.user.ui_prefs.mode, 'system');
+  assert.equal(login.body.user.ui_prefs.sound, true);
+
+  const updated = await call('PATCH', '/api/me/preferences', { theme: 'cosmic', mode: 'dark', glow: true, sound: false }, danT);
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.ui_prefs.theme, 'cosmic');
+  assert.equal(updated.body.ui_prefs.mode, 'dark');
+  assert.equal(updated.body.ui_prefs.glow, true);
+  assert.equal(updated.body.ui_prefs.sound, false);
+  assert.equal(updated.body.ui_prefs.panels, 'translucent', 'fields not sent keep their previous value');
+
+  assert.equal((await call('PATCH', '/api/me/preferences', { theme: 'not-a-real-theme' }, danT)).status, 400, 'an invalid value is rejected, not silently swapped for the default');
+
+  const dispPrefs = await call('PATCH', '/api/me/preferences', { theme: 'graphite' }, dispT);
+  assert.equal(dispPrefs.body.ui_prefs.theme, 'graphite');
+  const danAgain = await call('POST', '/api/auth/login', { username: 'dwhitfield', password: 'field123' });
+  assert.equal(danAgain.body.user.ui_prefs.theme, 'cosmic', "one account's preference change does not touch another's");
+
+  await call('PATCH', '/api/me/preferences', { theme: 'harbour', mode: 'system', glow: false, sound: true }, danT);
+});
+
 /* ---------------- offline replay safety ---------------- */
 test('a replayed write returns the first result instead of applying twice', async () => {
   const key = 'offline-replay-test-1';

@@ -11,9 +11,32 @@ const CCCS = (() => {
   // with windows opened via window.open(). That's what a GoldenLayout
   // "popout" panel is: without this, the new window has no session and its
   // auth check fails before it ever renders anything, i.e. a blank window.
-  function setSession(s) { session = s; sessionStorage.setItem(KEY, JSON.stringify(s)); try { localStorage.setItem(KEY + '.mirror', JSON.stringify(s)); } catch {} }
+  function setSession(s) { session = s; sessionStorage.setItem(KEY, JSON.stringify(s)); try { localStorage.setItem(KEY + '.mirror', JSON.stringify(s)); } catch {} applyTheme(s && s.user && s.user.ui_prefs); }
   function clearSession() { session = null; sessionStorage.removeItem(KEY); try { localStorage.removeItem(KEY + '.mirror'); } catch {} }
   function getSession() { return session; }
+
+  /** Stamps the operator's theme choice onto <html> as data-* attributes,
+   * which console.css keys every themed colour off. /theme-init.js does the
+   * same thing synchronously in <head>, before this file has even loaded,
+   * so the page never paints in the wrong theme first — this call exists
+   * to keep the DOM in sync after login and after a live preference change
+   * (public/settings.html calls it directly after PATCH /api/me/preferences
+   * succeeds, for instant feedback with no reload). */
+  function applyTheme(prefs) {
+    const d = document.documentElement;
+    if (!d) return; // stubbed DOM in the offline-outbox test harness, not a real page
+    const p = prefs || {};
+    const set = (attr, val) => { if (val) d.setAttribute(attr, val); else d.removeAttribute(attr); };
+    set('data-theme', p.theme);
+    set('data-mode', p.mode && p.mode !== 'system' ? p.mode : null);
+    set('data-bloom', p.bloom);
+    set('data-panels', p.panels);
+    set('data-corners', p.corners);
+    set('data-glow', p.glow ? 'on' : null);
+    set('data-priority-ramp', p.priority_ramp);
+    set('data-motion', p.reduce_motion ? 'reduce' : null);
+  }
+  if (session) applyTheme(session.user && session.user.ui_prefs);
 
   async function api(method, path, body, opts = {}) {
     const res = await fetch(path, {
@@ -424,5 +447,5 @@ const CCCS = (() => {
     },
   };
 
-  return { api, send, outbox, login, getSession, setSession, clearSession, bus, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth };
+  return { api, send, outbox, login, getSession, setSession, clearSession, applyTheme, bus, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth };
 })();

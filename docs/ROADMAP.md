@@ -96,6 +96,33 @@ patrol schedule form (scoped to the schedule's site); control room and
 `officer.html` show the beat name alongside the site wherever a visit
 appears. Covered by tests. Needs the same deploy treatment.
 
+**Dashboard + theming — done, not yet deployed.** Not from the roadmap list
+above — a direct request once the roadmap sweep landed. Two pieces:
+
+- A real landing page, `public/dashboard.html`: `SYSTEM_ADMIN`/`DISPATCHER`/
+  `SUPERVISOR` land here after login instead of straight into
+  `control.html`; live counts (jobs by priority, emergencies, patrol
+  visits, personnel/fleet), quick-action buttons, and an admin-only
+  System panel. Control room becomes a sidebar link, gated to roles that
+  have it — `FIELD_USER`/`MDT_USER` are unaffected, still landing on their
+  own terminal directly.
+- Six named themes (Cosmic/Midnight/Harbour/Rosewood/Terminal/Graphite,
+  matching a reference product's default look and settings page as
+  closely as practical), an independent light/dark/system toggle, four
+  surface knobs (field bloom, panel translucency, corner radius, glow),
+  and a colour-blind-safe priority ramp — all in a new `public/settings.html`,
+  stored per-user (`users.ui_prefs`, `PATCH /api/me/preferences`) so they
+  follow a login to any workstation. The priority/status colour set stays
+  outside the theme system entirely — see the comment at the top of
+  `console.css`'s theming section for why. `public/theme-init.js` stamps
+  the cached preference onto `<html>` before `console.css` paints, so nothing
+  flashes the default theme first.
+
+Covered by a new preferences test. Verified live in-browser: every theme
+switch, surface knob, and the colour-blind ramp visibly took effect
+immediately and survived a full page reload before this was deployed.
+Needs the same deploy treatment as the rest.
+
 ---
 
 ## Deploying Phase A
