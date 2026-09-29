@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — reports</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { min-height: 100vh; }
+  .rp-top { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .rp-top h1 { font-size: 16px; margin: 0; flex: 1; }
+  .rp-wrap { display: grid; grid-template-columns: minmax(280px, 420px) 1fr; gap: 16px; padding: 16px; }
+  .rp-wrap .panel .body { padding: 12px; }
+  .rp-filters { display: flex; gap: 8px; margin-bottom: 8px; }
+  .rp-filters select { flex: 1; }
+  .rp-note { font-size: 12px; color: var(--ink-dim); margin: 8px 0 0; }
+  @media (max-width: 760px) {
+    .rp-wrap { grid-template-columns: 1fr; padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="rp-top">
+  <h1>Reports</h1>
+  <span class="dim" id="who"></span>
+  <a class="btn" id="back" href="/index.html">Back</a>
+</div>
+<div class="rp-wrap">
+  <section class="panel">
+    <header>Filed reports</header>
+    <div class="body">
+      <div class="rp-filters">
+        <select id="fDef"><option value="">All report types</option></select>
+        <select id="fSubject">
+          <option value="">Anything</option>
+          <option value="JOB">Jobs</option>
+          <option value="SITE_VISIT">Patrol visits</option>
+          <option value="SITE">Sites</option>
+          <option value="PERSONNEL">People</option>
+          <option value="VEHICLE">Vehicles</option>
+        </select>
+      </div>
+      <div id="list"><p class="dim">Loading…</p></div>
+      <p class="rp-note">You see the reports you filed, and any others your role or a named grant entitles you to. Restricted reports you are not named on are not listed — not even as hidden rows.</p>
+    </div>
+  </section>
+  <section class="panel">
+    <header>Report</header>
+    <div class="body" id="detail"><p class="dim">Choose a report.</p></div>
+  </section>
+</div>
+
+<script src="/app.js"></script>
+<script src="/forms-ui.js"></script>
+<script>
+const { api, el, esc } = CCCS;
+// Every role: a safeguarding lead may be an officer. What each person can
+// actually read is decided by the server, not by this page.
+if (!CCCS.requireAuth(['FIELD_USER', 'MDT_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+el('#who').textContent = me.display_name;
+el('#back').href = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role) ? '/control.html' : me.role === 'MDT_USER' ? '/mdt.html' : '/officer.html';
+
+async function open(id) {
+  el('#detail').innerHTML = '<p class="dim">Loading…</p>';
+  try { CCCSForms.view(el('#detail'), await api('GET', `/api/form-submissions/${id}`)); history.replaceState(null, '', `?id=${id}`); }
+  catch (e) { el('#detail').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+async function refresh() {
+  const q = new URLSearchParams({ limit: '200' });
+  if (el('#fDef').value) q.set('definition_id', el('#fDef').value);
+  if (el('#fSubject').value) q.set('subject_type', el('#fSubject').value);
+  try { CCCSForms.list(el('#list'), await api('GET', `/api/form-submissions?${q}`), open, 'No reports match.'); }
+  catch (e) { el('#list').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+(async () => {
+  const defs = await api('GET', '/api/form-definitions');
+  el('#fDef').innerHTML += defs.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+  el('#fDef').onchange = refresh; el('#fSubject').onchange = refresh;
+  await refresh();
+  const id = new URLSearchParams(location.search).get('id');
+  if (id) open(Number(id));
+})();
+</script>
+</body>
+</html>

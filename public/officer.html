@@ -104,6 +104,14 @@
     </div>
   </section>
 
+  <section class="panel">
+    <header>Reports</header>
+    <div class="body" style="padding:12px">
+      <div class="btn-row" style="margin:0 0 8px"><button class="btn primary" id="bFileReport">File a report</button></div>
+      <div id="myReports"><p class="dim">Loading…</p></div>
+    </div>
+  </section>
+
   <section class="panel hide" id="equipmentPanel">
     <header>My equipment</header>
     <div class="body" id="equipmentBody" style="padding:12px"></div>
@@ -138,6 +146,7 @@
 <input type="file" id="fuelPhotoInput" accept="image/*" capture="environment" class="hide">
 
 <script src="/app.js"></script>
+<script src="/forms-ui.js"></script>
 <script>
 const { api, el, esc } = CCCS;
 if (!CCCS.requireAuth(['FIELD_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
@@ -621,6 +630,70 @@ const bus = CCCS.bus((up) => {
   if (up) CCCS.outbox.flush();
 });
 
+/* ---- Reports (configurable forms) -----------------------------------
+ * What an officer can file against is what they are actually dealing with:
+ * their current job or visit, the site either one is at, their vehicle, or
+ * any contracted site. The server re-checks every one of these (an officer
+ * can only file against a job or visit assigned to them). */
+let formDefs = [], allSites = null;
+async function refreshReports() {
+  try {
+    const mine = await api('GET', '/api/form-submissions?limit=10');
+    CCCSForms.list(el('#myReports'), mine, openReport, 'You have not filed any reports yet.');
+  } catch (e) { el('#myReports').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+async function openReport(id) {
+  modal('Report', '<div id="rView"><p class="dim">Loading…</p></div>', async () => {
+    try { CCCSForms.view(el('#rView'), await api('GET', `/api/form-submissions/${id}`)); }
+    catch (e) { el('#rView').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  });
+}
+async function reportSubjects() {
+  if (!allSites) allSites = await api('GET', '/api/sites');
+  const out = [];
+  if (job) out.push({ type: 'JOB', id: job.id, label: `${job.reference} — ${job.location}` });
+  if (visit) out.push({ type: 'SITE_VISIT', id: visit.id, label: `${visit.reference} — ${visit.site_name || ''}` });
+  const hereSiteIds = [job && job.site_id, visit && visit.site_id].filter(Boolean);
+  for (const sid of [...new Set(hereSiteIds)]) { const st = allSites.find((x) => x.id === sid); if (st) out.push({ type: 'SITE', id: st.id, label: st.name }); }
+  if (person && person.vehicle_id) out.push({ type: 'VEHICLE', id: person.vehicle_id, label: person.vehicle || 'My vehicle' });
+  for (const st of allSites) if (!hereSiteIds.includes(st.id)) out.push({ type: 'SITE', id: st.id, label: st.name });
+  return out;
+}
+el('#bFileReport').onclick = async () => {
+  if (!formDefs.length) formDefs = await api('GET', '/api/form-definitions');
+  const subjects = await reportSubjects();
+  modal('File a report', `
+    <label>Report</label>
+    <select id="rDef">${formDefs.map((d) => `<option value="${d.id}">${esc(d.name)}${d.visibility === 'RESTRICTED' ? ' (restricted)' : ''}</option>`).join('')}</select>
+    <p class="dim" id="rDefDesc" style="font-size:12.5px"></p>
+    <label>About</label>
+    <select id="rSubject"></select>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="rNext">Continue</button></div>
+    <div id="rFill"></div>`, () => {
+    const paintSubjects = () => {
+      const d = formDefs.find((x) => x.id === Number(el('#rDef').value));
+      el('#rDefDesc').textContent = d.description || '';
+      const ok = subjects.filter((sj) => d.subject_types.includes(sj.type));
+      el('#rSubject').innerHTML = ok.length
+        ? ok.map((sj, i) => `<option value="${i}">${esc(CCCSForms.SUBJECT_LABEL[sj.type])}: ${esc(sj.label)}</option>`).join('')
+        : '<option value="">Nothing you are assigned to fits this report</option>';
+      el('#rSubject').dataset.list = JSON.stringify(ok);
+    };
+    el('#rDef').onchange = paintSubjects; paintSubjects();
+    el('#rNext').onclick = () => {
+      const d = formDefs.find((x) => x.id === Number(el('#rDef').value));
+      const ok = JSON.parse(el('#rSubject').dataset.list || '[]');
+      const subject = ok[Number(el('#rSubject').value)];
+      if (!subject) return;
+      ['#rDef', '#rSubject', '#rNext'].forEach((q) => (el(q).disabled = true));
+      CCCSForms.fill(el('#rFill'), d, subject, {
+        signerName: (person && person.name) || me.display_name,
+        onDone: (sub) => { closeModal(); el('#alertHost').innerHTML = `<p class="dim">Report ${esc(sub.reference)} filed.</p>`; refreshReports(); },
+      });
+    };
+  });
+};
+
 async function boot() {
   const all = await api('GET', '/api/personnel');
   person = all.find((p) => p.id === me.personnel_id) || null;
@@ -633,6 +706,7 @@ async function boot() {
   paintVisit();
   await refreshShifts();
   await refreshEquipment();
+  await refreshReports();
 }
 boot();
 

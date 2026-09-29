@@ -39,6 +39,9 @@ const TABLES = [
   // whom, from where, and with what outcome. Losing it on restart would leave
   // a gap exactly where an incident review would look.
   'dial_log',
+  // Filed paperwork is evidence, and form_grants records who may read the
+  // restricted kind — neither can be allowed to vanish on a restart.
+  'form_definitions', 'form_submissions', 'form_grants',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */
