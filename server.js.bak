@@ -22,8 +22,6 @@ const TOKEN_TTL_MS = Number(process.env.TOKEN_TTL_MS || 8 * 60 * 60 * 1000);
 // Vehicle terminals stay signed in for the shift (or longer) — crew sign in
 // and out of the vehicle separately, without touching this session at all.
 const MDT_TOKEN_TTL_MS = Number(process.env.MDT_TOKEN_TTL_MS || 24 * 60 * 60 * 1000);
-const DIAL_RINGS_OPERATOR_FIRST = process.env.DIAL_RINGS_OPERATOR_FIRST !== 'off';
-
 const SIMULATION = process.env.SIMULATION !== 'off';
 
 const MS_TENANT_ID = process.env.MS_TENANT_ID || '';
@@ -33,7 +31,6 @@ const MS_REDIRECT_URI = process.env.MS_REDIRECT_URI || '';
 const MS_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && MS_REDIRECT_URI);
 const { verifyMicrosoftIdToken } = require('./msauth.js');
 const webpush = require('./webpush.js');
-const sms = require('./sms.js');
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@echeloncic.com';
 
 let SECRET = process.env.AUTH_SECRET;
@@ -85,7 +82,6 @@ const db = {
   locations: [], emergency_events: [], audit_logs: [],
   push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], assets: [],
   passdown_logs: [], fuel_logs: [], asset_checkouts: [], maintenance_logs: [], beats: [],
-  dial_log: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -2821,8 +2817,6 @@ route('POST', '/api/shifts/:id/clock-out', ALL, ({ params, user }) => {
   logEvent('shift.clocked_out', `${p ? p.name : 'PERSON'} CLOCKED OUT`, { shift_id: s.id, personnel_id: s.personnel_id });
   return publicShift(s);
 });
-require('./routes-contact.js')({ route, httpError, CONTROL, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms });
-
 
 route('GET', '/api/config', ALL, () => ({
   audio: process.env.AUDIO !== 'off',
