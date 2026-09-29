@@ -103,6 +103,15 @@
     </div>
   </section>
 
+  <section class="panel hide" id="passdownPanel">
+    <header>Passdown — <span id="passdownSite"></span></header>
+    <div class="body" style="padding:12px">
+      <textarea id="passdownNote" rows="2" placeholder="Note for the next person on site"></textarea>
+      <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="passdownSend">Add note</button></div>
+      <div id="passdownLog" style="margin-top:10px"></div>
+    </div>
+  </section>
+
   <section class="panel">
     <header>Message control</header>
     <div class="body" style="padding:12px">
@@ -193,12 +202,17 @@ function openWelfareModal() {
 
 let shifts = [];
 function fmtShiftTime(iso) { return new Date(iso).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); }
-function paintShift() {
+function currentShift() {
   const now = Date.now();
   const upcoming = shifts.filter((s) => !['CANCELLED'].includes(s.status)).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
-  const current = upcoming.find((s) => s.status === 'CLOCKED_IN')
-    || upcoming.find((s) => ['SCHEDULED', 'CONFIRMED'].includes(s.status) && Date.parse(s.starts_at) - 3600000 <= now && Date.parse(s.ends_at) >= now);
-  const rest = upcoming.filter((s) => s !== current && Date.parse(s.ends_at) >= now).slice(0, 4);
+  return upcoming.find((s) => s.status === 'CLOCKED_IN')
+    || upcoming.find((s) => ['SCHEDULED', 'CONFIRMED'].includes(s.status) && Date.parse(s.starts_at) - 3600000 <= now && Date.parse(s.ends_at) >= now)
+    || null;
+}
+function paintShift() {
+  const current = currentShift();
+  const upcoming = shifts.filter((s) => !['CANCELLED'].includes(s.status)).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
+  const rest = upcoming.filter((s) => s !== current && Date.parse(s.ends_at) >= Date.now()).slice(0, 4);
 
   if (!current && !rest.length) { el('#shiftBody').innerHTML = '<p class="dim">No shift scheduled.</p>'; return; }
 
@@ -219,6 +233,7 @@ function paintShift() {
   el('#shiftBody').innerHTML = html;
   if (el('#shClockIn')) el('#shClockIn').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-in`, {}); await refreshShifts(); };
   if (el('#shClockOut')) el('#shClockOut').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-out`, {}); await refreshShifts(); };
+  refreshPassdown();
 }
 async function refreshShifts() {
   if (!person) return;
@@ -226,6 +241,36 @@ async function refreshShifts() {
   shifts = await api('GET', `/api/shifts?personnel_id=${person.id}&from=${encodeURIComponent(from)}`);
   paintShift();
 }
+
+let passdownSiteId = null, passdownLogs = [];
+function currentPassdownSite() {
+  if (visit && visit.site_id) return { id: visit.site_id, name: visit.site_name };
+  const shift = currentShift();
+  if (shift && shift.site_id) return { id: shift.site_id, name: shift.site_name };
+  return null;
+}
+function paintPassdownLogs() {
+  el('#passdownLog').innerHTML = passdownLogs.length
+    ? passdownLogs.map((l) => `<div class="field"><span>${esc(l.author_name)} · ${esc(new Date(l.created_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span><div>${esc(l.body)}</div></div>`).join('')
+    : '<p class="dim">No handover notes yet.</p>';
+}
+async function refreshPassdown() {
+  const site = currentPassdownSite();
+  if (!site) { el('#passdownPanel').classList.add('hide'); passdownSiteId = null; return; }
+  passdownSiteId = site.id;
+  el('#passdownSite').textContent = site.name || '—';
+  el('#passdownPanel').classList.remove('hide');
+  try { passdownLogs = await api('GET', `/api/passdown-logs?site_id=${site.id}`); } catch { passdownLogs = []; }
+  paintPassdownLogs();
+}
+el('#passdownSend').onclick = async () => {
+  const body = el('#passdownNote').value.trim();
+  if (!body || !passdownSiteId) return;
+  const log = await api('POST', '/api/passdown-logs', { site_id: passdownSiteId, body });
+  el('#passdownNote').value = '';
+  passdownLogs.unshift(log);
+  paintPassdownLogs();
+};
 
 function paintJob() {
   if (!job) {
@@ -292,6 +337,7 @@ async function setJobStatus(status) {
 function paintVisit() {
   if (!visit) {
     el('#visitBody').innerHTML = '<p class="dim">No patrol visit assigned.</p>';
+    refreshPassdown();
     return;
   }
   const mine = visit.resources.find((r) => r.personnel === (person && person.name));
@@ -344,6 +390,7 @@ function paintVisit() {
   el('#vEnr').onclick = () => setVisitStatus('EN_ROUTE');
   el('#vScene').onclick = () => setVisitStatus('ON_SCENE');
   el('#vDone').onclick = () => setVisitStatus('COMPLETED');
+  refreshPassdown();
 }
 async function setVisitStatus(status) {
   const r = await CCCS.send('PATCH', `/api/site-visits/${visit.id}`, { status }, `${visit.reference} → ${status}`);

@@ -783,6 +783,13 @@ function siteForm(s) {
       <label>On-scene checklist</label>
       <div id="siteChecklistRows"></div>
       <button type="button" class="btn" id="sAddTask" style="align-self:flex-start;padding:6px 12px;font-size:12px">+ Add task</button>
+      ${s ? `
+      <label>Passdown — shift-handover notes</label>
+      <div id="sPassdownLog" class="dim">Loading…</div>
+      <div style="display:flex;gap:8px">
+        <input id="sPassdownNote" autocomplete="off" placeholder="Note for the next person on site" style="flex:1">
+        <button type="button" class="btn" id="sPassdownAdd">Add</button>
+      </div>` : ''}
       <p class="dim" id="sError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
@@ -790,6 +797,21 @@ function siteModal(s) {
   modal(s ? `Edit — ${s.name}` : 'New site', siteForm(s), () => {
     const editor = checklistEditor(s ? (s.checklist || []) : []);
     el('#sAddTask').onclick = () => editor.add();
+    if (s) {
+      const paintPassdown = (logs) => {
+        el('#sPassdownLog').innerHTML = logs.length
+          ? `<div class="log" style="max-height:160px;overflow:auto">${logs.map((l) => `<div><span class="t">${esc(new Date(l.created_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(l.author_name)}: ${esc(l.body)}</div>`).join('')}</div>`
+          : '<p class="dim">No handover notes yet.</p>';
+      };
+      api('GET', `/api/passdown-logs?site_id=${s.id}`).then(paintPassdown).catch(() => (el('#sPassdownLog').textContent = 'Failed to load.'));
+      el('#sPassdownAdd').onclick = async () => {
+        const body = el('#sPassdownNote').value.trim();
+        if (!body) return;
+        const logs = await api('POST', '/api/passdown-logs', { site_id: s.id, body }).then(() => api('GET', `/api/passdown-logs?site_id=${s.id}`));
+        el('#sPassdownNote').value = '';
+        paintPassdown(logs);
+      };
+    }
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">

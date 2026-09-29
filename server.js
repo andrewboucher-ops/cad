@@ -81,6 +81,7 @@ const db = {
   jobs: [], job_assignments: [], messages: [], call_requests: [],
   locations: [], emergency_events: [], audit_logs: [],
   push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], assets: [],
+  passdown_logs: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -502,6 +503,10 @@ function publicAsset(a) {
   const p = a.assigned_to ? db.personnel.find((x) => x.id === a.assigned_to) : null;
   const site = a.site_id ? db.sites.find((x) => x.id === a.site_id) : null;
   return { ...a, assigned_to_name: p ? p.name : null, site_name: site ? site.name : null };
+}
+function publicPassdownLog(l) {
+  const site = db.sites.find((x) => x.id === l.site_id);
+  return { ...l, site_name: site ? site.name : null };
 }
 const callsignOf = (r) => { const c = db.callsigns.find((x) => x.id === r.callsign_id); return c ? c.name : (r.mdt_code || r.name); };
 
@@ -1822,6 +1827,9 @@ const RETENTION = {
   messages: Number(process.env.RETAIN_MESSAGES_DAYS || 180),
   // Closed jobs.
   jobs: Number(process.env.RETAIN_JOBS_DAYS || 730),
+  // Shift-handover notes — kept alongside the audit trail's horizon since
+  // they carry the same "what happened at this site" evidentiary value.
+  passdown: Number(process.env.RETAIN_PASSDOWN_DAYS || 365),
 };
 
 function pruneOlderThan(table, days, field) {
@@ -1840,6 +1848,7 @@ function retentionSweep() {
     locations: pruneOlderThan('locations', RETENTION.locations, 'at'),
     audit_logs: pruneOlderThan('audit_logs', RETENTION.audit, 'at'),
     messages: pruneOlderThan('messages', RETENTION.messages, 'sent_at'),
+    passdown_logs: pruneOlderThan('passdown_logs', RETENTION.passdown, 'created_at'),
   };
 
   // Jobs are only removed once they are finished — an open job is
@@ -2094,6 +2103,55 @@ route('DELETE', '/api/sites/:id', ADMIN, ({ params }) => {
   }
   db.sites = db.sites.filter((x) => x.id !== site.id);
   logEvent('site.deleted', `SITE ${site.name} DELETED`, { site_id: site.id });
+  return { ok: true };
+});
+
+/* Passdown logs — per-site shift-handover notes. Control can read/write any
+ * site's log; a FIELD_USER can read/write a site's log only if they've
+ * actually been assigned there (a current or past shift or site visit) — the
+ * same "were you ever posted here" test either row type already answers, so
+ * no separate roster is needed. Entries are an append-only log, like the
+ * audit trail: no edit route, a DELETE for control to correct a mistake. */
+function assertPassdownAccess(siteId, user) {
+  if (isControlRole(user.role)) return;
+  if (user.role === 'FIELD_USER' && user.personnel_id) {
+    const hasShift = db.shifts.some((s) => s.personnel_id === user.personnel_id && s.site_id === siteId);
+    const hasVisit = db.site_visits.some((v) => v.site_id === siteId
+      && (v.personnel_id === user.personnel_id || (v.additional_personnel || []).includes(user.personnel_id)));
+    if (hasShift || hasVisit) return;
+  }
+  throw httpError(403, 'not assigned to this site');
+}
+route('GET', '/api/passdown-logs', ALL, ({ query, user }) => {
+  const siteId = Number(query.get('site_id'));
+  if (!siteId) throw httpError(400, 'site_id required');
+  if (!db.sites.some((s) => s.id === siteId)) throw httpError(404, 'site not found');
+  assertPassdownAccess(siteId, user);
+  return db.passdown_logs.filter((l) => l.site_id === siteId)
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+    .map(publicPassdownLog);
+});
+route('POST', '/api/passdown-logs', ALL, ({ body, user }) => {
+  const site = db.sites.find((s) => s.id === Number(body.site_id));
+  if (!site) throw httpError(400, 'site_id must reference an existing site');
+  assertPassdownAccess(site.id, user);
+  const text = String(body.body || '').trim();
+  if (!text) throw httpError(400, 'body required');
+  const author = user.role === 'FIELD_USER' && user.personnel_id ? db.personnel.find((p) => p.id === user.personnel_id) : null;
+  const log = {
+    id: nextId('passdown_logs'), site_id: site.id, body: text.slice(0, 4000),
+    author_personnel_id: author ? author.id : null, author_name: author ? author.name : user.display_name,
+    created_at: new Date().toISOString(),
+  };
+  db.passdown_logs.push(log);
+  broadcast('passdown_log.created', publicPassdownLog(log));
+  logEvent('passdown_log.created', `PASSDOWN NOTE ADDED FOR ${site.name} BY ${log.author_name}`, { site_id: site.id, passdown_log_id: log.id });
+  return { __status: 201, __body: publicPassdownLog(log) };
+});
+route('DELETE', '/api/passdown-logs/:id', ADMIN, ({ params }) => {
+  const l = db.passdown_logs.find((x) => x.id === Number(params.id)); if (!l) throw httpError(404, 'passdown log not found');
+  db.passdown_logs = db.passdown_logs.filter((x) => x.id !== l.id);
+  logEvent('passdown_log.deleted', 'PASSDOWN NOTE DELETED', { passdown_log_id: l.id, site_id: l.site_id });
   return { ok: true };
 });
 

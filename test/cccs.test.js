@@ -651,6 +651,49 @@ test('an asset can be created, assigned to personnel, and has a unique tag', asy
   assert.equal((await call('DELETE', `/api/assets/${created.body.id}`, undefined, adminT)).status, 200);
 });
 
+/* ---------------- passdown logs ---------------- */
+test('control can read and write a site passdown log; an unassigned officer cannot', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const carlton = sites.body.find((x) => x.name === 'Carlton Retail Centre');
+
+  assert.equal((await call('GET', `/api/passdown-logs?site_id=${carlton.id}`, undefined, dispT)).status, 200);
+  const created = await call('POST', '/api/passdown-logs', { site_id: carlton.id, body: 'Side gate padlock swapped, spare key with keyholder.' }, dispT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.author_name, 'Controller Hale');
+  assert.equal(created.body.site_name, 'Carlton Retail Centre');
+
+  const list = await call('GET', `/api/passdown-logs?site_id=${carlton.id}`, undefined, dispT);
+  assert.ok(list.body.some((l) => l.id === created.body.id));
+
+  assert.equal((await call('GET', `/api/passdown-logs?site_id=${carlton.id}`, undefined, ryanT)).status, 403, 'ryan has never been posted to Carlton');
+  assert.equal((await call('POST', '/api/passdown-logs', { site_id: carlton.id, body: 'x' }, ryanT)).status, 403);
+
+  assert.equal((await call('GET', '/api/passdown-logs', undefined, dispT)).status, 400, 'site_id is required');
+  assert.equal((await call('POST', '/api/passdown-logs', { site_id: 999999, body: 'x' }, dispT)).status, 400);
+  assert.equal((await call('POST', '/api/passdown-logs', { site_id: carlton.id, body: '   ' }, dispT)).status, 400);
+});
+
+test('a field officer gains passdown access to a site once they have a shift or visit there', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const meridian = sites.body.find((x) => x.name === 'Meridian Business Park');
+  assert.equal((await call('GET', `/api/passdown-logs?site_id=${meridian.id}`, undefined, ryanT)).status, 403);
+
+  const start = new Date(Date.now() + 3600000).toISOString();
+  const end = new Date(Date.now() + 9 * 3600000).toISOString();
+  await call('POST', '/api/shifts', { personnel: ryanId, site_id: meridian.id, starts_at: start, ends_at: end }, dispT);
+
+  const posted = await call('POST', '/api/passdown-logs', { site_id: meridian.id, body: 'Fire panel silenced after false trigger in zone 2.' }, ryanT);
+  assert.equal(posted.status, 201);
+  assert.equal(posted.body.author_name, 'Ryan Cole');
+  assert.equal(posted.body.author_personnel_id, ryanId);
+
+  const list = await call('GET', `/api/passdown-logs?site_id=${meridian.id}`, undefined, ryanT);
+  assert.ok(list.body.some((l) => l.id === posted.body.id));
+
+  assert.equal((await call('DELETE', `/api/passdown-logs/${posted.body.id}`, undefined, dispT)).status, 403, 'delete is admin-only');
+  assert.equal((await call('DELETE', `/api/passdown-logs/${posted.body.id}`, undefined, adminT)).status, 200);
+});
+
 /* ---------------- offline replay safety ---------------- */
 test('a replayed write returns the first result instead of applying twice', async () => {
   const key = 'offline-replay-test-1';

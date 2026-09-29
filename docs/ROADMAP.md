@@ -43,13 +43,21 @@ the account form; `public/rota.html` is a new week-grid rota builder;
 `officer.html` shows the officer's current/next shift with clock-in/out.
 Covered by tests. Needs the same deploy treatment as Phase A/B.
 
-**Phase D — Asset tracking: done, not yet deployed.** Vehicle CRUD
+**Phase D — Asset tracking: done and deployed.** Vehicle CRUD
 (`POST`/`PATCH`/`DELETE /api/vehicles`, unique registration, delete blocked
 while an MDT or person is still linked to it) and a new `assets` collection
 (equipment/uniform/key/device/other, optional unique tag, assignable to a
 person or a site) with the same CRUD shape. `admin.html` has Vehicles and
-Assets tabs. Covered by tests. Needs the same deploy treatment as
-Phase A/B/C.
+Assets tabs. Covered by tests. Live on the container alongside Phases B/C.
+
+**Passdown logs — done, not yet deployed.** The first "Extends
+Sites/Patrols" roadmap item: a `passdown_logs` collection of append-only,
+site-scoped handover notes (`GET`/`POST /api/passdown-logs`, `DELETE`
+admin-only). Control can read/write any site's log; a `FIELD_USER` can
+read/write a site's log only once they've had a shift or site visit there.
+`admin.html`'s site editor shows and adds to a site's log; `officer.html`
+shows the log for the officer's current shift/visit site. Covered by tests.
+Needs the same deploy treatment as Phase A/B/C/D.
 
 ---
 
@@ -160,7 +168,7 @@ else, but not yet a first-class "checked out to X, returned by Y" flow).
 **Extends Sites/Patrols**
 - Guard Tour checkpoint scanning (NFC/QR/geofence points per site)
 - Beats (patrol routes as their own entity)
-- Passdown logs (per-site shift-handover notes)
+- ~~Passdown logs (per-site shift-handover notes)~~ — done, see above
 - Forms: trespass advisals, parking citations, vehicle inspections,
   patient care/first-aid reports, safeguarding reports (the latter needs
   restricted-visibility handling given its sensitivity)

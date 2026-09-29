@@ -326,3 +326,17 @@ CREATE TABLE assets (
 );
 CREATE INDEX assets_assigned_idx ON assets(assigned_to);
 CREATE INDEX assets_category_idx ON assets(category);
+
+-- Per-site shift-handover notes. Append-only: no updated_at/edit path, a
+-- deletion is a control correction rather than an edit. author_personnel_id
+-- is set when a FIELD_USER writes the note, left null for a control-room
+-- author (whose name is still captured in author_name).
+CREATE TABLE passdown_logs (
+  id                  BIGSERIAL PRIMARY KEY,
+  site_id             BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  body                TEXT NOT NULL,
+  author_personnel_id BIGINT REFERENCES personnel(id) ON DELETE SET NULL,
+  author_name         TEXT NOT NULL,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX passdown_logs_site_idx ON passdown_logs(site_id, created_at DESC);

@@ -294,6 +294,20 @@ still linked to it. A new Assets tab covers everything else worth tracking
 assignable to a person or a site, with a status (in use, in store, lost,
 retired) and a "checked" timestamp you can bump on inspection.
 
+## Passdown logs
+
+Per-site shift-handover notes — "side gate padlock swapped, spare key with
+the keyholder", "fire panel silenced after a false trigger in zone 2" — the
+kind of thing the next person on site needs to know that doesn't belong in a
+patrol checklist or a job record. Entries are append-only (no edit, a control
+delete for corrections) and site-scoped: control can read and write any
+site's log; a field officer can read and write a site's log only once
+they've actually been posted there, via a shift or a site visit — the same
+test either record already answers, so there's no separate roster to
+maintain. `admin.html`'s site editor shows and adds to a site's log;
+`officer.html` shows the log for whichever site the officer's current shift
+or patrol visit puts them at, with a box to add a note before they hand over.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it
