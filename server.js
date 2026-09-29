@@ -612,6 +612,13 @@ const MIME = {
   '.apk': 'application/vnd.android.package-archive',
 };
 
+/* Paths that accept an x-www-form-urlencoded body. Only Twilio's status
+ * webhook needs one — Twilio cannot send JSON — and every other route stays
+ * JSON-only: a form body is what a cross-site HTML <form> can POST without a
+ * CORS preflight, so accepting it everywhere would widen what another origin
+ * can make a signed-in browser send. */
+const FORM_BODY_PATHS = new Set(['/api/sms/status']);
+
 const requestHandler = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const send = (status, body, headers = {}) => {
@@ -632,7 +639,10 @@ const requestHandler = async (req, res) => {
       // real phone photo rather than adding a second, route-specific limit.
       for await (const c of req) { size += c.length; if (size > 9e6) { return send(413, { error: 'payload too large' }); } chunks.push(c); }
       const raw = Buffer.concat(chunks).toString();
-      if (raw) { try { body = JSON.parse(raw); } catch { return send(400, { error: 'invalid JSON body' }); } }
+      const ctype = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (raw && ctype === 'application/x-www-form-urlencoded' && FORM_BODY_PATHS.has(url.pathname)) {
+        body = Object.fromEntries(new URLSearchParams(raw));
+      } else if (raw) { try { body = JSON.parse(raw); } catch { return send(400, { error: 'invalid JSON body' }); } }
     }
     for (const r of routes) {
       if (r.method !== req.method) continue;

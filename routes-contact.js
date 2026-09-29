@@ -305,9 +305,13 @@ module.exports = function registerContactRoutes({
     // path this must match what Twilio actually called, or every callback
     // fails — which is why SMS_STATUS_CALLBACK_URL is configurable rather
     // than derived.
+    // SMS_STATUS_CALLBACK_URL is exactly the URL handed to Twilio as
+    // StatusCallback, so it is exactly the URL Twilio signs — use it verbatim
+    // when set. Rebuilding from forwarded headers is only a fallback, and is
+    // the path that silently fails behind a proxy that rewrites host or path.
     const proto = req.headers['x-forwarded-proto'] || 'http';
     const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost';
-    const url = `${proto}://${host}${req.url}`;
+    const url = sms.STATUS_CALLBACK_URL || `${proto}://${host}${req.url}`;
 
     const signature = req.headers['x-twilio-signature'];
     if (!sms.verifySignature(signature, url, body || {})) {
