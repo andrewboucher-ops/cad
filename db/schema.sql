@@ -100,6 +100,19 @@ CREATE TABLE sites (
 
 CREATE TYPE site_visit_status AS ENUM ('SCHEDULED','DISPATCHED','ACKNOWLEDGED','EN_ROUTE','ON_SCENE','COMPLETED','CANCELLED','MISSED');
 
+-- A named patrol route within a site (e.g. "Perimeter", "Car park sweep"),
+-- for sites where one checklist doesn't describe the work. Purely optional:
+-- a patrol schedule or a manually created visit may reference one.
+CREATE TABLE beats (
+  id           BIGSERIAL PRIMARY KEY,
+  site_id      BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  description  TEXT,
+  waypoints    JSONB NOT NULL DEFAULT '[]'::jsonb,   -- ordered [{id, title, instructions}], same shape as sites.checklist
+  active       BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE INDEX beats_site_idx ON beats(site_id);
+
 -- A recurring patrol cadence, e.g. "every 4 hours" (interval_hours) or
 -- "Mon/Wed/Fri at 22:00" (days_of_week + time_of_day). Exactly one of those
 -- two cadence shapes is set. patrolScheduleTick() in server.js turns a due
@@ -107,6 +120,7 @@ CREATE TYPE site_visit_status AS ENUM ('SCHEDULED','DISPATCHED','ACKNOWLEDGED','
 CREATE TABLE patrol_schedules (
   id                     BIGSERIAL PRIMARY KEY,
   site_id                BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  beat_id                BIGINT REFERENCES beats(id) ON DELETE SET NULL,
   label                  TEXT NOT NULL,
   days_of_week           SMALLINT[],          -- 0=Sun..6=Sat, paired with time_of_day
   time_of_day            TEXT,                -- 'HH:MM'
@@ -125,6 +139,7 @@ CREATE TABLE site_visits (
   reference              TEXT NOT NULL UNIQUE,
   site_id                BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   schedule_id            BIGINT REFERENCES patrol_schedules(id) ON DELETE SET NULL,
+  beat_id                BIGINT REFERENCES beats(id) ON DELETE SET NULL,
   personnel_id           BIGINT REFERENCES personnel(id) ON DELETE SET NULL,   -- primary assignee
   additional_personnel   BIGINT[] NOT NULL DEFAULT '{}',                        -- team patrols
   status                 site_visit_status NOT NULL DEFAULT 'SCHEDULED',
@@ -361,3 +376,36 @@ CREATE TABLE fuel_logs (
   CHECK (litres > 0)
 );
 CREATE INDEX fuel_logs_vehicle_idx ON fuel_logs(vehicle_id, recorded_at DESC);
+
+-- Vehicle service history. Logging a row with next_due_at also updates the
+-- vehicle's own service_due_at (see server.js) — this table is the detail,
+-- that column is the summary the fleet list sorts/flags against.
+CREATE TABLE maintenance_logs (
+  id           BIGSERIAL PRIMARY KEY,
+  vehicle_id   BIGINT NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+  description  TEXT NOT NULL,
+  cost         NUMERIC(8,2),
+  odometer     INTEGER,
+  performed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  next_due_at  TIMESTAMPTZ,
+  notes        TEXT,
+  created_by   BIGINT REFERENCES users(id),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX maintenance_logs_vehicle_idx ON maintenance_logs(vehicle_id, performed_at DESC);
+
+-- Audit trail for who has an asset out and when it came back. Kept
+-- alongside assets.assigned_to/status (still directly editable for a quick
+-- admin correction) rather than replacing them — this is the record of how
+-- that field got to its current value.
+CREATE TABLE asset_checkouts (
+  id              BIGSERIAL PRIMARY KEY,
+  asset_id        BIGINT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  personnel_id    BIGINT NOT NULL REFERENCES personnel(id) ON DELETE CASCADE,
+  checked_out_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  checked_out_by  BIGINT REFERENCES users(id),
+  returned_at     TIMESTAMPTZ,
+  returned_by     BIGINT REFERENCES users(id),
+  notes           TEXT
+);
+CREATE INDEX asset_checkouts_asset_idx ON asset_checkouts(asset_id, checked_out_at DESC);

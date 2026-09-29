@@ -103,6 +103,11 @@
     </div>
   </section>
 
+  <section class="panel hide" id="equipmentPanel">
+    <header>My equipment</header>
+    <div class="body" id="equipmentBody" style="padding:12px"></div>
+  </section>
+
   <section class="panel hide" id="passdownPanel">
     <header>Passdown — <span id="passdownSite"></span></header>
     <div class="body" style="padding:12px">
@@ -246,6 +251,19 @@ function openWelfareModal() {
       paintWelfare();
     });
   });
+}
+
+async function refreshEquipment() {
+  if (!person) return;
+  const assets = await api('GET', `/api/assets?assigned_to=${person.id}`);
+  if (!assets.length) { el('#equipmentPanel').classList.add('hide'); return; }
+  el('#equipmentPanel').classList.remove('hide');
+  el('#equipmentBody').innerHTML = assets.map((a) => `
+    <div class="field" style="display:flex;align-items:center;gap:8px">
+      <div style="flex:1"><span>${esc(a.tag || a.category)}</span><div>${esc(a.description)}</div></div>
+      <button class="btn" style="padding:4px 10px;font-size:12px" data-return="${a.id}">Return</button>
+    </div>`).join('');
+  CCCS.els('[data-return]').forEach((b) => (b.onclick = async () => { await api('POST', `/api/assets/${b.dataset.return}/return`, {}); await refreshEquipment(); }));
 }
 
 let shifts = [];
@@ -395,7 +413,7 @@ function paintVisit() {
       <span class="mono" style="font-weight:700;font-size:16px">${esc(visit.reference)}</span>
       <span class="mono dim">${esc(visit.status.replace('_', ' '))}</span>
     </div>
-    <div class="field"><span>Site</span><div>${esc(visit.site_name || '—')}</div></div>
+    <div class="field"><span>Site</span><div>${esc(visit.site_name || '—')}${visit.beat_name ? ` — ${esc(visit.beat_name)}` : ''}</div></div>
     <div class="field"><span>Address</span><div>${esc(visit.site_address || '—')}</div></div>
     <div class="field"><span>Scheduled for</span><div>${new Date(visit.scheduled_for).toLocaleString()}</div></div>
     <div class="field"><span>Notes</span><div>${esc(visit.notes || '—')}</div></div>
@@ -515,6 +533,7 @@ async function boot() {
   visit = visits.find((v) => v.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) || null;
   paintVisit();
   await refreshShifts();
+  await refreshEquipment();
 }
 boot();
 

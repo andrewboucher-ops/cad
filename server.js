@@ -81,7 +81,7 @@ const db = {
   jobs: [], job_assignments: [], messages: [], call_requests: [],
   locations: [], emergency_events: [], audit_logs: [],
   push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], assets: [],
-  passdown_logs: [], fuel_logs: [],
+  passdown_logs: [], fuel_logs: [], asset_checkouts: [], maintenance_logs: [], beats: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -472,17 +472,24 @@ function publicJob(j) {
     }),
   };
 }
+function publicBeat(b) {
+  const site = db.sites.find((x) => x.id === b.site_id);
+  return { ...b, site_name: site ? site.name : null };
+}
 function publicPatrolSchedule(s) {
   const site = db.sites.find((x) => x.id === s.site_id);
-  return { ...s, site_name: site ? site.name : null };
+  const beat = s.beat_id ? db.beats.find((x) => x.id === s.beat_id) : null;
+  return { ...s, site_name: site ? site.name : null, beat_name: beat ? beat.name : null };
 }
 function publicSiteVisit(v) {
   const site = db.sites.find((x) => x.id === v.site_id);
+  const beat = v.beat_id ? db.beats.find((x) => x.id === v.beat_id) : null;
   const primary = v.personnel_id ? db.personnel.find((x) => x.id === v.personnel_id) : null;
   const additional = (v.additional_personnel || []).map((id) => db.personnel.find((x) => x.id === id)).filter(Boolean);
   return {
     ...v,
     site_name: site ? site.name : null, site_address: site ? site.address : null,
+    beat_name: beat ? beat.name : null,
     lat: site ? site.lat : null, lon: site ? site.lon : null,
     resources: [
       ...(primary ? [{ personnel_id: primary.id, personnel: primary.name, primary: true }] : []),
@@ -512,6 +519,16 @@ function publicFuelLog(f) {
   const v = db.vehicles.find((x) => x.id === f.vehicle_id);
   const p = f.personnel_id ? db.personnel.find((x) => x.id === f.personnel_id) : null;
   return { ...f, vehicle_registration: v ? v.registration : null, driver_name: p ? p.name : null };
+}
+function publicMaintenanceLog(m) {
+  const v = db.vehicles.find((x) => x.id === m.vehicle_id);
+  return { ...m, vehicle_registration: v ? v.registration : null };
+}
+function publicAssetCheckout(c) {
+  const p = db.personnel.find((x) => x.id === c.personnel_id);
+  const byUser = db.users.find((x) => x.id === c.checked_out_by);
+  const retUser = c.returned_by ? db.users.find((x) => x.id === c.returned_by) : null;
+  return { ...c, personnel_name: p ? p.name : null, checked_out_by_name: byUser ? byUser.display_name : null, returned_by_name: retUser ? retUser.display_name : null };
 }
 const callsignOf = (r) => { const c = db.callsigns.find((x) => x.id === r.callsign_id); return c ? c.name : (r.mdt_code || r.name); };
 
@@ -1031,6 +1048,47 @@ route('DELETE', '/api/fuel-logs/:id', ADMIN, ({ params }) => {
   return { ok: true };
 });
 
+/* Vehicle maintenance history — a record of what was done, and when it's due
+ * again. Logging one with next_due_at also updates the vehicle's own
+ * service_due_at, the same "the record updates the summary field" pattern
+ * fuel logs use for mileage. Control-only to log (coordinating a garage
+ * visit isn't something an officer does), same read access as everything
+ * else vehicle-related. */
+route('GET', '/api/vehicles/:id/maintenance-logs', ALL, ({ params }) => {
+  const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
+  return db.maintenance_logs.filter((m) => m.vehicle_id === v.id)
+    .sort((a, b) => Date.parse(b.performed_at) - Date.parse(a.performed_at))
+    .map(publicMaintenanceLog);
+});
+route('POST', '/api/vehicles/:id/maintenance-logs', CONTROL, ({ params, body, user }) => {
+  const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
+  const description = String(body.description || '').trim();
+  if (!description) throw httpError(400, 'description required');
+  const cost = body.cost != null && body.cost !== '' ? Number(body.cost) : null;
+  const odometer = body.odometer != null && body.odometer !== '' ? Number(body.odometer) : null;
+  const performedAt = body.performed_at ? new Date(body.performed_at) : new Date();
+  if (isNaN(performedAt)) throw httpError(400, 'invalid performed_at');
+  const nextDueAt = body.next_due_at ? new Date(body.next_due_at) : null;
+  if (body.next_due_at && isNaN(nextDueAt)) throw httpError(400, 'invalid next_due_at');
+  const log = {
+    id: nextId('maintenance_logs'), vehicle_id: v.id, description,
+    cost: cost != null && !isNaN(cost) ? cost : null, odometer: odometer != null && !isNaN(odometer) ? odometer : null,
+    performed_at: performedAt.toISOString(), next_due_at: nextDueAt ? nextDueAt.toISOString() : null,
+    notes: body.notes || '', created_by: user.id, created_at: new Date().toISOString(),
+  };
+  db.maintenance_logs.push(log);
+  if (odometer != null && !isNaN(odometer)) v.mileage = odometer;
+  if (nextDueAt) v.service_due_at = nextDueAt.toISOString();
+  logEvent('maintenance_log.created', `MAINTENANCE LOGGED FOR ${v.registration}: ${description}`, { vehicle_id: v.id, maintenance_log_id: log.id });
+  return { __status: 201, __body: publicMaintenanceLog(log) };
+});
+route('DELETE', '/api/maintenance-logs/:id', ADMIN, ({ params }) => {
+  const m = db.maintenance_logs.find((x) => x.id === Number(params.id)); if (!m) throw httpError(404, 'maintenance log not found');
+  db.maintenance_logs = db.maintenance_logs.filter((x) => x.id !== m.id);
+  logEvent('maintenance_log.deleted', 'MAINTENANCE LOG DELETED', { maintenance_log_id: m.id, vehicle_id: m.vehicle_id });
+  return { ok: true };
+});
+
 const ASSET_CATEGORIES = ['EQUIPMENT', 'UNIFORM', 'KEY', 'DEVICE', 'OTHER'];
 const ASSET_STATUSES = ['IN_USE', 'IN_STORE', 'LOST', 'RETIRED'];
 route('GET', '/api/assets', ALL, ({ query }) => {
@@ -1081,6 +1139,50 @@ route('DELETE', '/api/assets/:id', ADMIN, ({ params }) => {
   db.assets = db.assets.filter((x) => x.id !== a.id);
   logEvent('asset.deleted', `ASSET ${a.tag || a.description} DELETED`, { asset_id: a.id });
   return { ok: true };
+});
+
+/* Checkout/return as a dedicated, audit-trailed path alongside the blunter
+ * PATCH assigned_to/status (kept for admin corrections). A FIELD_USER can
+ * only check an asset out to themselves and only return their own
+ * checkout — control/admin can act on anyone's. */
+route('GET', '/api/assets/:id/checkouts', ALL, ({ params }) => {
+  const a = db.assets.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'asset not found');
+  return db.asset_checkouts.filter((c) => c.asset_id === a.id)
+    .sort((x, y) => Date.parse(y.checked_out_at) - Date.parse(x.checked_out_at))
+    .map(publicAssetCheckout);
+});
+route('POST', '/api/assets/:id/checkout', ALL, ({ params, body, user }) => {
+  const a = db.assets.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'asset not found');
+  if (db.asset_checkouts.some((c) => c.asset_id === a.id && !c.returned_at)) throw httpError(409, 'asset is already checked out — return it first');
+  let personnelId;
+  if (user.role === 'FIELD_USER') {
+    if (!user.personnel_id) throw httpError(400, 'no personnel record linked to your account');
+    personnelId = user.personnel_id;
+  } else {
+    const p = body.personnel_id ? db.personnel.find((x) => x.id === Number(body.personnel_id)) : null;
+    if (!p) throw httpError(400, 'personnel_id required');
+    personnelId = p.id;
+  }
+  const co = {
+    id: nextId('asset_checkouts'), asset_id: a.id, personnel_id: personnelId,
+    checked_out_at: new Date().toISOString(), checked_out_by: user.id,
+    returned_at: null, returned_by: null, notes: body.notes || '',
+  };
+  db.asset_checkouts.push(co);
+  a.assigned_to = personnelId; a.status = 'IN_USE';
+  const p = db.personnel.find((x) => x.id === personnelId);
+  logEvent('asset.checked_out', `ASSET ${a.tag || a.description} CHECKED OUT TO ${p ? p.name : personnelId}`, { asset_id: a.id, checkout_id: co.id });
+  return { __status: 201, __body: publicAsset(a) };
+});
+route('POST', '/api/assets/:id/return', ALL, ({ params, user }) => {
+  const a = db.assets.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'asset not found');
+  const co = db.asset_checkouts.find((c) => c.asset_id === a.id && !c.returned_at);
+  if (!co) throw httpError(409, 'asset is not currently checked out');
+  if (user.role === 'FIELD_USER' && user.personnel_id !== co.personnel_id) throw httpError(403, 'not your checkout');
+  co.returned_at = new Date().toISOString(); co.returned_by = user.id;
+  a.assigned_to = null; a.status = 'IN_STORE'; a.last_checked_at = new Date().toISOString();
+  logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
+  return publicAsset(a);
 });
 route('GET', '/api/personnel', ALL, () => db.personnel.map(publicPersonnel));
 route('POST', '/api/personnel', ADMIN, ({ body }) => {
@@ -2163,6 +2265,9 @@ route('DELETE', '/api/sites/:id', ADMIN, ({ params }) => {
   if (db.patrol_schedules.some((s) => s.site_id === site.id)) {
     throw httpError(409, 'site has patrol schedules — delete them first');
   }
+  if (db.beats.some((b) => b.site_id === site.id)) {
+    throw httpError(409, 'site has beats — delete them first');
+  }
   if (db.site_visits.some((v) => v.site_id === site.id && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status))) {
     throw httpError(409, 'site has an open site visit — resolve or cancel it first');
   }
@@ -2220,6 +2325,50 @@ route('DELETE', '/api/passdown-logs/:id', ADMIN, ({ params }) => {
   return { ok: true };
 });
 
+/* Beats — a named patrol route within a site (e.g. "Perimeter", "Car park
+ * sweep"), for sites where one checklist doesn't describe the work. Purely
+ * optional: a patrol schedule or a manually created visit can reference one,
+ * but neither requires it — a site with no beats behaves exactly as before. */
+route('GET', '/api/beats', ALL, ({ query }) => {
+  let rows = db.beats.map(publicBeat);
+  if (query.get('site_id')) rows = rows.filter((b) => b.site_id === Number(query.get('site_id')));
+  return rows;
+});
+route('POST', '/api/beats', CONTROL, ({ body }) => {
+  const site = db.sites.find((s) => s.id === Number(body.site_id));
+  if (!site) throw httpError(400, 'site_id must reference an existing site');
+  const name = String(body.name || '').trim();
+  if (!name) throw httpError(400, 'name required');
+  const beat = { id: nextId('beats'), site_id: site.id, name, description: body.description || '', waypoints: [], active: body.active !== false };
+  db.beats.push(beat);
+  logEvent('beat.created', `BEAT "${name}" CREATED FOR ${site.name}`, { beat_id: beat.id });
+  return { __status: 201, __body: publicBeat(beat) };
+});
+route('PATCH', '/api/beats/:id', CONTROL, ({ params, body }) => {
+  const b = db.beats.find((x) => x.id === Number(params.id)); if (!b) throw httpError(404, 'beat not found');
+  if ('name' in body) { const name = String(body.name || '').trim(); if (!name) throw httpError(400, 'name required'); b.name = name; }
+  if ('description' in body) b.description = body.description || '';
+  if ('active' in body) b.active = Boolean(body.active);
+  if ('waypoints' in body) {
+    if (!Array.isArray(body.waypoints)) throw httpError(400, 'waypoints must be an array');
+    b.waypoints = body.waypoints.map((w) => ({
+      id: w.id || crypto.randomUUID(), title: String(w.title || '').trim(), instructions: String(w.instructions || '').trim(),
+    })).filter((w) => w.title);
+  }
+  logEvent('beat.updated', `BEAT "${b.name}" UPDATED`, { beat_id: b.id });
+  return publicBeat(b);
+});
+route('DELETE', '/api/beats/:id', ADMIN, ({ params }) => {
+  const b = db.beats.find((x) => x.id === Number(params.id)); if (!b) throw httpError(404, 'beat not found');
+  if (db.patrol_schedules.some((s) => s.beat_id === b.id)) throw httpError(409, 'beat has patrol schedules — reassign or delete them first');
+  if (db.site_visits.some((v) => v.beat_id === b.id && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status))) {
+    throw httpError(409, 'beat has an open site visit — resolve or cancel it first');
+  }
+  db.beats = db.beats.filter((x) => x.id !== b.id);
+  logEvent('beat.deleted', `BEAT "${b.name}" DELETED`, { beat_id: b.id });
+  return { ok: true };
+});
+
 /* ------------------------------------------------------------------ *
  * Patrol schedules and site visits
  *
@@ -2238,6 +2387,13 @@ route('GET', '/api/patrol-schedules', ALL, ({ query }) => {
   if (query.get('site_id')) rows = rows.filter((s) => s.site_id === Number(query.get('site_id')));
   return rows;
 });
+function resolveBeatId(rawBeatId, siteId) {
+  if (!rawBeatId) return null;
+  const beat = db.beats.find((b) => b.id === Number(rawBeatId));
+  if (!beat) throw httpError(400, 'beat_id must reference an existing beat');
+  if (beat.site_id !== siteId) throw httpError(400, 'beat does not belong to this site');
+  return beat.id;
+}
 route('POST', '/api/patrol-schedules', CONTROL, ({ body }) => {
   const site = db.sites.find((s) => s.id === Number(body.site_id));
   if (!site) throw httpError(400, 'site_id must reference an existing site');
@@ -2247,7 +2403,7 @@ route('POST', '/api/patrol-schedules', CONTROL, ({ body }) => {
   const intervalHours = body.interval_hours != null && body.interval_hours !== '' ? Number(body.interval_hours) : null;
   if (!(daysOfWeek && daysOfWeek.length) && !intervalHours) throw httpError(400, 'either days_of_week (with time_of_day) or interval_hours is required');
   const schedule = {
-    id: nextId('patrol_schedules'), site_id: site.id, label,
+    id: nextId('patrol_schedules'), site_id: site.id, beat_id: resolveBeatId(body.beat_id, site.id), label,
     days_of_week: daysOfWeek && daysOfWeek.length ? daysOfWeek : null,
     time_of_day: body.time_of_day || null,
     interval_hours: intervalHours || null,
@@ -2266,6 +2422,7 @@ route('PATCH', '/api/patrol-schedules/:id', CONTROL, ({ params, body }) => {
   if ('interval_hours' in body) s.interval_hours = body.interval_hours != null && body.interval_hours !== '' ? Number(body.interval_hours) : null;
   if ('duration_expected_min' in body) s.duration_expected_min = Number(body.duration_expected_min) || 30;
   if ('active' in body) s.active = Boolean(body.active);
+  if ('beat_id' in body) s.beat_id = resolveBeatId(body.beat_id, s.site_id);
   logEvent('patrol_schedule.updated', `PATROL SCHEDULE "${s.label}" UPDATED`, { patrol_schedule_id: s.id });
   return publicPatrolSchedule(s);
 });
@@ -2289,7 +2446,7 @@ route('POST', '/api/site-visits', CONTROL, ({ body, user }) => {
   const site = db.sites.find((s) => s.id === Number(body.site_id));
   if (!site) throw httpError(400, 'site_id must reference an existing site');
   const v = {
-    id: nextId('site_visits'), reference: nextVisitReference(), site_id: site.id, schedule_id: null,
+    id: nextId('site_visits'), reference: nextVisitReference(), site_id: site.id, schedule_id: null, beat_id: resolveBeatId(body.beat_id, site.id),
     personnel_id: null, additional_personnel: [], status: 'SCHEDULED',
     scheduled_for: body.scheduled_for || new Date().toISOString(),
     dispatched_at: null, acknowledged_at: null, en_route_at: null, on_scene_at: null, completed_at: null, cancelled_at: null, missed_at: null,
@@ -2451,7 +2608,7 @@ function createSiteVisitFromSchedule(schedule, scheduledFor) {
   const site = db.sites.find((s) => s.id === schedule.site_id);
   if (!site) return null;
   const v = {
-    id: nextId('site_visits'), reference: nextVisitReference(), site_id: site.id, schedule_id: schedule.id,
+    id: nextId('site_visits'), reference: nextVisitReference(), site_id: site.id, schedule_id: schedule.id, beat_id: schedule.beat_id || null,
     personnel_id: null, additional_personnel: [], status: 'SCHEDULED',
     scheduled_for: scheduledFor.toISOString(),
     dispatched_at: null, acknowledged_at: null, en_route_at: null, on_scene_at: null, completed_at: null, cancelled_at: null, missed_at: null,

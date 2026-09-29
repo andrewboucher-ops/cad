@@ -292,7 +292,10 @@ they started as. A vehicle can't be deleted while an MDT or a person is
 still linked to it. A new Assets tab covers everything else worth tracking
 — equipment, uniform, keys, devices — each with an optional unique tag,
 assignable to a person or a site, with a status (in use, in store, lost,
-retired) and a "checked" timestamp you can bump on inspection.
+retired) and a "checked" timestamp you can bump on inspection. A dedicated
+checkout/return path (also reachable from `officer.html` as "My equipment")
+audit-trails who has an asset out and when it came back, alongside the
+blunter direct-edit "assigned to" field for a quick admin correction.
 
 ## Passdown logs
 
@@ -317,6 +320,24 @@ vehicle editor, and an officer with a vehicle assigned to them gets a "Log
 fuel" button next to it in `officer.html`. Logging one with an odometer
 reading also bumps the vehicle's own mileage field, so it stays current
 without a separate manual update.
+
+## Vehicle maintenance logs
+
+A service history against a vehicle — description, cost, odometer, and when
+it's next due — logged by control from `admin.html`'s vehicle editor (not
+something an officer does themselves). Logging one with a next-due date
+updates the vehicle's own `service_due_at`, and the Vehicles table flags one
+that's overdue in red rather than making you open each record to check.
+
+## Beats
+
+A named patrol route within a site — "Perimeter", "Car park sweep" — for
+sites where one checklist doesn't describe the work. Purely optional: a site
+with no beats behaves exactly as before. `admin.html` has a Beats tab (site,
+description, an ordered list of waypoints); a patrol schedule can optionally
+reference one, and any site visit it generates inherits it. Control room and
+`officer.html` show the beat name alongside the site wherever a visit is
+displayed.
 
 ## Working without a link
 

@@ -725,6 +725,97 @@ test('a fuel log is created against a vehicle, updates its mileage, and can take
   assert.equal((await call('DELETE', `/api/fuel-logs/${created.body.id}`, undefined, adminT)).status, 200);
 });
 
+/* ---------------- vehicle maintenance logs ---------------- */
+test('a maintenance log is created against a vehicle and updates its service due date and mileage', async () => {
+  const vehicles = await call('GET', '/api/vehicles', undefined, dispT);
+  const vehicle = vehicles.body.find((v) => v.registration === 'VAN-101');
+  assert.ok(vehicle, 'VAN-101 is in the demo fleet');
+
+  assert.equal((await call('POST', `/api/vehicles/${vehicle.id}/maintenance-logs`, { description: 'Oil change' }, danT)).status, 403, 'logging maintenance is control-only');
+
+  const nextDue = new Date(Date.now() + 90 * 86400000).toISOString();
+  const created = await call('POST', `/api/vehicles/${vehicle.id}/maintenance-logs`, {
+    description: 'Oil change and brake check', cost: 145.5, odometer: 61000, next_due_at: nextDue,
+  }, dispT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.description, 'Oil change and brake check');
+  assert.equal(created.body.vehicle_registration, 'VAN-101');
+
+  const patchedVehicle = (await call('GET', '/api/vehicles', undefined, dispT)).body.find((v) => v.id === vehicle.id);
+  assert.equal(patchedVehicle.mileage, 61000, 'logging an odometer reading updates the vehicle mileage');
+  assert.equal(patchedVehicle.service_due_at, created.body.next_due_at, 'next_due_at updates the vehicle service_due_at');
+
+  assert.equal((await call('POST', `/api/vehicles/${vehicle.id}/maintenance-logs`, { description: '' }, dispT)).status, 400, 'description is required');
+
+  const list = await call('GET', `/api/vehicles/${vehicle.id}/maintenance-logs`, undefined, danT);
+  assert.ok(list.body.some((m) => m.id === created.body.id));
+
+  assert.equal((await call('DELETE', `/api/maintenance-logs/${created.body.id}`, undefined, dispT)).status, 403, 'delete is admin-only');
+  assert.equal((await call('DELETE', `/api/maintenance-logs/${created.body.id}`, undefined, adminT)).status, 200);
+});
+
+/* ---------------- asset checkout/return ---------------- */
+test('an asset can be checked out and returned, audit-trailed, and a field user can only act on their own checkout', async () => {
+  const asset = await call('POST', '/api/assets', { category: 'KEY', description: 'Master key — Meridian' }, adminT);
+
+  assert.equal((await call('POST', `/api/assets/${asset.body.id}/checkout`, {}, dispT)).status, 400, 'control must specify who');
+  const out = await call('POST', `/api/assets/${asset.body.id}/checkout`, { personnel_id: danId }, dispT);
+  assert.equal(out.status, 201);
+  assert.equal(out.body.assigned_to, danId);
+  assert.equal(out.body.status, 'IN_USE');
+
+  assert.equal((await call('POST', `/api/assets/${asset.body.id}/checkout`, { personnel_id: ellieId }, dispT)).status, 409, 'already checked out');
+
+  assert.equal((await call('POST', `/api/assets/${asset.body.id}/return`, {}, ellieT)).status, 403, 'not ellie\'s checkout');
+  const back = await call('POST', `/api/assets/${asset.body.id}/return`, {}, danT);
+  assert.equal(back.status, 200);
+  assert.equal(back.body.assigned_to, null);
+  assert.equal(back.body.status, 'IN_STORE');
+  assert.ok(back.body.last_checked_at);
+
+  assert.equal((await call('POST', `/api/assets/${asset.body.id}/return`, {}, dispT)).status, 409, 'not currently checked out');
+
+  const history = await call('GET', `/api/assets/${asset.body.id}/checkouts`, undefined, dispT);
+  assert.equal(history.body.length, 1);
+  assert.equal(history.body[0].personnel_name, 'Dan Whitfield');
+  assert.ok(history.body[0].returned_at);
+
+  const self = await call('POST', `/api/assets/${asset.body.id}/checkout`, {}, ellieT);
+  assert.equal(self.status, 201, 'a field user can check an asset out to themselves with no personnel_id');
+  assert.equal(self.body.assigned_to, ellieId);
+
+  await call('DELETE', `/api/assets/${asset.body.id}`, undefined, adminT).catch(() => {});
+});
+
+/* ---------------- beats ---------------- */
+test('a beat is created against a site, referenced by a patrol schedule and the visit it generates', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const meridian = sites.body.find((x) => x.name === 'Meridian Business Park');
+
+  const beat = await call('POST', '/api/beats', { site_id: meridian.id, name: 'Perimeter sweep', description: 'Fence line and gates' }, dispT);
+  assert.equal(beat.status, 201);
+  assert.equal(beat.body.site_name, 'Meridian Business Park');
+
+  const waypointed = await call('PATCH', `/api/beats/${beat.body.id}`, { waypoints: [{ title: 'Gate 1', instructions: 'Check padlock' }, { title: '' }] }, dispT);
+  assert.equal(waypointed.body.waypoints.length, 1, 'a waypoint with no title is dropped');
+
+  const otherSite = sites.body.find((x) => x.name === 'Carlton Retail Centre');
+  const schedule = await call('POST', '/api/patrol-schedules', { site_id: meridian.id, beat_id: beat.body.id, label: 'Perimeter check', interval_hours: 4 }, dispT);
+  assert.equal(schedule.status, 201);
+  assert.equal(schedule.body.beat_name, 'Perimeter sweep');
+  assert.equal((await call('POST', '/api/patrol-schedules', { site_id: otherSite.id, beat_id: beat.body.id, label: 'Wrong site', interval_hours: 4 }, dispT)).status, 400, 'beat must belong to the schedule\'s site');
+
+  const visit = await call('POST', '/api/site-visits', { site_id: meridian.id, beat_id: beat.body.id }, dispT);
+  assert.equal(visit.status, 201);
+  assert.equal(visit.body.beat_name, 'Perimeter sweep');
+
+  assert.equal((await call('DELETE', `/api/beats/${beat.body.id}`, undefined, adminT)).status, 409, 'beat has patrol schedules');
+  await call('DELETE', `/api/patrol-schedules/${schedule.body.id}`, undefined, adminT);
+  assert.equal((await call('DELETE', `/api/beats/${beat.body.id}`, undefined, adminT)).status, 409, 'beat has an open site visit');
+  await call('PATCH', `/api/site-visits/${visit.body.id}`, { status: 'CANCELLED' }, dispT);
+  assert.equal((await call('DELETE', `/api/beats/${beat.body.id}`, undefined, adminT)).status, 200);
+});
+
 /* ---------------- offline replay safety ---------------- */
 test('a replayed write returns the first result instead of applying twice', async () => {
   const key = 'offline-replay-test-1';

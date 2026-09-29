@@ -318,7 +318,7 @@ function renderVisits() {
         <span class="status-pill ${visitStatusClass(v.status)}">${visitStatusLabel(v.status)}</span>
       </div>
       <div class="card-sub">
-        <span>${esc(v.site_name || 'Site')}</span>
+        <span>${esc(v.site_name || 'Site')}${v.beat_name ? ` — ${esc(v.beat_name)}` : ''}</span>
         <span>${esc(v.resources.map((r) => r.personnel).join(', ') || 'unassigned')}</span>
       </div>
     </div>`).join('') : '<p class="dim">No open patrol visits.</p>';
@@ -346,7 +346,7 @@ function visitModal(v) {
   modal(`Visit ${v.reference}`, `
     <div class="job-head">
       <div>
-        <div class="titles"><h3>${esc(v.site_name || 'Site visit')}</h3></div>
+        <div class="titles"><h3>${esc(v.site_name || 'Site visit')}${v.beat_name ? ` — ${esc(v.beat_name)}` : ''}</h3></div>
         <div class="dim" style="margin-top:5px">${esc(v.reference)} · ${esc(v.site_address || '')}</div>
       </div>
       ${v.status === 'MISSED' ? `<span class="status-pill emg">MISSED</span>` : active

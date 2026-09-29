@@ -96,6 +96,7 @@
         <button class="btn primary" id="btnNewPersonnel" style="padding:7px 14px;font-size:13px" hidden>New personnel</button>
         <button class="btn primary" id="btnNewMdt" style="padding:7px 14px;font-size:13px" hidden>New MDT</button>
         <button class="btn primary" id="btnNewSite" style="padding:7px 14px;font-size:13px" hidden>New site</button>
+        <button class="btn primary" id="btnNewBeat" style="padding:7px 14px;font-size:13px" hidden>New beat</button>
         <button class="btn primary" id="btnNewSchedule" style="padding:7px 14px;font-size:13px" hidden>New patrol schedule</button>
         <button class="btn primary" id="btnNewVehicle" style="padding:7px 14px;font-size:13px" hidden>New vehicle</button>
         <button class="btn primary" id="btnNewAsset" style="padding:7px 14px;font-size:13px" hidden>New asset</button>
@@ -108,6 +109,7 @@
       <button id="tabVehicles">Vehicles</button>
       <button id="tabAssets">Assets</button>
       <button id="tabSites">Sites</button>
+      <button id="tabBeats">Beats</button>
       <button id="tabPatrols">Patrol schedules</button>
     </div>
 
@@ -175,6 +177,13 @@
       <div id="sTableWrap"></div>
     </div>
 
+    <div id="viewBeats" class="hide">
+      <div class="toolbar">
+        <input id="beSearch" placeholder="Search beat name, site…">
+      </div>
+      <div id="beTableWrap"></div>
+    </div>
+
     <div id="viewPatrols" class="hide">
       <div class="toolbar">
         <input id="pSearch" placeholder="Search label, site…">
@@ -208,15 +217,15 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : '');
 
-let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [];
+let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets] = await Promise.all([
+  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats] = await Promise.all([
     api('GET', '/api/users'), api('GET', '/api/personnel'), api('GET', '/api/mdts'),
     api('GET', '/api/callsigns'), api('GET', '/api/sites'), api('GET', '/api/patrol-schedules'),
-    api('GET', '/api/vehicles'), api('GET', '/api/assets'),
+    api('GET', '/api/vehicles'), api('GET', '/api/assets'), api('GET', '/api/beats'),
   ]);
-  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintSchedules();
+  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules();
 }
 
 /* ---------- tabs ---------- */
@@ -227,6 +236,7 @@ function showTab(name) {
   el('#tabVehicles').classList.toggle('active', name === 'vehicles');
   el('#tabAssets').classList.toggle('active', name === 'assets');
   el('#tabSites').classList.toggle('active', name === 'sites');
+  el('#tabBeats').classList.toggle('active', name === 'beats');
   el('#tabPatrols').classList.toggle('active', name === 'patrols');
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
@@ -234,6 +244,7 @@ function showTab(name) {
   el('#viewVehicles').classList.toggle('hide', name !== 'vehicles');
   el('#viewAssets').classList.toggle('hide', name !== 'assets');
   el('#viewSites').classList.toggle('hide', name !== 'sites');
+  el('#viewBeats').classList.toggle('hide', name !== 'beats');
   el('#viewPatrols').classList.toggle('hide', name !== 'patrols');
   el('#btnNewUser').hidden = name !== 'accounts';
   el('#btnNewPersonnel').hidden = name !== 'personnel';
@@ -241,6 +252,7 @@ function showTab(name) {
   el('#btnNewVehicle').hidden = name !== 'vehicles';
   el('#btnNewAsset').hidden = name !== 'assets';
   el('#btnNewSite').hidden = name !== 'sites';
+  el('#btnNewBeat').hidden = name !== 'beats';
   el('#btnNewSchedule').hidden = name !== 'patrols';
 }
 el('#tabAccounts').onclick = () => showTab('accounts');
@@ -249,6 +261,7 @@ el('#tabMdts').onclick = () => showTab('mdts');
 el('#tabVehicles').onclick = () => showTab('vehicles');
 el('#tabAssets').onclick = () => showTab('assets');
 el('#tabSites').onclick = () => showTab('sites');
+el('#tabBeats').onclick = () => showTab('beats');
 el('#tabPatrols').onclick = () => showTab('patrols');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
@@ -530,14 +543,18 @@ function paintVehicles() {
   if (q) rows = rows.filter((v) => v.registration.toLowerCase().includes(q) || (v.make || '').toLowerCase().includes(q) || (v.model || '').toLowerCase().includes(q));
   el('#vTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
-      <thead><tr><th style="width:120px">Registration</th><th>Type</th><th>Assigned to</th><th style="width:110px">Status</th><th style="width:70px"></th></tr></thead>
-      <tbody>${rows.map((v) => `<tr class="clickable" data-vehicle="${v.id}">
+      <thead><tr><th style="width:120px">Registration</th><th>Type</th><th>Assigned to</th><th style="width:110px">Status</th><th style="width:100px">Service</th><th style="width:70px"></th></tr></thead>
+      <tbody>${rows.map((v) => {
+        const overdue = v.service_due_at && Date.parse(v.service_due_at) < Date.now();
+        return `<tr class="clickable" data-vehicle="${v.id}">
         <td class="mono">${esc(v.registration)}</td>
         <td class="dim">${esc(v.type)}${v.make ? ` — ${esc(v.make)} ${esc(v.model || '')}` : ''}</td>
         <td class="dim">${esc(v.assigned_personnel_name || '—')}</td>
         <td class="dim">${esc(v.status.replace('_', ' '))}</td>
+        <td>${v.service_due_at ? `<span class="${overdue ? 'err' : 'dim'}">${overdue ? 'Overdue' : esc(new Date(v.service_due_at).toLocaleDateString('en-GB'))}</span>` : '<span class="dim">—</span>'}</td>
         <td><button class="btn danger" data-delvehicle="${v.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
-      </tr>`).join('')}</tbody>
+      </tr>`;
+      }).join('')}</tbody>
     </table>` : '<p class="empty-note">No vehicles yet.</p>';
   els('#vTableWrap [data-vehicle]').forEach((row) => row.addEventListener('click', (e) => {
     if (e.target.closest('[data-delvehicle]')) return;
@@ -588,6 +605,14 @@ function vehicleForm(v) {
         <input id="vfLitres" type="number" min="0" step="0.01" placeholder="Litres" style="width:90px">
         <input id="vfCost" type="number" min="0" step="0.01" placeholder="Cost £" style="width:90px">
         <button type="button" class="btn" id="vfAdd">Add</button>
+      </div>
+      <label>Maintenance history</label>
+      <div id="vMaintLog" class="dim">Loading…</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="vmDesc" autocomplete="off" placeholder="Service performed" style="flex:1;min-width:140px">
+        <input id="vmCost" type="number" min="0" step="0.01" placeholder="Cost £" style="width:90px">
+        <input id="vmNextDue" type="date" title="Next due">
+        <button type="button" class="btn" id="vmAdd">Add</button>
       </div>` : ''}
       <p class="dim" id="vError" style="min-height:16px;margin:0"></p>
     </form>`;
@@ -609,6 +634,21 @@ function vehicleModal(v) {
         }).then(() => api('GET', `/api/vehicles/${v.id}/fuel-logs`));
         el('#vfOdo').value = ''; el('#vfLitres').value = ''; el('#vfCost').value = '';
         paintFuel(logs);
+      };
+      const paintMaint = (logs) => {
+        el('#vMaintLog').innerHTML = logs.length
+          ? `<div class="log" style="max-height:160px;overflow:auto">${logs.map((m) => `<div><span class="t">${esc(new Date(m.performed_at).toLocaleDateString('en-GB'))}</span>${esc(m.description)}${m.cost != null ? ` · £${m.cost.toFixed(2)}` : ''}${m.next_due_at ? ` · next due ${esc(new Date(m.next_due_at).toLocaleDateString('en-GB'))}` : ''}</div>`).join('')}</div>`
+          : '<p class="dim">No maintenance logged yet.</p>';
+      };
+      api('GET', `/api/vehicles/${v.id}/maintenance-logs`).then(paintMaint).catch(() => (el('#vMaintLog').textContent = 'Failed to load.'));
+      el('#vmAdd').onclick = async () => {
+        const description = el('#vmDesc').value.trim();
+        if (!description) return;
+        const logs = await api('POST', `/api/vehicles/${v.id}/maintenance-logs`, {
+          description, cost: el('#vmCost').value || null, next_due_at: el('#vmNextDue').value || null,
+        }).then(() => api('GET', `/api/vehicles/${v.id}/maintenance-logs`));
+        el('#vmDesc').value = ''; el('#vmCost').value = ''; el('#vmNextDue').value = '';
+        paintMaint(logs);
       };
     }
     const foot = document.querySelector('#modalHost .foot');
@@ -701,11 +741,38 @@ function assetForm(a) {
       <input id="naPurchase" type="date" value="${!isNew && a.purchase_date ? a.purchase_date.slice(0, 10) : ''}">
       <label>Notes</label>
       <textarea id="naNotes" rows="2">${isNew ? '' : esc(a.notes || '')}</textarea>
+      ${a ? `
+      <label>Checkout history</label>
+      <div id="asCheckoutLog" class="dim">Loading…</div>
+      <div id="asCheckoutAction"></div>` : ''}
       <p class="dim" id="asError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
 function assetModal(a) {
   modal(a ? `Edit — ${a.tag || a.description}` : 'New asset', assetForm(a), () => {
+    if (a) {
+      const refreshCheckouts = async () => {
+        const checkouts = await api('GET', `/api/assets/${a.id}/checkouts`).catch(() => []);
+        el('#asCheckoutLog').innerHTML = checkouts.length
+          ? `<div class="log" style="max-height:140px;overflow:auto">${checkouts.map((c) => `<div><span class="t">${esc(new Date(c.checked_out_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(c.personnel_name || '—')}${c.returned_at ? ` — returned ${esc(new Date(c.returned_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}` : ' — still out'}</div>`).join('')}</div>`
+          : '<p class="dim">Never checked out.</p>';
+        const open = checkouts.find((c) => !c.returned_at);
+        el('#asCheckoutAction').innerHTML = open
+          ? `<div class="btn-row" style="margin-top:4px"><button type="button" class="btn ok" id="asReturn">Mark returned</button></div>`
+          : `<div style="display:flex;gap:8px;margin-top:4px">
+               <select id="asCheckoutTo">${assignedPersonnelOptions(null)}</select>
+               <button type="button" class="btn" id="asCheckout">Check out</button>
+             </div>`;
+        if (el('#asReturn')) el('#asReturn').onclick = async () => { await api('POST', `/api/assets/${a.id}/return`, {}); await refreshCheckouts(); };
+        if (el('#asCheckout')) el('#asCheckout').onclick = async () => {
+          const personnel_id = el('#asCheckoutTo').value ? Number(el('#asCheckoutTo').value) : null;
+          if (!personnel_id) return;
+          await api('POST', `/api/assets/${a.id}/checkout`, { personnel_id });
+          await refreshCheckouts();
+        };
+      };
+      refreshCheckouts();
+    }
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
@@ -770,10 +837,12 @@ async function deleteSite(id) {
 /** Checklist rows are edited as a plain list of title/instructions pairs —
  * kept in a local array and re-rendered on every add/remove rather than
  * reading the DOM back apart, since drag-free add/remove is all this needs. */
-function checklistEditor(items) {
+function checklistEditor(items, hostId, emptyText) {
+  hostId = hostId || 'siteChecklistRows';
+  emptyText = emptyText || 'No custom tasks — this site uses the default checklist template until you add one.';
   let rows = items.map((it) => ({ id: it.id, title: it.title, instructions: it.instructions || '' }));
   function render() {
-    const host = el('#siteChecklistRows');
+    const host = document.getElementById(hostId);
     if (!host) return;
     host.innerHTML = rows.length ? rows.map((r, i) => `
       <div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:8px;padding:10px;border:1px solid var(--line);border-radius:8px">
@@ -782,10 +851,10 @@ function checklistEditor(items) {
           <textarea data-ct-instr="${i}" placeholder="Instructions" rows="2" style="width:100%;box-sizing:border-box;resize:vertical;font-family:var(--font);font-size:13px;padding:8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--ink)">${esc(r.instructions)}</textarea>
         </div>
         <button type="button" class="btn danger" data-ct-remove="${i}" style="padding:6px 10px;font-size:11px">Remove</button>
-      </div>`).join('') : '<p class="dim" style="font-size:13px">No custom tasks — this site uses the default checklist template until you add one.</p>';
-    els('#siteChecklistRows [data-ct-title]').forEach((inp) => inp.addEventListener('input', () => { rows[Number(inp.dataset.ctTitle)].title = inp.value; }));
-    els('#siteChecklistRows [data-ct-instr]').forEach((inp) => inp.addEventListener('input', () => { rows[Number(inp.dataset.ctInstr)].instructions = inp.value; }));
-    els('#siteChecklistRows [data-ct-remove]').forEach((b) => (b.onclick = () => { rows.splice(Number(b.dataset.ctRemove), 1); render(); }));
+      </div>`).join('') : `<p class="dim" style="font-size:13px">${esc(emptyText)}</p>`;
+    els(`#${hostId} [data-ct-title]`).forEach((inp) => inp.addEventListener('input', () => { rows[Number(inp.dataset.ctTitle)].title = inp.value; }));
+    els(`#${hostId} [data-ct-instr]`).forEach((inp) => inp.addEventListener('input', () => { rows[Number(inp.dataset.ctInstr)].instructions = inp.value; }));
+    els(`#${hostId} [data-ct-remove]`).forEach((b) => (b.onclick = () => { rows.splice(Number(b.dataset.ctRemove), 1); render(); }));
   }
   render();
   return {
@@ -866,6 +935,90 @@ function siteModal(s) {
 }
 el('#btnNewSite').onclick = () => siteModal(null);
 
+/* ---------- beats ---------- */
+function paintBeats() {
+  const q = el('#beSearch').value.trim().toLowerCase();
+  let rows = allBeats.slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (q) rows = rows.filter((b) => b.name.toLowerCase().includes(q) || (b.site_name || '').toLowerCase().includes(q));
+  el('#beTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Name</th><th>Site</th><th style="width:110px">Waypoints</th><th style="width:90px">Active</th><th style="width:70px"></th></tr></thead>
+      <tbody>${rows.map((b) => `<tr class="clickable" data-beat="${b.id}">
+        <td>${esc(b.name)}</td>
+        <td class="dim">${esc(b.site_name || '—')}</td>
+        <td class="dim">${(b.waypoints || []).length}</td>
+        <td class="dim">${b.active ? 'Yes' : 'Paused'}</td>
+        <td><button class="btn danger" data-delbeat="${b.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No beats yet.</p>';
+  els('#beTableWrap [data-beat]').forEach((row) => row.addEventListener('click', (e) => {
+    if (e.target.closest('[data-delbeat]')) return;
+    beatModal(allBeats.find((b) => b.id === Number(row.dataset.beat)));
+  }));
+  els('#beTableWrap [data-delbeat]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteBeat(Number(b.dataset.delbeat)); }));
+}
+el('#beSearch').addEventListener('input', paintBeats);
+
+async function deleteBeat(id) {
+  const b = allBeats.find((x) => x.id === id);
+  if (!b || !confirm(`Delete beat "${b.name}"? This cannot be undone.`)) return;
+  try { await api('DELETE', `/api/beats/${id}`); closeModal(); await load(); showTab('beats'); }
+  catch (e) { alert(e.message); }
+}
+
+function beatForm(b) {
+  const isNew = !b;
+  return `
+    <form class="stack" id="beForm">
+      <label>Name</label>
+      <input id="nbeName" autocomplete="off" value="${isNew ? '' : esc(b.name)}" placeholder="Perimeter, Car park sweep…">
+      <label>Site</label>
+      <select id="nbeSite">${allSites.map((x) => `<option value="${x.id}" ${!isNew && b.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <label>Description</label>
+      <textarea id="nbeDesc" rows="2">${isNew ? '' : esc(b.description || '')}</textarea>
+      <label>Waypoints</label>
+      <div id="beatWaypointRows"></div>
+      <button type="button" class="btn" id="beAddWaypoint" style="align-self:flex-start;padding:6px 12px;font-size:12px">+ Add waypoint</button>
+      <label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;font-weight:500;letter-spacing:0">
+        <input type="checkbox" id="nbeActive" ${isNew || b.active ? 'checked' : ''}> Active
+      </label>
+      <p class="dim" id="beError" style="min-height:16px;margin:0"></p>
+    </form>`;
+}
+function beatModal(b) {
+  modal(b ? `Edit — ${b.name}` : 'New beat', beatForm(b), () => {
+    const editor = checklistEditor(b ? (b.waypoints || []) : [], 'beatWaypointRows', 'No waypoints yet — a beat works fine as a plain named route without them.');
+    el('#beAddWaypoint').onclick = () => editor.add();
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${b ? '<button class="btn danger" id="beDelete">Delete beat</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="beCancel">Cancel</button>
+          <button class="btn primary" id="beSave">${b ? 'Save changes' : 'Create beat'}</button>
+        </span>
+      </div>`;
+    el('#beCancel').onclick = closeModal;
+    if (el('#beDelete')) el('#beDelete').onclick = () => deleteBeat(b.id);
+    el('#beSave').onclick = async () => {
+      const name = el('#nbeName').value.trim();
+      if (!name) { el('#beError').textContent = 'name is required'; return; }
+      const body = { name, description: el('#nbeDesc').value.trim(), active: el('#nbeActive').checked };
+      try {
+        if (b) await api('PATCH', `/api/beats/${b.id}`, { ...body, waypoints: editor.get() });
+        else {
+          body.site_id = Number(el('#nbeSite').value);
+          const created = await api('POST', '/api/beats', body);
+          const waypoints = editor.get();
+          if (waypoints.length) await api('PATCH', `/api/beats/${created.id}`, { waypoints });
+        }
+        closeModal(); await load(); showTab('beats');
+      } catch (e) { el('#beError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewBeat').onclick = () => beatModal(null);
+
 /* ---------- patrol schedules ---------- */
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function cadenceLabel(s) {
@@ -879,10 +1032,11 @@ function paintSchedules() {
   if (q) rows = rows.filter((s) => s.label.toLowerCase().includes(q) || (s.site_name || '').toLowerCase().includes(q));
   el('#pTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
-      <thead><tr><th>Label</th><th>Site</th><th style="width:160px">Cadence</th><th style="width:90px">Active</th><th style="width:70px"></th></tr></thead>
+      <thead><tr><th>Label</th><th>Site</th><th>Beat</th><th style="width:160px">Cadence</th><th style="width:90px">Active</th><th style="width:70px"></th></tr></thead>
       <tbody>${rows.map((s) => `<tr class="clickable" data-schedule="${s.id}">
         <td>${esc(s.label)}</td>
         <td class="dim">${esc(s.site_name || '—')}</td>
+        <td class="dim">${esc(s.beat_name || '—')}</td>
         <td class="dim mono">${esc(cadenceLabel(s))}</td>
         <td class="dim">${s.active ? 'Yes' : 'Paused'}</td>
         <td><button class="btn danger" data-delschedule="${s.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
@@ -912,6 +1066,8 @@ function scheduleForm(s) {
       <input id="npLabel" autocomplete="off" value="${isNew ? '' : esc(s.label)}">
       <label>Site</label>
       <select id="npSite">${allSites.map((x) => `<option value="${x.id}" ${!isNew && s.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <label>Beat (optional)</label>
+      <select id="npBeat"></select>
       <label>Cadence</label>
       <select id="npCadence">
         <option value="interval" ${cadence === 'interval' ? 'selected' : ''}>Every N hours</option>
@@ -944,6 +1100,13 @@ function scheduleModal(s) {
       el('#npIntervalRow').style.display = interval ? '' : 'none';
       el('#npWeeklyRow').style.display = interval ? 'none' : '';
     };
+    const paintBeatOptions = () => {
+      const siteId = Number(el('#npSite').value);
+      const beats = allBeats.filter((b) => b.site_id === siteId);
+      el('#npBeat').innerHTML = '<option value="">— none —</option>' + beats.map((b) => `<option value="${b.id}" ${s && s.beat_id === b.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('');
+    };
+    el('#npSite').onchange = paintBeatOptions;
+    paintBeatOptions();
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
@@ -960,7 +1123,8 @@ function scheduleModal(s) {
       if (!label) { el('#pError').textContent = 'label is required'; return; }
       const interval = el('#npCadence').value === 'interval';
       const body = {
-        label, site_id: Number(el('#npSite').value), duration_expected_min: Number(el('#npDuration').value) || 30,
+        label, site_id: Number(el('#npSite').value), beat_id: el('#npBeat').value ? Number(el('#npBeat').value) : null,
+        duration_expected_min: Number(el('#npDuration').value) || 30,
         active: el('#npActive').checked,
         interval_hours: interval ? Number(el('#npInterval').value) || null : null,
         days_of_week: interval ? null : els('[data-npday]:checked').map((c) => Number(c.dataset.npday)),
