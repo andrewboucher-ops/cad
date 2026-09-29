@@ -34,10 +34,22 @@ const TABLES = [
   'locations', 'emergency_events', 'audit_logs',
   'push_subscriptions', 'patrol_schedules', 'site_visits', 'shifts', 'assets', 'passdown_logs', 'fuel_logs',
   'asset_checkouts', 'maintenance_logs', 'beats',
+  // Contact attempts (click-to-dial / click-to-SMS). Persisted rather than
+  // kept in memory because this is an audit surface: it records who contacted
+  // whom, from where, and with what outcome. Losing it on restart would leave
+  // a gap exactly where an incident review would look.
+  'dial_log',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */
-const CAPS = { call_requests: 2000, locations: 20000, audit_logs: 20000, messages: 5000 };
+const CAPS = {
+  call_requests: 2000, locations: 20000, audit_logs: 20000, messages: 5000,
+  // Contact attempts grow with every shift and are the kind of thing a review
+  // reaches for months later, so the cap is far higher than the audit-log one
+  // and is a safety valve rather than a retention policy. Set a real retention
+  // window for it alongside RETAIN_AUDIT_DAYS if you need one.
+  dial_log: 50000,
+};
 
 function createStore(db, seq, opts = {}) {
   const file = opts.file || process.env.DATA_FILE || path.join(__dirname, 'data', 'cccs.db');
