@@ -59,15 +59,14 @@ site editor shows and adds to a site's log; `officer.html` shows the log for
 the officer's current shift/visit site. Covered by tests. Live on the
 container.
 
-**Fuel logs — done, not yet deployed.** The first "Extends Asset tracking"
+**Fuel logs — done and deployed.** The first "Extends Asset tracking"
 roadmap item: a `fuel_logs` collection against a vehicle (odometer, litres,
 cost, an optional single receipt photo, driver). `GET`/`POST
 /api/vehicles/:id/fuel-logs`, `POST /api/fuel-logs/:id/receipt`, `DELETE`
 admin-only. Logging one with an odometer reading also updates the vehicle's
 own `mileage`. `admin.html`'s vehicle editor shows and adds to a vehicle's
 fuel log; `officer.html` has a "Log fuel" button next to an officer's
-assigned vehicle. Covered by tests. Needs the same deploy treatment as the
-rest.
+assigned vehicle. Covered by tests. Live on the container.
 
 ---
 
