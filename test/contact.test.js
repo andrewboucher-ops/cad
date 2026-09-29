@@ -250,3 +250,32 @@ test('the operator\'s extension is validated and only remembered when asked', as
   await call('POST', '/api/me/extension', { extension: '905', remember: true }, dispT);
   assert.equal((await call('GET', '/api/me/extension', undefined, dispT)).body.default_extension, '905');
 });
+
+/* ---------------- setting both supervisor concepts through the API ---------------- */
+test('line manager and duty supervisor are settable through the real routes, and dial follows them', async () => {
+  const adminT = await login('admin', 'admin123');
+  const dan = person('Dan Whitfield'), ellie = person('Ellie Marsh'), ryan = person('Ryan Cole');
+
+  assert.equal((await call('PATCH', `/api/personnel/${dan.id}`, { supervisor_id: dan.id }, adminT)).status, 400, 'not their own line manager');
+  assert.equal((await call('PATCH', `/api/personnel/${dan.id}`, { supervisor_id: 99999 }, adminT)).status, 400, 'must exist');
+  assert.equal((await call('PATCH', `/api/personnel/${dan.id}`, { supervisor_id: ellie.id }, dispT)).status, 403, 'line management is an admin decision');
+  const set = await call('PATCH', `/api/personnel/${dan.id}`, { supervisor_id: ellie.id }, adminT);
+  assert.equal(set.body.supervisor_id, ellie.id);
+  assert.equal((await call('GET', `/api/personnel/${dan.id}/contact`, undefined, dispT)).body.supervisor.source, 'LINE_MANAGER');
+
+  const now = Date.now();
+  const shift = await call('POST', '/api/shifts', {
+    personnel: ryan.id, starts_at: new Date(now - 3600e3).toISOString(), ends_at: new Date(now + 3600e3).toISOString(), is_duty_supervisor: true,
+  }, dispT);
+  assert.equal(shift.status, 201);
+  assert.equal(shift.body.is_duty_supervisor, true);
+  const c = await call('GET', `/api/personnel/${dan.id}/contact`, undefined, dispT);
+  assert.equal(c.body.supervisor.name, 'Ryan Cole');
+  assert.equal(c.body.supervisor.source, 'DUTY_SUPERVISOR');
+
+  const off = await call('PATCH', `/api/shifts/${shift.body.id}`, { is_duty_supervisor: false }, dispT);
+  assert.equal(off.body.is_duty_supervisor, false);
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'shift.updated' && /Ryan Cole\) UPDATED — NO LONGER DUTY SUPERVISOR/.test(e.summary)), 'the change is logged by name');
+  assert.equal((await call('GET', `/api/personnel/${dan.id}/contact`, undefined, dispT)).body.supervisor.source, 'LINE_MANAGER');
+  await call('PATCH', `/api/personnel/${dan.id}`, { supervisor_id: null }, adminT);
+});

@@ -455,7 +455,7 @@ function publicPersonnel(p) {
     employment_status: p.employment_status || 'ACTIVE',
     callsign: cs ? cs.name : null, callsign_id: p.callsign_id,
     vehicle: veh ? veh.registration : null, vehicle_id: p.vehicle_id,
-    has_login: Boolean(p.user_id),
+    has_login: Boolean(p.user_id), supervisor_id: p.supervisor_id || null,
     welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
     welfare_note: p.welfare_note || null,
     notes: p.notes || '',
@@ -1281,6 +1281,20 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
   }
   if ('callsign_id' in body) { const cs = body.callsign_id ? findCallsign(body.callsign_id) : null; p.callsign_id = cs ? cs.id : null; }
   if ('vehicle_id' in body) { const veh = body.vehicle_id ? db.vehicles.find((v) => v.id === Number(body.vehicle_id)) : null; p.vehicle_id = veh ? veh.id : null; }
+  // Line management: stable and HR-owned, the fallback when no duty
+  // supervisor is rostered (see routes-contact.js supervisorFor). Refused
+  // rather than silently dropped when it points nowhere, because a console
+  // "call supervisor" button resolving to nobody is worth knowing about now,
+  // not at 03:00.
+  if ('supervisor_id' in body) {
+    if (body.supervisor_id === null || body.supervisor_id === '') p.supervisor_id = null;
+    else {
+      const sup = db.personnel.find((x) => x.id === Number(body.supervisor_id));
+      if (!sup) throw httpError(400, 'line manager not found');
+      if (sup.id === p.id) throw httpError(400, 'a person cannot be their own line manager');
+      p.supervisor_id = sup.id;
+    }
+  }
   if ('notes' in body) p.notes = body.notes || '';
   logEvent('personnel.updated', `PERSONNEL ${p.name} UPDATED`, { personnel_id: p.id });
   return publicPersonnel(p);
@@ -2777,6 +2791,10 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
     id: nextId('shifts'), personnel_id: p.id, site_id: site ? site.id : null,
     starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(), role_type: body.role_type || '',
     status: 'SCHEDULED', clocked_in_at: null, clocked_out_at: null, notes: body.notes || '',
+    // Who supervises THIS shift — operational, per shift, and can be nobody.
+    // Distinct from personnel.supervisor_id (line management); the console's
+    // call-supervisor button prefers this and logs which one it reached.
+    is_duty_supervisor: body.is_duty_supervisor === true,
     created_by: user.id, created_at: new Date().toISOString(),
   };
   db.shifts.push(s);
@@ -2796,8 +2814,14 @@ route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body }) => {
     if (!SHIFT_STATES.includes(body.status)) throw httpError(400, 'invalid shift status');
     s.status = body.status;
   }
+  let dutyChange = '';
+  if ('is_duty_supervisor' in body && Boolean(body.is_duty_supervisor) !== Boolean(s.is_duty_supervisor)) {
+    s.is_duty_supervisor = Boolean(body.is_duty_supervisor);
+    dutyChange = s.is_duty_supervisor ? ' — NOW DUTY SUPERVISOR' : ' — NO LONGER DUTY SUPERVISOR';
+  }
   broadcast('shift.updated', publicShift(s), { personnelIds: [s.personnel_id] });
-  logEvent('shift.updated', `SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: s.personnel_id });
+  const who = (db.personnel.find((x) => x.id === s.personnel_id) || {}).name || 'PERSON';
+  logEvent('shift.updated', `SHIFT ${s.id} (${who}) UPDATED${dutyChange}`, { shift_id: s.id, personnel_id: s.personnel_id });
   return publicShift(s);
 });
 route('DELETE', '/api/shifts/:id', ADMIN, ({ params }) => {

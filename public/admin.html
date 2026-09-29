@@ -435,6 +435,8 @@ function personnelForm(p) {
       <select id="npnStatus">${Object.entries(EMPLOYMENT_LABEL).map(([v, label]) => `<option value="${v}" ${!isNew && p.employment_status === v ? 'selected' : ''}>${label}</option>`).join('')}</select>
       <label>Call sign (optional)</label>
       <select id="npnCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${c.id}" ${!isNew && p.callsign_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <label>Line manager — who the console phones when no duty supervisor is rostered</label>
+      <select id="npnSupervisor"><option value="">— none —</option>${allPersonnel.filter((x) => isNew || x.id !== p.id).map((x) => `<option value="${x.id}" ${!isNew && p.supervisor_id === x.id ? 'selected' : ''}>${esc(x.name)}${x.contact_phone ? '' : ' (no phone on record)'}</option>`).join('')}</select>
       <label>Phone</label>
       <input id="npnPhone" autocomplete="off" value="${isNew ? '' : esc(p.contact_phone || '')}">
       <label>Email</label>
@@ -465,9 +467,13 @@ function personnelModal(p) {
         employment_status: el('#npnStatus').value, callsign_id: el('#npnCallsign').value ? Number(el('#npnCallsign').value) : null,
         contact_phone: el('#npnPhone').value.trim(), contact_email: el('#npnEmail').value.trim(), notes: el('#npnNotes').value.trim(),
       };
+      const supervisorId = el('#npnSupervisor').value ? Number(el('#npnSupervisor').value) : null;
       try {
-        if (p) await api('PATCH', `/api/personnel/${p.id}`, body);
-        else await api('POST', '/api/personnel', body);
+        if (p) await api('PATCH', `/api/personnel/${p.id}`, { ...body, supervisor_id: supervisorId });
+        else {
+          const created = await api('POST', '/api/personnel', body);
+          if (supervisorId) await api('PATCH', `/api/personnel/${created.id}`, { supervisor_id: supervisorId });
+        }
         closeModal(); await load(); showTab('personnel');
       } catch (e) { el('#pnError').textContent = e.message; }
     };

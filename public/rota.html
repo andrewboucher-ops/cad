@@ -171,7 +171,7 @@ function paintGrid() {
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
         ${dayShifts.map((s) => `<div class="shift-chip status-${s.status}" data-shift="${s.id}">
           <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</div>
-          <div>${esc(s.site_name || s.role_type || '')}</div>
+          <div>${esc(s.site_name || s.role_type || '')}${s.is_duty_supervisor ? ' · <strong>duty sup.</strong>' : ''}</div>
         </div>`).join('')}
         <span class="add-hint">+ add shift</span>
       </div>`;
@@ -210,6 +210,7 @@ function shiftForm(s, defaults) {
       <input id="shEnd" type="datetime-local" value="${endDefault}">
       <label>Role</label>
       <input id="shRole" autocomplete="off" value="${isNew ? '' : esc(s.role_type || '')}" placeholder="Patrol, static guard…">
+      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDuty" ${!isNew && s.is_duty_supervisor ? 'checked' : ''}> Duty supervisor for this shift — the console calls them first for any officer's "call supervisor"</label>
       <label>Notes</label>
       <textarea id="shNotes" rows="2">${isNew ? '' : esc(s.notes || '')}</textarea>
       ${isNew ? '' : `<label>Status</label>
@@ -242,6 +243,7 @@ function shiftModal(s, defaults) {
         ends_at: new Date(el('#shEnd').value).toISOString(),
         role_type: el('#shRole').value.trim(),
         notes: el('#shNotes').value.trim(),
+        is_duty_supervisor: el('#shDuty').checked,
       };
       try {
         if (s) {
