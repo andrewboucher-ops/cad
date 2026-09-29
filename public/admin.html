@@ -103,6 +103,7 @@
         <button class="btn primary" id="btnNewSchedule" style="padding:7px 14px;font-size:13px" hidden>New patrol schedule</button>
         <button class="btn primary" id="btnNewVehicle" style="padding:7px 14px;font-size:13px" hidden>New vehicle</button>
         <button class="btn primary" id="btnNewAsset" style="padding:7px 14px;font-size:13px" hidden>New asset</button>
+        <button class="btn primary" id="btnNewForm" style="padding:7px 14px;font-size:13px" hidden>New form</button>
       </span>
     </div>
     <div class="tabs">
@@ -114,6 +115,7 @@
       <button id="tabSites">Sites</button>
       <button id="tabBeats">Beats</button>
       <button id="tabPatrols">Patrol schedules</button>
+      <button id="tabForms">Forms</button>
     </div>
 
     <div id="viewAccounts">
@@ -173,6 +175,11 @@
       <div id="asTableWrap"></div>
     </div>
 
+    <div id="viewForms" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">Reports from a <strong>restricted</strong> form can be read only by the officer who filed them and by the people named on that form below — not by any role, including this one. Adding or removing a name is logged. <a href="/forms.html">Open reports</a></p>
+      <div id="fTableWrap"></div>
+    </div>
+
     <div id="viewSites" class="hide">
       <div class="toolbar">
         <input id="sSearch" placeholder="Search site name, address…">
@@ -220,7 +227,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : '');
 
-let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [];
+let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
   [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats] = await Promise.all([
@@ -228,7 +235,8 @@ async function load() {
     api('GET', '/api/callsigns'), api('GET', '/api/sites'), api('GET', '/api/patrol-schedules'),
     api('GET', '/api/vehicles'), api('GET', '/api/assets'), api('GET', '/api/beats'),
   ]);
-  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules();
+  allForms = await api('GET', '/api/form-definitions?all=1');
+  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms();
 }
 
 /* ---------- tabs ---------- */
@@ -241,6 +249,9 @@ function showTab(name) {
   el('#tabSites').classList.toggle('active', name === 'sites');
   el('#tabBeats').classList.toggle('active', name === 'beats');
   el('#tabPatrols').classList.toggle('active', name === 'patrols');
+  el('#tabForms').classList.toggle('active', name === 'forms');
+  el('#viewForms').classList.toggle('hide', name !== 'forms');
+  el('#btnNewForm').hidden = name !== 'forms';
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
@@ -266,6 +277,7 @@ el('#tabAssets').onclick = () => showTab('assets');
 el('#tabSites').onclick = () => showTab('sites');
 el('#tabBeats').onclick = () => showTab('beats');
 el('#tabPatrols').onclick = () => showTab('patrols');
+el('#tabForms').onclick = () => showTab('forms');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -937,6 +949,142 @@ function siteModal(s) {
   });
 }
 el('#btnNewSite').onclick = () => siteModal(null);
+
+/* ---------- forms ---------- */
+const FORM_FIELD_TYPES = ['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime', 'signature', 'photo'];
+const FORM_SUBJECTS = { JOB: 'Job', SITE_VISIT: 'Patrol visit', SITE: 'Site', PERSONNEL: 'Person', VEHICLE: 'Vehicle' };
+function paintForms() {
+  const rows = allForms.slice().sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
+  el('#fTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Form</th><th style="width:110px">Visibility</th><th style="width:170px">Filed against</th><th style="width:70px">Fields</th><th style="width:60px">Ver.</th><th style="width:200px">Named readers</th></tr></thead>
+      <tbody>${rows.map((f) => `<tr class="clickable" data-form="${f.id}" style="${f.active ? '' : 'opacity:.5'}">
+        <td>${esc(f.name)}${f.active ? '' : ' <span class="dim">(retired)</span>'}</td>
+        <td>${f.visibility === 'RESTRICTED' ? '<span class="pri pri-RED">RESTRICTED</span>' : '<span class="dim">Standard</span>'}</td>
+        <td class="dim">${f.subject_types.map((t) => FORM_SUBJECTS[t] || t).join(', ')}</td>
+        <td class="dim">${f.fields.length}</td>
+        <td class="dim">v${f.version}</td>
+        <td class="dim">${f.visibility === 'RESTRICTED' ? (f.grants.length ? f.grants.map((g) => esc(g.display_name)).join(', ') : '<span style="color:var(--priority)">nobody yet</span>') : '—'}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No forms.</p>';
+  els('#fTableWrap [data-form]').forEach((row) => row.addEventListener('click', () => formModal(allForms.find((f) => f.id === Number(row.dataset.form)))));
+}
+
+/** Field rows are held in a local array and re-rendered on each add/remove/
+ * move — same approach as checklistEditor above. Field ids are derived from
+ * the label for a new field but never changed afterwards, since a filed
+ * report's values are keyed on them. */
+function formFieldEditor(fields) {
+  let rows = fields.map((f) => ({ ...f, options: (f.options || []).join(', '), locked: true }));
+  const slug = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').replace(/^(\d)/, 'f_$1').slice(0, 40);
+  function render() {
+    el('#formFieldRows').innerHTML = rows.map((r, i) => `
+      <div style="display:grid;grid-template-columns:1fr 120px auto auto;gap:6px;align-items:center;padding:8px;border:1px solid var(--line);border-radius:8px;margin-bottom:6px">
+        <input data-ffl="${i}" placeholder="Label" value="${esc(r.label || '')}">
+        <select data-fft="${i}">${FORM_FIELD_TYPES.map((t) => `<option ${t === r.type ? 'selected' : ''}>${t}</option>`).join('')}</select>
+        <label style="display:flex;gap:4px;align-items:center;font-size:12px;text-transform:none;letter-spacing:0"><input type="checkbox" data-ffr="${i}" ${r.required ? 'checked' : ''}>required</label>
+        <span style="display:flex;gap:4px">
+          <button type="button" class="btn" data-ffup="${i}" style="padding:4px 8px;font-size:11px" ${i ? '' : 'disabled'}>↑</button>
+          <button type="button" class="btn danger" data-ffx="${i}" style="padding:4px 8px;font-size:11px">✕</button>
+        </span>
+        ${r.type === 'select' ? `<input data-ffo="${i}" placeholder="Options, comma separated" value="${esc(r.options || '')}" style="grid-column:1 / -1">` : ''}
+        <span class="dim mono" style="grid-column:1 / -1;font-size:11px">id: ${esc(r.id || slug(r.label || '') || '—')}</span>
+      </div>`).join('') || '<p class="dim">No fields yet.</p>';
+    els('#formFieldRows [data-ffl]').forEach((i) => i.addEventListener('input', () => { rows[+i.dataset.ffl].label = i.value; }));
+    els('#formFieldRows [data-ffl]').forEach((i) => i.addEventListener('change', render));
+    els('#formFieldRows [data-fft]').forEach((i) => (i.onchange = () => { rows[+i.dataset.fft].type = i.value; render(); }));
+    els('#formFieldRows [data-ffr]').forEach((i) => (i.onchange = () => { rows[+i.dataset.ffr].required = i.checked; }));
+    els('#formFieldRows [data-ffo]').forEach((i) => i.addEventListener('input', () => { rows[+i.dataset.ffo].options = i.value; }));
+    els('#formFieldRows [data-ffx]').forEach((b) => (b.onclick = () => { rows.splice(+b.dataset.ffx, 1); render(); }));
+    els('#formFieldRows [data-ffup]').forEach((b) => (b.onclick = () => { const i = +b.dataset.ffup; [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; render(); }));
+  }
+  render();
+  return {
+    add: () => { rows.push({ label: '', type: 'text', required: false, options: '' }); render(); },
+    get: () => rows.filter((r) => (r.label || '').trim()).map((r) => {
+      const out = { id: r.id || slug(r.label), label: r.label.trim(), type: r.type, required: Boolean(r.required) };
+      if (r.help) out.help = r.help;
+      if (r.type === 'select') out.options = String(r.options || '').split(',').map((o) => o.trim()).filter(Boolean);
+      return out;
+    }),
+  };
+}
+
+function formModal(f) {
+  const isNew = !f;
+  modal(isNew ? 'New form' : `Form — ${f.name}`, `
+    <form class="stack" onsubmit="return false">
+      <label>Name</label>
+      <input id="fmName" value="${isNew ? '' : esc(f.name)}">
+      <label>Description (shown to officers)</label>
+      <input id="fmDesc" value="${isNew ? '' : esc(f.description || '')}">
+      <label>Visibility</label>
+      <select id="fmVis">
+        <option value="STANDARD" ${!isNew && f.visibility === 'STANDARD' ? 'selected' : ''}>Standard — control and the officer who filed it</option>
+        <option value="RESTRICTED" ${!isNew && f.visibility === 'RESTRICTED' ? 'selected' : ''}>Restricted — the officer who filed it and the named readers only</option>
+      </select>
+      <p class="dim" style="margin:0;font-size:12px">Changing restricted → standard only affects reports filed from now on; earlier reports stay restricted.</p>
+      <label>Can be filed against</label>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">${Object.entries(FORM_SUBJECTS).map(([k, v]) => `<label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px"><input type="checkbox" data-fms="${k}" ${!isNew && f.subject_types.includes(k) ? 'checked' : ''}>${v}</label>`).join('')}</div>
+      <label>Fields ${isNew ? '' : `<span class="dim">(saving field changes makes version ${f.version + 1}; reports already filed keep v${f.version})</span>`}</label>
+      <div id="formFieldRows"></div>
+      <button type="button" class="btn" id="fmAddField" style="align-self:flex-start;padding:6px 12px;font-size:12px">+ Add field</button>
+      ${isNew ? '' : `
+      <label>Named readers ${f.visibility === 'RESTRICTED' ? '' : '<span class="dim">(only used while the form is restricted)</span>'}</label>
+      <div id="fmGrants">${f.grants.length ? f.grants.map((g) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><span style="flex:1">${esc(g.display_name)} <span class="dim">(${esc(g.username || '')}) — added by ${esc(g.granted_by)}</span></span><button type="button" class="btn danger" data-fmrevoke="${g.id}" style="padding:3px 8px;font-size:11px">Remove</button></div>`).join('') : '<p class="dim" style="margin:0">Nobody. Until someone is named, only the officer who filed a report can read it.</p>'}</div>
+      <div style="display:flex;gap:8px">
+        <select id="fmGrantUser" style="flex:1">${allUsers.filter((u) => !f.grants.some((g) => g.user_id === u.id)).map((u) => `<option value="${u.id}">${esc(u.display_name)} (${esc(u.username)})</option>`).join('')}</select>
+        <button type="button" class="btn" id="fmGrantAdd">Name as reader</button>
+      </div>`}
+      <p class="dim" id="fmError" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    const editor = formFieldEditor(isNew ? [] : f.fields);
+    el('#fmAddField').onclick = () => editor.add();
+    const refreshAfter = async (id) => { await load(); showTab('forms'); formModal(allForms.find((x) => x.id === id)); };
+    if (!isNew) {
+      el('#fmGrantAdd').onclick = async () => {
+        try { await api('POST', `/api/form-definitions/${f.id}/grants`, { user_id: Number(el('#fmGrantUser').value) }); await refreshAfter(f.id); }
+        catch (e) { el('#fmError').textContent = e.message; }
+      };
+      els('[data-fmrevoke]').forEach((b) => (b.onclick = async () => {
+        try { await api('DELETE', `/api/form-definitions/${f.id}/grants/${b.dataset.fmrevoke}`); await refreshAfter(f.id); }
+        catch (e) { el('#fmError').textContent = e.message; }
+      }));
+    }
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${isNew ? '' : `<button class="btn ${f.active ? 'danger' : ''}" id="fmActive">${f.active ? 'Retire form' : 'Reactivate'}</button>`}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="fmCancel">Cancel</button>
+          <button class="btn primary" id="fmSave">${isNew ? 'Create form' : 'Save changes'}</button>
+        </span>
+      </div>`;
+    el('#fmCancel').onclick = closeModal;
+    if (!isNew) el('#fmActive').onclick = async () => {
+      try { await api('PATCH', `/api/form-definitions/${f.id}`, { active: !f.active }); closeModal(); await load(); showTab('forms'); }
+      catch (e) { el('#fmError').textContent = e.message; }
+    };
+    el('#fmSave').onclick = async () => {
+      const body = {
+        name: el('#fmName').value.trim(), description: el('#fmDesc').value.trim(), visibility: el('#fmVis').value,
+        subject_types: els('[data-fms]').filter((c) => c.checked).map((c) => c.dataset.fms),
+      };
+      const fields = editor.get();
+      // Only send fields when they changed, so a rename or visibility change
+      // does not needlessly bump the version.
+      if (isNew || JSON.stringify(fields) !== JSON.stringify(f.fields)) body.fields = fields;
+      if (!isNew && f.visibility === 'RESTRICTED' && body.visibility === 'STANDARD'
+        && !confirm('Make this form standard? Reports filed from now on will be readable by control. Reports already filed stay restricted.')) return;
+      try {
+        if (isNew) await api('POST', '/api/form-definitions', body);
+        else await api('PATCH', `/api/form-definitions/${f.id}`, body);
+        closeModal(); await load(); showTab('forms');
+      } catch (e) { el('#fmError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewForm').onclick = () => formModal(null);
 
 /* ---------- beats ---------- */
 function paintBeats() {
