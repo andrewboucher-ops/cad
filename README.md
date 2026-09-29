@@ -257,6 +257,43 @@ from the site's own template if it has one, else a sane default — with photo
 evidence, and completing a job builds and emails a resolution report to the
 site's contact via Microsoft Graph.
 
+## Scheduled patrol visits
+
+A recurring alternative to one-off jobs: a patrol schedule describes a
+cadence (every N hours, or specific days and a time of day) against a site.
+A background tick creates a `SCHEDULED` visit when one falls due, and flags
+one nobody ever dispatched, well past its window, as `MISSED` — a silent gap
+in patrol coverage is meant to be surfaced, not quietly age out. A visit
+walks the same dispatch → acknowledge → en route → on scene → completed
+lifecycle as a job, with the same checklist, photo evidence and emailed
+resolution report. Manage schedules from `admin.html`'s Patrol Schedules
+tab; control room has a Patrol Visits panel; officers see and act on their
+assigned visit in `officer.html` alongside any job.
+
+## HR rota
+
+Personnel are a real, editable record (`admin.html`'s Personnel tab) rather
+than a read-only stub — name, rank, employee number, contact details,
+employment status, and an optional linked user login. `public/rota.html` is
+a week-at-a-time grid (personnel rows × day columns) for building the rota;
+click a cell to add a shift, click a shift to edit or delete it. Officers
+see their current or next shift and clock in/out from `officer.html`; a
+shift can also be edited or clocked by control. Deleting a person is
+blocked while they're assigned to an open job or site visit, have an
+upcoming or active shift, or still have a login linked — unlink or resolve
+those first.
+
+## Asset tracking
+
+Vehicles are a real, editable record (`admin.html`'s Vehicles tab) — make,
+model, mileage, service/insurance due dates, condition, status, and an
+optional assigned person — rather than the bare registration-and-type stub
+they started as. A vehicle can't be deleted while an MDT or a person is
+still linked to it. A new Assets tab covers everything else worth tracking
+— equipment, uniform, keys, devices — each with an optional unique tag,
+assignable to a person or a site, with a status (in use, in store, lost,
+retired) and a "checked" timestamp you can bump on inspection.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it

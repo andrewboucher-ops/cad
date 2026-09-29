@@ -10,6 +10,8 @@ process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';   // tests run against a clean in-memory state
 process.env.WELFARE_TICK_MS = '200';
 process.env.WELFARE_WARN_S = '2';
+process.env.PATROL_SCHEDULE_TICK_MS = '3600000'; // tests drive this by calling app.patrolScheduleTick() directly
+process.env.VISIT_MISSED_GRACE_MIN = '120';
 
 const app = require('../server.js');
 const BASE = `http://127.0.0.1:${process.env.PORT}`;
@@ -422,6 +424,231 @@ test('jobs can be raised against a contracted site and inherit its details', asy
 
   assert.equal((await call('POST', '/api/jobs', { priority: 'AMBER' }, dispT)).status, 400);
   assert.equal((await call('POST', '/api/sites', { name: 'Meridian Business Park' }, dispT)).status, 409);
+});
+
+/* ---------------- patrol schedules and site visits ---------------- */
+test('a patrol schedule is created and the tick turns a due occurrence into a scheduled visit', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const carlton = sites.body.find((x) => x.name === 'Carlton Retail Centre');
+
+  const sched = await call('POST', '/api/patrol-schedules', { site_id: carlton.id, label: 'Hourly check', interval_hours: 1 }, dispT);
+  assert.equal(sched.status, 201);
+  assert.equal(sched.body.site_name, 'Carlton Retail Centre');
+  assert.equal((await call('POST', '/api/patrol-schedules', { site_id: carlton.id, label: 'No cadence' }, dispT)).status, 400);
+
+  app.patrolScheduleTick();
+  const visits = (await call('GET', '/api/site-visits', undefined, dispT)).body.filter((v) => v.schedule_id === sched.body.id);
+  assert.equal(visits.length, 1, 'one visit created for the due schedule');
+  assert.equal(visits[0].status, 'SCHEDULED');
+  assert.ok(visits[0].checklist.length > 0, 'checklist instantiated from the site template');
+
+  app.patrolScheduleTick();
+  const stillOne = (await call('GET', '/api/site-visits', undefined, dispT)).body.filter((v) => v.schedule_id === sched.body.id);
+  assert.equal(stillOne.length, 1, 'a second tick does not create a duplicate while one is still open');
+});
+
+test('a site visit is assigned, acknowledged, walked through checklist and photo, and completed with a report', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const northgate = sites.body.find((x) => x.name === 'Northgate Distribution');
+
+  const created = await call('POST', '/api/site-visits', { site_id: northgate.id }, dispT);
+  assert.equal(created.status, 201);
+  const visitId = created.body.id;
+
+  const assigned = await call('POST', `/api/site-visits/${visitId}/assign`, { personnel: danId }, dispT);
+  assert.equal(assigned.body.status, 'DISPATCHED');
+  assert.ok(assigned.body.resources.some((r) => r.personnel === 'Dan Whitfield' && r.primary));
+  assert.equal((await call('POST', `/api/site-visits/${visitId}/assign`, { personnel: danId }, dispT)).status, 409, 'cannot double-assign the same person');
+
+  const acked = await call('POST', `/api/site-visits/${visitId}/ack`, {}, danT);
+  assert.equal(acked.status, 200);
+  assert.equal(acked.body.status, 'ACKNOWLEDGED');
+  assert.equal((await call('POST', `/api/site-visits/${visitId}/ack`, {}, ellieT)).status, 403, 'not assigned to this visit');
+
+  const item = acked.body.checklist[0];
+  const checked = await call('PATCH', `/api/site-visits/${visitId}/checklist/${item.id}`, { status: 'COMPLETE', notes: 'Clear' }, danT);
+  assert.equal(checked.body.checklist.find((x) => x.id === item.id).status, 'COMPLETE');
+
+  const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const media = await call('POST', `/api/site-visits/${visitId}/media`, { mimetype: 'image/png', data: tinyPngBase64 }, danT);
+  assert.equal(media.status, 201);
+
+  const enroute = await call('PATCH', `/api/site-visits/${visitId}`, { status: 'EN_ROUTE' }, danT);
+  assert.equal(enroute.body.status, 'EN_ROUTE');
+  const completed = await call('PATCH', `/api/site-visits/${visitId}`, { status: 'COMPLETED' }, danT);
+  assert.equal(completed.body.status, 'COMPLETED');
+  assert.ok(completed.body.report_html.includes(completed.body.reference));
+
+  const report = await fetch(BASE + `/api/site-visits/${visitId}/report`, { headers: { authorization: `Bearer ${dispT}` } });
+  assert.equal(report.status, 200);
+  assert.ok((await report.text()).includes(completed.body.reference));
+});
+
+test('a person can be stood down from a site visit', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const meridian = sites.body.find((x) => x.name === 'Meridian Business Park');
+  const visit = await call('POST', '/api/site-visits', { site_id: meridian.id }, dispT);
+  await call('POST', `/api/site-visits/${visit.body.id}/assign`, { personnel: ellieId }, dispT);
+
+  const stood = await call('POST', `/api/site-visits/${visit.body.id}/stand-down`, { personnel: ellieId }, dispT);
+  assert.equal(stood.status, 200);
+  assert.equal(stood.body.resources.length, 0);
+  assert.equal(stood.body.status, 'SCHEDULED', 'reverts to scheduled once nobody is assigned');
+  assert.equal((await call('POST', `/api/site-visits/${visit.body.id}/stand-down`, { personnel: ellieId }, dispT)).status, 404);
+});
+
+test('a site with an open patrol schedule cannot be deleted', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const carlton = sites.body.find((x) => x.name === 'Carlton Retail Centre');
+  assert.equal((await call('DELETE', `/api/sites/${carlton.id}`, undefined, adminT)).status, 409);
+});
+
+test('a scheduled visit nobody dispatches in time is marked missed', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const ashcroft = sites.body.find((x) => x.name === 'Ashcroft House');
+  const visit = await call('POST', '/api/site-visits', { site_id: ashcroft.id, scheduled_for: new Date(Date.now() - 3 * 3600000).toISOString() }, dispT);
+
+  app.patrolScheduleTick();
+  const after = (await call('GET', '/api/site-visits', undefined, dispT)).body.find((v) => v.id === visit.body.id);
+  assert.equal(after.status, 'MISSED');
+  assert.ok(after.missed_at);
+});
+
+/* ---------------- HR rota: personnel CRUD ---------------- */
+test('personnel can be created, updated and deleted, with a unique employee number', async () => {
+  const created = await call('POST', '/api/personnel', { name: 'Robin Vance', rank: 'Officer' }, adminT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.employment_status, 'ACTIVE');
+  assert.equal((await call('POST', '/api/personnel', { name: 'No name' }, dispT)).status, 403, 'only admin creates personnel');
+
+  const patched = await call('PATCH', `/api/personnel/${created.body.id}`, { contact_phone: '07700900321', employment_status: 'LEAVE' }, adminT);
+  assert.equal(patched.body.contact_phone, '07700900321');
+  assert.equal(patched.body.employment_status, 'LEAVE');
+  assert.equal((await call('PATCH', `/api/personnel/${created.body.id}`, { employment_status: 'NONSENSE' }, adminT)).status, 400);
+
+  const a = await call('POST', '/api/personnel', { name: 'Dup A', employee_no: 'EMP-100' }, adminT);
+  assert.equal(a.status, 201);
+  assert.equal((await call('POST', '/api/personnel', { name: 'Dup B', employee_no: 'EMP-100' }, adminT)).status, 409);
+
+  const del = await call('DELETE', `/api/personnel/${created.body.id}`, undefined, adminT);
+  assert.equal(del.status, 200);
+  assert.equal((await call('DELETE', `/api/personnel/${a.body.id}`, undefined, adminT)).status, 200);
+});
+
+test('personnel cannot be deleted while assigned to an open job or site visit, or linked to a login', async () => {
+  const p = await call('POST', '/api/personnel', { name: 'Temp Officer' }, adminT);
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Test site' }, dispT);
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: [p.body.id] }, dispT);
+  assert.equal((await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT)).status, 409);
+  await call('POST', `/api/jobs/${job.body.id}/stand-down`, { personnel: p.body.id }, dispT);
+  assert.equal((await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT)).status, 200);
+});
+
+test('linking a user to a personnel record updates has_login both ways, and unlinking clears it', async () => {
+  const p = await call('POST', '/api/personnel', { name: 'Link Test' }, adminT);
+  assert.equal(p.body.has_login, false);
+
+  const u = await call('POST', '/api/users', { username: 'linktest', password: 'realpassword1', role: 'FIELD_USER', personnel_id: p.body.id }, adminT);
+  assert.equal(u.status, 201);
+  let refreshed = (await call('GET', '/api/personnel', undefined, adminT)).body.find((x) => x.id === p.body.id);
+  assert.equal(refreshed.has_login, true);
+
+  assert.equal((await call('POST', '/api/users', { username: 'linktest2', password: 'realpassword1', role: 'FIELD_USER', personnel_id: p.body.id }, adminT)).status, 409,
+    'a second account cannot claim the same personnel record');
+
+  await call('PATCH', `/api/users/${u.body.id}`, { personnel_id: null }, adminT);
+  refreshed = (await call('GET', '/api/personnel', undefined, adminT)).body.find((x) => x.id === p.body.id);
+  assert.equal(refreshed.has_login, false);
+  await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT);
+});
+
+/* ---------------- HR rota: shifts ---------------- */
+test('a shift is created, and only the assigned officer or control can clock in and out', async () => {
+  const start = new Date(Date.now() + 3600000).toISOString();
+  const end = new Date(Date.now() + 9 * 3600000).toISOString();
+  const shift = await call('POST', '/api/shifts', { personnel: danId, starts_at: start, ends_at: end, role_type: 'Patrol' }, dispT);
+  assert.equal(shift.status, 201);
+  assert.equal(shift.body.status, 'SCHEDULED');
+  assert.equal(shift.body.personnel_name, 'Dan Whitfield');
+
+  assert.equal((await call('POST', `/api/shifts/${shift.body.id}/clock-in`, {}, ellieT)).status, 403);
+  const in1 = await call('POST', `/api/shifts/${shift.body.id}/clock-in`, {}, danT);
+  assert.equal(in1.body.status, 'CLOCKED_IN');
+  assert.ok(in1.body.clocked_in_at);
+
+  const out1 = await call('POST', `/api/shifts/${shift.body.id}/clock-out`, {}, danT);
+  assert.equal(out1.body.status, 'CLOCKED_OUT');
+  assert.ok(out1.body.clocked_out_at);
+  assert.equal((await call('POST', `/api/shifts/${shift.body.id}/clock-out`, {}, danT)).status, 409, 'cannot clock out twice');
+});
+
+test('shifts reject a bad time range and can be filtered by personnel', async () => {
+  const start = new Date(Date.now() + 3600000).toISOString();
+  const bad = await call('POST', '/api/shifts', { personnel: ryanId, starts_at: start, ends_at: start }, dispT);
+  assert.equal(bad.status, 400);
+
+  const end = new Date(Date.now() + 8 * 3600000).toISOString();
+  await call('POST', '/api/shifts', { personnel: ryanId, starts_at: start, ends_at: end }, dispT);
+  const mine = await call('GET', `/api/shifts?personnel_id=${ryanId}`, undefined, dispT);
+  assert.ok(mine.body.every((s) => s.personnel_id === ryanId));
+  assert.ok(mine.body.length >= 1);
+});
+
+test('a shift can be edited and deleted by control', async () => {
+  const start = new Date(Date.now() + 3600000).toISOString();
+  const end = new Date(Date.now() + 5 * 3600000).toISOString();
+  const shift = await call('POST', '/api/shifts', { personnel: ellieId, starts_at: start, ends_at: end }, dispT);
+  const edited = await call('PATCH', `/api/shifts/${shift.body.id}`, { notes: 'Cover for Dan', status: 'CONFIRMED' }, dispT);
+  assert.equal(edited.body.notes, 'Cover for Dan');
+  assert.equal(edited.body.status, 'CONFIRMED');
+  assert.equal((await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, dispT)).status, 403, 'delete is admin-only');
+  assert.equal((await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, adminT)).status, 200);
+});
+
+/* ---------------- asset tracking ---------------- */
+test('a vehicle can be created, updated and deleted, with a unique registration', async () => {
+  const created = await call('POST', '/api/vehicles', { registration: 'test-500', type: 'Van' }, adminT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.registration, 'TEST-500', 'registration is normalised to upper case');
+  assert.equal((await call('POST', '/api/vehicles', { registration: 'TEST-501' }, dispT)).status, 403, 'only admin creates vehicles');
+  assert.equal((await call('POST', '/api/vehicles', { registration: 'TEST-500' }, adminT)).status, 409);
+
+  const patched = await call('PATCH', `/api/vehicles/${created.body.id}`, { mileage: 4200, status: 'OFF_ROAD' }, adminT);
+  assert.equal(patched.body.mileage, 4200);
+  assert.equal(patched.body.status, 'OFF_ROAD');
+  assert.equal((await call('PATCH', `/api/vehicles/${created.body.id}`, { status: 'NONSENSE' }, adminT)).status, 400);
+
+  assert.equal((await call('DELETE', `/api/vehicles/${created.body.id}`, undefined, adminT)).status, 200);
+});
+
+test('a vehicle cannot be deleted while an MDT or person is still linked to it', async () => {
+  const mdts = await call('GET', '/api/mdts', undefined, dispT);
+  const mdt001 = mdts.body.find((m) => m.mdt_code === 'MDT-001');
+  const vehicles = await call('GET', '/api/vehicles', undefined, dispT);
+  const linkedVehicle = vehicles.body.find((v) => v.registration === mdt001.vehicle);
+  assert.ok(linkedVehicle, 'MDT-001 has a linked vehicle in the demo fleet');
+  assert.equal((await call('DELETE', `/api/vehicles/${linkedVehicle.id}`, undefined, adminT)).status, 409);
+});
+
+test('an asset can be created, assigned to personnel, and has a unique tag', async () => {
+  const created = await call('POST', '/api/assets', { category: 'DEVICE', description: 'Body camera', tag: 'BC-100' }, adminT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.status, 'IN_STORE');
+  assert.equal((await call('POST', '/api/assets', { category: 'DEVICE', description: 'Dup', tag: 'BC-100' }, adminT)).status, 409);
+  assert.equal((await call('POST', '/api/assets', { category: 'NOT_REAL', description: 'x' }, adminT)).status, 400);
+
+  const assigned = await call('PATCH', `/api/assets/${created.body.id}`, { assigned_to: danId, status: 'IN_USE' }, adminT);
+  assert.equal(assigned.body.assigned_to, danId);
+  assert.equal(assigned.body.assigned_to_name, 'Dan Whitfield');
+  assert.equal(assigned.body.status, 'IN_USE');
+
+  const checked = await call('PATCH', `/api/assets/${created.body.id}`, { check_now: true }, adminT);
+  assert.ok(checked.body.last_checked_at);
+
+  const list = await call('GET', `/api/assets?assigned_to=${danId}`, undefined, dispT);
+  assert.ok(list.body.some((a) => a.id === created.body.id));
+
+  assert.equal((await call('DELETE', `/api/assets/${created.body.id}`, undefined, adminT)).status, 200);
 });
 
 /* ---------------- offline replay safety ---------------- */

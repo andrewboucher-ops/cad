@@ -78,14 +78,28 @@
   </div>
 
   <section class="panel">
-    <header>My shift</header>
+    <header>My details</header>
     <div class="body" id="whoBody" style="padding:12px"></div>
+  </section>
+
+  <section class="panel">
+    <header>My shift</header>
+    <div class="body" id="shiftBody" style="padding:12px">
+      <p class="dim">No shift scheduled.</p>
+    </div>
   </section>
 
   <section class="panel">
     <header>Current job</header>
     <div class="body" id="jobBody" style="padding:12px">
       <p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <header>Current patrol visit</header>
+    <div class="body" id="visitBody" style="padding:12px">
+      <p class="dim">No patrol visit assigned.</p>
     </div>
   </section>
 
@@ -113,7 +127,7 @@ setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
 
 el('#signOut').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
 
-let person = null, job = null, pendingPhotoItemId = null;
+let person = null, job = null, visit = null, pendingPhotoItemId = null, pendingPhotoKind = 'job';
 
 function modal(title, html, onMount) {
   el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
@@ -177,6 +191,42 @@ function openWelfareModal() {
   });
 }
 
+let shifts = [];
+function fmtShiftTime(iso) { return new Date(iso).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); }
+function paintShift() {
+  const now = Date.now();
+  const upcoming = shifts.filter((s) => !['CANCELLED'].includes(s.status)).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
+  const current = upcoming.find((s) => s.status === 'CLOCKED_IN')
+    || upcoming.find((s) => ['SCHEDULED', 'CONFIRMED'].includes(s.status) && Date.parse(s.starts_at) - 3600000 <= now && Date.parse(s.ends_at) >= now);
+  const rest = upcoming.filter((s) => s !== current && Date.parse(s.ends_at) >= now).slice(0, 4);
+
+  if (!current && !rest.length) { el('#shiftBody').innerHTML = '<p class="dim">No shift scheduled.</p>'; return; }
+
+  let html = '';
+  if (current) {
+    html += `
+      <div class="field"><span>${current.status === 'CLOCKED_IN' ? 'Clocked in' : 'Next shift'}</span><div>${esc(fmtShiftTime(current.starts_at))} – ${esc(fmtShiftTime(current.ends_at))}</div></div>
+      <div class="field"><span>Site</span><div>${esc(current.site_name || '—')}</div></div>
+      <div class="field"><span>Role</span><div>${esc(current.role_type || '—')}</div></div>
+      <div class="btn-row" style="margin-top:8px">
+        ${current.status !== 'CLOCKED_IN' ? `<button class="btn ok" id="shClockIn">Clock in</button>` : `<button class="btn danger" id="shClockOut">Clock out</button>`}
+      </div>`;
+  }
+  if (rest.length) {
+    html += `<label style="margin-top:${current ? '14px' : '0'}">Upcoming</label>` +
+      rest.map((s) => `<div class="field"><span>${esc(fmtShiftTime(s.starts_at))}</span><div>${esc(s.site_name || s.role_type || '—')}</div></div>`).join('');
+  }
+  el('#shiftBody').innerHTML = html;
+  if (el('#shClockIn')) el('#shClockIn').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-in`, {}); await refreshShifts(); };
+  if (el('#shClockOut')) el('#shClockOut').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-out`, {}); await refreshShifts(); };
+}
+async function refreshShifts() {
+  if (!person) return;
+  const from = new Date(Date.now() - 12 * 3600000).toISOString();
+  shifts = await api('GET', `/api/shifts?personnel_id=${person.id}&from=${encodeURIComponent(from)}`);
+  paintShift();
+}
+
 function paintJob() {
   if (!job) {
     el('#jobBody').innerHTML = '<p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>';
@@ -222,9 +272,9 @@ function paintJob() {
     CCCS.els('[data-note]').forEach((ta) => (ta.onblur = async () => {
       job = await api('PATCH', `/api/jobs/${job.id}/checklist/${ta.dataset.note}`, { notes: ta.value });
     }));
-    CCCS.els('[data-photofor]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = b.dataset.photofor; el('#photoInput').click(); }));
+    CCCS.els('[data-photofor]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = b.dataset.photofor; pendingPhotoKind = 'job'; el('#photoInput').click(); }));
   }
-  el('#jAddPhoto').onclick = () => { pendingPhotoItemId = null; el('#photoInput').click(); };
+  el('#jAddPhoto').onclick = () => { pendingPhotoItemId = null; pendingPhotoKind = 'job'; el('#photoInput').click(); };
 
   if (el('#jAck')) el('#jAck').onclick = async () => {
     const r = await CCCS.send('POST', `/api/jobs/${job.id}/ack`, {}, `acknowledge ${job.reference}`);
@@ -239,10 +289,72 @@ async function setJobStatus(status) {
   if (!r.queued) { job = r; paintJob(); }
 }
 
+function paintVisit() {
+  if (!visit) {
+    el('#visitBody').innerHTML = '<p class="dim">No patrol visit assigned.</p>';
+    return;
+  }
+  const mine = visit.resources.find((r) => r.personnel === (person && person.name));
+  const checklist = visit.checklist || [];
+  el('#visitBody').innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <span class="mono" style="font-weight:700;font-size:16px">${esc(visit.reference)}</span>
+      <span class="mono dim">${esc(visit.status.replace('_', ' '))}</span>
+    </div>
+    <div class="field"><span>Site</span><div>${esc(visit.site_name || '—')}</div></div>
+    <div class="field"><span>Address</span><div>${esc(visit.site_address || '—')}</div></div>
+    <div class="field"><span>Scheduled for</span><div>${new Date(visit.scheduled_for).toLocaleString()}</div></div>
+    <div class="field"><span>Notes</span><div>${esc(visit.notes || '—')}</div></div>
+    <div class="btn-row" style="margin:12px 0">
+      ${mine && visit.status === 'DISPATCHED' ? '<button class="btn ok" id="vAck">Accept visit</button>' : ''}
+      <button class="btn" id="vEnr">En route</button>
+      <button class="btn" id="vScene">On scene</button>
+      <button class="btn" id="vDone">Completed</button>
+    </div>
+    ${checklist.length ? `<label style="margin-top:10px">Checklist</label><div id="visitChecklistHost"></div>` : ''}
+    <div class="btn-row" style="margin-top:10px"><button class="btn" id="vAddPhoto">Add photo</button></div>`;
+
+  if (checklist.length) {
+    el('#visitChecklistHost').innerHTML = checklist.map((item) => `
+      <div class="checklist-item ${item.status === 'COMPLETE' ? 'done' : ''}" data-item="${item.id}">
+        <input type="checkbox" data-vcheck="${item.id}" ${item.status === 'COMPLETE' ? 'checked' : ''}>
+        <div class="ci-body">
+          <div class="ci-title">${esc(item.title)}</div>
+          ${item.instructions ? `<div class="ci-instr">${esc(item.instructions)}</div>` : ''}
+          <textarea rows="1" placeholder="Notes" data-vnote="${item.id}">${esc(item.notes || '')}</textarea>
+          <div class="ci-photos">${(visit.media || []).filter((m) => m.checklist_item_id === item.id).map((m) => `<img src="${m.url}" alt="">`).join('')}</div>
+          <div class="btn-row" style="margin-top:6px"><button class="btn" style="padding:2px 8px;font-size:11px" data-vphotofor="${item.id}">Photo</button></div>
+        </div>
+      </div>`).join('');
+    CCCS.els('[data-vcheck]').forEach((cb) => (cb.onchange = async () => {
+      visit = await api('PATCH', `/api/site-visits/${visit.id}/checklist/${cb.dataset.vcheck}`, { status: cb.checked ? 'COMPLETE' : 'PENDING' });
+      paintVisit();
+    }));
+    CCCS.els('[data-vnote]').forEach((ta) => (ta.onblur = async () => {
+      visit = await api('PATCH', `/api/site-visits/${visit.id}/checklist/${ta.dataset.vnote}`, { notes: ta.value });
+    }));
+    CCCS.els('[data-vphotofor]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = b.dataset.vphotofor; pendingPhotoKind = 'visit'; el('#photoInput').click(); }));
+  }
+  el('#vAddPhoto').onclick = () => { pendingPhotoItemId = null; pendingPhotoKind = 'visit'; el('#photoInput').click(); };
+
+  if (el('#vAck')) el('#vAck').onclick = async () => {
+    const r = await CCCS.send('POST', `/api/site-visits/${visit.id}/ack`, {}, `acknowledge visit ${visit.reference}`);
+    if (!r.queued) { visit = r; paintVisit(); }
+  };
+  el('#vEnr').onclick = () => setVisitStatus('EN_ROUTE');
+  el('#vScene').onclick = () => setVisitStatus('ON_SCENE');
+  el('#vDone').onclick = () => setVisitStatus('COMPLETED');
+}
+async function setVisitStatus(status) {
+  const r = await CCCS.send('PATCH', `/api/site-visits/${visit.id}`, { status }, `${visit.reference} → ${status}`);
+  if (!r.queued) { visit = r; paintVisit(); }
+}
+
 el('#photoInput').onchange = async () => {
   const file = el('#photoInput').files[0];
   el('#photoInput').value = '';
-  if (!file || !job) return;
+  const target = pendingPhotoKind === 'visit' ? visit : job;
+  if (!file || !target) return;
   const mimetype = file.type;
   const data = await new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -251,9 +363,15 @@ el('#photoInput').onchange = async () => {
     reader.readAsDataURL(file);
   });
   try {
-    await api('POST', `/api/jobs/${job.id}/media`, { mimetype, data, checklist_item_id: pendingPhotoItemId || undefined });
-    job = await api('GET', `/api/jobs`).then((jobs) => jobs.find((j) => j.id === job.id) || job);
-    paintJob();
+    if (pendingPhotoKind === 'visit') {
+      await api('POST', `/api/site-visits/${visit.id}/media`, { mimetype, data, checklist_item_id: pendingPhotoItemId || undefined });
+      visit = await api('GET', '/api/site-visits').then((visits) => visits.find((v) => v.id === visit.id) || visit);
+      paintVisit();
+    } else {
+      await api('POST', `/api/jobs/${job.id}/media`, { mimetype, data, checklist_item_id: pendingPhotoItemId || undefined });
+      job = await api('GET', `/api/jobs`).then((jobs) => jobs.find((j) => j.id === job.id) || job);
+      paintJob();
+    }
   } catch (e) { alert(e.message); }
 };
 
@@ -298,6 +416,10 @@ async function boot() {
   const jobs = await api('GET', '/api/jobs');
   job = jobs.find((j) => j.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
   paintJob();
+  const visits = await api('GET', '/api/site-visits');
+  visit = visits.find((v) => v.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) || null;
+  paintVisit();
+  await refreshShifts();
 }
 boot();
 
@@ -321,6 +443,27 @@ bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === pe
      job = null; el('#alertHost').innerHTML = ''; paintJob();
    })
    .on('job.acknowledged', ({ job: j }) => { if (job && j.id === job.id) { job = j; paintJob(); } })
+   .on('site_visit.dispatched', (v) => {
+     if (!person || !v.resources.some((r) => r.personnel === person.name)) return;
+     visit = v; paintVisit();
+     el('#alertHost').innerHTML = `<div class="err" style="border:1px solid var(--priority);border-radius:8px;padding:10px">New patrol visit ${esc(v.reference)} — ${esc(v.site_name || '')}</div>`;
+   })
+   .on('site_visit.status_changed', (v) => {
+     if (!visit || v.id !== visit.id) {
+       if (person && v.resources.some((r) => r.personnel === person.name) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) { visit = v; paintVisit(); }
+       return;
+     }
+     const stillMine = person && v.resources.some((r) => r.personnel === person.name);
+     visit = stillMine && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status) ? v : null;
+     paintVisit();
+   })
+   .on('site_visit.stood_down', (v) => {
+     if (!visit || v.id !== visit.id) return;
+     visit = null; paintVisit();
+   })
+   .on('site_visit.acknowledged', ({ visit: v }) => { if (visit && v.id === visit.id) { visit = v; paintVisit(); } })
+   .on('shift.created', (s) => { if (person && s.personnel_id === person.id) refreshShifts(); })
+   .on('shift.updated', (s) => { if (person && s.personnel_id === person.id) refreshShifts(); })
    .on('emergency.acknowledged', () => { el('#alertHost').innerHTML = '<p class="dim">Emergency acknowledged by control.</p>'; })
    .on('emergency.resolved', () => { el('#alertHost').innerHTML = ''; })
    .on('message.received', (m) => {

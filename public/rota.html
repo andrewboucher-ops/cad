@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — rota</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Rota">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { display: flex; height: 100vh; overflow: hidden; padding-left: 228px; }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .page-body { flex: 1; overflow: auto; padding: 24px 28px; }
+  .page-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+  .page-head h1 { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .week-nav { display: flex; align-items: center; gap: 10px; }
+  .week-nav .range { font-family: var(--mono); font-size: 13px; color: var(--ink-dim); min-width: 190px; text-align: center; }
+
+  .rota-grid { display: grid; grid-template-columns: 180px repeat(7, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .rota-grid > div { background: var(--panel); padding: 8px; min-height: 64px; }
+  .rota-grid .hdr { background: var(--panel-2); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-dim); padding: 10px 8px; position: sticky; top: 0; z-index: 1; }
+  .rota-grid .hdr.today { color: var(--accent); }
+  .rota-grid .person-name { background: var(--panel-2); font-weight: 600; display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+  .rota-grid .person-name .sub { font-size: 11px; color: var(--ink-dim); font-weight: 400; }
+  .rota-cell { display: flex; flex-direction: column; gap: 4px; cursor: pointer; }
+  .rota-cell:hover { background: var(--panel-2); }
+  .shift-chip {
+    font-size: 11px; padding: 4px 6px; border-radius: 5px; background: var(--panel-3);
+    border-left: 3px solid var(--accent); line-height: 1.35;
+  }
+  .shift-chip .times { font-family: var(--mono); font-weight: 700; }
+  .shift-chip.status-CLOCKED_IN { border-color: var(--available); }
+  .shift-chip.status-CLOCKED_OUT { border-color: var(--ink-dim); opacity: .7; }
+  .shift-chip.status-NO_SHOW { border-color: var(--emergency); }
+  .shift-chip.status-CANCELLED { border-color: var(--ink-dim); opacity: .5; text-decoration: line-through; }
+  .add-hint { font-size: 10.5px; color: var(--ink-dim); opacity: 0; transition: opacity .1s; }
+  .rota-cell:hover .add-hint { opacity: 1; }
+  form.stack { display: flex; flex-direction: column; gap: 12px; }
+  form.stack label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: -6px; }
+  .foot-split { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+</style>
+</head>
+<body>
+
+<div class="icon-rail">
+  <div class="rail-brand">
+    <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon">
+  </div>
+
+  <div class="rail-section">Operations</div>
+  <a href="/control.html" title="Incidents"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Incidents</span></a>
+  <a href="/control.html" title="Terminals"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="1.8"/><path d="M9 19h6M12 15v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Terminals</span></a>
+  <a href="/control.html" title="Map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Map</span></a>
+  <a href="/control.html" title="Messages"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Messages</span></a>
+  <a href="/control.html" title="Callbacks"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3l3 1.5-1.2 3.2a12 12 0 007.5 7.5l3.2-1.2L20 17c0 2-1.6 3.5-3.5 3.3C10 19.7 4.3 14 3.7 7.5 3.5 5.6 5 4 7 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Callbacks</span></a>
+  <a href="/log.html" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
+
+  <div class="rail-section">Fleet</div>
+  <a href="/control.html" title="Assignments"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/></svg><span>Assignments</span></a>
+
+  <div class="rail-section">HR</div>
+  <a href="/rota.html" class="active" title="Rota"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="17" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 3v3M16 3v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Rota</span></a>
+
+  <div class="rail-section" id="railSystemSection" hidden>System</div>
+  <a href="/admin.html" id="railAdmin" title="Admin" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 4.5l1 1.8 2 .4-1.4 1.5.3 2-1.9-.9-1.9.9.3-2-1.4-1.5 2-.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>Admin</span></a>
+</div>
+
+<main>
+  <div class="topbar">
+    <span class="link-net" id="net">link down</span>
+    <span class="spacer"></span>
+    <span class="clock" id="clock">--:--:--</span>
+    <div class="user-block">
+      <span class="avatar" id="avatar"></span>
+      <span class="who">
+        <span class="name" id="whoName"></span>
+        <span class="role" id="whoRole"></span>
+      </span>
+    </div>
+    <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
+  </div>
+
+  <div class="page-body">
+    <div class="page-head">
+      <h1>Rota</h1>
+      <div class="week-nav">
+        <button class="btn" id="prevWeek" style="padding:6px 12px">‹ Prev</button>
+        <span class="range" id="weekRange"></span>
+        <button class="btn" id="thisWeek" style="padding:6px 12px">This week</button>
+        <button class="btn" id="nextWeek" style="padding:6px 12px">Next ›</button>
+      </div>
+      <button class="btn primary" id="btnNewShift" style="padding:7px 14px;font-size:13px">New shift</button>
+    </div>
+    <div id="gridWrap"></div>
+  </div>
+</main>
+
+<div id="modalHost"></div>
+
+<script src="/app.js"></script>
+<script>
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+
+el('#whoName').textContent = me.display_name;
+el('#whoRole').textContent = me.role.replace('_', ' ');
+el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
+el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
+if (me.role === 'SYSTEM_ADMIN') { el('#railSystemSection').hidden = false; el('#railAdmin').hidden = false; }
+
+function modal(title, html, onMount) {
+  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"></div></div></div>`;
+  onMount && onMount();
+}
+const closeModal = () => (el('#modalHost').innerHTML = '');
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+function startOfWeek(d) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() - x.getDay()); // Sunday start
+  return x;
+}
+let weekStart = startOfWeek(new Date());
+let allPersonnel = [], allSites = [], allShifts = [];
+
+function weekDays() {
+  return Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(d.getDate() + i); return d; });
+}
+// Deliberately NOT toISOString().slice(0,10) — that converts to UTC first,
+// which silently shifts the calendar date back a day for any timezone ahead
+// of UTC (confirmed live: BST puts this off by one). Format the local
+// calendar date directly instead.
+function fmtDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+function sameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
+
+async function load() {
+  const days = weekDays();
+  const from = new Date(days[0]); from.setHours(0, 0, 0, 0);
+  const to = new Date(days[6]); to.setHours(23, 59, 59, 999);
+  el('#weekRange').textContent = `${days[0].toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${days[6].toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+  [allPersonnel, allSites, allShifts] = await Promise.all([
+    api('GET', '/api/personnel'), api('GET', '/api/sites'),
+    api('GET', `/api/shifts?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`),
+  ]);
+  paintGrid();
+}
+
+function paintGrid() {
+  const days = weekDays();
+  const today = new Date();
+  const rows = allPersonnel.filter((p) => p.employment_status !== 'TERMINATED').sort((a, b) => a.name.localeCompare(b.name));
+  let html = `<div class="rota-grid">`;
+  html += `<div class="hdr"></div>`;
+  for (const d of days) html += `<div class="hdr ${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()].slice(0, 3)} ${d.getDate()}</div>`;
+  for (const p of rows) {
+    html += `<div class="person-name">${esc(p.name)}<span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
+    for (const d of days) {
+      const dayShifts = allShifts.filter((s) => s.personnel_id === p.id && sameDay(new Date(s.starts_at), d));
+      html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
+        ${dayShifts.map((s) => `<div class="shift-chip status-${s.status}" data-shift="${s.id}">
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</div>
+          <div>${esc(s.site_name || s.role_type || '')}</div>
+        </div>`).join('')}
+        <span class="add-hint">+ add shift</span>
+      </div>`;
+    }
+  }
+  html += `</div>`;
+  el('#gridWrap').innerHTML = rows.length ? html : '<p class="dim">No active personnel to schedule.</p>';
+
+  els('.shift-chip').forEach((chip) => chip.addEventListener('click', (e) => {
+    e.stopPropagation();
+    shiftModal(allShifts.find((s) => s.id === Number(chip.dataset.shift)));
+  }));
+  els('.rota-cell').forEach((cell) => cell.addEventListener('click', () => {
+    shiftModal(null, { personnelId: Number(cell.dataset.personnel), date: cell.dataset.date });
+  }));
+}
+
+el('#prevWeek').onclick = () => { weekStart.setDate(weekStart.getDate() - 7); load(); };
+el('#nextWeek').onclick = () => { weekStart.setDate(weekStart.getDate() + 7); load(); };
+el('#thisWeek').onclick = () => { weekStart = startOfWeek(new Date()); load(); };
+
+function shiftForm(s, defaults) {
+  const isNew = !s;
+  const d = defaults || {};
+  const startDefault = isNew ? `${d.date}T09:00` : new Date(s.starts_at).toISOString().slice(0, 16);
+  const endDefault = isNew ? `${d.date}T17:00` : new Date(s.ends_at).toISOString().slice(0, 16);
+  return `
+    <form class="stack" id="shForm">
+      <label>Personnel</label>
+      <select id="shPersonnel">${allPersonnel.map((p) => `<option value="${p.id}" ${(isNew ? d.personnelId : s.personnel_id) === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+      <label>Site (optional)</label>
+      <select id="shSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${!isNew && s.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <label>Starts</label>
+      <input id="shStart" type="datetime-local" value="${startDefault}">
+      <label>Ends</label>
+      <input id="shEnd" type="datetime-local" value="${endDefault}">
+      <label>Role</label>
+      <input id="shRole" autocomplete="off" value="${isNew ? '' : esc(s.role_type || '')}" placeholder="Patrol, static guard…">
+      <label>Notes</label>
+      <textarea id="shNotes" rows="2">${isNew ? '' : esc(s.notes || '')}</textarea>
+      ${isNew ? '' : `<label>Status</label>
+      <select id="shStatus">${['SCHEDULED', 'CONFIRMED', 'CLOCKED_IN', 'CLOCKED_OUT', 'NO_SHOW', 'CANCELLED'].map((v) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
+      <p class="dim" id="shError" style="min-height:16px;margin:0"></p>
+    </form>`;
+}
+function shiftModal(s, defaults) {
+  modal(s ? `Shift — ${s.personnel_name}` : 'New shift', shiftForm(s, defaults), () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${s ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="shCancel">Cancel</button>
+          <button class="btn primary" id="shSave">${s ? 'Save changes' : 'Create shift'}</button>
+        </span>
+      </div>`;
+    el('#shCancel').onclick = closeModal;
+    if (el('#shDelete')) el('#shDelete').onclick = async () => {
+      if (!confirm('Delete this shift?')) return;
+      try { await api('DELETE', `/api/shifts/${s.id}`); closeModal(); await load(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    };
+    el('#shSave').onclick = async () => {
+      const body = {
+        personnel: Number(el('#shPersonnel').value),
+        site_id: el('#shSite').value ? Number(el('#shSite').value) : null,
+        starts_at: new Date(el('#shStart').value).toISOString(),
+        ends_at: new Date(el('#shEnd').value).toISOString(),
+        role_type: el('#shRole').value.trim(),
+        notes: el('#shNotes').value.trim(),
+      };
+      try {
+        if (s) {
+          if (el('#shStatus')) body.status = el('#shStatus').value;
+          await api('PATCH', `/api/shifts/${s.id}`, body);
+        } else {
+          await api('POST', '/api/shifts', body);
+        }
+        closeModal(); await load();
+      } catch (e) { el('#shError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewShift').onclick = () => shiftModal(null, { personnelId: allPersonnel[0] && allPersonnel[0].id, date: fmtDate(new Date()) });
+
+CCCS.bus((up) => {
+  const n = el('#net');
+  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
+});
+
+load();
+</script>
+</body>
+</html>

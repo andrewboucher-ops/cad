@@ -163,6 +163,10 @@
 
   <div class="rail-section">Fleet</div>
   <button id="railAssignments" title="Assignments"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/></svg><span>Assignments</span></button>
+  <button id="railPatrols" title="Patrol visits"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 9.5l2.2 2.2L15 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Patrols</span></button>
+
+  <div class="rail-section">HR</div>
+  <a href="/rota.html" title="Rota"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="17" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 3v3M16 3v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Rota</span></a>
 
   <div class="rail-section" id="railSystemSection" hidden>System</div>
   <a href="/admin.html" id="railAdmin" title="Admin" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 4.5l1 1.8 2 .4-1.4 1.5.3 2-1.9-.9-1.9.9.3-2-1.4-1.5 2-.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>Admin</span></a>
@@ -197,7 +201,7 @@ if (!isPopout) {
   setInterval(() => { if (state.personnel.some((p) => p.welfare_due_at)) renderResources(); }, 1000);
 }
 
-const state = { personnel: [], mdts: [], jobs: [], sites: [], requests: [], emergencies: [], events: [], selected: null };
+const state = { personnel: [], mdts: [], jobs: [], sites: [], site_visits: [], requests: [], emergencies: [], events: [], selected: null };
 let map; // assigned once the 'map' panel is mounted, below
 
 /* ---------- rendering ---------- */
@@ -295,6 +299,111 @@ function renderJobs() {
     assignModal(state.jobs.find((j) => j.id === Number(b.dataset.assignjob)));
   }));
   updateCallbackBadge();
+}
+
+/* ---------- patrol visits ---------- */
+const visitStatusLabel = (s) => (s === 'ACKNOWLEDGED' ? 'ACK' : s.replace('_', ' '));
+const visitStatusClass = (s) => ({ EN_ROUTE: 'busy', ON_SCENE: 'busy', DISPATCHED: 'busy', ACKNOWLEDGED: 'busy', MISSED: 'emg', CANCELLED: 'off' }[s] || 'on');
+function renderVisits() {
+  if (!el('#visitList')) return;
+  const showClosed = el('#fltVisitClosed') && el('#fltVisitClosed').checked;
+  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const open = state.site_visits.filter((v) => !['COMPLETED', 'CANCELLED'].includes(v.status)
+    || (showClosed && Date.parse(v.updated_at) > dayAgo));
+  open.sort((a, b) => Date.parse(a.scheduled_for) - Date.parse(b.scheduled_for));
+  el('#visitList').innerHTML = open.length ? open.map((v) => `
+    <div class="row ${['COMPLETED', 'CANCELLED'].includes(v.status) ? 'closed' : ''} ${v.status === 'MISSED' ? 'alarm' : ''}" data-visit="${v.id}">
+      <div class="card-top">
+        <span class="cs">${esc(v.reference)}</span>
+        <span class="status-pill ${visitStatusClass(v.status)}">${visitStatusLabel(v.status)}</span>
+      </div>
+      <div class="card-sub">
+        <span>${esc(v.site_name || 'Site')}</span>
+        <span>${esc(v.resources.map((r) => r.personnel).join(', ') || 'unassigned')}</span>
+      </div>
+    </div>`).join('') : '<p class="dim">No open patrol visits.</p>';
+  CCCS.els('#visitList .row').forEach((n) => n.addEventListener('click', () => visitModal(state.site_visits.find((v) => v.id === Number(n.dataset.visit)))));
+}
+
+const VISIT_STAGES = [
+  ['DISPATCHED', 'Dispatched'], ['ACKNOWLEDGED', 'Acknowledged'], ['EN_ROUTE', 'En route'],
+  ['ON_SCENE', 'On scene'], ['COMPLETED', 'Completed'],
+];
+function visitModal(v) {
+  if (!v) return;
+  const stageAt = { DISPATCHED: v.dispatched_at, ACKNOWLEDGED: v.acknowledged_at, EN_ROUTE: v.en_route_at, ON_SCENE: v.on_scene_at, COMPLETED: v.completed_at };
+  let lastDoneIdx = -1;
+  VISIT_STAGES.forEach(([code], i) => { if (stageAt[code]) lastDoneIdx = i; });
+  const active = !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status);
+  const stepper = VISIT_STAGES.map(([code, label], i) => {
+    const at = stageAt[code];
+    const isCurrent = at && i === lastDoneIdx && active;
+    return `<div class="step ${at ? (isCurrent ? 'current' : 'done') : ''}">
+      <div class="dot-step">${at && !isCurrent ? '✓' : i + 1}</div>
+      <div><div class="label">${label}</div><div class="time${at ? '' : ' dim'}">${at ? new Date(at).toLocaleTimeString() : 'waiting'}</div></div>
+    </div>`;
+  }).join('');
+  modal(`Visit ${v.reference}`, `
+    <div class="job-head">
+      <div>
+        <div class="titles"><h3>${esc(v.site_name || 'Site visit')}</h3></div>
+        <div class="dim" style="margin-top:5px">${esc(v.reference)} · ${esc(v.site_address || '')}</div>
+      </div>
+      ${v.status === 'MISSED' ? `<span class="status-pill emg">MISSED</span>` : active
+        ? `<div class="dim" style="font-size:12px">Scheduled ${new Date(v.scheduled_for).toLocaleString()}</div>`
+        : `<span class="status-pill ${v.status === 'CANCELLED' ? 'off' : 'on'}">${esc(v.status)}</span>`}
+    </div>
+    ${['CANCELLED', 'MISSED'].includes(v.status) ? '' : `<div class="stepper">${stepper}</div>`}
+
+    <dl class="kv" style="margin-top:14px">
+      <dt>Resources</dt><dd>${v.resources.length ? v.resources.map((r) => `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+          <span style="flex:1">${esc(r.personnel)}${r.primary ? ' (primary)' : ''}</span>
+          <button class="btn danger" style="padding:0 6px;font-size:11px" data-visitstanddown="${r.personnel_id}">Stand down</button>
+        </div>`).join('') : '—'}</dd>
+    </dl>
+
+    <label for="vNotes">Notes</label>
+    <textarea id="vNotes" rows="3" style="width:100%;resize:vertical">${esc(v.notes || '')}</textarea>
+    <div class="btn-row" style="margin-top:6px"><button class="btn" id="vSaveNotes">Save notes</button></div>
+
+    <label for="vAdd" style="margin-top:12px;display:block">Assign an officer</label>
+    <select id="vAdd">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}</option>`).join('')}</select>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn primary" id="vAssign">Assign</button>
+      <button class="btn ok" id="vDone">Mark completed</button>
+      <button class="btn danger" id="vCancel">Cancel visit</button>
+    </div>`, () => {
+    el('#vAssign').onclick = async () => {
+      try { await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vAdd').value) }); closeModal(); }
+      catch (e) { alert(e.message); }
+    };
+    el('#vDone').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }); closeModal(); };
+    el('#vCancel').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }); closeModal(); };
+    el('#vSaveNotes').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { notes: el('#vNotes').value }); closeModal(); };
+    CCCS.els('[data-visitstanddown]').forEach((b) => (b.onclick = async () => {
+      if (!confirm('Stand this person down from the visit?')) return;
+      await api('POST', `/api/site-visits/${v.id}/stand-down`, { personnel: Number(b.dataset.visitstanddown) });
+      closeModal();
+    }));
+  });
+}
+
+function openNewVisitModal() {
+  modal('New patrol visit', `
+  <label for="nvSite">Site</label>
+  <select id="nvSite">${state.sites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
+  <label for="nvPersonnel">Assign now (optional)</label>
+  <select id="nvPersonnel"><option value="">— assign later —</option>${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}</option>`).join('')}</select>
+  <div style="height:12px"></div><button class="btn primary" id="nvGo">Create visit</button>`, () => {
+  el('#nvGo').onclick = async () => {
+    try {
+      const visit = await api('POST', '/api/site-visits', { site_id: Number(el('#nvSite').value) });
+      if (el('#nvPersonnel').value) await api('POST', `/api/site-visits/${visit.id}/assign`, { personnel: Number(el('#nvPersonnel').value) });
+      closeModal();
+    } catch (e) { el('#nvGo').insertAdjacentHTML('afterend', `<p class="err">${esc(e.message)}</p>`); }
+  };
+});
 }
 
 /** Tap a call sign to dispatch every person and MDT on it — mirrors how a
@@ -724,7 +833,20 @@ layout.registerComponentFactoryFunction('detail', (container) => {
   renderDetail();
 });
 
-const PANEL_TITLES = { jobs: 'Active Jobs', map: 'Operational Map', resources: 'Resources', detail: 'Resource Detail' };
+layout.registerComponentFactoryFunction('visits', (container) => {
+  mount(container,
+    '<button class="btn" id="visitFilters" style="padding:2px 8px;font-size:11px">Filters</button>' +
+    '<button class="btn" id="newVisit" style="padding:2px 8px;font-size:11px">New visit</button>',
+    '<div class="filters-drop hide" id="visitFiltersDrop"><label><input type="checkbox" id="fltVisitClosed"> Include recently closed (last 24h)</label></div>' +
+    '<div class="body" id="visitList" style="flex:1;overflow:auto"></div>');
+  const $ = (sel) => el(sel, container.element);
+  $('#visitFilters').onclick = () => $('#visitFiltersDrop').classList.toggle('hide');
+  $('#fltVisitClosed').onchange = renderVisits;
+  $('#newVisit').onclick = openNewVisitModal;
+  renderVisits();
+});
+
+const PANEL_TITLES = { jobs: 'Active Jobs', map: 'Operational Map', resources: 'Resources', detail: 'Resource Detail', visits: 'Patrol Visits' };
 
 const defaultLayoutConfig = {
   // Popout really is useful here — genuinely separate windows for a
@@ -750,7 +872,8 @@ const defaultLayoutConfig = {
       {
         type: 'row', height: 28,
         content: [
-          { type: 'component', componentType: 'detail', title: PANEL_TITLES.detail, width: 100 },
+          { type: 'component', componentType: 'detail', title: PANEL_TITLES.detail, width: 55 },
+          { type: 'component', componentType: 'visits', title: PANEL_TITLES.visits, width: 45 },
         ],
       },
     ],
@@ -762,7 +885,7 @@ const defaultLayoutConfig = {
 // layout always wins over the default. This is what silently carried an
 // earlier broken config (header.close disabling drag/close) forward even
 // after the code was fixed.
-const LAYOUT_VERSION = 4;
+const LAYOUT_VERSION = 5;
 
 // (isPopout is declared near the top of the script.) The component
 // factories above must still be registered so GL can rebuild whichever one
@@ -847,6 +970,7 @@ el('#railMessages').onclick = () => el('#btnMessage').click();
 el('#railCallbacks').onclick = () => focusPanel('#reqWrap');
 el('#railMap').onclick = () => openPanel('map');
 el('#railAssignments').onclick = () => el('#btnAssign').click();
+el('#railPatrols').onclick = () => openPanel('visits');
 }
 
 /* ---------- realtime ---------- */
@@ -918,6 +1042,12 @@ bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderResources(); 
    .on('job.status_changed', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); renderResources(); })
    .on('job.acknowledged', ({ job }) => { upsert(state.jobs, job); renderJobs(); renderResources(); })
    .on('job.stood_down', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); })
+   .on('site_visit.created', (v) => { upsert(state.site_visits, v); renderVisits(); })
+   .on('site_visit.dispatched', (v) => { upsert(state.site_visits, v); renderVisits(); })
+   .on('site_visit.acknowledged', ({ visit }) => { upsert(state.site_visits, visit); renderVisits(); })
+   .on('site_visit.status_changed', (v) => { upsert(state.site_visits, v); renderVisits(); })
+   .on('site_visit.stood_down', (v) => { upsert(state.site_visits, v); renderVisits(); })
+   .on('site_visit.missed', (v) => { upsert(state.site_visits, v); renderVisits(); })
    .on('emergency.activated', (e) => { upsert(state.emergencies, e); renderEmergencies(); renderResources(); sound.refreshEmergencyAlarm(); })
    .on('call.request', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); sound.callRequest(); })
    .on('call.request_cleared', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); })
@@ -933,9 +1063,9 @@ async function boot() {
   const s = await api('GET', '/api/state');
   state.mdts = s.mdts; state.jobs = s.jobs; state.personnel = s.personnel;
   state.emergencies = s.emergencies; state.events = s.events;
-  state.sites = s.sites || [];
+  state.sites = s.sites || []; state.site_visits = s.site_visits || [];
   state.requests = await api('GET', '/api/calls/requests').catch(() => []);
-  renderResources(); renderJobs(); renderMap(); renderEmergencies(); renderRequests(); renderLog();
+  renderResources(); renderJobs(); renderVisits(); renderMap(); renderEmergencies(); renderRequests(); renderLog();
   // Covers a page load/reconnect landing mid-emergency -- the alarm
   // shouldn't depend on having been open when emergency.activated fired.
   sound.refreshEmergencyAlarm();

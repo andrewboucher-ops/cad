@@ -13,26 +13,43 @@ before cutting quality. This document is the sequence to follow.
 
 ## Where things stand
 
-**Phase A — radio removal + rename: code-complete, not yet deployed.**
+**Phase A — radio removal + rename: done and deployed.**
 `server.js`/`store.js` are rebuilt around `personnel`/`mdts`/`job_assignments`
 (no more `radio_id`, no PTT, no talkgroups, no PBX/telephony). Every client
-page (`control.html`, the new `officer.html`, `mdt.html`, `admin.html`,
-`index.html`, `log.html`) is radio-free. `db/schema.sql` and the test suite
-still need updating to match, and nothing has shipped to the live container
-yet — see *Deploying Phase A* below before that happens.
+page (`control.html`, `officer.html`, `mdt.html`, `admin.html`, `index.html`,
+`log.html`) is radio-free, `db/schema.sql` and the test suite match, and this
+has shipped to the live container.
 
-**Phase B — Sites/Patrols: not started.** Scheduled patrol visits
-(`patrol_schedules`, `site_visits`) as a distinct, persistent model from
-one-off `jobs`, reusing the existing checklist/photo/resolution-report
-machinery.
+**Phase B — Sites/Patrols: done, not yet deployed.** `patrol_schedules` and
+`site_visits` are live: a scheduling tick (`patrolScheduleTick`, every 60s)
+turns a due occurrence into a `SCHEDULED` visit and flags one nobody
+dispatched in time as `MISSED`; visits walk the same
+DISPATCHED→ACKNOWLEDGED→EN_ROUTE→ON_SCENE→COMPLETED lifecycle as a job,
+reusing the checklist/photo/resolution-report machinery. Control room has a
+Patrol Visits panel, `admin.html` has a Patrol Schedules tab, `officer.html`
+shows and acts on an assigned visit. Covered by tests. Needs the same deploy
+treatment as Phase A before it reaches the live container — see *Deploying
+Phase A* below for the pattern (git checkpoint, then copy the runtime files,
+restart, smoke-test).
 
-**Phase C — HR Rota: not started.** Real personnel CRUD (currently
-read-only), shifts/clock-in-out, a control-room rota builder, and the
-officer-facing shift view in `officer.html`.
+**Phase C — HR Rota: done, not yet deployed.** Personnel CRUD
+(`POST`/`PATCH`/`DELETE /api/personnel`, ADMIN-gated, with delete guards
+against an open job/visit assignment or a linked login), a `shifts`
+collection with clock-in/out (gated to the shift's own person or control),
+and reciprocal `user.personnel_id` ↔ `personnel.user_id` linking (a real bug
+in the existing user-linking code was fixed in the process — it only set one
+side). `admin.html` has a Personnel tab and a "linked personnel" select on
+the account form; `public/rota.html` is a new week-grid rota builder;
+`officer.html` shows the officer's current/next shift with clock-in/out.
+Covered by tests. Needs the same deploy treatment as Phase A/B.
 
-**Phase D — Asset tracking: not started.** Vehicle CRUD (currently
-read-only) and a new general-purpose `assets` collection (equipment,
-uniform, keys, devices) with checkout/return tracking.
+**Phase D — Asset tracking: done, not yet deployed.** Vehicle CRUD
+(`POST`/`PATCH`/`DELETE /api/vehicles`, unique registration, delete blocked
+while an MDT or person is still linked to it) and a new `assets` collection
+(equipment/uniform/key/device/other, optional unique tag, assignable to a
+person or a site) with the same CRUD shape. `admin.html` has Vehicles and
+Assets tabs. Covered by tests. Needs the same deploy treatment as
+Phase A/B/C.
 
 ---
 
@@ -93,24 +110,32 @@ Two things the installer can't do for you:
 - **Uptime monitoring that pages you.** Healthchecks.io or UptimeRobot — not a
   dashboard you have to remember to look at.
 
-## Phase 3 — Sites/Patrols (2–3 weeks)
+## Phase 3 — Sites/Patrols ✅ done, not yet deployed
 
-New `patrol_schedules` and `site_visits` collections, a scheduling tick that
+`patrol_schedules` and `site_visits` collections, a scheduling tick that
 creates a `SCHEDULED` visit when one is due, and routes mirroring `/api/jobs*`
-for assign/ack/checklist/media/report. Genericise the resolution-report HTML
-builder to accept `{reference, locationLabel, checklist, media, timeline,
-resources}` so both jobs and site-visits can use it.
+for assign/ack/checklist/media/report. The resolution-report HTML builder is
+generic across jobs and site-visits. Remaining: deploy to the container (see
+*Deploying Phase A* above for the pattern), then build out the roadmap items
+under "Extends Sites/Patrols" below — Guard Tour checkpoints, Beats, Passdown
+logs, Forms.
 
-## Phase 4 — HR Rota (2–3 weeks)
+## Phase 4 — HR Rota ✅ done, not yet deployed
 
 Real `personnel` CRUD, a `shifts` collection with clock-in/out, a
 control-room rota builder (`public/rota.html`), and the shift/clock-in view
-inside `officer.html`.
+inside `officer.html`. Remaining: deploy (see *Deploying Phase A*), then
+build out "Extends HR Rota" below — leave management, payroll export,
+SIA/DBS checks, Xero invoicing.
 
-## Phase 5 — Asset tracking (1–2 weeks)
+## Phase 5 — Asset tracking ✅ done, not yet deployed
 
 Real `vehicles` CRUD and a new `assets` collection (equipment, uniform, keys,
-devices) with a checkout/return audit trail.
+devices). Remaining: deploy (see *Deploying Phase A*), then build out
+"Extends Asset tracking" below — fuel-up reports, maintenance scheduling, a
+dedicated checkout/return audit trail (today a checkout is just a PATCH
+changing `assigned_to`/`status`, logged to the audit trail like everything
+else, but not yet a first-class "checked out to X, returned by Y" flow).
 
 ## Phase 6 — The operational layer (ongoing)
 

@@ -98,6 +98,55 @@ CREATE TABLE sites (
   checklist     JSONB NOT NULL DEFAULT '[]'::jsonb          -- on-scene checklist template: [{id, title, instructions}]
 );
 
+CREATE TYPE site_visit_status AS ENUM ('SCHEDULED','DISPATCHED','ACKNOWLEDGED','EN_ROUTE','ON_SCENE','COMPLETED','CANCELLED','MISSED');
+
+-- A recurring patrol cadence, e.g. "every 4 hours" (interval_hours) or
+-- "Mon/Wed/Fri at 22:00" (days_of_week + time_of_day). Exactly one of those
+-- two cadence shapes is set. patrolScheduleTick() in server.js turns a due
+-- occurrence into a site_visits row.
+CREATE TABLE patrol_schedules (
+  id                     BIGSERIAL PRIMARY KEY,
+  site_id                BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  label                  TEXT NOT NULL,
+  days_of_week           SMALLINT[],          -- 0=Sun..6=Sat, paired with time_of_day
+  time_of_day            TEXT,                -- 'HH:MM'
+  interval_hours         INTEGER,             -- alternative cadence: every N hours
+  duration_expected_min  INTEGER NOT NULL DEFAULT 30,
+  active                 BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- A scheduled patrol visit — the persistent, recurring counterpart to a
+-- one-off job. No TRANSPORTING (nobody is carried anywhere); MISSED is a
+-- visit the schedule tick created that nobody ever dispatched in time.
+-- Assignment is direct fields here rather than a join table like
+-- job_assignments, since a visit is never assigned to an MDT.
+CREATE TABLE site_visits (
+  id                     BIGSERIAL PRIMARY KEY,
+  reference              TEXT NOT NULL UNIQUE,
+  site_id                BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  schedule_id            BIGINT REFERENCES patrol_schedules(id) ON DELETE SET NULL,
+  personnel_id           BIGINT REFERENCES personnel(id) ON DELETE SET NULL,   -- primary assignee
+  additional_personnel   BIGINT[] NOT NULL DEFAULT '{}',                        -- team patrols
+  status                 site_visit_status NOT NULL DEFAULT 'SCHEDULED',
+  scheduled_for          TIMESTAMPTZ NOT NULL,
+  dispatched_at          TIMESTAMPTZ,
+  acknowledged_at        TIMESTAMPTZ,
+  en_route_at            TIMESTAMPTZ,
+  on_scene_at            TIMESTAMPTZ,
+  completed_at           TIMESTAMPTZ,
+  cancelled_at           TIMESTAMPTZ,
+  missed_at              TIMESTAMPTZ,
+  notes                  TEXT,
+  checklist              JSONB NOT NULL DEFAULT '[]'::jsonb,   -- instantiated from the site's template, same shape as jobs.checklist
+  media                  JSONB NOT NULL DEFAULT '[]'::jsonb,
+  report_html            TEXT,
+  created_by             BIGINT REFERENCES users(id),
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX site_visits_status_idx   ON site_visits(status);
+CREATE INDEX site_visits_schedule_idx ON site_visits(schedule_id);
+
 CREATE TABLE jobs (
   id                     BIGSERIAL PRIMARY KEY,
   reference              TEXT NOT NULL UNIQUE,
@@ -238,3 +287,42 @@ CREATE TABLE push_subscriptions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX push_subscriptions_user_idx ON push_subscriptions(user_id);
+
+CREATE TYPE shift_status AS ENUM ('SCHEDULED','CONFIRMED','CLOCKED_IN','CLOCKED_OUT','NO_SHOW','CANCELLED');
+
+CREATE TABLE shifts (
+  id             BIGSERIAL PRIMARY KEY,
+  personnel_id   BIGINT NOT NULL REFERENCES personnel(id) ON DELETE CASCADE,
+  site_id        BIGINT REFERENCES sites(id) ON DELETE SET NULL,
+  starts_at      TIMESTAMPTZ NOT NULL,
+  ends_at        TIMESTAMPTZ NOT NULL,
+  role_type      TEXT,
+  status         shift_status NOT NULL DEFAULT 'SCHEDULED',
+  clocked_in_at  TIMESTAMPTZ,
+  clocked_out_at TIMESTAMPTZ,
+  notes          TEXT,
+  created_by     BIGINT REFERENCES users(id),
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (ends_at > starts_at)
+);
+CREATE INDEX shifts_personnel_idx ON shifts(personnel_id, starts_at);
+CREATE INDEX shifts_site_idx      ON shifts(site_id);
+
+CREATE TYPE asset_category AS ENUM ('EQUIPMENT','UNIFORM','KEY','DEVICE','OTHER');
+CREATE TYPE asset_status   AS ENUM ('IN_USE','IN_STORE','LOST','RETIRED');
+
+CREATE TABLE assets (
+  id              BIGSERIAL PRIMARY KEY,
+  tag             TEXT UNIQUE,
+  category        asset_category NOT NULL,
+  description     TEXT NOT NULL,
+  serial_no       TEXT,
+  assigned_to     BIGINT REFERENCES personnel(id) ON DELETE SET NULL,
+  site_id         BIGINT REFERENCES sites(id) ON DELETE SET NULL,
+  status          asset_status NOT NULL DEFAULT 'IN_STORE',
+  purchase_date   DATE,
+  last_checked_at TIMESTAMPTZ,
+  notes           TEXT
+);
+CREATE INDEX assets_assigned_idx ON assets(assigned_to);
+CREATE INDEX assets_category_idx ON assets(category);
