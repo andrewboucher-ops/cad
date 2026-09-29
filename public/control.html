@@ -16,198 +16,297 @@
 <link rel="stylesheet" href="/console.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
   integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-<link rel="stylesheet" href="https://unpkg.com/golden-layout@2.6.0/dist/css/goldenlayout-base.css">
-<link rel="stylesheet" href="https://unpkg.com/golden-layout@2.6.0/dist/css/themes/goldenlayout-dark-theme.css">
 <style>
-  /* Real docking panels (GoldenLayout): drag tabs to rearrange, drag borders
-     to resize, close one and its neighbours reflow to fill the space, and
-     each tab's own maximise button is our "expand to fill screen". This
-     replaces an earlier hand-rolled minimize/close/expand-per-panel scheme
-     that could only approximate this. */
-  body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; padding-left: 228px; }
-  #glRoot { flex: 1; min-height: 0; margin: 8px; }
-  .lm_content { background: var(--panel); overflow: hidden; }
-  .lm_header { background: var(--panel-2) !important; }
-  .lm_tab { background: var(--panel-2) !important; color: var(--ink-dim) !important; border: none !important; }
-  .lm_tab.lm_active { background: var(--panel) !important; color: var(--ink) !important; box-shadow: inset 0 -2px 0 var(--accent) !important; }
-  .lm_tab .lm_title { font-family: var(--font) !important; font-size: 11.5px !important; font-weight: 700 !important; letter-spacing: .04em !important; text-transform: uppercase !important; }
-  .lm_splitter { background: var(--bg) !important; }
-  .lm_splitter:hover, .lm_splitter.lm_dragging { background: var(--accent-dim) !important; }
-  .lm_controls > * { opacity: .7; }
-  .lm_controls > *:hover { opacity: 1; }
-  /* Each tab already has its own close (lm_close_tab); the stack-level one
-     is the same action restated, which read as two close buttons. */
-  .lm_controls > .lm_close { display: none; }
+  /* MAP-PRIMARY. The map is the whole working area; every other surface is
+     docked over it, translucent, so a controller never loses sight of where
+     things are while reading about them. There are no modals: creating a
+     job or visit, assigning by call sign, messaging and notification set-up
+     are all modes of the Detail panel, so nothing ever covers the map or
+     blocks the emergency banners. */
+  body { height: 100vh; overflow: hidden; padding-left: 228px; display: flex; flex-direction: column; }
+  .stage { position: relative; flex: 1; min-height: 0; }
+  #map { position: absolute; inset: 0; }
+  /* Leaflet's own controls, moved to the bottom of the map clear of the
+     docked panels AND of the banner strip. Leaflet stacks its controls at
+     z-index 1000; the banners and panels sit above that (see z-index below)
+     so nothing the map draws can ever cover an emergency. */
+  #map .leaflet-top.leaflet-left { top: auto; bottom: 64px; left: 356px; }
+  #map .leaflet-top.leaflet-right { top: auto; bottom: 64px; right: 440px; }
 
-  .pcount {
-    display: flex; align-items: center; gap: 8px; padding: 7px 10px; flex: none;
-    border-bottom: 1px solid var(--line); background: var(--panel-2); min-height: 32px; box-sizing: border-box;
+  .glass {
+    position: absolute; z-index: 1050; display: flex; flex-direction: column; min-height: 0;
+    background: color-mix(in srgb, var(--panel) 84%, transparent);
+    backdrop-filter: blur(10px) saturate(1.1); -webkit-backdrop-filter: blur(10px) saturate(1.1);
+    border: 1px solid color-mix(in srgb, var(--line) 80%, transparent); border-radius: 12px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.28);
   }
-
-  .actionbar { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
-  .emg-banner { background: #4c1113; border-bottom: 1px solid #7f1d1d; padding: 8px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-  .emg-banner strong { color: #fecaca; letter-spacing: .08em; }
-  .req-bar { background: #14202e; border-bottom: 1px solid var(--line); padding: 6px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .req-bar.pri { background: #2a1c11; border-color: var(--priority); }
-  .req-bar strong { letter-spacing: .06em; }
-  .req-bar.pri strong { color: var(--priority); }
-  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 2px 10px; font-size: 13px; }
-  .kv dt { color: var(--ink-dim); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; align-self: center; }
-  .kv dd { margin: 0; font-family: var(--mono); }
-
-  /* ---- terminal / incident cards (replaces the plain text rows) ---- */
-  #resList .row, #jobList .row {
-    flex-direction: column; align-items: stretch; gap: 7px; padding: 11px 12px; border-radius: 8px;
-    border: 1px solid var(--line); background: var(--panel-2); margin-bottom: 7px; border-bottom: none;
+  .glass > header {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px; flex: none; cursor: pointer; user-select: none;
+    font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim);
+    border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
   }
-  #resList .row:hover, #jobList .row:hover { border-color: var(--accent-dim); background: var(--panel-2); }
-  #resList .row.sel, #jobList .row.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; background: var(--panel-2); }
+  .glass > header .count { font-family: var(--mono); color: var(--ink); }
+  .glass > header .tools { margin-left: auto; display: flex; gap: 6px; }
+  .glass > header .tools .btn { padding: 2px 8px; font-size: 11px; text-transform: none; letter-spacing: 0; }
+  .glass > .gbody { flex: 1; min-height: 0; overflow: auto; padding: 8px 10px; }
+  .glass.collapsed > .gbody { display: none; }
+  /* Top-anchored panels shrink upward to their header; the log is docked to
+     the bottom and must stay there when collapsed. */
+  .glass.collapsed:not(#pLog) { bottom: auto !important; }
+  .chev { transition: transform .15s; display: inline-block; }
+  .glass.collapsed .chev { transform: rotate(-90deg); }
+
+  #pDispatch { top: 12px; left: 12px; bottom: 12px; width: 340px; }
+  #pShift    { top: 12px; right: 12px; width: 320px; bottom: 50%; }
+  #pDetail   { right: 12px; bottom: 12px; width: 420px; top: calc(50% + 12px); }
+  #pLog      { left: 364px; bottom: 12px; width: min(520px, calc(100% - 820px)); max-height: 170px; }
+  #pLog.collapsed { max-height: none; }
+  @media (max-width: 1400px) { #pLog { display: none; } }
+
+  .attn-strip { position: absolute; z-index: 1100; top: 12px; left: 364px; right: 344px; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: none; }
+  .attn-strip > * { pointer-events: auto; }
+  .banner { border-radius: 10px; padding: 8px 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; width: 100%; box-shadow: 0 6px 20px rgba(0,0,0,.3); }
+  /* Fixed colours, not theme tokens: an emergency banner must read the same,
+     at full contrast, in the light theme as in the dark one. */
+  .banner.emg { background: #5b1215; border: 1px solid #dc2626; color: #fee2e2; }
+  .banner.emg strong { color: #fff; letter-spacing: .08em; }
+  .banner.emg .mono, .banner.emg .dim { color: #fecaca; }
+  .banner.emg .btn:not(.ok):not(.armed) { background: rgba(255,255,255,.14); color: #fff; border-color: rgba(255,255,255,.35); }
+  .banner.emg .btn.danger:not(.armed) { background: #dc2626; border-color: #fca5a5; }
+  .banner.req { background: color-mix(in srgb, #14202e 92%, transparent); border: 1px solid var(--line); }
+  .banner.req.pri { background: #2a1c11; border-color: var(--priority); }
+  .banner.req.pri strong { color: var(--priority); }
+  .banner .btn { padding: 3px 10px; font-size: 12px; }
+
+  /* cards */
+  .card { border: 1px solid var(--line); background: color-mix(in srgb, var(--panel-2) 88%, transparent); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; cursor: pointer; }
+  .card:hover { border-color: var(--accent-dim); }
+  .card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .card.alarm { border-color: var(--emergency); }
+  .card.closed { opacity: .55; }
   .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .card-top .cs { font-family: var(--mono); font-weight: 700; font-size: 14px; }
-  .card-sub { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-dim); font-size: 11.5px; }
-  .status-pill { font-size: 10px; font-weight: 700; letter-spacing: .05em; padding: 3px 10px; border-radius: 20px; text-transform: uppercase; white-space: nowrap; }
+  .card-top .cs { font-family: var(--mono); font-weight: 700; font-size: 13px; white-space: nowrap; }
+  .card-sub { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-dim); font-size: 11.5px; margin-top: 4px; }
+  .kind { font-size: 9.5px; font-weight: 800; letter-spacing: .08em; padding: 2px 6px; border-radius: 4px; background: var(--panel); color: var(--ink-dim); border: 1px solid var(--line); }
+  .kind.job { color: #93c5fd; border-color: #1d4ed8; }
+  .kind.visit { color: #86efac; border-color: #15803d; }
+  .needs { font-size: 10px; font-weight: 700; color: var(--priority); }
+  .status-pill { font-size: 10px; font-weight: 700; letter-spacing: .05em; padding: 2px 8px; border-radius: 20px; text-transform: uppercase; white-space: nowrap; }
   .status-pill.on { background: rgba(34,197,94,.16); color: var(--available); }
   .status-pill.busy { background: rgba(234,179,8,.16); color: var(--busy); }
   .status-pill.off { background: rgba(100,116,139,.18); color: var(--offline); }
   .status-pill.emg { background: rgba(239,68,68,.2); color: var(--emergency); }
-  .assign-ic {
-    display: flex; align-items: center; justify-content: center; width: 24px; height: 24px;
-    border-radius: 50%; border: none; background: rgba(239,68,68,.16); color: var(--emergency);
-    cursor: pointer; flex: none; transition: background-color .12s var(--ease);
-  }
-  .assign-ic:hover { background: rgba(239,68,68,.3); }
-  #jobList .row.closed { opacity: .55; }
-  .callback-tag {
-    background: linear-gradient(90deg,#4a3405,#5c4008); border: 1px solid #a16207; color: #fde68a;
-    font-weight: 700; font-size: 10.5px; letter-spacing: .04em; text-align: center; text-transform: uppercase;
-    padding: 6px; border-radius: 5px; cursor: pointer;
-  }
-  .callback-tag:hover { filter: brightness(1.15); }
 
-  @keyframes flash-glow { 0%, 100% { box-shadow: var(--shadow); } 40% { box-shadow: 0 0 0 2px var(--accent), var(--shadow-lg); } }
-  .flash { animation: flash-glow .9s var(--ease); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .chip { font-size: 11.5px; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--line); background: transparent; color: var(--ink-dim); cursor: pointer; }
+  .chip.on { background: var(--accent-dim); color: #eafffb; border-color: var(--accent-dim); }
+  .grp { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); margin: 10px 2px 6px; display: flex; justify-content: space-between; }
+  .grp:first-child { margin-top: 2px; }
+  .avail { display: flex; gap: 6px; flex-wrap: wrap; }
+  .avail .chip { color: var(--available); border-color: color-mix(in srgb, var(--available) 50%, transparent); }
 
-  .filters-drop {
-    padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px;
-    background: var(--panel-2); font-size: 12.5px; flex: none;
-  }
-  .filters-drop label { display: flex; align-items: center; gap: 8px; margin: 0; text-transform: none; letter-spacing: 0; font-size: 12.5px; color: var(--ink); }
+  /* detail */
+  .kv { display: grid; grid-template-columns: 96px 1fr; gap: 3px 10px; font-size: 13px; }
+  .kv dt { color: var(--ink-dim); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; align-self: center; }
+  .kv dd { margin: 0; }
+  .dhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 10px; margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .dhead h3 { margin: 0; font-size: 16px; font-weight: 800; }
+  .dsec { margin-top: 12px; }
+  .dsec > .t { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: 6px; }
+  .contact { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; }
+  .contact .who { flex: 1; min-width: 0; }
+  .contact .num { font-family: var(--mono); font-size: 13px; }
+  .contact .btn { padding: 3px 10px; font-size: 12px; }
+  .src { font-size: 10px; font-weight: 700; letter-spacing: .05em; padding: 1px 6px; border-radius: 4px; background: var(--panel); border: 1px solid var(--line); color: var(--ink-dim); }
+  .src.duty { color: var(--available); }
+  .src.line { color: var(--busy); }
+  .mini-log { font-size: 12px; }
+  .mini-log div { padding: 2px 0; border-bottom: 1px solid var(--line-soft); }
+  .stepper { display: flex; gap: 4px; margin: 6px 0; }
+  .stepper span { flex: 1; text-align: center; font-size: 10px; padding: 3px 0; border-radius: 4px; background: var(--panel); color: var(--ink-dim); border: 1px solid var(--line); }
+  .stepper span.done { background: var(--accent-dim); color: #eafffb; border-color: var(--accent-dim); }
+  .stepper span.cur { border-color: var(--accent); color: var(--accent); }
+  .gbody label { margin-top: 8px; }
+  .gbody input:not([type=checkbox]), .gbody select, .gbody textarea { width: 100%; box-sizing: border-box; }
+  .armed { background: var(--emergency) !important; color: #fff !important; }
 
-  /* ---- job detail: header + workflow stepper (job modal) ---- */
-  .job-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
-  .job-head .titles { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .job-head h3 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.01em; }
-  .job-head .elapsed { text-align: right; flex: none; }
-  .job-head .elapsed .big { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; color: var(--ink); }
-  .job-head .elapsed .lbl { font-size: 9.5px; letter-spacing: .08em; color: var(--ink-dim); text-transform: uppercase; margin-top: 4px; }
-
-  .stepper { display: flex; flex-direction: column; }
-  .stepper .step { display: flex; gap: 12px; position: relative; padding-bottom: 14px; }
-  .stepper .step:last-child { padding-bottom: 0; }
-  .stepper .step::before {
-    content: ""; position: absolute; left: 9px; top: 22px; bottom: -2px; width: 1px; background: var(--line);
-  }
-  .stepper .step:last-child::before { display: none; }
-  .stepper .dot-step {
-    width: 20px; height: 20px; border-radius: 50%; flex: none; display: grid; place-items: center;
-    font-size: 10.5px; font-weight: 800; border: 2px solid var(--line); color: var(--ink-dim);
-    background: var(--panel-2); z-index: 1;
-  }
-  .stepper .step.done .dot-step { background: var(--accent-dim); border-color: var(--accent-dim); color: #eafffb; }
-  .stepper .step.current .dot-step { border-color: var(--accent); color: var(--accent); background: var(--panel); }
-  .stepper .step.current .label { color: var(--accent); }
-  .stepper .label { font-weight: 600; font-size: 13px; }
-  .stepper .time { font-size: 11px; color: var(--ink-dim); margin-top: 1px; }
+  .ext { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .ext input { width: 70px; padding: 4px 8px; font-family: var(--mono); }
+  .ext.missing input { border-color: var(--priority); box-shadow: 0 0 0 2px color-mix(in srgb, var(--priority) 35%, transparent); }
+  .log div { font-size: 12px; }
 </style>
 </head>
 <body>
 <div class="topbar">
   <span class="link-net" id="net">link down</span>
+  <span class="ext" id="extWrap" title="The phone at your desk. Click-to-dial rings this first, then connects you.">
+    Your extension <input id="ext" inputmode="numeric" maxlength="6" placeholder="e.g. 201">
+    <label style="display:flex;gap:4px;align-items:center;margin:0;text-transform:none;letter-spacing:0;font-size:11px"><input type="checkbox" id="extRemember">remember</label>
+  </span>
   <span class="spacer"></span>
-  <button class="btn" id="btnNotify" title="Get emergency and job alerts on this device even when it's in the background" style="padding:6px 10px;font-size:11px">🔔 Notifications</button>
-  <button class="btn" id="resetLayout" title="Restore the default panel arrangement" style="padding:6px 10px;font-size:11px">Reset layout</button>
+  <button class="btn" id="btnNotify" style="padding:6px 10px;font-size:11px" title="Emergency and job alerts on this device while it's in the background">🔔 Notifications</button>
+  <button class="btn" id="btnCallsigns" style="padding:6px 10px;font-size:11px">Call signs</button>
+  <a class="btn" href="/forms.html" style="padding:6px 10px;font-size:11px">Reports</a>
   <span class="clock" id="clock">--:--:--</span>
   <div class="user-block">
     <span class="avatar" id="avatar"></span>
-    <span class="who">
-      <span class="name" id="whoName"></span>
-      <span class="role" id="whoRole"></span>
-    </span>
+    <span class="who"><span class="name" id="whoName"></span><span class="role" id="whoRole"></span></span>
   </div>
   <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
 </div>
 
-<div id="emgWrap"></div>
-<div id="reqWrap"></div>
+<div class="stage">
+  <div id="map"></div>
 
-<div id="glRoot"></div>
+  <div class="attn-strip" id="attn"></div>
 
-<div class="actionbar">
-  <button class="btn primary" id="btnMessage">Send message</button>
-  <button class="btn" id="btnAssign">Assignments</button>
+  <section class="glass" id="pDispatch">
+    <header data-collapse="pDispatch"><span class="chev">▾</span> Dispatch <span class="count" id="dispCount"></span>
+      <span class="tools"><button class="btn primary" id="newJob">New job</button><button class="btn" id="newVisit">New visit</button></span>
+    </header>
+    <div class="gbody">
+      <div class="chips" id="dispFilter">
+        <button class="chip on" data-f="attention">Needs attendance</button>
+        <button class="chip" data-f="all">All open</button>
+        <button class="chip" data-f="jobs">Jobs</button>
+        <button class="chip" data-f="visits">Visits</button>
+        <button class="chip" data-f="closed">Closed 24h</button>
+      </div>
+      <div id="dispList"></div>
+    </div>
+  </section>
+
+  <section class="glass" id="pShift">
+    <header data-collapse="pShift"><span class="chev">▾</span> On shift <span class="count" id="shiftCount"></span></header>
+    <div class="gbody" id="shiftBody"></div>
+  </section>
+
+  <section class="glass" id="pDetail">
+    <header data-collapse="pDetail"><span class="chev">▾</span> <span id="detailTitle">Detail</span>
+      <span class="tools"><button class="btn" id="detailClose" hidden>Close</button></span>
+    </header>
+    <div class="gbody" id="detailBody"></div>
+  </section>
+
+  <section class="glass collapsed" id="pLog">
+    <header data-collapse="pLog"><span class="chev">▾</span> Event log
+      <span class="tools"><input id="logFilter" placeholder="filter" style="padding:2px 6px;font-size:11px;width:120px" onclick="event.stopPropagation()"></span>
+    </header>
+    <div class="gbody"><div class="log" id="log"></div></div>
+  </section>
 </div>
 
-<div id="modalHost"></div>
-
 <div class="icon-rail">
-  <div class="rail-brand">
-    <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon">
-  </div>
-
+  <div class="rail-brand"><img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon"></div>
   <div class="rail-section">Operations</div>
   <a href="/dashboard.html" title="Dashboard"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="3" width="8" height="5" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="10" width="8" height="11" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg><span>Dashboard</span></a>
-  <button id="railIncidents" title="Incidents"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Incidents</span></button>
-  <button id="railTerminals" title="Personnel & terminals"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="3" width="16" height="12" rx="1.5" stroke="currentColor" stroke-width="1.8"/><path d="M9 19h6M12 15v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Personnel</span></button>
-  <button id="railMap" title="Map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Map</span></button>
-  <button id="railMessages" title="Messages"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Messages</span></button>
-  <button id="railCallbacks" title="Callback requests"><svg viewBox="0 0 24 24" fill="none"><path d="M6 3l3 1.5-1.2 3.2a12 12 0 007.5 7.5l3.2-1.2L20 17c0 2-1.6 3.5-3.5 3.3C10 19.7 4.3 14 3.7 7.5 3.5 5.6 5 4 7 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Callbacks</span><span class="badge" id="railCallbackBadge" hidden>0</span></button>
-  <a id="railLog" title="Log" href="/log.html"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
-
-  <div class="rail-section">Fleet</div>
-  <button id="railAssignments" title="Assignments"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.4" stroke="currentColor" stroke-width="1.8"/></svg><span>Assignments</span></button>
-  <button id="railPatrols" title="Patrol visits"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 9.5l2.2 2.2L15 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Patrols</span></button>
-
+  <button id="railDispatch" title="Dispatch"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Dispatch</span></button>
+  <button id="railShift" title="On shift"><svg viewBox="0 0 24 24" fill="none"><circle cx="9" cy="8" r="3" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>On shift</span></button>
+  <button id="railMap" title="Fit map"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 4v14M15 6v14" stroke="currentColor" stroke-width="1.6"/></svg><span>Fit map</span></button>
+  <button id="railMessage" title="Message"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span>Message</span></button>
+  <a href="/log.html" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
+  <a href="/forms.html" title="Reports"><svg viewBox="0 0 24 24" fill="none"><rect x="5" y="3" width="14" height="18" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M9 8h6M9 12h6M9 16h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Reports</span></a>
   <div class="rail-section">HR</div>
   <a href="/rota.html" title="Rota"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="17" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 3v3M16 3v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Rota</span></a>
-
   <div class="rail-section" id="railSystemSection" hidden>System</div>
-  <a href="/admin.html" id="railAdmin" title="Admin" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 4.5l1 1.8 2 .4-1.4 1.5.3 2-1.9-.9-1.9.9.3-2-1.4-1.5 2-.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>Admin</span></a>
+  <a href="/admin.html" id="railAdmin" title="Admin" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Admin</span></a>
   <a href="/settings.html" title="My settings"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>My settings</span></a>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="/app.js"></script>
-<script type="module">
-import { GoldenLayout } from 'https://unpkg.com/golden-layout@2.6.0/dist/esm/index.js';
-
-const { api, el, esc } = CCCS;
+<script src="/forms-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const me = CCCS.getSession().user;
 
-// A GoldenLayout popout window is this same page reloaded with
-// ?gl-window=<id> — but GL takes that as licence to wipe document.body
-// entirely and replace it with its own single-panel scaffolding, so none of
-// this page's normal chrome (topbar, actionbar, icon rail) exists there.
-// Every statement below that touches that chrome has to be skipped, or it
-// throws against a null element and can stop other setup mid-script.
-const isPopout = /[?&]gl-window=/.test(location.search);
+el('#whoName').textContent = me.display_name;
+el('#whoRole').textContent = me.role.replace('_', ' ');
+el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
+el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
+if (me.role === 'SYSTEM_ADMIN') { el('#railSystemSection').hidden = false; el('#railAdmin').hidden = false; }
 
-if (!isPopout) {
-  el('#whoName').textContent = me.display_name;
-  el('#whoRole').textContent = me.role.replace('_', ' ');
-  el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
-  el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
-  setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
-  if (me.role === 'SYSTEM_ADMIN') { el('#railSystemSection').hidden = false; el('#railAdmin').hidden = false; }
-  // keep welfare countdowns ticking without a server round trip
-  setInterval(() => { if (state.personnel.some((p) => p.welfare_due_at)) renderResources(); }, 1000);
+const state = {
+  personnel: [], mdts: [], jobs: [], sites: [], site_visits: [], shifts: [], requests: [], emergencies: [], events: [],
+  selected: null,          // { kind: 'j'|'v'|'p'|'m', id }
+  mode: null,              // non-selection Detail modes: newJob, newVisit, assign, message, notify, callsigns, report
+  modeArg: null,
+  dispFilter: 'attention',
+};
+const CLOSED_JOB = ['COMPLETED', 'CANCELLED'];
+const CLOSED_VISIT = ['COMPLETED', 'CANCELLED', 'MISSED'];
+
+/* ------------------------------------------------------------------ *
+ * Panels: collapse state per panel, remembered on this browser
+ * ------------------------------------------------------------------ */
+const collapsed = (() => { try { return JSON.parse(localStorage.getItem('cccs.control.collapsed') || '{}'); } catch { return {}; } })();
+function applyCollapsed() {
+  for (const id of ['pDispatch', 'pShift', 'pDetail', 'pLog']) {
+    if (id in collapsed) el('#' + id).classList.toggle('collapsed', collapsed[id]);
+  }
+}
+els('[data-collapse]').forEach((h) => h.addEventListener('click', (e) => {
+  if (e.target.closest('.tools')) return;
+  const p = el('#' + h.dataset.collapse);
+  p.classList.toggle('collapsed');
+  collapsed[h.dataset.collapse] = p.classList.contains('collapsed');
+  try { localStorage.setItem('cccs.control.collapsed', JSON.stringify(collapsed)); } catch {}
+}));
+applyCollapsed();
+const openPanel = (id) => { el('#' + id).classList.remove('collapsed'); collapsed[id] = false; };
+
+/** Two-step confirm in place of a confirm() dialog: the first click arms the
+ * button (turns red, says so), a second within 4s does it. */
+function armed(btn, label, fn) {
+  const original = btn.textContent;
+  btn.onclick = async () => {
+    if (!btn.classList.contains('armed')) {
+      btn.classList.add('armed'); btn.textContent = label;
+      setTimeout(() => { btn.classList.remove('armed'); btn.textContent = original; }, 4000);
+      return;
+    }
+    btn.classList.remove('armed'); btn.textContent = original;
+    try { await fn(); } catch (e) { showErr(e); }
+  };
+}
+function showErr(e) {
+  const n = el('#detailErr');
+  if (n) n.textContent = e.message || String(e); else console.warn(e);
 }
 
-const state = { personnel: [], mdts: [], jobs: [], sites: [], site_visits: [], requests: [], emergencies: [], events: [], selected: null };
-let map; // assigned once the 'map' panel is mounted, below
+/* ------------------------------------------------------------------ *
+ * Operator extension — chosen per session, because an operator works a
+ * different desk on a different shift; "remember" only sets a default.
+ * ------------------------------------------------------------------ */
+const EXT_KEY = 'cccs.extension';
+let ringsOperatorFirst = true;
+function extension() { return el('#ext').value.trim(); }
+function paintExt() { el('#extWrap').classList.toggle('missing', ringsOperatorFirst && !/^\d{2,6}$/.test(extension())); }
+el('#ext').addEventListener('input', () => { sessionStorage.setItem(EXT_KEY, extension()); paintExt(); });
+el('#ext').addEventListener('change', async () => {
+  if (el('#extRemember').checked && /^\d{2,6}$/.test(extension())) await api('POST', '/api/me/extension', { extension: extension(), remember: true }).catch(() => {});
+});
+el('#extRemember').addEventListener('change', () => el('#ext').dispatchEvent(new Event('change')));
+(async () => {
+  const cfg = await api('GET', '/api/me/extension').catch(() => ({ default_extension: '', rings_operator_first: true }));
+  ringsOperatorFirst = cfg.rings_operator_first !== false;
+  el('#ext').value = sessionStorage.getItem(EXT_KEY) || cfg.default_extension || '';
+  el('#extRemember').checked = Boolean(cfg.default_extension);
+  paintExt();
+})();
 
-/* ---------- rendering ---------- */
+/* ------------------------------------------------------------------ *
+ * Derived views
+ * ------------------------------------------------------------------ */
+const jobStatusLabel = (s) => (s === 'ACKNOWLEDGED' ? 'ACK' : s.replace('_', ' '));
+const busyCls = (s) => ({ EN_ROUTE: 'busy', ON_SCENE: 'busy', TRANSPORTING: 'busy', DISPATCHED: 'busy', ACKNOWLEDGED: 'busy', MISSED: 'emg', CANCELLED: 'off' }[s] || 'on');
+const openJobFor = (p) => state.jobs.find((j) => !CLOSED_JOB.includes(j.status) && j.resources.some((r) => r.personnel === p.name));
+const openVisitFor = (p) => state.site_visits.find((v) => !CLOSED_VISIT.includes(v.status) && v.resources.some((r) => r.personnel_id === p.id));
+const emergencyFor = (p) => state.emergencies.find((e) => e.personnel_id === p.id && e.state !== 'RESOLVED');
 function welfareLeft(p) {
   if (!p.welfare_due_at) return '';
   const left = Math.round((Date.parse(p.welfare_due_at) - Date.now()) / 1000);
@@ -215,319 +314,74 @@ function welfareLeft(p) {
   return `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`;
 }
 
-// A person or terminal working a job shows that job's cycle status, matching
-// what's on their own screen — one status vocabulary end to end, not the
-// resource's own status label competing with the job's. ACKNOWLEDGED gets
-// abbreviated; the pill is tight on width and "EN ROUTE"/"ON SCENE" already
-// read fine at full length.
-const jobStatusLabel = (s) => (s === 'ACKNOWLEDGED' ? 'ACK' : s.replace('_', ' '));
-const jobStatusClass = (s) => ({ EN_ROUTE: 'busy', ON_SCENE: 'busy', TRANSPORTING: 'busy', DISPATCHED: 'busy', ACKNOWLEDGED: 'busy' }[s] || 'on');
-
-function openJobFor(matchFn) {
-  return state.jobs.find((j) => j.resources.some(matchFn) && !['COMPLETED', 'CANCELLED'].includes(j.status));
-}
-function emergencyFor(personnelId) {
-  return state.emergencies.some((e) => e.personnel_id === personnelId && e.state !== 'RESOLVED');
-}
-
-function renderResources() {
-  if (!el('#resList')) return;
-  const reqByPerson = new Map(state.requests.filter((r) => r.state === 'PENDING').map((r) => [r.personnel_id, r]));
-  const rows = state.personnel.map((p) => {
-    const req = reqByPerson.get(p.id);
-    const emg = emergencyFor(p.id);
-    const job = openJobFor((r) => r.personnel === p.name);
-    const pillCls = emg ? 'emg' : job ? jobStatusClass(job.status) : (p.employment_status === 'ACTIVE' ? 'on' : 'off');
-    const pillText = emg ? 'EMERGENCY' : job ? jobStatusLabel(job.status) : p.employment_status.replace('_', ' ');
-    return `
-    <div class="row ${state.selected && state.selected.kind === 'p' && state.selected.id === p.id ? 'sel' : ''} ${emg ? 'alarm' : ''}" data-res="p:${p.id}">
-      <div class="card-top">
-        <span class="cs">${esc(p.callsign || p.name)}</span>
-        <span class="status-pill ${pillCls}">${pillText}</span>
-      </div>
-      <div class="card-sub">
-        <span class="mono">${esc(p.rank || 'Officer')}</span>
-        <span>${esc(p.vehicle || '—')}${p.welfare_due_at ? ' · welfare ' + welfareLeft(p) : ''}</span>
-      </div>
-      ${req ? `<div class="callback-tag" data-cbview="${p.id}">${req.priority ? 'Priority callback requested' : 'Callback requested'}</div>` : ''}
-    </div>`;
-  }).join('');
-  const mdtPillClass = (m, job) => m.emergency ? 'emg' : !m.connected ? 'off' : job ? jobStatusClass(job.status) : m.duty_status === 'BUSY' ? 'busy' : m.duty_status === 'OUT_OF_SERVICE' ? 'off' : 'on';
-  const mdtRows = state.mdts.map((m) => {
-    const job = openJobFor((r) => r.mdt === m.mdt_code);
-    const label = m.emergency ? 'EMERGENCY' : !m.connected ? 'OFFLINE' : job ? jobStatusLabel(job.status) : (m.duty_status || 'AVAILABLE').replace('_', ' ');
-    return `
-    <div class="row ${state.selected && state.selected.kind === 'm' && state.selected.id === m.id ? 'sel' : ''} ${m.emergency ? 'alarm' : ''}" data-res="m:${m.id}">
-      <div class="card-top">
-        <span class="cs">${esc(m.mdt_code)}</span>
-        <span class="status-pill ${mdtPillClass(m, job)}">${label}</span>
-      </div>
-      <div class="card-sub"><span>${esc(m.callsign || 'unassigned')}</span><span>${m.crew && m.crew.length ? esc(m.crew.map((c) => c.name).join(', ')) : 'no crew'}</span></div>
-    </div>`;
-  }).join('');
-  el('#resList').innerHTML = rows + `<div style="padding:10px 8px 4px" class="dim" >Mobile data terminals</div>` + mdtRows;
-  if (el('#resCount')) el('#resCount').textContent = `${state.personnel.filter((p) => p.employment_status === 'ACTIVE').length}/${state.personnel.length} active`;
-  CCCS.els('#resList .row[data-res]').forEach((n) => n.addEventListener('click', () => {
-    const [kind, id] = n.dataset.res.split(':');
-    select(kind, kind === 'p' ? Number(id) : Number(id));
-  }));
-  CCCS.els('[data-cbview]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); select('p', Number(b.dataset.cbview)); }));
-}
-
-const ASSIGN_ICON = '<svg viewBox="0 0 24 24" fill="none" width="16" height="16"><circle cx="9" cy="8" r="3" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="17" cy="8.5" r="2.4" stroke="currentColor" stroke-width="1.6" opacity=".7"/><path d="M14.5 19c.3-2.4 2-4.2 4-4.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".7"/></svg>';
-
-function renderJobs() {
-  if (!el('#jobList')) return;
-  const showClosed = el('#fltClosed') && el('#fltClosed').checked;
-  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-  const open = state.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)
-    || (showClosed && Date.parse(j.updated_at) > dayAgo));
-  el('#jobList').innerHTML = open.length ? open.map((j) => `
-    <div class="row ${['COMPLETED', 'CANCELLED'].includes(j.status) ? 'closed' : ''} ${state.selected && state.selected.kind === 'j' && state.selected.id === j.id ? 'sel' : ''}" data-job="${j.id}">
-      <div class="card-top">
-        <span class="cs">${esc(j.reference)}</span>
-        <span style="display:flex;align-items:center;gap:8px">
-          <span class="pri pri-${j.priority}">${j.priority}</span>
-          <button class="assign-ic" data-assignjob="${j.id}" title="Assign call signs">${ASSIGN_ICON}</button>
-        </span>
-      </div>
-      <div class="card-sub">
-        <span>${esc(j.status.replace('_', ' '))}</span>
-        <span>${esc(j.resources.map((r) => r.callsign || r.personnel || r.mdt).join(', ') || 'unassigned')}</span>
-      </div>
-    </div>`).join('') : '<p class="dim">No open jobs. Create one to start a dispatch.</p>';
-  CCCS.els('#jobList .row').forEach((n) => n.addEventListener('click', () => select('j', Number(n.dataset.job))));
-  CCCS.els('[data-assignjob]').forEach((b) => b.addEventListener('click', (e) => {
-    e.stopPropagation();
-    assignModal(state.jobs.find((j) => j.id === Number(b.dataset.assignjob)));
-  }));
-  updateCallbackBadge();
-}
-
-/* ---------- patrol visits ---------- */
-const visitStatusLabel = (s) => (s === 'ACKNOWLEDGED' ? 'ACK' : s.replace('_', ' '));
-const visitStatusClass = (s) => ({ EN_ROUTE: 'busy', ON_SCENE: 'busy', DISPATCHED: 'busy', ACKNOWLEDGED: 'busy', MISSED: 'emg', CANCELLED: 'off' }[s] || 'on');
-function renderVisits() {
-  if (!el('#visitList')) return;
-  const showClosed = el('#fltVisitClosed') && el('#fltVisitClosed').checked;
-  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-  const open = state.site_visits.filter((v) => !['COMPLETED', 'CANCELLED'].includes(v.status)
-    || (showClosed && Date.parse(v.updated_at) > dayAgo));
-  open.sort((a, b) => Date.parse(a.scheduled_for) - Date.parse(b.scheduled_for));
-  el('#visitList').innerHTML = open.length ? open.map((v) => `
-    <div class="row ${['COMPLETED', 'CANCELLED'].includes(v.status) ? 'closed' : ''} ${v.status === 'MISSED' ? 'alarm' : ''} ${state.selected && state.selected.kind === 'v' && state.selected.id === v.id ? 'sel' : ''}" data-visit="${v.id}">
-      <div class="card-top">
-        <span class="cs">${esc(v.reference)}</span>
-        <span class="status-pill ${visitStatusClass(v.status)}">${visitStatusLabel(v.status)}</span>
-      </div>
-      <div class="card-sub">
-        <span>${esc(v.site_name || 'Site')}${v.beat_name ? ` — ${esc(v.beat_name)}` : ''}</span>
-        <span>${esc(v.resources.map((r) => r.personnel).join(', ') || 'unassigned')}</span>
-      </div>
-    </div>`).join('') : '<p class="dim">No open patrol visits.</p>';
-  CCCS.els('#visitList .row').forEach((n) => n.addEventListener('click', () => select('v', Number(n.dataset.visit))));
-}
-
-const VISIT_STAGES = [
-  ['DISPATCHED', 'Dispatched'], ['ACKNOWLEDGED', 'Acknowledged'], ['EN_ROUTE', 'En route'],
-  ['ON_SCENE', 'On scene'], ['COMPLETED', 'Completed'],
-];
-function renderVisitDetail() {
-  const v = state.site_visits.find((x) => x.id === state.selected.id);
-  if (!v) { el('#detailBody').innerHTML = '<p class="dim">That visit is no longer open.</p>'; return; }
-  const stageAt = { DISPATCHED: v.dispatched_at, ACKNOWLEDGED: v.acknowledged_at, EN_ROUTE: v.en_route_at, ON_SCENE: v.on_scene_at, COMPLETED: v.completed_at };
-  let lastDoneIdx = -1;
-  VISIT_STAGES.forEach(([code], i) => { if (stageAt[code]) lastDoneIdx = i; });
-  const active = !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status);
-  const stepper = VISIT_STAGES.map(([code, label], i) => {
-    const at = stageAt[code];
-    const isCurrent = at && i === lastDoneIdx && active;
-    return `<div class="step ${at ? (isCurrent ? 'current' : 'done') : ''}">
-      <div class="dot-step">${at && !isCurrent ? '✓' : i + 1}</div>
-      <div><div class="label">${label}</div><div class="time${at ? '' : ' dim'}">${at ? new Date(at).toLocaleTimeString() : 'waiting'}</div></div>
-    </div>`;
-  }).join('');
-  el('#detailBody').innerHTML = `
-    <div class="job-head">
-      <div>
-        <div class="titles"><h3>${esc(v.site_name || 'Site visit')}${v.beat_name ? ` — ${esc(v.beat_name)}` : ''}</h3></div>
-        <div class="dim" style="margin-top:5px">${esc(v.reference)} · ${esc(v.site_address || '')}</div>
-      </div>
-      ${v.status === 'MISSED' ? `<span class="status-pill emg">MISSED</span>` : active
-        ? `<div class="dim" style="font-size:12px">Scheduled ${new Date(v.scheduled_for).toLocaleString()}</div>`
-        : `<span class="status-pill ${v.status === 'CANCELLED' ? 'off' : 'on'}">${esc(v.status)}</span>`}
-    </div>
-    ${['CANCELLED', 'MISSED'].includes(v.status) ? '' : `<div class="stepper">${stepper}</div>`}
-
-    <dl class="kv" style="margin-top:14px">
-      <dt>Resources</dt><dd>${v.resources.length ? v.resources.map((r) => `
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
-          <span style="flex:1">${esc(r.personnel)}${r.primary ? ' (primary)' : ''}</span>
-          <button class="btn danger" style="padding:0 6px;font-size:11px" data-visitstanddown="${r.personnel_id}">Stand down</button>
-        </div>`).join('') : '—'}</dd>
-      ${(v.waypoints || []).length ? `<dt>Checkpoints</dt><dd>${(() => {
-        const scanned = new Set((v.checkpoint_scans || []).map((s) => s.waypoint_id));
-        return `${v.waypoints.filter((w) => scanned.has(w.id)).length} / ${v.waypoints.length} scanned` +
-          (v.waypoints.some((w) => !scanned.has(w.id)) ? `<div class="dim" style="font-size:11.5px;margin-top:2px">Missing: ${v.waypoints.filter((w) => !scanned.has(w.id)).map((w) => esc(w.title)).join(', ')}</div>` : '');
-      })()}</dd>` : ''}
-    </dl>
-
-    <label for="vNotes">Notes</label>
-    <textarea id="vNotes" rows="3" style="width:100%;resize:vertical">${esc(v.notes || '')}</textarea>
-    <div class="btn-row" style="margin-top:6px"><button class="btn" id="vSaveNotes">Save notes</button></div>
-
-    <label for="vAdd" style="margin-top:12px;display:block">Assign an officer</label>
-    <select id="vAdd">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}</option>`).join('')}</select>
-    <div class="btn-row" style="margin-top:12px">
-      <button class="btn primary" id="vAssign">Assign</button>
-      <button class="btn ok" id="vDone">Mark completed</button>
-      <button class="btn danger" id="vCancel">Cancel visit</button>
-    </div>`;
-  el('#vAssign').onclick = async () => {
-    try { await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vAdd').value) }); }
-    catch (e) { alert(e.message); }
-  };
-  el('#vDone').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }); };
-  el('#vCancel').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }); };
-  el('#vSaveNotes').onclick = async () => { await api('PATCH', `/api/site-visits/${v.id}`, { notes: el('#vNotes').value }); };
-  CCCS.els('[data-visitstanddown]').forEach((b) => (b.onclick = async () => {
-    if (!confirm('Stand this person down from the visit?')) return;
-    await api('POST', `/api/site-visits/${v.id}/stand-down`, { personnel: Number(b.dataset.visitstanddown) });
-  }));
-}
-
-function openNewVisitModal() {
-  modal('New patrol visit', `
-  <label for="nvSite">Site</label>
-  <select id="nvSite">${state.sites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
-  <label for="nvPersonnel">Assign now (optional)</label>
-  <select id="nvPersonnel"><option value="">— assign later —</option>${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}</option>`).join('')}</select>
-  <div style="height:12px"></div><button class="btn primary" id="nvGo">Create visit</button>`, () => {
-  el('#nvGo').onclick = async () => {
-    try {
-      const visit = await api('POST', '/api/site-visits', { site_id: Number(el('#nvSite').value) });
-      if (el('#nvPersonnel').value) await api('POST', `/api/site-visits/${visit.id}/assign`, { personnel: Number(el('#nvPersonnel').value) });
-      closeModal();
-    } catch (e) { el('#nvGo').insertAdjacentHTML('afterend', `<p class="err">${esc(e.message)}</p>`); }
-  };
-});
-}
-
-/** Tap a call sign to dispatch every person and MDT on it — mirrors how a
- * real dispatch console assigns by call sign rather than by individual
- * resource, since an officer and their MDT should move together. */
-async function assignModal(job) {
-  if (!job) return;
-  const callsigns = await api('GET', '/api/callsigns');
-  const buttonsHtml = () => callsigns.map((c) => {
-    const n = c.personnel.length + c.mdts.length;
-    const already = job.resources.some((r) => r.callsign === c.name);
-    return `<button class="btn ${already ? 'ok' : 'primary'}" data-cs="${esc(c.name)}" ${already || !n ? 'disabled' : ''}>${esc(c.name)} ${already ? '— assigned' : `(${n})`}</button>`;
-  }).join('') || '<p class="dim">No call signs configured.</p>';
-
-  function paint() {
-    el('#csButtons').innerHTML = buttonsHtml();
-    CCCS.els('[data-cs]').forEach((b) => (b.onclick = async () => {
-      try { job = await api('POST', `/api/jobs/${job.id}/assign`, { resources: [b.dataset.cs] }); paint(); }
-      catch (e) { alert(e.message); }
-    }));
+/** Why a job or visit "needs attendance": nobody sent, nobody accepted, or a
+ * scheduled patrol that has been missed or is due with nobody on it. Null
+ * means it is in hand. This is the definition the Dispatch panel's default
+ * filter and the count in its header both use. */
+function needsAttendance(item) {
+  if (item.kind === 'job') {
+    const j = item.row;
+    if (CLOSED_JOB.includes(j.status)) return null;
+    if (j.emergency_id) return 'emergency';
+    if (!j.resources.length) return 'unassigned';
+    if (j.status === 'DISPATCHED' && !j.resources.some((r) => r.acknowledged)) return 'not accepted';
+    return null;
   }
-
-  modal(`Assign — ${job.reference}`, `
-    <p class="dim" style="margin:0 0 12px">Tap a call sign to dispatch every person and MDT on it to ${esc(job.reference)}.</p>
-    <div class="btn-row" id="csButtons"></div>`, paint);
+  const v = item.row;
+  if (v.status === 'MISSED') return 'missed';
+  if (CLOSED_VISIT.includes(v.status)) return null;
+  if (!v.resources.length && Date.parse(v.scheduled_for) <= Date.now() + 30 * 60000) return 'due, unassigned';
+  if (v.status === 'DISPATCHED' && Date.parse(v.scheduled_for) < Date.now()) return 'not accepted';
+  return null;
 }
 
-function updateCallbackBadge() {
-  const n = state.requests.filter((r) => r.state === 'PENDING').length;
-  const b = el('#railCallbackBadge');
-  if (!b) return;
-  b.textContent = n; b.hidden = n === 0;
+/** Jobs and patrol visits together — they share a lifecycle (dispatched →
+ * acknowledged → en route → on scene → completed), so one panel. */
+function dispatchItems() {
+  const dayAgo = Date.now() - 86400000;
+  const all = [
+    ...state.jobs.map((row) => ({ kind: 'job', row, closed: CLOSED_JOB.includes(row.status) })),
+    ...state.site_visits.map((row) => ({ kind: 'visit', row, closed: CLOSED_VISIT.includes(row.status) && row.status !== 'MISSED' })),
+  ];
+  const f = state.dispFilter;
+  const out = all.filter((it) => {
+    if (f === 'closed') return it.closed && Date.parse(it.row.updated_at || it.row.created_at) > dayAgo;
+    if (it.closed) return false;
+    if (f === 'attention') return Boolean(needsAttendance(it));
+    if (f === 'jobs') return it.kind === 'job';
+    if (f === 'visits') return it.kind === 'visit';
+    return true;
+  });
+  const priRank = { RED: 0, AMBER: 1, GREEN: 2, ROUTINE: 3 };
+  out.sort((a, b) => (Boolean(needsAttendance(b)) - Boolean(needsAttendance(a)))
+    || ((a.kind === 'job' ? priRank[a.row.priority] ?? 4 : 3.5) - (b.kind === 'job' ? priRank[b.row.priority] ?? 4 : 3.5))
+    || (Date.parse(a.row.scheduled_for || a.row.created_at) - Date.parse(b.row.scheduled_for || b.row.created_at)));
+  return out;
 }
 
-let detailTick = null;
-function renderDetail() {
-  if (!el('#detailBody')) return;
-  // A live panel updates on every matching WS event now that it's not a
-  // modal a local action explicitly closes — but that must never yank a
-  // half-typed notes/edit field out from under whoever's currently in it.
-  if (document.activeElement && el('#detailBody').contains(document.activeElement)) return;
-  if (detailTick) { clearInterval(detailTick); detailTick = null; }
-  if (!state.selected) { el('#detailBody').innerHTML = '<p class="dim">Select a resource, job or patrol visit to see its detail here.</p>'; return; }
-  if (state.selected.kind === 'j') { renderJobDetail(); return; }
-  if (state.selected.kind === 'v') { renderVisitDetail(); return; }
-  if (state.selected.kind === 'p') {
-    const p = state.personnel.find((x) => x.id === state.selected.id);
-    if (!p) return;
-    const emg = emergencyFor(p.id);
-    const job = openJobFor((r) => r.personnel === p.name);
-    el('#detailBody').innerHTML = `
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span class="dot ${emg ? 's-EMERGENCY' : ''}"></span>
-        <strong class="mono" style="font-size:18px">${esc(p.callsign || p.name)}</strong>
-        <span>${esc(p.employment_status.replace('_', ' '))}</span>
-      </div>
-      <dl class="kv">
-        <dt>Name</dt><dd>${esc(p.name)}</dd>
-        <dt>Employee no</dt><dd>${esc(p.employee_no || '—')}</dd>
-        <dt>Rank</dt><dd>${esc(p.rank || '—')}</dd>
-        <dt>Phone</dt><dd>${esc(p.contact_phone || '—')}</dd>
-        <dt>Email</dt><dd>${esc(p.contact_email || '—')}</dd>
-        <dt>Vehicle</dt><dd>${esc(p.vehicle || '—')}</dd>
-        <dt>Job</dt><dd>${job ? esc(job.reference) : '—'}</dd>
-        <dt>Login</dt><dd>${p.has_login ? 'yes' : 'no'}</dd>
-        <dt>Welfare</dt><dd>${p.welfare_due_at ? welfareLeft(p) + ' remaining' : 'no timer'}</dd>
-        <dt>Notes</dt><dd>${esc(p.notes || '—')}</dd>
-      </dl>
-      <div class="btn-row" style="margin-top:10px">
-        <button class="btn primary" id="dMsg">Message</button>
-      </div>`;
-    el('#dMsg').onclick = () => messageModal('p:' + p.id);
-    return;
-  }
-  const m = state.mdts.find((x) => x.id === state.selected.id);
-  if (!m) return;
-  const job = openJobFor((r) => r.mdt === m.mdt_code);
-  el('#detailBody').innerHTML = `
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <span class="dot ${m.emergency ? 's-EMERGENCY' : ''}"></span>
-      <strong class="mono" style="font-size:18px">${esc(m.mdt_code)}</strong>
-      <span>${m.connected ? 'online' : 'offline'}</span>
-    </div>
-    <dl class="kv">
-      <dt>Call sign</dt><dd>${esc(m.callsign || '—')}</dd>
-      <dt>Vehicle</dt><dd>${esc(m.vehicle || '—')}</dd>
-      <dt>Job</dt><dd>${job ? esc(job.reference) : '—'}</dd>
-      <dt>Crew</dt><dd>${esc((m.crew || []).map((c) => c.name).join(', ') || '—')}</dd>
-      <dt>Battery</dt><dd>${m.battery != null ? m.battery + '%' : '—'}</dd>
-      <dt>Position</dt><dd>${m.lat != null ? m.lat.toFixed(4) + ', ' + m.lon.toFixed(4) : '—'}</dd>
-      <dt>Duty status</dt><dd>${esc((m.duty_status || 'AVAILABLE').replace('_', ' '))}</dd>
-    </dl>
-    <div class="btn-row" style="margin-top:10px">
-      <button class="btn primary" id="dMsg">Message</button>
-    </div>`;
-  el('#dMsg').onclick = () => messageModal('m:' + m.mdt_code);
+/** Shifts that are live now: clocked in, or rostered to have started and not
+ * clocked in (shown so control sees a no-show forming, not only after it). */
+function liveShifts() {
+  const now = Date.now();
+  return state.shifts.filter((s) => s.status === 'CLOCKED_IN'
+    || (['SCHEDULED', 'CONFIRMED'].includes(s.status) && Date.parse(s.starts_at) <= now && Date.parse(s.ends_at) > now));
 }
+const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+function shiftBand(s) {
+  const h = new Date(s.starts_at).getHours();
+  return h >= 5 && h < 12 ? 'Early' : h >= 12 && h < 18 ? 'Late' : 'Night';
+}
+function isAvailable(p) { return !emergencyFor(p) && !openJobFor(p) && !openVisitFor(p) && p.employment_status === 'ACTIVE'; }
 
-function mapData() {
-  const units = state.mdts.filter((m) => m.lat != null).map((m) => ({
-    ...m,
-    callsign: m.callsign || m.mdt_code,
-    status: m.emergency ? 'EMERGENCY' : (!m.connected ? 'OFFLINE' : (m.duty_status || 'AVAILABLE')),
-  }));
-  return { units, jobs: state.jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status)) };
-}
-function renderMap() {
-  if (!map) return;
-  const { units, jobs } = mapData();
-  map.render(units, jobs, (u) => select('m', u.id));
-}
-
-function renderEmergencies() {
-  if (!el('#emgWrap')) return; // this chrome doesn't exist in a GL popout window
-  const active = state.emergencies.filter((e) => e.state !== 'RESOLVED');
-  el('#emgWrap').innerHTML = active.map((e) => `
-    <div class="emg-banner">
+/* ------------------------------------------------------------------ *
+ * Rendering
+ * ------------------------------------------------------------------ */
+function renderAttention() {
+  const emgs = state.emergencies.filter((e) => e.state !== 'RESOLVED');
+  const reqs = state.requests.filter((r) => r.state === 'PENDING')
+    .sort((a, b) => (b.priority - a.priority) || (Date.parse(a.requested_at) - Date.parse(b.requested_at)));
+  el('#attn').innerHTML = emgs.map((e) => `
+    <div class="banner emg">
       <strong>${e.kind === 'WELFARE' ? 'WELFARE OVERDUE — NO CHECK-IN' : 'EMERGENCY'}</strong>
       <span class="mono">${esc(e.callsign)} · ${e.lat ? e.lat.toFixed(4) + ', ' + e.lon.toFixed(4) : 'no fix'} · ${new Date(e.activated_at).toLocaleTimeString()}</span>
       ${e.note ? `<span class="dim">last task: ${esc(e.note)}</span>` : ''}
@@ -535,474 +389,610 @@ function renderEmergencies() {
       <span style="flex:1"></span>
       ${e.job_id ? `<button class="btn" data-emgjob="${e.job_id}">Job ${esc((state.jobs.find((j) => j.id === e.job_id) || {}).reference || '')}</button>` : ''}
       ${e.state === 'ACTIVE' ? `<button class="btn danger" data-ack="${e.id}">Acknowledge</button>` : ''}
-      ${e.personnel_id ? `<button class="btn" data-loc="p:${e.personnel_id}">View location</button>` : ''}
-      ${e.mdt_id ? `<button class="btn" data-loc="m:${e.mdt_id}">View location</button>` : ''}
-      <button class="btn ok" data-res="${e.id}">Reset emergency</button>
-    </div>`).join('');
-  CCCS.els('[data-ack]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.ack}/ack`)));
-  CCCS.els('[data-res]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.res}/resolve`)));
-  CCCS.els('[data-loc]').forEach((b) => (b.onclick = () => { const [kind, id] = b.dataset.loc.split(':'); select(kind, Number(id)); }));
-  CCCS.els('[data-emgjob]').forEach((b) => (b.onclick = () => { select('j', Number(b.dataset.emgjob)); focusPanel('#detailBody'); }));
-}
-
-function renderRequests() {
-  if (!el('#reqWrap')) return; // this chrome doesn't exist in a GL popout window
-  const open = state.requests.filter((r) => r.state === 'PENDING')
-    .sort((a, b) => (b.priority - a.priority) || (Date.parse(a.requested_at) - Date.parse(b.requested_at)));
-  el('#reqWrap').innerHTML = open.map((r) => {
-    const p = state.personnel.find((x) => x.id === r.personnel_id);
-    return `
-    <div class="req-bar ${r.priority ? 'pri' : ''}">
+      ${e.personnel_id ? `<button class="btn" data-emgp="${e.personnel_id}">Officer</button>` : ''}
+      ${e.mdt_id ? `<button class="btn" data-emgm="${e.mdt_id}">Vehicle</button>` : ''}
+      <button class="btn ok" data-emgres="${e.id}">Reset emergency</button>
+    </div>`).join('') + reqs.map((r) => `
+    <div class="banner req ${r.priority ? 'pri' : ''}">
       <strong>${r.priority ? 'PRIORITY CALLBACK REQUEST' : 'CALLBACK REQUEST'}</strong>
-      <span class="mono">${esc(r.callsign)}${p && p.contact_phone ? ' · ' + esc(p.contact_phone) : ''} · ${new Date(r.requested_at).toLocaleTimeString()}</span>
+      <span class="mono">${esc(r.callsign)} · ${new Date(r.requested_at).toLocaleTimeString()}</span>
       ${r.note ? `<span class="dim">${esc(r.note)}</span>` : ''}
       <span style="flex:1"></span>
-      <button class="btn" data-reqloc="${r.personnel_id}">Locate</button>
-      <button class="btn primary" data-reqclear="${r.id}">Mark answered</button>
+      <button class="btn primary" data-reqp="${r.personnel_id}">Contact</button>
+      <button class="btn" data-reqclear="${r.id}">Mark answered</button>
+    </div>`).join('');
+  els('[data-ack]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.ack}/ack`)));
+  els('[data-emgres]').forEach((b) => armed(b, 'Confirm reset', () => api('POST', `/api/emergency/${b.dataset.emgres}/resolve`)));
+  els('[data-emgjob]').forEach((b) => (b.onclick = () => select('j', Number(b.dataset.emgjob))));
+  els('[data-emgp]').forEach((b) => (b.onclick = () => select('p', Number(b.dataset.emgp))));
+  els('[data-emgm]').forEach((b) => (b.onclick = () => select('m', Number(b.dataset.emgm))));
+  els('[data-reqp]').forEach((b) => (b.onclick = () => select('p', Number(b.dataset.reqp))));
+  els('[data-reqclear]').forEach((b) => (b.onclick = () => api('POST', `/api/calls/requests/${b.dataset.reqclear}/clear`, {})));
+}
+
+function renderDispatch() {
+  const items = dispatchItems();
+  const attention = [...state.jobs.map((row) => ({ kind: 'job', row })), ...state.site_visits.map((row) => ({ kind: 'visit', row }))].filter(needsAttendance).length;
+  el('#dispCount').textContent = attention ? `${attention} need attendance` : '';
+  els('#dispFilter .chip').forEach((c) => c.classList.toggle('on', c.dataset.f === state.dispFilter));
+  const sel = state.selected;
+  el('#dispList').innerHTML = items.length ? items.map((it) => {
+    const r = it.row, need = needsAttendance(it);
+    const isSel = sel && ((it.kind === 'job' && sel.kind === 'j') || (it.kind === 'visit' && sel.kind === 'v')) && sel.id === r.id;
+    const who = it.kind === 'job' ? r.resources.map((x) => x.callsign || x.personnel || x.mdt) : r.resources.map((x) => x.personnel);
+    return `<div class="card ${isSel ? 'sel' : ''} ${need === 'emergency' || need === 'missed' ? 'alarm' : ''} ${it.closed ? 'closed' : ''}" data-open="${it.kind === 'job' ? 'j' : 'v'}:${r.id}">
+      <div class="card-top">
+        <span style="display:flex;gap:6px;align-items:center"><span class="kind ${it.kind}">${it.kind === 'job' ? 'JOB' : 'VISIT'}</span><span class="cs">${esc(r.reference)}</span></span>
+        <span style="display:flex;gap:6px;align-items:center">
+          ${it.kind === 'job' ? `<span class="pri pri-${r.priority}">${r.priority}</span>` : ''}
+          <span class="status-pill ${busyCls(r.status)}">${jobStatusLabel(r.status)}</span>
+        </span>
+      </div>
+      <div class="card-sub">
+        <span>${esc(it.kind === 'job' ? `${r.incident_type} — ${r.location}` : `${r.site_name || 'Site'}${r.beat_name ? ' — ' + r.beat_name : ''}`)}</span>
+      </div>
+      <div class="card-sub">
+        <span>${need ? `<span class="needs">▲ ${esc(need)}</span>` : esc(who.join(', ') || 'unassigned')}</span>
+        <span>${it.kind === 'visit' ? hhmm(r.scheduled_for) : hhmm(r.created_at)}</span>
+      </div>
     </div>`;
-  }).join('');
-  CCCS.els('[data-reqloc]').forEach((b) => (b.onclick = () => select('p', Number(b.dataset.reqloc))));
-  CCCS.els('[data-reqclear]').forEach((b) => (b.onclick = () => api('POST', `/api/calls/requests/${b.dataset.reqclear}/clear`, {})));
-  updateCallbackBadge();
+  }).join('') : `<p class="dim">${state.dispFilter === 'attention' ? 'Nothing needs attendance.' : 'Nothing here.'}</p>`;
+  els('#dispList [data-open]').forEach((n) => n.addEventListener('click', () => {
+    const [k, id] = n.dataset.open.split(':'); select(k, Number(id), { pan: true });
+  }));
+}
+els('#dispFilter .chip').forEach((c) => (c.onclick = () => { state.dispFilter = c.dataset.f; renderDispatch(); }));
+
+function personCard(p, shift) {
+  const emg = emergencyFor(p), job = openJobFor(p), visit = openVisitFor(p);
+  const task = job || visit;
+  const pill = emg ? ['emg', 'EMERGENCY'] : task ? [busyCls(task.status), jobStatusLabel(task.status)] : ['on', 'AVAILABLE'];
+  const clockedIn = shift && shift.status === 'CLOCKED_IN';
+  const sel = state.selected && state.selected.kind === 'p' && state.selected.id === p.id;
+  return `<div class="card ${sel ? 'sel' : ''} ${emg ? 'alarm' : ''}" data-p="${p.id}" style="${clockedIn || !shift ? '' : 'opacity:.7'}">
+    <div class="card-top">
+      <span class="cs">${esc(p.callsign || p.name)}</span>
+      <span style="display:flex;gap:6px;align-items:center">
+        ${shift && shift.is_duty_supervisor ? '<span class="src duty">DUTY SUP</span>' : ''}
+        ${clockedIn || !shift ? `<span class="status-pill ${pill[0]}">${pill[1]}</span>` : '<span class="status-pill emg">NOT CLOCKED IN</span>'}
+      </span>
+    </div>
+    <div class="card-sub">
+      <span>${esc(p.name)}${shift && shift.site_name ? ' · ' + esc(shift.site_name) : ''}</span>
+      <span>${task ? esc(task.reference) : ''}${p.welfare_due_at ? ` · welfare ${welfareLeft(p)}` : ''}</span>
+    </div>
+  </div>`;
+}
+
+function renderShift() {
+  const live = liveShifts();
+  const byPerson = new Map();
+  for (const s of live) if (!byPerson.has(s.personnel_id) || s.status === 'CLOCKED_IN') byPerson.set(s.personnel_id, s);
+  const onShift = [...byPerson.values()];
+  const clockedIn = onShift.filter((s) => s.status === 'CLOCKED_IN');
+  const people = (s) => state.personnel.find((p) => p.id === s.personnel_id);
+  const available = clockedIn.map(people).filter((p) => p && isAvailable(p));
+  const mdtsFree = state.mdts.filter((m) => m.connected && !m.emergency && !m.job_id && (m.duty_status || 'AVAILABLE') === 'AVAILABLE');
+  el('#shiftCount').textContent = `${clockedIn.length} clocked in`;
+
+  // Group by the shift itself: same start and end is the same shift.
+  const groups = new Map();
+  for (const s of onShift) {
+    const key = `${s.starts_at}|${s.ends_at}`;
+    if (!groups.has(key)) groups.set(key, { s, rows: [] });
+    groups.get(key).rows.push(s);
+  }
+  const ordered = [...groups.values()].sort((a, b) => Date.parse(a.s.starts_at) - Date.parse(b.s.starts_at));
+  // Anyone on a job or with a welfare timer but no live shift is still shown,
+  // under its own heading — an officer mid-task must never vanish from view
+  // just because their rota entry is wrong.
+  const offRota = state.personnel.filter((p) => !byPerson.has(p.id) && (openJobFor(p) || openVisitFor(p) || p.welfare_due_at || emergencyFor(p)));
+
+  el('#shiftBody').innerHTML = `
+    <div class="grp"><span>Available patrols</span><span>${available.length + mdtsFree.length}</span></div>
+    <div class="avail">${available.map((p) => `<button class="chip" data-p="${p.id}">${esc(p.callsign || p.name)}</button>`).join('')}
+      ${mdtsFree.map((m) => `<button class="chip" data-m="${m.id}">${esc(m.mdt_code)}${m.callsign ? ' · ' + esc(m.callsign) : ''}</button>`).join('')}
+      ${available.length + mdtsFree.length ? '' : '<span class="dim" style="font-size:12px">None free right now.</span>'}</div>
+    ${ordered.map((g) => `
+      <div class="grp"><span>${shiftBand(g.s)} · ${hhmm(g.s.starts_at)}–${hhmm(g.s.ends_at)}</span><span>${g.rows.filter((s) => s.status === 'CLOCKED_IN').length}/${g.rows.length}</span></div>
+      ${g.rows.map((s) => { const p = people(s); return p ? personCard(p, s) : ''; }).join('')}`).join('')
+      || '<p class="dim" style="margin-top:10px">Nobody is rostered on right now.</p>'}
+    ${offRota.length ? `<div class="grp"><span>Working, not on the rota</span><span>${offRota.length}</span></div>${offRota.map((p) => personCard(p, null)).join('')}` : ''}
+    <div class="grp"><span>Vehicles (MDT)</span><span>${state.mdts.filter((m) => m.connected).length} online</span></div>
+    ${state.mdts.map((m) => `<div class="card ${state.selected && state.selected.kind === 'm' && state.selected.id === m.id ? 'sel' : ''} ${m.emergency ? 'alarm' : ''}" data-m="${m.id}">
+      <div class="card-top"><span class="cs">${esc(m.mdt_code)}</span><span class="status-pill ${m.emergency ? 'emg' : !m.connected ? 'off' : m.job_id ? 'busy' : 'on'}">${m.emergency ? 'EMERGENCY' : !m.connected ? 'OFFLINE' : m.job_id ? 'ON JOB' : (m.duty_status || 'AVAILABLE').replace('_', ' ')}</span></div>
+      <div class="card-sub"><span>${esc(m.callsign || 'no call sign')}</span><span>${esc((m.crew || []).map((c) => c.name).join(', ') || 'no crew')}</span></div>
+    </div>`).join('')}`;
+  els('#shiftBody [data-p]').forEach((n) => (n.onclick = () => select('p', Number(n.dataset.p), { pan: true })));
+  els('#shiftBody [data-m]').forEach((n) => (n.onclick = () => select('m', Number(n.dataset.m), { pan: true })));
+}
+
+let map = null;
+function renderMap() {
+  if (!map) return;
+  const units = state.mdts.filter((m) => m.lat != null).map((m) => ({
+    ...m, callsign: m.callsign || m.mdt_code, status: m.emergency ? 'EMERGENCY' : (!m.connected ? 'OFFLINE' : (m.duty_status || 'AVAILABLE')),
+  }));
+  // Visits ride the job-marker layer with their own reference, so the map
+  // shows every place someone is due to attend, not only incidents.
+  const markers = [
+    ...state.jobs.filter((j) => !CLOSED_JOB.includes(j.status)),
+    ...state.site_visits.filter((v) => !CLOSED_VISIT.includes(v.status) && v.lat != null).map((v) => ({ ...v, priority: 'ROUTINE' })),
+  ];
+  map.render(units, markers, (u) => select('m', u.id));
 }
 
 function renderLog() {
-  if (!el('#log') || !el('#logFilter')) return;
   const f = el('#logFilter').value.toLowerCase();
-  const rows = state.events.filter((e) => !f || e.summary.toLowerCase().includes(f)).slice(-250);
+  const rows = state.events.filter((e) => !f || e.summary.toLowerCase().includes(f)).slice(-200);
   el('#log').innerHTML = rows.map((e) => `<div><span class="t">${CCCS.hhmmss(new Date(e.at))}</span>${esc(e.summary)}</div>`).join('');
   el('#log').scrollTop = el('#log').scrollHeight;
 }
+el('#logFilter').addEventListener('input', renderLog);
 
-function select(kind, id) { state.selected = { kind, id }; renderResources(); renderJobs(); renderVisits(); renderDetail(); }
+function renderAll() { renderAttention(); renderDispatch(); renderShift(); renderMap(); renderDetail(); }
 
-/* ---------- modals ---------- */
-function modal(title, html, onMount) {
-  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
-  el('#mClose').onclick = closeModal;
-  onMount && onMount();
+/* ------------------------------------------------------------------ *
+ * Selection and Detail modes
+ * ------------------------------------------------------------------ */
+function select(kind, id, opts = {}) {
+  state.selected = { kind, id }; state.mode = null; state.modeArg = null;
+  openPanel('pDetail');
+  renderDispatch(); renderShift(); renderDetail({ force: true });
+  if (opts.pan && map) {
+    const t = kind === 'j' ? state.jobs.find((x) => x.id === id) : kind === 'v' ? state.site_visits.find((x) => x.id === id)
+      : kind === 'm' ? state.mdts.find((x) => x.id === id) : null;
+    if (t && t.lat != null) map.centerOn(t.lat, t.lon, 15);
+  }
 }
-const closeModal = () => (el('#modalHost').innerHTML = '');
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
-
-if (!isPopout) {
-  el('#btnMessage').onclick = () => messageModal(state.selected ? `${state.selected.kind}:${state.selected.kind === 'p' ? state.selected.id : (state.mdts.find((m) => m.id === state.selected.id) || {}).mdt_code}` : null);
+function setMode(mode, arg = null) {
+  state.mode = mode; state.modeArg = arg;
+  openPanel('pDetail');
+  renderDetail({ force: true });
 }
-function messageModal(preselect) {
-  modal('Send message', `
-    <label for="mTo">Recipient</label>
-    <select id="mTo">
-      ${state.personnel.map((p) => `<option value="p:${p.id}" ${preselect === 'p:' + p.id ? 'selected' : ''}>${esc(p.callsign || p.name)}</option>`).join('')}
-      ${state.mdts.map((m) => `<option value="m:${m.mdt_code}" ${preselect === 'm:' + m.mdt_code ? 'selected' : ''}>MDT ${esc(m.mdt_code)}</option>`).join('')}
-    </select>
-    <label for="mBody">Message</label>
-    <textarea id="mBody" rows="3"></textarea>
-    <div style="height:12px"></div><button class="btn primary" id="mSend">Send</button>`, () => {
-    el('#mSend').onclick = async () => {
-      const [kind, id] = el('#mTo').value.split(':');
-      await api('POST', '/api/messages', { [kind === 'p' ? 'to_personnel' : 'to_mdt']: id, body: el('#mBody').value });
-      closeModal();
-    };
-  });
-}
+el('#detailClose').onclick = () => { state.mode = null; state.selected = null; renderDispatch(); renderShift(); renderDetail({ force: true }); };
 
-function openNewJobModal() {
-  modal('Create job', `
-  <label for="jType">Incident type</label>
-  <input id="jType" list="incidentTypes" value="Alarm activation">
-  <datalist id="incidentTypes">
-    <option>Alarm activation</option><option>Intruder on site</option><option>Keyholding response</option>
-    <option>Lock and unlock</option><option>Patrol visit</option><option>Fire alarm</option>
-    <option>Vandalism</option><option>Trespass</option><option>Welfare check</option>
-  </datalist>
-  <label for="jPri">Priority</label>
-  <select id="jPri"><option>RED</option><option selected>AMBER</option><option>GREEN</option><option>ROUTINE</option></select>
-  <label for="jSite">Site under contract</label>
-  <select id="jSite"><option value="">— not a contracted site —</option>${state.sites.map((x) => `<option value="${x.id}">${esc(x.name)} — ${esc(x.address)}</option>`).join('')}</select>
-  <label for="jLoc">Location (used when no site is selected)</label>
-  <input id="jLoc" value="">
-  <label for="jW3w">What3Words <span class="dim">(optional — for locations with no address, e.g. open ground at an event)</span></label>
-  <input id="jW3w" placeholder="///filled.count.soap">
-  <label for="jDesc">Description</label>
-  <textarea id="jDesc" rows="2">Zone 3 activation reported by monitoring centre.</textarea>
-  <label for="jCaller">Caller</label>
-  <input id="jCaller" value="Monitoring centre, ref ARC-00000">
-  <label for="jRes">Resources to dispatch</label>
-  <select id="jRes" multiple size="6">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)} — ${esc(p.employment_status.replace('_', ' '))}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
-  <div style="height:12px"></div><button class="btn primary" id="jGo">Create and dispatch</button>`, () => {
-  el('#jGo').onclick = async () => {
-    try {
-      const job = await api('POST', '/api/jobs', {
-        incident_type: el('#jType').value, priority: el('#jPri').value,
-        location: el('#jLoc').value, site: el('#jSite').value || undefined,
-        description: el('#jDesc').value, caller: el('#jCaller').value,
-        what3words: el('#jW3w').value.replace(/^\/+/, '').trim() || undefined,
-      });
-      const picks = [...el('#jRes').selectedOptions].map((o) => o.value);
-      if (picks.length) await api('POST', `/api/jobs/${job.id}/assign`, { resources: picks });
-      closeModal();
-    } catch (e) { el('#jGo').insertAdjacentHTML('afterend', `<p class="err">${esc(e.message)}</p>`); }
-  };
-});
+let detailTick = null;
+function renderDetail({ force = false } = {}) {
+  // A live update must never yank a half-typed field out from under the
+  // person typing in it — unless they just chose something else.
+  if (!force && document.activeElement && el('#detailBody').contains(document.activeElement)
+    && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
+  if (detailTick) { clearInterval(detailTick); detailTick = null; }
+  el('#detailClose').hidden = !state.mode && !state.selected;
+  const body = el('#detailBody');
+  const mode = state.mode;
+  const title = (t) => (el('#detailTitle').textContent = t);
+  if (mode === 'newJob') { title('New job'); return renderNewJob(body); }
+  if (mode === 'newVisit') { title('New patrol visit'); return renderNewVisit(body); }
+  if (mode === 'assign') { title('Assign by call sign'); return renderAssign(body); }
+  if (mode === 'message') { title('Send message'); return renderMessage(body); }
+  if (mode === 'notify') { title('Notifications'); return renderNotify(body); }
+  if (mode === 'callsigns') { title('Call signs'); return renderCallsigns(body); }
+  if (mode === 'report') { title('Report'); return renderReport(body); }
+  if (!state.selected) { title('Detail'); body.innerHTML = '<p class="dim">Select a job, a patrol visit, an officer or a vehicle.</p>'; return; }
+  const { kind } = state.selected;
+  if (kind === 'j') { title('Job'); return renderJob(body); }
+  if (kind === 'v') { title('Patrol visit'); return renderVisit(body); }
+  if (kind === 'p') { title('Officer'); return renderPerson(body); }
+  if (kind === 'm') { title('Vehicle'); return renderMdt(body); }
 }
 
-/* "12m" / "1h 04m" — good enough for a status timeline, no need for a
- * date library over two units. */
 function fmtElapsed(fromIso, toIso) {
   const ms = (toIso ? Date.parse(toIso) : Date.now()) - Date.parse(fromIso);
   if (!(ms >= 0)) return '—';
   const mins = Math.floor(ms / 60000);
   return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
 }
+function stepper(stages, stageAt, active) {
+  let last = -1; stages.forEach(([c], i) => { if (stageAt[c]) last = i; });
+  return `<div class="stepper">${stages.map(([c, label], i) => `<span class="${stageAt[c] ? (i === last && active ? 'cur' : 'done') : ''}" title="${stageAt[c] ? new Date(stageAt[c]).toLocaleTimeString() : 'waiting'}">${label}</span>`).join('')}</div>`;
+}
 
-const JOB_STAGES = [
-  ['DISPATCHED', 'Dispatched'], ['ACKNOWLEDGED', 'Acknowledged'], ['EN_ROUTE', 'En route'],
-  ['ON_SCENE', 'On scene'], ['TRANSPORTING', 'Transporting'], ['COMPLETED', 'Completed'],
-];
-function renderJobDetail() {
+/** Reports filed against this job / visit / person, as the server allows
+ * this controller to see them — restricted ones they are not named on are
+ * simply not returned. */
+async function paintReports(host, subjectType, subjectId) {
+  try {
+    const rows = await api('GET', `/api/form-submissions?subject_type=${subjectType}&subject_id=${subjectId}`);
+    CCCSForms.list(host, rows, (id) => setMode('report', id), 'No reports filed.');
+  } catch { host.innerHTML = '<p class="dim">Reports unavailable.</p>'; }
+}
+
+function renderJob(body) {
   const j = state.jobs.find((x) => x.id === state.selected.id);
-  if (!j) { el('#detailBody').innerHTML = '<p class="dim">That job is no longer open.</p>'; return; }
-  const stageAt = { DISPATCHED: j.dispatched_at, ACKNOWLEDGED: j.acknowledged_at, EN_ROUTE: j.en_route_at, ON_SCENE: j.on_scene_at, TRANSPORTING: j.transporting_at, COMPLETED: j.completed_at };
-  let lastDoneIdx = -1;
-  JOB_STAGES.forEach(([code], i) => { if (stageAt[code]) lastDoneIdx = i; });
-  const active = !['COMPLETED', 'CANCELLED'].includes(j.status);
-  const stepper = JOB_STAGES.map(([code, label], i) => {
-    const at = stageAt[code];
-    const isCurrent = at && i === lastDoneIdx && active;
-    return `<div class="step ${at ? (isCurrent ? 'current' : 'done') : ''}">
-      <div class="dot-step">${at && !isCurrent ? '✓' : i + 1}</div>
-      <div><div class="label">${label}</div><div class="time${at ? '' : ' dim'}">${at ? new Date(at).toLocaleTimeString() : 'waiting'}</div></div>
-    </div>`;
-  }).join('');
-  el('#detailBody').innerHTML = `
-    <div class="job-head">
-      <div>
-        <div class="titles">
-          <span class="pri pri-${j.priority}">${j.priority}</span>
-          <h3>${esc(j.incident_type)}</h3>
-        </div>
-        <div class="dim" style="margin-top:5px">${esc(j.reference)} · ${esc(j.location)}</div>
-      </div>
-      ${active ? `<div class="elapsed"><div class="big" id="jElapsedBig">${fmtElapsed(j.created_at)}</div><div class="lbl">since created</div></div>`
+  if (!j) { body.innerHTML = '<p class="dim">That job is no longer open.</p>'; return; }
+  const active = !CLOSED_JOB.includes(j.status);
+  const stageAt = { DISPATCHED: j.dispatched_at, ACKNOWLEDGED: j.acknowledged_at, EN_ROUTE: j.en_route_at, ON_SCENE: j.on_scene_at, COMPLETED: j.completed_at };
+  body.innerHTML = `
+    <div class="dhead">
+      <div><div style="display:flex;gap:8px;align-items:center"><span class="pri pri-${j.priority}">${j.priority}</span><h3>${esc(j.incident_type)}</h3></div>
+        <div class="dim" style="margin-top:4px;font-size:12.5px">${esc(j.reference)} · ${esc(j.location)}</div></div>
+      ${active ? `<div style="text-align:right"><div style="font-size:20px;font-weight:800" id="jElapsed">${fmtElapsed(j.created_at)}</div><div class="dim" style="font-size:10px">SINCE CREATED</div></div>`
         : `<span class="status-pill ${j.status === 'CANCELLED' ? 'off' : 'on'}">${esc(j.status)}</span>`}
     </div>
-    ${j.status === 'CANCELLED' ? '' : `<div class="stepper">${stepper}</div>`}
-
-    <div class="btn-row" style="margin:16px 0 8px"><span style="flex:1"></span><button class="btn" id="jEditToggle">Edit details</button></div>
-    <dl class="kv" id="jDetailsView">
+    ${j.status === 'CANCELLED' ? '' : stepper([['DISPATCHED', 'Disp'], ['ACKNOWLEDGED', 'Ack'], ['EN_ROUTE', 'En rt'], ['ON_SCENE', 'Scene'], ['COMPLETED', 'Done']], stageAt, active)}
+    <dl class="kv" id="jView">
       ${j.what3words ? `<dt>What3Words</dt><dd class="mono">///${esc(j.what3words)}</dd>` : ''}
       <dt>Caller</dt><dd>${esc(j.caller || '—')}</dd>
       <dt>Detail</dt><dd>${esc(j.description || '—')}</dd>
-      <dt>Resources</dt><dd>${j.resources.length ? j.resources.map((r) => `
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
-          <span style="flex:1">${esc(r.callsign || r.personnel || r.mdt)}${r.acknowledged ? ' ✓' : ''}</span>
-          <button class="btn danger" style="padding:0 6px;font-size:11px" data-standdown="${esc(r.personnel ? 'p:' + r.personnel : 'm:' + r.mdt)}">Stand down</button>
-        </div>`).join('') : '—'}</dd>
+      ${j.keyholder ? `<dt>Keyholder</dt><dd>${esc(j.keyholder)}</dd>` : ''}
     </dl>
-    <div id="jDetailsEdit" class="hide">
-      <label for="jType">Incident type</label>
-      <input id="jType" value="${esc(j.incident_type)}">
-      <label for="jLoc">Location</label>
-      <input id="jLoc" value="${esc(j.location)}">
-      <label for="jW3w">What3Words</label>
-      <input id="jW3w" value="${esc(j.what3words || '')}" placeholder="///word.word.word">
-      <label for="jCaller">Caller</label>
-      <input id="jCaller" value="${esc(j.caller || '')}">
-      <label for="jDesc">Detail</label>
-      <textarea id="jDesc" rows="3" style="width:100%;resize:vertical">${esc(j.description || '')}</textarea>
-      <div class="btn-row" style="margin-top:6px">
-        <button class="btn primary" id="jSaveDetails">Save details</button>
-        <button class="btn" id="jCancelEdit">Cancel</button>
-      </div>
+    <div id="jEdit" class="hide">
+      <label>Incident type</label><input id="eType" value="${esc(j.incident_type)}">
+      <label>Location</label><input id="eLoc" value="${esc(j.location)}">
+      <label>What3Words</label><input id="eW3w" value="${esc(j.what3words || '')}">
+      <label>Caller</label><input id="eCaller" value="${esc(j.caller || '')}">
+      <label>Detail</label><textarea id="eDesc" rows="3">${esc(j.description || '')}</textarea>
+      <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="eSave">Save details</button><button class="btn" id="eCancel">Cancel</button></div>
     </div>
-    <label for="jNotes">Notes — visible to every assigned call sign</label>
-    <textarea id="jNotes" rows="3" style="width:100%;resize:vertical">${esc(j.notes || '')}</textarea>
-    <div class="btn-row" style="margin-top:6px"><button class="btn" id="jSaveNotes">Save notes</button></div>
-
-    <label for="jAdd" style="margin-top:12px;display:block">Assign more resources</label>
-    <select id="jAdd" multiple size="4">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
-    <div class="btn-row" style="margin-top:12px">
-      <button class="btn primary" id="jAssign">Dispatch</button>
-      <button class="btn ok" id="jDone">Mark completed</button>
-      <button class="btn danger" id="jCancel">Cancel job</button>
-    </div>`;
-  el('#jAssign').onclick = async () => {
-    const picks = [...el('#jAdd').selectedOptions].map((o) => o.value);
-    if (picks.length) await api('POST', `/api/jobs/${j.id}/assign`, { resources: picks });
-  };
-  el('#jDone').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }); };
-  el('#jCancel').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }); };
-  el('#jSaveNotes').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }); };
-  el('#jEditToggle').onclick = () => {
-    el('#jDetailsView').classList.add('hide');
-    el('#jEditToggle').classList.add('hide');
-    el('#jDetailsEdit').classList.remove('hide');
-  };
-  el('#jCancelEdit').onclick = () => renderJobDetail();
-  el('#jSaveDetails').onclick = async () => {
-    await api('PATCH', `/api/jobs/${j.id}`, {
-      incident_type: el('#jType').value, location: el('#jLoc').value,
-      what3words: el('#jW3w').value, caller: el('#jCaller').value, description: el('#jDesc').value,
-    });
-  };
-  CCCS.els('[data-standdown]').forEach((b) => (b.onclick = async () => {
-    const [kind, id] = b.dataset.standdown.split(':');
-    if (!confirm(`Stand down ${id} from this job?`)) return;
-    await api('POST', `/api/jobs/${j.id}/stand-down`, kind === 'p' ? { personnel: id } : { mdt: id });
+    <div class="dsec"><div class="t">Resources</div>
+      ${j.resources.length ? j.resources.map((r) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:3px">
+        <span style="flex:1">${esc(r.callsign || r.personnel || r.mdt)}${r.personnel && r.callsign ? ` <span class="dim">(${esc(r.personnel)})</span>` : ''}${r.acknowledged ? ' ✓' : ''}</span>
+        ${r.personnel ? `<button class="btn" data-contact="${esc(r.personnel)}" style="padding:1px 8px;font-size:11px">Contact</button>` : ''}
+        ${active ? `<button class="btn danger" data-standdown="${esc(r.personnel ? 'p:' + r.personnel : 'm:' + r.mdt)}" style="padding:1px 8px;font-size:11px">Stand down</button>` : ''}
+      </div>`).join('') : '<p class="dim" style="margin:0">Nobody assigned.</p>'}
+      ${active ? `<div class="btn-row" style="margin-top:6px"><button class="btn primary" id="jAssign">Assign by call sign</button><button class="btn" id="jEditBtn">Edit details</button></div>` : ''}
+    </div>
+    <div class="dsec"><div class="t">Notes — visible to every assigned call sign</div>
+      <textarea id="jNotes" rows="2">${esc(j.notes || '')}</textarea>
+      <div class="btn-row" style="margin-top:4px"><button class="btn" id="jSaveNotes">Save notes</button></div>
+    </div>
+    <div class="dsec"><div class="t">Reports</div><div id="jReports"><p class="dim">Loading…</p></div></div>
+    ${active ? `<div class="btn-row" style="margin-top:12px"><button class="btn ok" id="jDone">Mark completed</button><button class="btn danger" id="jCancel">Cancel job</button></div>` : ''}
+    <p class="err" id="detailErr"></p>`;
+  paintReports(el('#jReports'), 'JOB', j.id);
+  el('#jSaveNotes').onclick = () => api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }).catch(showErr);
+  els('[data-contact]', body).forEach((b) => (b.onclick = () => { const p = state.personnel.find((x) => x.name === b.dataset.contact); if (p) select('p', p.id); }));
+  if (!active) return;
+  el('#jAssign').onclick = () => setMode('assign', j.id);
+  el('#jEditBtn').onclick = () => { el('#jView').classList.add('hide'); el('#jEdit').classList.remove('hide'); };
+  el('#eCancel').onclick = () => renderDetail({ force: true });
+  el('#eSave').onclick = () => api('PATCH', `/api/jobs/${j.id}`, {
+    incident_type: el('#eType').value, location: el('#eLoc').value, what3words: el('#eW3w').value, caller: el('#eCaller').value, description: el('#eDesc').value,
+  }).then(() => renderDetail({ force: true })).catch(showErr);
+  armed(el('#jDone'), 'Confirm completed', () => api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }));
+  armed(el('#jCancel'), 'Confirm cancel', () => api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }));
+  els('[data-standdown]', body).forEach((b) => armed(b, 'Confirm', () => {
+    const [k, id] = b.dataset.standdown.split(':');
+    return api('POST', `/api/jobs/${j.id}/stand-down`, k === 'p' ? { personnel: id } : { mdt: id });
   }));
-  if (el('#jElapsedBig')) {
-    detailTick = setInterval(() => { const n = el('#jElapsedBig'); if (n) n.textContent = fmtElapsed(j.created_at); }, 30000);
-  }
+  detailTick = setInterval(() => { const n = el('#jElapsed'); if (n) n.textContent = fmtElapsed(j.created_at); }, 30000);
 }
 
-if (!isPopout) {
-el('#btnAssign').onclick = async () => {
-  const cs = await api('GET', '/api/callsigns');
-  modal('Call sign assignments', cs.map((c) => `
-    <div style="margin-bottom:12px">
-      <strong class="mono">${esc(c.name)}</strong> <span class="dim">${esc(c.description || '')}</span>
-      <div class="log">
-        ${c.mdts.map((m) => `<div>${esc(m.mdt_code)} <button class="btn" style="padding:0 6px;font-size:11px" data-unm="${c.id}:${m.mdt_code}">remove</button></div>`).join('')}
-        ${c.personnel.map((p) => `<div class="dim">${esc(p.name)}</div>`).join('')}
+function renderVisit(body) {
+  const v = state.site_visits.find((x) => x.id === state.selected.id);
+  if (!v) { body.innerHTML = '<p class="dim">That visit is no longer open.</p>'; return; }
+  const active = !CLOSED_VISIT.includes(v.status);
+  const stageAt = { DISPATCHED: v.dispatched_at, ACKNOWLEDGED: v.acknowledged_at, EN_ROUTE: v.en_route_at, ON_SCENE: v.on_scene_at, COMPLETED: v.completed_at };
+  const scanned = new Set((v.checkpoint_scans || []).map((s) => s.waypoint_id));
+  body.innerHTML = `
+    <div class="dhead">
+      <div><h3>${esc(v.site_name || 'Site visit')}${v.beat_name ? ` — ${esc(v.beat_name)}` : ''}</h3>
+        <div class="dim" style="margin-top:4px;font-size:12.5px">${esc(v.reference)} · ${esc(v.site_address || '')}</div></div>
+      <span class="status-pill ${busyCls(v.status)}">${esc(v.status.replace('_', ' '))}</span>
+    </div>
+    <div class="dim" style="font-size:12px">Scheduled ${new Date(v.scheduled_for).toLocaleString('en-GB')}</div>
+    ${['CANCELLED', 'MISSED'].includes(v.status) ? '' : stepper([['DISPATCHED', 'Disp'], ['ACKNOWLEDGED', 'Ack'], ['EN_ROUTE', 'En rt'], ['ON_SCENE', 'Scene'], ['COMPLETED', 'Done']], stageAt, active)}
+    ${(v.waypoints || []).length ? `<div class="dsec"><div class="t">Checkpoints — ${v.waypoints.filter((w) => scanned.has(w.id)).length}/${v.waypoints.length} scanned</div>
+      ${v.waypoints.map((w) => `<div style="font-size:12.5px">${scanned.has(w.id) ? '✓' : '○'} ${esc(w.title)}</div>`).join('')}</div>` : ''}
+    <div class="dsec"><div class="t">Officers</div>
+      ${v.resources.length ? v.resources.map((r) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:3px">
+        <span style="flex:1">${esc(r.personnel)}${r.primary ? ' <span class="dim">(primary)</span>' : ''}</span>
+        <button class="btn" data-vcontact="${r.personnel_id}" style="padding:1px 8px;font-size:11px">Contact</button>
+        ${active ? `<button class="btn danger" data-vstand="${r.personnel_id}" style="padding:1px 8px;font-size:11px">Stand down</button>` : ''}
+      </div>`).join('') : '<p class="dim" style="margin:0">Nobody assigned.</p>'}
+      ${active ? `<div style="display:flex;gap:6px;margin-top:6px"><select id="vAdd">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}${isAvailable(p) ? '' : ' (busy)'}</option>`).join('')}</select><button class="btn primary" id="vAssign">Assign</button></div>` : ''}
+    </div>
+    <div class="dsec"><div class="t">Notes</div>
+      <textarea id="vNotes" rows="2">${esc(v.notes || '')}</textarea>
+      <div class="btn-row" style="margin-top:4px"><button class="btn" id="vSaveNotes">Save notes</button></div>
+    </div>
+    <div class="dsec"><div class="t">Reports</div><div id="vReports"><p class="dim">Loading…</p></div></div>
+    ${active ? `<div class="btn-row" style="margin-top:12px"><button class="btn ok" id="vDone">Mark completed</button><button class="btn danger" id="vCancel">Cancel visit</button></div>` : ''}
+    <p class="err" id="detailErr"></p>`;
+  paintReports(el('#vReports'), 'SITE_VISIT', v.id);
+  el('#vSaveNotes').onclick = () => api('PATCH', `/api/site-visits/${v.id}`, { notes: el('#vNotes').value }).catch(showErr);
+  els('[data-vcontact]', body).forEach((b) => (b.onclick = () => select('p', Number(b.dataset.vcontact))));
+  if (!active) return;
+  el('#vAssign').onclick = () => api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vAdd').value) }).catch(showErr);
+  armed(el('#vDone'), 'Confirm completed', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }));
+  armed(el('#vCancel'), 'Confirm cancel', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }));
+  els('[data-vstand]', body).forEach((b) => armed(b, 'Confirm', () => api('POST', `/api/site-visits/${v.id}/stand-down`, { personnel: Number(b.dataset.vstand) })));
+}
+
+/* ---- Officer: contact details, click-to-dial and click-to-SMS ---------- */
+function renderPerson(body) {
+  const p = state.personnel.find((x) => x.id === state.selected.id);
+  if (!p) { body.innerHTML = '<p class="dim">Unknown officer.</p>'; return; }
+  const shift = liveShifts().find((s) => s.personnel_id === p.id);
+  const task = openJobFor(p) || openVisitFor(p);
+  const emg = emergencyFor(p);
+  body.innerHTML = `
+    <div class="dhead">
+      <div><h3>${esc(p.callsign || p.name)}</h3><div class="dim" style="margin-top:4px;font-size:12.5px">${esc(p.name)} · ${esc(p.rank || 'Officer')}</div></div>
+      ${emg ? '<span class="status-pill emg">EMERGENCY</span>' : task ? `<span class="status-pill busy">${esc(task.reference)}</span>` : '<span class="status-pill on">AVAILABLE</span>'}
+    </div>
+    <dl class="kv">
+      <dt>Shift</dt><dd>${shift ? `${hhmm(shift.starts_at)}–${hhmm(shift.ends_at)} · ${shift.status === 'CLOCKED_IN' ? 'clocked in ' + hhmm(shift.clocked_in_at) : '<span style="color:var(--priority)">not clocked in</span>'}${shift.site_name ? ' · ' + esc(shift.site_name) : ''}` : '<span class="dim">not rostered now</span>'}</dd>
+      <dt>Vehicle</dt><dd>${esc(p.vehicle || '—')}</dd>
+      <dt>Welfare</dt><dd>${p.welfare_due_at ? `${welfareLeft(p)} remaining${p.welfare_note ? ' — ' + esc(p.welfare_note) : ''}` : 'no timer'}</dd>
+    </dl>
+    <div class="dsec"><div class="t">Contact</div><div id="pContact"><p class="dim">Loading…</p></div>
+      <div id="smsBox" class="hide" style="margin-top:6px">
+        <label id="smsTo" style="margin-top:0"></label>
+        <textarea id="smsText" rows="2" maxlength="1600" placeholder="Message"></textarea>
+        <div class="btn-row" style="margin-top:4px"><button class="btn primary" id="smsSend">Send SMS</button><button class="btn" id="smsCancel">Cancel</button></div>
       </div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <select data-pick="${c.id}" style="flex:1">
-          ${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}
-        </select>
-        <button class="btn" data-assign="${c.id}">Assign MDT</button>
+      <p class="dim" id="contactStatus" style="font-size:12px;min-height:14px;margin:4px 0 0"></p>
+    </div>
+    <div class="dsec"><div class="t">Recent contact</div><div class="mini-log" id="pContactLog"><p class="dim">Loading…</p></div></div>
+    <div class="btn-row" style="margin-top:10px"><button class="btn" id="pMsg">Send message to terminal</button></div>
+    <div class="dsec"><div class="t">Reports about this person</div><div id="pReports"><p class="dim">Loading…</p></div></div>
+    <p class="err" id="detailErr"></p>`;
+  el('#pMsg').onclick = () => setMode('message', 'p:' + p.id);
+  paintReports(el('#pReports'), 'PERSONNEL', p.id);
+  paintContact(p);
+}
+
+async function paintContact(p) {
+  const host = el('#pContact');
+  let c;
+  try { c = await api('GET', `/api/personnel/${p.id}/contact`); }
+  catch (e) { host.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  if (!el('#pContact') || !state.selected || state.selected.kind !== 'p' || state.selected.id !== p.id) return;
+  const line = (who, phone, valid, supervisor, source) => `
+    <div class="contact">
+      <div class="who">
+        <div>${esc(who)} ${source ? `<span class="src ${source === 'DUTY_SUPERVISOR' ? 'duty' : 'line'}">${source === 'DUTY_SUPERVISOR' ? 'DUTY SUPERVISOR' : 'LINE MANAGER'}</span>` : ''}</div>
+        <div class="num">${phone ? esc(phone) : '<span class="dim">no number on record</span>'}</div>
       </div>
-    </div>`).join(''), () => {
-    CCCS.els('[data-assign]').forEach((b) => (b.onclick = async () => {
-      const v = document.querySelector(`[data-pick="${b.dataset.assign}"]`).value;
-      await api('POST', `/api/callsigns/${b.dataset.assign}/assign`, { mdt: v });
-      el('#btnAssign').click();
+      ${phone ? `<button class="btn primary" data-dial="${supervisor ? 1 : 0}">Dial</button>` : ''}
+      ${phone && valid ? `<button class="btn" data-sms="${supervisor ? 1 : 0}">SMS</button>` : ''}
+    </div>`;
+  host.innerHTML = line(c.name, c.phone, c.phone_valid, false, null)
+    + (c.supervisor ? line(`Supervisor: ${c.supervisor.name}`, c.supervisor.phone, c.supervisor.phone_valid, true, c.supervisor.source)
+      : '<div class="contact"><div class="who dim">No supervisor — nobody is rostered as duty supervisor and no line manager is set.</div></div>');
+  els('[data-dial]', host).forEach((b) => (b.onclick = () => dial(p, b.dataset.dial === '1', c)));
+  els('[data-sms]', host).forEach((b) => (b.onclick = () => {
+    const sup = b.dataset.sms === '1';
+    el('#smsBox').classList.remove('hide'); el('#smsBox').dataset.sup = sup ? '1' : '0';
+    el('#smsTo').textContent = `SMS to ${sup ? c.supervisor.name : c.name}`;
+    el('#smsText').focus();
+  }));
+  el('#smsCancel').onclick = () => el('#smsBox').classList.add('hide');
+  el('#smsSend').onclick = async () => {
+    const text = el('#smsText').value.trim(); if (!text) return;
+    el('#smsSend').disabled = true;
+    try {
+      const r = await api('POST', '/api/contact/sms', { personnel: p.id, supervisor: el('#smsBox').dataset.sup === '1', body: text, job_id: (openJobFor(p) || {}).id });
+      el('#contactStatus').textContent = r.dry_run ? 'Recorded — SMS is in dry-run mode, nothing was actually sent.' : 'SMS accepted by Twilio; delivery status will follow.';
+      el('#smsText').value = ''; el('#smsBox').classList.add('hide');
+      paintContactLog(p);
+    } catch (e) { el('#contactStatus').textContent = `SMS failed: ${e.message}`; }
+    el('#smsSend').disabled = false;
+  };
+  paintContactLog(p);
+}
+
+/** Every dial is recorded server-side before anything rings. With FreePBX
+ * configured the server places the call (your extension first) and the
+ * outcome arrives later as an event; without it the server hands back a
+ * tel: link and records an attempt only — the browser cannot report what
+ * happened next, and the log says so. */
+async function dial(p, supervisor, c) {
+  const ext = extension();
+  if (ringsOperatorFirst && !/^\d{2,6}$/.test(ext)) {
+    el('#contactStatus').textContent = 'Set the extension you are working from (top bar) first — the call rings your phone before connecting.';
+    el('#ext').focus(); return;
+  }
+  try {
+    const r = await api('POST', '/api/contact/dial', { personnel: p.id, supervisor, extension: ext, job_id: (openJobFor(p) || {}).id });
+    const target = supervisor ? c.supervisor.name : c.name;
+    if (r.dial_uri) {
+      el('#contactStatus').textContent = `Dialling ${target} from this device — logged as an attempt (no outcome is reported for this kind of call).`;
+      location.href = r.dial_uri;
+    } else {
+      el('#contactStatus').textContent = `Ringing your extension ${ext} — answer it to be connected to ${target}.`;
+      pendingDials.set(r.id, p.id);
+    }
+    paintContactLog(p);
+  } catch (e) { el('#contactStatus').textContent = e.message; }
+}
+const pendingDials = new Map(); // dial_log id -> personnel id, for outcome events
+
+async function paintContactLog(p) {
+  const host = el('#pContactLog'); if (!host) return;
+  try {
+    const rows = await api('GET', `/api/personnel/${p.id}/contact-log?limit=6`);
+    const label = (d) => d.outcome === 'ANSWERED' && d.duration_s != null ? `ANSWERED ${d.duration_s}s` : d.outcome;
+    host.innerHTML = rows.length ? rows.map((d) => `<div><span class="mono dim">${hhmm(d.attempted_at)}</span> ${d.channel === 'SMS' ? 'SMS' : 'Call'} by ${esc(d.actor_name)} — <strong>${esc(label(d))}</strong>${d.supervisor_source ? ` <span class="dim">(via ${d.supervisor_source === 'DUTY_SUPERVISOR' ? 'duty supervisor' : 'line manager'})</span>` : ''}${d.error_code ? ` <span class="dim">${esc(d.error_code)}</span>` : ''}</div>`).join('') : '<p class="dim" style="margin:0">None yet.</p>';
+  } catch { host.innerHTML = '<p class="dim">Unavailable.</p>'; }
+}
+
+function renderMdt(body) {
+  const m = state.mdts.find((x) => x.id === state.selected.id);
+  if (!m) { body.innerHTML = '<p class="dim">Unknown vehicle.</p>'; return; }
+  const job = m.job_id ? state.jobs.find((j) => j.id === m.job_id) : null;
+  body.innerHTML = `
+    <div class="dhead"><div><h3>${esc(m.mdt_code)}</h3><div class="dim" style="margin-top:4px;font-size:12.5px">${esc(m.callsign || 'no call sign')} · ${esc(m.vehicle || 'no vehicle')}</div></div>
+      <span class="status-pill ${m.emergency ? 'emg' : m.connected ? 'on' : 'off'}">${m.emergency ? 'EMERGENCY' : m.connected ? 'ONLINE' : 'OFFLINE'}</span></div>
+    <dl class="kv">
+      <dt>Job</dt><dd>${job ? `<a href="#" id="mJob">${esc(job.reference)}</a>` : '—'}</dd>
+      <dt>Crew</dt><dd>${esc((m.crew || []).map((c) => c.name).join(', ') || '—')}</dd>
+      <dt>Duty</dt><dd>${esc((m.duty_status || 'AVAILABLE').replace('_', ' '))}</dd>
+      <dt>Battery</dt><dd>${m.battery != null ? m.battery + '%' : '—'}</dd>
+      <dt>Position</dt><dd class="mono">${m.lat != null ? m.lat.toFixed(4) + ', ' + m.lon.toFixed(4) : '—'}</dd>
+    </dl>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="mMsg">Send message</button></div>`;
+  el('#mMsg').onclick = () => setMode('message', 'm:' + m.mdt_code);
+  if (el('#mJob')) el('#mJob').onclick = (e) => { e.preventDefault(); select('j', job.id, { pan: true }); };
+}
+
+function renderReport(body) {
+  body.innerHTML = '<p class="dim">Loading…</p><div class="btn-row"><button class="btn" id="rBack">Back</button></div>';
+  const back = () => { state.mode = null; renderDetail({ force: true }); };
+  el('#rBack').onclick = back;
+  api('GET', `/api/form-submissions/${state.modeArg}`)
+    .then((sub) => { body.innerHTML = '<div id="rHost"></div><div class="btn-row" style="margin-top:8px"><button class="btn" id="rBack2">Back</button></div>'; CCCSForms.view(el('#rHost'), sub); el('#rBack2').onclick = back; })
+    .catch((e) => { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; });
+}
+
+/* ---- Modes that used to be modals -------------------------------------- */
+function renderNewJob(body) {
+  body.innerHTML = `
+    <label style="margin-top:0">Incident type</label>
+    <input id="nType" list="incTypes" value="Alarm activation">
+    <datalist id="incTypes"><option>Alarm activation</option><option>Intruder on site</option><option>Keyholding response</option><option>Lock and unlock</option><option>Fire alarm</option><option>Vandalism</option><option>Trespass</option><option>Welfare check</option></datalist>
+    <label>Priority</label>
+    <select id="nPri"><option>RED</option><option selected>AMBER</option><option>GREEN</option><option>ROUTINE</option></select>
+    <label>Site under contract</label>
+    <select id="nSite"><option value="">— not a contracted site —</option>${state.sites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
+    <label>Location (when no site is chosen)</label><input id="nLoc">
+    <label>What3Words (optional)</label><input id="nW3w" placeholder="///filled.count.soap">
+    <label>Description</label><textarea id="nDesc" rows="2"></textarea>
+    <label>Caller</label><input id="nCaller">
+    <label>Dispatch now (optional)</label>
+    <div class="chips" id="nRes">${state.personnel.filter((p) => liveShifts().some((s) => s.personnel_id === p.id && s.status === 'CLOCKED_IN') && isAvailable(p)).map((p) => `<button type="button" class="chip" data-v="${p.id}">${esc(p.callsign || p.name)}</button>`).join('')}
+      ${state.mdts.filter((m) => m.connected && !m.job_id).map((m) => `<button type="button" class="chip" data-v="${esc(m.mdt_code)}">${esc(m.mdt_code)}</button>`).join('') || ''}</div>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="nGo">Create job</button><button class="btn" id="nBack">Cancel</button></div>
+    <p class="err" id="detailErr"></p>`;
+  els('#nRes .chip').forEach((c) => (c.onclick = () => c.classList.toggle('on')));
+  el('#nBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
+  el('#nGo').onclick = async () => {
+    try {
+      const job = await api('POST', '/api/jobs', {
+        incident_type: el('#nType').value, priority: el('#nPri').value, location: el('#nLoc').value, site: el('#nSite').value || undefined,
+        description: el('#nDesc').value, caller: el('#nCaller').value, what3words: el('#nW3w').value.replace(/^\/+/, '').trim() || undefined,
+      });
+      const picks = els('#nRes .chip.on').map((c) => c.dataset.v);
+      if (picks.length) await api('POST', `/api/jobs/${job.id}/assign`, { resources: picks });
+      upsert(state.jobs, job); select('j', job.id, { pan: true });
+    } catch (e) { showErr(e); }
+  };
+  el('#nType').focus();
+}
+
+function renderNewVisit(body) {
+  body.innerHTML = `
+    <label style="margin-top:0">Site</label>
+    <select id="vsSite">${state.sites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
+    <label>Assign now (optional)</label>
+    <select id="vsWho"><option value="">— assign later —</option>${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}${isAvailable(p) ? '' : ' (busy)'}</option>`).join('')}</select>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="vsGo">Create visit</button><button class="btn" id="vsBack">Cancel</button></div>
+    <p class="err" id="detailErr"></p>`;
+  el('#vsBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
+  el('#vsGo').onclick = async () => {
+    try {
+      const v = await api('POST', '/api/site-visits', { site_id: Number(el('#vsSite').value) });
+      if (el('#vsWho').value) await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vsWho').value) });
+      upsert(state.site_visits, v); select('v', v.id, { pan: true });
+    } catch (e) { showErr(e); }
+  };
+}
+
+/** Assign by call sign: every person and MDT on a call sign moves together,
+ * the way a dispatch console assigns — not one resource at a time. */
+async function renderAssign(body) {
+  const jobId = state.modeArg;
+  body.innerHTML = '<p class="dim">Loading call signs…</p>';
+  const callsigns = await api('GET', '/api/callsigns').catch((e) => { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; return null; });
+  if (!callsigns || state.mode !== 'assign') return;
+  const paint = () => {
+    const job = state.jobs.find((j) => j.id === jobId);
+    if (!job) { body.innerHTML = '<p class="dim">That job is no longer open.</p>'; return; }
+    body.innerHTML = `
+      <p class="dim" style="margin:0 0 8px">Tap a call sign to dispatch every officer and MDT on it to <strong>${esc(job.reference)}</strong>.</p>
+      <div class="chips">${callsigns.map((c) => {
+        const n = c.personnel.length + c.mdts.length, already = job.resources.some((r) => r.callsign === c.name);
+        return `<button class="chip ${already ? 'on' : ''}" data-cs="${esc(c.name)}" ${already || !n ? 'disabled' : ''}>${esc(c.name)} ${already ? '✓' : `(${n})`}</button>`;
+      }).join('') || '<span class="dim">No call signs configured.</span>'}</div>
+      <div class="btn-row" style="margin-top:10px"><button class="btn" id="asBack">Back to ${esc(job.reference)}</button></div>
+      <p class="err" id="detailErr"></p>`;
+    els('[data-cs]', body).forEach((b) => (b.onclick = async () => {
+      try { upsert(state.jobs, await api('POST', `/api/jobs/${jobId}/assign`, { resources: [b.dataset.cs] })); paint(); renderDispatch(); }
+      catch (e) { showErr(e); }
     }));
-    CCCS.els('[data-unm]').forEach((b) => (b.onclick = async () => {
-      const [id, code] = b.dataset.unm.split(':');
-      await api('DELETE', `/api/callsigns/${id}/assign`, { mdt: code });
-      el('#btnAssign').click();
-    }));
-  });
-};
+    el('#asBack').onclick = () => select('j', jobId);
+  };
+  paint();
+}
+
+function renderMessage(body) {
+  const pre = state.modeArg;
+  body.innerHTML = `
+    <label style="margin-top:0">To</label>
+    <select id="msgTo">
+      ${state.personnel.map((p) => `<option value="p:${p.id}" ${pre === 'p:' + p.id ? 'selected' : ''}>${esc(p.callsign || p.name)}</option>`).join('')}
+      ${state.mdts.map((m) => `<option value="m:${esc(m.mdt_code)}" ${pre === 'm:' + m.mdt_code ? 'selected' : ''}>MDT ${esc(m.mdt_code)}</option>`).join('')}
+    </select>
+    <label>Message</label><textarea id="msgBody" rows="3"></textarea>
+    <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="msgSend">Send</button><button class="btn" id="msgBack">Back</button></div>
+    <p class="dim" id="msgStatus" style="font-size:12px"></p>
+    <p class="err" id="detailErr"></p>`;
+  el('#msgBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
+  el('#msgSend').onclick = async () => {
+    const [k, id] = el('#msgTo').value.split(':');
+    const text = el('#msgBody').value.trim(); if (!text) return;
+    try { await api('POST', '/api/messages', { [k === 'p' ? 'to_personnel' : 'to_mdt']: id, body: text }); el('#msgBody').value = ''; el('#msgStatus').textContent = 'Sent.'; }
+    catch (e) { showErr(e); }
+  };
+  el('#msgBody').focus();
+}
+
+function renderNotify(body) {
+  body.innerHTML = `
+    <p class="dim" style="margin-top:0">Get an alert on this device for emergencies and welfare alarms even when this tab is in the background. On iPhone this only works after adding this page to the Home Screen.</p>
+    <div class="btn-row"><button class="btn primary" id="pushOn">Enable notifications</button><button class="btn" id="pushOff" hidden>Turn off</button><button class="btn" id="pushBack">Back</button></div>
+    <p class="dim" id="pushStatus" style="font-size:12px"></p>`;
+  const paint = async () => {
+    const s = await CCCS.push.status();
+    if (s === 'unsupported' || s === 'denied') {
+      el('#pushStatus').textContent = s === 'denied' ? 'Blocked — allow notifications for this site in your browser settings.' : 'Not supported in this browser.';
+      el('#pushOn').hidden = true; el('#pushOff').hidden = true; return;
+    }
+    el('#pushOn').hidden = s === 'subscribed'; el('#pushOff').hidden = s !== 'subscribed';
+    el('#pushStatus').textContent = s === 'subscribed' ? 'Notifications are on.' : '';
+  };
+  paint();
+  el('#pushOn').onclick = async () => { try { await CCCS.push.enable(); } catch (e) { el('#pushStatus').textContent = e.message; } paint(); };
+  el('#pushOff').onclick = async () => { await CCCS.push.disable(); paint(); };
+  el('#pushBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
+}
+
+async function renderCallsigns(body) {
+  body.innerHTML = '<p class="dim">Loading…</p>';
+  const cs = await api('GET', '/api/callsigns').catch(() => null);
+  if (!cs || state.mode !== 'callsigns') return;
+  body.innerHTML = cs.map((c) => `
+    <div class="dsec"><div class="t">${esc(c.name)} <span style="text-transform:none;letter-spacing:0;font-weight:400">${esc(c.description || '')}</span></div>
+      ${c.personnel.map((p) => `<div class="dim" style="font-size:12.5px">${esc(p)}</div>`).join('')}
+      ${c.mdts.map((m) => `<div style="font-size:12.5px;display:flex;gap:6px;align-items:center">${esc(m.mdt_code)} <button class="btn" data-unm="${c.id}:${esc(m.mdt_code)}" style="padding:0 6px;font-size:11px">remove</button></div>`).join('')}
+      <div style="display:flex;gap:6px;margin-top:4px"><select data-pick="${c.id}">${state.mdts.map((m) => `<option>${esc(m.mdt_code)}</option>`).join('')}</select><button class="btn" data-assign="${c.id}">Assign MDT</button></div>
+    </div>`).join('') + '<div class="btn-row" style="margin-top:10px"><button class="btn" id="csBack">Back</button></div>';
+  els('[data-assign]', body).forEach((b) => (b.onclick = async () => { await api('POST', `/api/callsigns/${b.dataset.assign}/assign`, { mdt: body.querySelector(`[data-pick="${b.dataset.assign}"]`).value }); renderCallsigns(body); }));
+  els('[data-unm]', body).forEach((b) => (b.onclick = async () => { const [id, code] = b.dataset.unm.split(':'); await api('DELETE', `/api/callsigns/${id}/assign`, { mdt: code }); renderCallsigns(body); }));
+  el('#csBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
 }
 
 /* ------------------------------------------------------------------ *
- * GoldenLayout shell — drag tabs to rearrange, drag borders to resize,
- * close one and its neighbours reflow, each tab's own maximise button
- * fills the screen. Panels are plain DOM built the same way they always
- * were; only how they're mounted changes.
+ * Buttons that open a mode
  * ------------------------------------------------------------------ */
-const glRoot = document.getElementById('glRoot');
-// A popout window wipes document.body down to nothing before building its
-// single-panel layout (see the isPopout comment above) — but our glRoot div
-// was a child of that body, so by the time GL rebuilds, glRoot has been
-// detached from the document. Passing it as GL's container here would make
-// GL build the whole popout layout inside that now-invisible orphaned node
-// (GL only falls back to document.body when no container is given at all),
-// which is why a popout used to render nothing after its brief flash of the
-// full dashboard. In the popout, let GL manage body itself.
-const layout = isPopout ? new GoldenLayout() : new GoldenLayout(glRoot);
-
-function mount(container, toolbarHtml, bodyHtml) {
-  container.element.style.cssText = 'display:flex;flex-direction:column;height:100%;overflow:hidden';
-  container.element.innerHTML = (toolbarHtml ? `<div class="pcount">${toolbarHtml}</div>` : '') + bodyHtml;
-}
-
-layout.registerComponentFactoryFunction('jobs', (container) => {
-  mount(container,
-    '<button class="btn" id="jobFilters" style="padding:2px 8px;font-size:11px">Filters</button>' +
-    '<button class="btn" id="newJob" style="padding:2px 8px;font-size:11px">Create job</button>',
-    '<div class="filters-drop hide" id="jobFiltersDrop"><label><input type="checkbox" id="fltClosed"> Include recently closed (last 24h)</label></div>' +
-    '<div class="body" id="jobList" style="flex:1;overflow:auto"></div>');
-  // GoldenLayout builds new panels in a detached tree before attaching the
-  // whole layout, so document-wide queries (plain el()) can't find elements
-  // we just created — scope to container.element, which works either way.
-  const $ = (sel) => el(sel, container.element);
-  $('#jobFilters').onclick = () => $('#jobFiltersDrop').classList.toggle('hide');
-  $('#fltClosed').onchange = renderJobs;
-  $('#newJob').onclick = openNewJobModal;
-  renderJobs();
+el('#newJob').onclick = (e) => { e.stopPropagation(); setMode('newJob'); };
+el('#newVisit').onclick = (e) => { e.stopPropagation(); setMode('newVisit'); };
+el('#btnNotify').onclick = () => setMode('notify');
+el('#btnCallsigns').onclick = () => setMode('callsigns');
+el('#railMessage').onclick = () => setMode('message', state.selected && state.selected.kind === 'p' ? 'p:' + state.selected.id : null);
+el('#railDispatch').onclick = () => { openPanel('pDispatch'); applyCollapsed(); };
+el('#railShift').onclick = () => { openPanel('pShift'); applyCollapsed(); };
+el('#railMap').onclick = () => { if (map) map.fitToData(state.mdts, [...state.jobs, ...state.site_visits].filter((x) => x.lat != null)); };
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && (state.mode || state.selected) && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) el('#detailClose').click();
 });
 
-layout.registerComponentFactoryFunction('map', (container) => {
-  mount(container, '<button class="btn" id="mapRecenter" style="padding:2px 8px;font-size:11px">Recenter</button>',
-    '<div class="map" id="map" style="flex:1"></div>');
-  const $ = (sel) => el(sel, container.element);
-  map = CCCS.makeMap($('#map'));
-  $('#mapRecenter').onclick = () => { const { units, jobs } = mapData(); map.fitToData(units, jobs); };
-  container.on('resize', () => map && map.invalidateSize());
-  renderMap();
-});
-
-layout.registerComponentFactoryFunction('resources', (container) => {
-  mount(container, '<span class="spacer" style="flex:1"></span><span class="dim" id="resCount"></span>',
-    '<div class="body" id="resList" style="flex:1;overflow:auto"></div>');
-  renderResources();
-});
-
-layout.registerComponentFactoryFunction('detail', (container) => {
-  mount(container, null, '<div class="body" id="detailBody" style="flex:1;overflow:auto"><p class="dim">Select a resource, job or patrol visit to see its detail here.</p></div>');
-  renderDetail();
-});
-
-layout.registerComponentFactoryFunction('visits', (container) => {
-  mount(container,
-    '<button class="btn" id="visitFilters" style="padding:2px 8px;font-size:11px">Filters</button>' +
-    '<button class="btn" id="newVisit" style="padding:2px 8px;font-size:11px">New visit</button>',
-    '<div class="filters-drop hide" id="visitFiltersDrop"><label><input type="checkbox" id="fltVisitClosed"> Include recently closed (last 24h)</label></div>' +
-    '<div class="body" id="visitList" style="flex:1;overflow:auto"></div>');
-  const $ = (sel) => el(sel, container.element);
-  $('#visitFilters').onclick = () => $('#visitFiltersDrop').classList.toggle('hide');
-  $('#fltVisitClosed').onchange = renderVisits;
-  $('#newVisit').onclick = openNewVisitModal;
-  renderVisits();
-});
-
-const PANEL_TITLES = { jobs: 'Active Jobs', map: 'Operational Map', resources: 'Resources', detail: 'Detail', visits: 'Patrol Visits' };
-
-const defaultLayoutConfig = {
-  // Popout really is useful here — genuinely separate windows for a
-  // multi-monitor control room, one browser window per screen. If the
-  // browser ever blocks the popup, blockedPopoutsThrowError below makes
-  // that fail quietly instead of losing the panel. The redundant stack-level
-  // close button (each tab already has its own) is hidden with CSS instead
-  // of header.close — that config flag turned out to disable more than the
-  // icon (drag-to-reorder and close went with it), so leave GL's own
-  // defaults alone and just hide the extra icon.
-  settings: { blockedPopoutsThrowError: false },
-  root: {
-    type: 'column',
-    content: [
-      {
-        type: 'row', height: 72,
-        content: [
-          { type: 'component', componentType: 'jobs', title: PANEL_TITLES.jobs, width: 22 },
-          { type: 'component', componentType: 'map', title: PANEL_TITLES.map, width: 56 },
-          { type: 'component', componentType: 'resources', title: PANEL_TITLES.resources, width: 22 },
-        ],
-      },
-      {
-        type: 'row', height: 28,
-        content: [
-          { type: 'component', componentType: 'detail', title: PANEL_TITLES.detail, width: 55 },
-          { type: 'component', componentType: 'visits', title: PANEL_TITLES.visits, width: 45 },
-        ],
-      },
-    ],
-  },
-};
-
-// Bump this whenever defaultLayoutConfig's shape or settings change —
-// otherwise a browser with an old save never sees the update, since a saved
-// layout always wins over the default. This is what silently carried an
-// earlier broken config (header.close disabling drag/close) forward even
-// after the code was fixed.
-const LAYOUT_VERSION = 6;
-
-// (isPopout is declared near the top of the script.) The component
-// factories above must still be registered so GL can rebuild whichever one
-// component this popout is for, but GL manages its own config for that
-// window (it wrote the config to localStorage keyed by <id> before opening
-// it) and expects to take over on its own; force-loading the full 5-panel
-// default into it as well only fights that and is the other half of
-// "popout is blank".
-function loadSavedOrDefault() {
-  let cfg = defaultLayoutConfig;
-  try {
-    const saved = JSON.parse(localStorage.getItem('cccs.layout') || 'null');
-    if (saved && saved.__v === LAYOUT_VERSION) cfg = saved.config;
-  } catch {}
-  try { layout.loadLayout(cfg); }
-  catch (e) { console.warn('[cccs] saved layout would not load, using default:', e.message); layout.loadLayout(defaultLayoutConfig); }
-}
-
-function saveLayoutState() {
-  try { localStorage.setItem('cccs.layout', JSON.stringify({ __v: LAYOUT_VERSION, config: layout.saveLayout() })); } catch {}
-}
-
-if (!isPopout) {
-  loadSavedOrDefault();
-  layout.on('stateChanged', saveLayoutState);
-}
-window.addEventListener('resize', () => layout.updateRootSize());
-
-if (!isPopout) {
-el('#resetLayout').onclick = () => {
-  if (!confirm('Restore the default panel arrangement? Any custom sizing or rearranging you’ve done will be lost.')) return;
-  localStorage.removeItem('cccs.layout');
-  location.reload();
-};
-
-el('#btnNotify').onclick = () => {
-  modal('Notifications', `
-    <p class="dim">Get an alert on this device for emergencies and welfare alarms even when this tab is in the background. On iPhone this only works after adding this page to your Home Screen (Share → Add to Home Screen) — a plain Safari tab can't receive it while backgrounded.</p>
-    <div class="btn-row">
-      <button class="btn primary" id="pushEnable">Enable notifications</button>
-      <button class="btn" id="pushDisable" hidden>Turn off</button>
-    </div>
-    <p class="dim" id="pushStatus" style="font-size:12px"></p>`, async () => {
-    async function paint() {
-      const s = await CCCS.push.status();
-      const enableBtn = el('#pushEnable'), disableBtn = el('#pushDisable'), status = el('#pushStatus');
-      if (s === 'unsupported') { status.textContent = 'Not supported in this browser.'; enableBtn.hidden = true; disableBtn.hidden = true; return; }
-      if (s === 'denied') { status.textContent = 'Blocked — allow notifications for this site in your phone/browser settings.'; enableBtn.hidden = true; disableBtn.hidden = true; return; }
-      enableBtn.hidden = s === 'subscribed';
-      disableBtn.hidden = s !== 'subscribed';
-      status.textContent = s === 'subscribed' ? 'Notifications are on.' : '';
-    }
-    paint();
-    el('#pushEnable').onclick = async () => {
-      try { await CCCS.push.enable(); } catch (e) { el('#pushStatus').textContent = e.message; }
-      paint();
-    };
-    el('#pushDisable').onclick = async () => { await CCCS.push.disable(); paint(); };
-  });
-};
-}
-
-/* ---------- quick-nav icon rail: brings a closed panel back. If it's
- * already open this adds a second copy rather than focusing the existing
- * one — an acceptable trade for not tracking GL's internal tree by hand;
- * closing the extra copy costs one click. ---------- */
-function openPanel(type) {
-  layout.newComponent(type, undefined, PANEL_TITLES[type]);
-  saveLayoutState();
-}
-function focusPanel(sel) {
-  const node = el(sel);
-  if (!node) return;
-  node.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  node.classList.add('flash');
-  setTimeout(() => node.classList.remove('flash'), 900);
-}
-if (!isPopout) {
-el('#railIncidents').onclick = () => openPanel('jobs');
-el('#railTerminals').onclick = () => openPanel('resources');
-el('#railMessages').onclick = () => el('#btnMessage').click();
-el('#railCallbacks').onclick = () => focusPanel('#reqWrap');
-el('#railMap').onclick = () => openPanel('map');
-el('#railAssignments').onclick = () => el('#btnAssign').click();
-el('#railPatrols').onclick = () => openPanel('visits');
-}
-
-/* ---------- realtime ---------- */
-let bus;
-bus = CCCS.bus((up) => {
-  const n = el('#net');
-  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
-  if (up) boot();
-});
-
-const upsert = (list, item, key = 'id') => {
-  const i = list.findIndex((x) => x[key] === item[key]);
-  if (i >= 0) list[i] = item; else list.push(item);
-};
-
-/* ---------- Console alert tones ------------------------------------
- * Short synthesised tones, not sampled audio -- nothing to source or
- * license, ships as code. Browsers start an AudioContext suspended until
- * a user gesture -- actx() resumes it on every call rather than once, so
- * it also recovers if the tab power-saves it back to suspended later. */
+/* ------------------------------------------------------------------ *
+ * Alert tones (synthesised; kept verbatim from the previous console)
+ * ------------------------------------------------------------------ */
 const alertCtx = { current: null };
 function actx() {
   if (!alertCtx.current) alertCtx.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -1013,11 +1003,9 @@ function beep(freq, ms, delayMs = 0, gain = 0.25, type = 'sine') {
   const session = CCCS.getSession();
   if (session && session.user.ui_prefs && session.user.ui_prefs.sound === false) return;
   const ctx = actx();
-  const osc = ctx.createOscillator();
-  const g = ctx.createGain();
+  const osc = ctx.createOscillator(), g = ctx.createGain();
   osc.type = type; osc.frequency.value = freq;
-  const start = ctx.currentTime + delayMs / 1000;
-  const end = start + ms / 1000;
+  const start = ctx.currentTime + delayMs / 1000, end = start + ms / 1000;
   g.gain.setValueAtTime(0, start);
   g.gain.linearRampToValueAtTime(gain, start + 0.005);
   g.gain.setValueAtTime(gain, Math.max(start + 0.005, end - 0.01));
@@ -1030,9 +1018,7 @@ const sound = {
   callRequest() { beep(1300, 80); beep(1300, 80, 140); },
   _emergencyTimer: null,
   // Keeps sounding while ANY emergency is still ACTIVE (not yet
-  // acknowledged) -- call after every emergency.* event rather than
-  // just on emergency.activated, so acknowledging silences it and a
-  // second, separate emergency re-triggers it.
+  // acknowledged) — re-evaluated after every emergency.* event.
   refreshEmergencyAlarm() {
     const stillActive = state.emergencies.some((e) => e.state === 'ACTIVE');
     if (stillActive && !sound._emergencyTimer) {
@@ -1046,44 +1032,80 @@ const sound = {
   },
 };
 
-bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderResources(); renderMap(); })
-   .on('mdt.created', (m) => { upsert(state.mdts, m); renderResources(); })
-   .on('mdt.assigned', (m) => { upsert(state.mdts, m); renderResources(); })
-   .on('mdt.crew_changed', (m) => { upsert(state.mdts, m); renderResources(); })
-   .on('mdt.deleted', (m) => { state.mdts = state.mdts.filter((x) => x.id !== m.id); renderResources(); renderMap(); })
-   .on('job.created', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); sound.jobCreated(); })
-   .on('job.dispatched', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); renderDetail(); })
-   .on('job.status_changed', (j) => { upsert(state.jobs, j); renderJobs(); renderMap(); renderResources(); renderDetail(); })
-   .on('job.acknowledged', ({ job }) => { upsert(state.jobs, job); renderJobs(); renderResources(); renderDetail(); })
-   .on('job.stood_down', (j) => { upsert(state.jobs, j); renderJobs(); renderResources(); renderDetail(); })
-   .on('site_visit.created', (v) => { upsert(state.site_visits, v); renderVisits(); })
-   .on('site_visit.dispatched', (v) => { upsert(state.site_visits, v); renderVisits(); renderDetail(); })
-   .on('site_visit.acknowledged', ({ visit }) => { upsert(state.site_visits, visit); renderVisits(); renderDetail(); })
-   .on('site_visit.status_changed', (v) => { upsert(state.site_visits, v); renderVisits(); renderDetail(); })
-   .on('site_visit.stood_down', (v) => { upsert(state.site_visits, v); renderVisits(); renderDetail(); })
-   .on('site_visit.missed', (v) => { upsert(state.site_visits, v); renderVisits(); renderDetail(); })
-   .on('emergency.activated', (e) => { upsert(state.emergencies, e); renderEmergencies(); renderResources(); sound.refreshEmergencyAlarm(); })
-   .on('call.request', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); sound.callRequest(); })
-   .on('call.request_cleared', (r) => { upsert(state.requests, r); renderRequests(); renderResources(); })
-   .on('welfare.started', ({ personnel }) => { upsert(state.personnel, personnel); renderResources(); renderDetail(); })
-   .on('welfare.checked_in', (p) => { upsert(state.personnel, p); renderResources(); renderDetail(); })
-   .on('welfare.stopped', (p) => { upsert(state.personnel, p); renderResources(); renderDetail(); })
-   .on('emergency.acknowledged', (e) => { upsert(state.emergencies, e); renderEmergencies(); sound.refreshEmergencyAlarm(); })
-   .on('emergency.resolved', (e) => { upsert(state.emergencies, e); renderEmergencies(); sound.refreshEmergencyAlarm(); })
-   .on('event.logged', (e) => { state.events.push(e); if (state.events.length > 400) state.events.shift(); renderLog(); })
+/* ------------------------------------------------------------------ *
+ * Realtime
+ * ------------------------------------------------------------------ */
+const upsert = (list, item, key = 'id') => { const i = list.findIndex((x) => x[key] === item[key]); if (i >= 0) list[i] = item; else list.push(item); };
+const bus = CCCS.bus((up) => { const n = el('#net'); n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); if (up) boot(); });
+const onPersonChange = (p) => { upsert(state.personnel, p); renderShift(); renderDetail(); };
+
+bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderShift(); renderMap(); renderDetail(); })
+   .on('mdt.created', (m) => { upsert(state.mdts, m); renderShift(); })
+   .on('mdt.assigned', (m) => { upsert(state.mdts, m); renderShift(); })
+   .on('mdt.crew_changed', (m) => { upsert(state.mdts, m); renderShift(); renderDetail(); })
+   .on('mdt.deleted', (m) => { state.mdts = state.mdts.filter((x) => x.id !== m.id); renderShift(); renderMap(); })
+   .on('job.created', (j) => { upsert(state.jobs, j); renderDispatch(); renderMap(); sound.jobCreated(); })
+   .on('job.dispatched', (j) => { upsert(state.jobs, j); renderDispatch(); renderShift(); renderDetail(); })
+   .on('job.status_changed', (j) => { upsert(state.jobs, j); renderDispatch(); renderShift(); renderMap(); renderDetail(); })
+   .on('job.acknowledged', ({ job }) => { upsert(state.jobs, job); renderDispatch(); renderShift(); renderDetail(); })
+   .on('job.stood_down', (j) => { upsert(state.jobs, j); renderDispatch(); renderShift(); renderDetail(); })
+   .on('site_visit.created', (v) => { upsert(state.site_visits, v); renderDispatch(); renderMap(); })
+   .on('site_visit.dispatched', (v) => { upsert(state.site_visits, v); renderDispatch(); renderShift(); renderDetail(); })
+   .on('site_visit.acknowledged', ({ visit }) => { upsert(state.site_visits, visit); renderDispatch(); renderShift(); renderDetail(); })
+   .on('site_visit.status_changed', (v) => { upsert(state.site_visits, v); renderDispatch(); renderShift(); renderMap(); renderDetail(); })
+   .on('site_visit.stood_down', (v) => { upsert(state.site_visits, v); renderDispatch(); renderShift(); renderDetail(); })
+   .on('site_visit.missed', (v) => { upsert(state.site_visits, v); renderDispatch(); renderDetail(); })
+   .on('shift.created', (s) => { upsert(state.shifts, s); renderShift(); })
+   .on('shift.updated', (s) => { upsert(state.shifts, s); renderShift(); renderDetail(); })
+   .on('emergency.activated', (e) => { upsert(state.emergencies, e); renderAttention(); renderShift(); renderDispatch(); sound.refreshEmergencyAlarm(); })
+   .on('emergency.acknowledged', (e) => { upsert(state.emergencies, e); renderAttention(); sound.refreshEmergencyAlarm(); })
+   .on('emergency.resolved', (e) => { upsert(state.emergencies, e); renderAttention(); renderShift(); sound.refreshEmergencyAlarm(); })
+   .on('call.request', (r) => { upsert(state.requests, r); renderAttention(); sound.callRequest(); })
+   .on('call.request_cleared', (r) => { upsert(state.requests, r); renderAttention(); })
+   .on('welfare.started', ({ personnel }) => onPersonChange(personnel))
+   .on('welfare.checked_in', onPersonChange)
+   .on('welfare.stopped', onPersonChange)
+   .on('event.logged', (e) => {
+     state.events.push(e); if (state.events.length > 400) state.events.shift(); renderLog();
+     // A PBX-placed call settles later; refresh the officer's contact log
+     // if that's who is on screen.
+     if (e.type === 'contact.dial_outcome' && pendingDials.has(e.data.dial_log_id)) {
+       const pid = pendingDials.get(e.data.dial_log_id); pendingDials.delete(e.data.dial_log_id);
+       if (state.selected && state.selected.kind === 'p' && state.selected.id === pid) {
+         const s = el('#contactStatus'); if (s) s.textContent = e.summary;
+         paintContactLog(state.personnel.find((p) => p.id === pid));
+       }
+     }
+   })
    .on('message.received', () => {});
+
+// Welfare countdowns tick without a round trip.
+setInterval(() => { if (state.personnel.some((p) => p.welfare_due_at)) renderShift(); }, 1000);
+// "Due, unassigned" visits and not-yet-clocked-in shifts change with time alone.
+setInterval(() => { renderDispatch(); renderShift(); }, 60000);
 
 async function boot() {
   const s = await api('GET', '/api/state');
-  state.mdts = s.mdts; state.jobs = s.jobs; state.personnel = s.personnel;
-  state.emergencies = s.emergencies; state.events = s.events;
-  state.sites = s.sites || []; state.site_visits = s.site_visits || [];
+  Object.assign(state, {
+    mdts: s.mdts, jobs: s.jobs, personnel: s.personnel, emergencies: s.emergencies, events: s.events,
+    sites: s.sites || [], site_visits: s.site_visits || [],
+  });
+  const from = new Date(Date.now() - 18 * 3600e3).toISOString(), to = new Date(Date.now() + 3600e3).toISOString();
+  state.shifts = await api('GET', `/api/shifts?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`).catch(() => []);
   state.requests = await api('GET', '/api/calls/requests').catch(() => []);
-  renderResources(); renderJobs(); renderVisits(); renderMap(); renderEmergencies(); renderRequests(); renderLog();
-  // Covers a page load/reconnect landing mid-emergency -- the alarm
-  // shouldn't depend on having been open when emergency.activated fired.
+  // The map loads from a CDN. If that fails the console must still show
+  // emergencies, welfare alarms and the dispatch list — a map outage must
+  // never blank the screen that tells control someone needs help.
+  if (!map) {
+    try { map = CCCS.makeMap(el('#map')); }
+    catch (e) { el('#map').innerHTML = `<p class="dim" style="position:absolute;top:50%;width:100%;text-align:center">Map unavailable (${esc(e.message)}). Everything else is live.</p>`; }
+  }
+  renderAll(); renderLog();
+  // A reload landing mid-emergency must still sound.
   sound.refreshEmergencyAlarm();
 }
+// Load now as well as on every (re)connect: the console must show state even
+// if the WebSocket is slow to come up.
 boot();
 </script>
 </body>
