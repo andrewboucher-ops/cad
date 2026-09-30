@@ -358,7 +358,23 @@ tracking's extended roadmap is now fully built out.
   too. See `docs/PRIVACY.md` for the updated data table, staff-notice
   wording, and the legitimate-interest-assessment reminder that has to
   happen before an operator sets the flag.
-- Training/academy module, applicant tracking
+- ~~Training/academy module~~ — done, the training-records half. Decision
+  made: a hybrid, not purely tracked or purely delivered — a course either
+  gets logged by an admin after it happens externally (a classroom
+  session), or is taken in-app with material and a short multiple-choice
+  assessment scored server-side (`correct_index` never reaches the
+  officer). Status per person per course (never/overdue/expiring/ok) is
+  derived the same way SIA/DBS already is. `admin.html`'s new Training tab
+  defines courses and logs external completions from a person's own
+  record; `officer.html` has a Training panel to take one. Covered by
+  `test/training.test.js`: assessment validation, the answer-key leak
+  check, server-side scoring (failing creates no record), external logging,
+  and a retired course dropping out of the live summary. See README's
+  Training section for the full design and the deliberate v1
+  simplifications (no course versioning, no DELETE — retire via `active:
+  false`). **Applicant tracking is still outstanding** — a genuinely
+  separate feature (a recruitment pipeline before someone becomes a real
+  personnel record), not yet started.
 - ~~**Multi-branch**~~ — done. Decision made: a staff-visibility split, not
   full tenant separation — `SUPERVISOR`/`FIELD_USER`/`MDT_USER` see only
   their own branch's sites/personnel/vehicles/assets (and jobs/visits at

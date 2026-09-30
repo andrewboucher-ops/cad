@@ -498,6 +498,32 @@ terminal. Erasing someone's location history
 (`POST /api/personnel/:id/erase-location-history`) also clears their
 last-known dot, not just the history behind it.
 
+## Training
+
+A hybrid of the SIA/DBS "record what happened" pattern and actual in-app
+delivery, for a variable admin-defined set of courses rather than two
+fixed checks. `admin.html`'s Training tab defines a course — name,
+category, an optional renewal period, and either nothing else (a
+classroom session or toolbox talk an admin logs after the fact from a
+person's own record) or `material` plus a short multiple-choice
+assessment an officer takes on `officer.html` itself.
+
+`training_records` is append-only, like `dial_log` — a completion is
+never mutated in place, so a retake keeps its own history — and the
+current status per person per course (`never` / `overdue` / `expiring` /
+`ok`) is always derived from the most recent one, the same "make the gap
+visible" shape as `personnelCompliance()`. A course with no renewal period
+doesn't expire: a one-time induction stays `ok` forever once done, there
+is nothing to renew. Scoring happens server-side only — `correct_index`
+never reaches an officer taking the assessment, only `admin.html`'s course
+editor, so there is no answer key to read out of the page even by
+inspecting what the client received. A course is retired via `active:
+false`, never deleted, since `training_records` must always be able to
+resolve their `course_id`; editing a course's content in place, with no
+`form_definitions`-style versioning, is a deliberate v1 simplification —
+a quiz's wording changing later doesn't carry the audit-fidelity stakes a
+restricted safeguarding report does.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it

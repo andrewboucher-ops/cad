@@ -220,6 +220,10 @@ async function load() {
     if (dbsOverdue.length) {
       el('#systemBody').innerHTML += `<div class="list-row"><span style="flex:1;color:var(--emergency)">DBS rechecks overdue</span><b style="color:var(--emergency)">${dbsOverdue.length}</b></div>`;
     }
+    const trainingOverdue = state.personnel.filter((p) => (p.training || []).some((t) => t.status === 'overdue'));
+    if (trainingOverdue.length) {
+      el('#systemBody').innerHTML += `<div class="list-row"><span style="flex:1;color:var(--emergency)">Training overdue</span><b style="color:var(--emergency)">${trainingOverdue.length}</b></div>`;
+    }
   }
 }
 load().catch((e) => { el('#activityBody').innerHTML = `<p class="empty-note">${esc(e.message)}</p>`; });

@@ -109,6 +109,13 @@
   </section>
 
   <section class="panel">
+    <header>Training</header>
+    <div class="body" style="padding:12px">
+      <div id="trainingList"><p class="dim">Loading…</p></div>
+    </div>
+  </section>
+
+  <section class="panel">
     <header>Reports</header>
     <div class="body" style="padding:12px">
       <div class="btn-row" style="margin:0 0 8px"><button class="btn primary" id="bFileReport">File a report</button></div>
@@ -152,7 +159,7 @@
 <script src="/app.js"></script>
 <script src="/forms-ui.js"></script>
 <script>
-const { api, el, esc } = CCCS;
+const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['FIELD_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const me = CCCS.getSession().user;
 setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
@@ -664,6 +671,59 @@ const bus = CCCS.bus((up) => {
  * any contracted site. The server re-checks every one of these (an officer
  * can only file against a job or visit assigned to them). */
 let formDefs = [], allSites = null;
+/* ---- Training (courses logged or taken in-app) ------------------------ */
+const TRAINING_STATUS_LABEL = { never: 'Never done', overdue: 'Overdue', expiring: 'Expires soon', ok: 'Up to date' };
+async function refreshTraining() {
+  try {
+    const [courses, mine] = await Promise.all([api('GET', '/api/training-courses'), api('GET', '/api/personnel')]);
+    const me_ = mine.find((p) => p.id === (person && person.id));
+    const statusOf = (courseId) => (me_ ? me_.training.find((t) => t.course_id === courseId) : null);
+    el('#trainingList').innerHTML = courses.length ? courses.map((c) => {
+      const st = statusOf(c.id);
+      const badge = st ? TRAINING_STATUS_LABEL[st.status] || st.status : '';
+      const urgent = st && ['overdue', 'never'].includes(st.status);
+      return `<div class="field" style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line-soft);padding-bottom:8px;margin-bottom:8px">
+        <div style="flex:1"><div>${esc(c.name)}</div><div class="dim" style="font-size:12px${urgent ? ';color:var(--emergency)' : ''}">${esc(badge)}</div></div>
+        <button type="button" class="btn" data-course="${c.id}" style="padding:6px 12px;font-size:12px">${c.has_assessment ? 'Start' : 'View'}</button>
+      </div>`;
+    }).join('') : '<p class="dim">No training courses set up yet.</p>';
+    els('#trainingList [data-course]').forEach((b) => (b.onclick = () => openCourse(courses.find((c) => c.id === Number(b.dataset.course)))));
+  } catch (e) { el('#trainingList').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+function openCourse(c) {
+  modal(c.name, `
+    ${c.description ? `<p class="dim">${esc(c.description)}</p>` : ''}
+    ${c.material ? `<p>${esc(c.material)}</p>` : ''}
+    <div id="courseBody"></div>
+    <p class="err" id="courseError"></p>
+  `, () => {
+    if (!c.has_assessment) {
+      el('#courseBody').innerHTML = `<button type="button" class="btn primary" id="courseDone">Mark as done</button>`;
+      el('#courseDone').onclick = async () => {
+        try { await api('POST', `/api/training-courses/${c.id}/complete`, {}); closeModal(); await refreshTraining(); }
+        catch (e) { el('#courseError').textContent = e.message; }
+      };
+      return;
+    }
+    el('#courseBody').innerHTML = c.questions.map((q, qi) => `
+      <div class="field">
+        <span>${esc(q.text)}</span>
+        <div>${q.options.map((o, oi) => `<label style="display:block;font-weight:400;text-transform:none;letter-spacing:0;padding:4px 0">
+          <input type="radio" name="cq${qi}" value="${oi}"> ${esc(o)}</label>`).join('')}</div>
+      </div>`).join('') + `<button type="button" class="btn primary" id="courseSubmit" style="margin-top:8px">Submit</button>`;
+    el('#courseSubmit').onclick = async () => {
+      const answers = c.questions.map((q, qi) => { const checked = document.querySelector(`input[name="cq${qi}"]:checked`); return checked ? Number(checked.value) : -1; });
+      if (answers.includes(-1)) { el('#courseError').textContent = 'answer every question'; return; }
+      try {
+        const r = await api('POST', `/api/training-courses/${c.id}/complete`, { answers });
+        el('#courseBody').innerHTML = `<p class="field"><span>Result</span><div>Passed — ${r.score_pct}%</div></p>`;
+        el('#courseError').textContent = '';
+        await refreshTraining();
+      } catch (e) { el('#courseError').textContent = e.message; }
+    };
+  });
+}
+
 async function refreshReports() {
   try {
     const mine = await api('GET', '/api/form-submissions?limit=10');
@@ -735,6 +795,7 @@ async function boot() {
   await refreshShifts();
   await refreshEquipment();
   await refreshReports();
+  await refreshTraining();
   footTrackingEnabled = await api('GET', '/api/config').then((c) => c.foot_tracking).catch(() => false);
   if (currentShift() && currentShift().status === 'CLOCKED_IN') startFootTracking();
 }

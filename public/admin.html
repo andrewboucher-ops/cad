@@ -107,6 +107,7 @@
         <button class="btn primary" id="btnNewForm" style="padding:7px 14px;font-size:13px" hidden>New form</button>
         <button class="btn primary" id="btnNewClient" style="padding:7px 14px;font-size:13px" hidden>New client</button>
         <button class="btn primary" id="btnNewBranch" style="padding:7px 14px;font-size:13px" hidden>New branch</button>
+        <button class="btn primary" id="btnNewCourse" style="padding:7px 14px;font-size:13px" hidden>New course</button>
       </span>
     </div>
     <div class="tabs">
@@ -121,6 +122,7 @@
       <button id="tabForms">Forms</button>
       <button id="tabClients">Clients</button>
       <button id="tabBranches">Branches</button>
+      <button id="tabTraining">Training</button>
     </div>
 
     <div id="viewAccounts">
@@ -220,6 +222,11 @@
       <p class="dim" style="margin:0 0 10px;font-size:13px">A branch scopes what supervisors and field/MDT users see — dispatchers and admins always see every branch. A site, person, vehicle or asset with no branch set is shared and visible to everyone.</p>
       <div id="brTableWrap"></div>
     </div>
+
+    <div id="viewTraining" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">A course with an assessment is taken in-app from the officer terminal, scored server-side. A course without one is logged — by an admin, from a person's own record — after it happens elsewhere (a classroom session, a toolbox talk).</p>
+      <div id="tcTableWrap"></div>
+    </div>
   </div>
 </main>
 
@@ -247,17 +254,18 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user', CLIENT: 'Client' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : '');
 
-let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [];
+let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [], allCourses = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches] = await Promise.all([
+  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches, allCourses] = await Promise.all([
     api('GET', '/api/users'), api('GET', '/api/personnel'), api('GET', '/api/mdts'),
     api('GET', '/api/callsigns'), api('GET', '/api/sites'), api('GET', '/api/patrol-schedules'),
     api('GET', '/api/vehicles'), api('GET', '/api/assets'), api('GET', '/api/beats'),
     api('GET', '/api/clients'), api('GET', '/api/client-requests'), api('GET', '/api/branches'),
+    api('GET', '/api/training-courses?all=1'),
   ]);
   allForms = await api('GET', '/api/form-definitions?all=1');
-  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests(); paintBranches();
+  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests(); paintBranches(); paintCourses();
 }
 function branchOptions(selected) {
   return '<option value="">— none / shared —</option>' + allBranches.map((b) =>
@@ -283,6 +291,9 @@ function showTab(name) {
   el('#tabBranches').classList.toggle('active', name === 'branches');
   el('#viewBranches').classList.toggle('hide', name !== 'branches');
   el('#btnNewBranch').hidden = name !== 'branches';
+  el('#tabTraining').classList.toggle('active', name === 'training');
+  el('#viewTraining').classList.toggle('hide', name !== 'training');
+  el('#btnNewCourse').hidden = name !== 'training';
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
@@ -311,6 +322,7 @@ el('#tabPatrols').onclick = () => showTab('patrols');
 el('#tabForms').onclick = () => showTab('forms');
 el('#tabClients').onclick = () => showTab('clients');
 el('#tabBranches').onclick = () => showTab('branches');
+el('#tabTraining').onclick = () => showTab('training');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -447,6 +459,8 @@ function paintPersonnel() {
           else if (p.compliance.sia === 'expiring') flags.push('SIA expiring');
           if (p.compliance.dbs === 'overdue') flags.push('DBS overdue');
         }
+        const overdueTraining = (p.training || []).filter((t) => t.status === 'overdue').length;
+        if (overdueTraining) flags.push(`${overdueTraining} training overdue`);
         return `<tr class="clickable" data-personnel="${p.id}">
         <td>${esc(p.name)}</td>
         <td class="dim">${esc(p.rank || '—')}</td>
@@ -516,6 +530,14 @@ function personnelForm(p) {
       </div>${p.compliance && p.compliance.dbs === 'overdue' ? '<p class="err" style="margin:0">Recheck overdue</p>' : ''}` : ''}
       <label>Branch (optional — leave shared if you don't use branches)</label>
       <select id="npnBranch">${branchOptions(isNew ? null : p.branch_id)}</select>
+      ${!isNew ? `
+      <label>Training</label>
+      <div id="pnTrainingList" class="dim">${p.training && p.training.length ? '' : 'No active courses defined yet.'}</div>
+      ${allCourses.filter((c) => c.active).length ? `<div style="display:flex;gap:8px;align-items:center">
+        <select id="pnLogCourse" style="flex:1">${allCourses.filter((c) => c.active).map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+        <input id="pnLogScore" type="number" min="0" max="100" placeholder="Score % (optional)" style="width:150px">
+        <button type="button" class="btn" id="pnLogTraining">Log completion</button>
+      </div>` : ''}` : ''}
       <label>Notes</label>
       <textarea id="npnNotes" rows="2">${isNew ? '' : esc(p.notes || '')}</textarea>
       <p class="dim" id="pnError" style="min-height:16px;margin:0"></p>
@@ -559,6 +581,19 @@ function personnelModal(p) {
     if (el('#pnDbsCheckNow')) el('#pnDbsCheckNow').onclick = async () => {
       try {
         await api('PATCH', `/api/personnel/${p.id}`, { dbs_checked_now: true });
+        closeModal(); await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id));
+      } catch (e) { el('#pnError').textContent = e.message; }
+    };
+    if (p && el('#pnTrainingList')) {
+      const label = { never: 'Never done', overdue: 'Overdue', expiring: 'Expires soon', ok: 'Up to date' };
+      el('#pnTrainingList').innerHTML = p.training.length
+        ? p.training.map((t) => `<div style="display:flex;gap:8px;padding:4px 0;font-size:13px"><span style="flex:1">${esc(t.course_name)}</span><span class="${['overdue', 'never'].includes(t.status) ? 'err' : 'dim'}">${label[t.status] || t.status}${t.expires_at ? ` · ${esc(new Date(t.expires_at).toLocaleDateString('en-GB'))}` : ''}</span></div>`).join('')
+        : '<p class="dim" style="font-size:13px">No active courses defined yet.</p>';
+    }
+    if (el('#pnLogTraining')) el('#pnLogTraining').onclick = async () => {
+      try {
+        const score = el('#pnLogScore').value;
+        await api('POST', `/api/personnel/${p.id}/training-records`, { course_id: Number(el('#pnLogCourse').value), score_pct: score || null });
         closeModal(); await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id));
       } catch (e) { el('#pnError').textContent = e.message; }
     };
@@ -1688,6 +1723,137 @@ function branchModal(b) {
   });
 }
 el('#btnNewBranch').onclick = () => branchModal(null);
+
+/* ---------- training ---------- */
+function paintCourses() {
+  const rows = allCourses.slice().sort((a, b) => a.name.localeCompare(b.name));
+  el('#tcTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Name</th><th style="width:130px">Category</th><th style="width:100px">Assessment</th><th style="width:110px">Renews</th><th style="width:90px">Status</th></tr></thead>
+      <tbody>${rows.map((c) => `<tr class="clickable" data-course="${c.id}" style="${c.active ? '' : 'opacity:.5'}">
+        <td>${esc(c.name)}</td>
+        <td class="dim">${esc(c.category || '—')}</td>
+        <td class="dim">${c.has_assessment ? `In-app (${c.pass_mark_pct}% pass)` : 'Logged only'}</td>
+        <td class="dim">${c.validity_months ? `${c.validity_months} mo` : 'never'}</td>
+        <td class="dim">${c.active ? 'Active' : 'Retired'}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No training courses yet.</p>';
+  els('#tcTableWrap [data-course]').forEach((row) => row.addEventListener('click', () => courseModal(allCourses.find((c) => c.id === Number(row.dataset.course)))));
+}
+
+/** Local question-list editor, same shape as checklistEditor: an array of
+ * {text, options[], correct_index} held in closure, re-rendered on every
+ * add/remove/change rather than reading the DOM back apart. */
+function questionEditor(questions) {
+  let rows = questions.map((q) => ({ id: q.id, text: q.text, options: [...q.options], correct_index: q.correct_index }));
+  function render() {
+    const host = document.getElementById('tcQuestionRows');
+    if (!host) return;
+    host.innerHTML = rows.map((q, qi) => `
+      <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px">
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <input data-q-text="${qi}" placeholder="Question" value="${esc(q.text)}" style="flex:1">
+          <button type="button" class="btn danger" data-q-remove="${qi}" style="padding:6px 10px;font-size:11px">Remove</button>
+        </div>
+        <div style="margin-top:6px;display:flex;flex-direction:column;gap:6px">
+          ${q.options.map((o, oi) => `
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="radio" name="tcCorrect${qi}" data-q-correct="${qi}:${oi}" ${q.correct_index === oi ? 'checked' : ''}>
+              <input data-q-opt="${qi}:${oi}" placeholder="Option ${oi + 1}" value="${esc(o)}" style="flex:1">
+              ${q.options.length > 2 ? `<button type="button" class="btn danger" data-q-optremove="${qi}:${oi}" style="padding:4px 8px;font-size:11px">×</button>` : ''}
+            </div>`).join('')}
+          <button type="button" class="btn" data-q-addopt="${qi}" style="align-self:flex-start;padding:4px 10px;font-size:11px">+ Option</button>
+        </div>
+      </div>`).join('') || '<p class="dim" style="font-size:13px">No questions yet.</p>';
+    els('#tcQuestionRows [data-q-text]').forEach((inp) => inp.addEventListener('input', () => { rows[Number(inp.dataset.qText)].text = inp.value; }));
+    els('#tcQuestionRows [data-q-opt]').forEach((inp) => inp.addEventListener('input', () => { const [qi, oi] = inp.dataset.qOpt.split(':').map(Number); rows[qi].options[oi] = inp.value; }));
+    els('#tcQuestionRows [data-q-correct]').forEach((r) => r.addEventListener('change', () => { const [qi, oi] = r.dataset.qCorrect.split(':').map(Number); rows[qi].correct_index = oi; }));
+    els('#tcQuestionRows [data-q-remove]').forEach((b) => (b.onclick = () => { rows.splice(Number(b.dataset.qRemove), 1); render(); }));
+    els('#tcQuestionRows [data-q-addopt]').forEach((b) => (b.onclick = () => { rows[Number(b.dataset.qAddopt)].options.push(''); render(); }));
+    els('#tcQuestionRows [data-q-optremove]').forEach((b) => (b.onclick = () => {
+      const [qi, oi] = b.dataset.qOptremove.split(':').map(Number);
+      rows[qi].options.splice(oi, 1);
+      if (rows[qi].correct_index >= rows[qi].options.length) rows[qi].correct_index = 0;
+      else if (rows[qi].correct_index > oi) rows[qi].correct_index -= 1;
+      render();
+    }));
+  }
+  render();
+  return {
+    get: () => rows.map((q) => ({ id: q.id, text: q.text.trim(), options: q.options.map((o) => o.trim()), correct_index: q.correct_index })).filter((q) => q.text),
+    add: () => { rows.push({ text: '', options: ['', ''], correct_index: 0 }); render(); },
+  };
+}
+
+function courseForm(c) {
+  const isNew = !c;
+  return `
+    <form class="stack" id="tcForm">
+      <label>Name</label>
+      <input id="ntcName" autocomplete="off" value="${isNew ? '' : esc(c.name)}">
+      <label>Category (optional)</label>
+      <input id="ntcCategory" autocomplete="off" value="${isNew ? '' : esc(c.category || '')}">
+      <label>Description</label>
+      <textarea id="ntcDescription" rows="2">${isNew ? '' : esc(c.description || '')}</textarea>
+      <label>Renews after (months, optional — leave blank for a one-time course)</label>
+      <input id="ntcValidity" type="number" min="1" value="${!isNew && c.validity_months ? c.validity_months : ''}">
+      <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px">
+        <input type="checkbox" id="ntcHasAssessment" ${!isNew && c.has_assessment ? 'checked' : ''}> This course is taken in-app, with an assessment
+      </label>
+      <div id="tcAssessmentFields" style="${!isNew && c.has_assessment ? '' : 'display:none'}">
+        <label>Material — shown to the officer before the assessment</label>
+        <textarea id="ntcMaterial" rows="4">${isNew ? '' : esc(c.material || '')}</textarea>
+        <label>Pass mark (%)</label>
+        <input id="ntcPassMark" type="number" min="1" max="100" value="${!isNew && c.pass_mark_pct ? c.pass_mark_pct : 80}">
+        <label>Questions</label>
+        <div id="tcQuestionRows"></div>
+        <button type="button" class="btn" id="tcAddQuestion" style="align-self:flex-start;padding:6px 12px;font-size:12px;margin-top:6px">+ Add question</button>
+      </div>
+      ${!isNew ? `<label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px;margin-top:6px">
+        <input type="checkbox" id="ntcActive" ${c.active ? 'checked' : ''}> Active (visible to officers, counted in compliance)
+      </label>` : ''}
+      <p class="dim" id="tcError" style="min-height:16px;margin:0"></p>
+    </form>`;
+}
+function courseModal(c) {
+  modal(c ? `Edit — ${c.name}` : 'New training course', courseForm(c), () => {
+    const editor = questionEditor(c && c.has_assessment ? c.questions : []);
+    el('#tcAddQuestion').onclick = () => editor.add();
+    el('#ntcHasAssessment').onchange = () => { el('#tcAssessmentFields').style.display = el('#ntcHasAssessment').checked ? '' : 'none'; };
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span></span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="tcCancel">Cancel</button>
+          <button class="btn primary" id="tcSave">${c ? 'Save changes' : 'Create course'}</button>
+        </span>
+      </div>`;
+    el('#tcCancel').onclick = closeModal;
+    el('#tcSave').onclick = async () => {
+      const name = el('#ntcName').value.trim();
+      if (!name) { el('#tcError').textContent = 'name is required'; return; }
+      const hasAssessment = el('#ntcHasAssessment').checked;
+      const body = {
+        name, category: el('#ntcCategory').value.trim(), description: el('#ntcDescription').value.trim(),
+        validity_months: el('#ntcValidity').value ? Number(el('#ntcValidity').value) : null,
+        has_assessment: hasAssessment,
+      };
+      if (hasAssessment) {
+        body.material = el('#ntcMaterial').value.trim();
+        body.pass_mark_pct = Number(el('#ntcPassMark').value) || 80;
+        body.questions = editor.get();
+      }
+      if (c) body.active = el('#ntcActive').checked;
+      try {
+        if (c) await api('PATCH', `/api/training-courses/${c.id}`, body);
+        else await api('POST', '/api/training-courses', body);
+        closeModal(); await load(); showTab('training');
+      } catch (e) { el('#tcError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewCourse').onclick = () => courseModal(null);
 
 CCCS.bus((up) => {
   const n = el('#net');
