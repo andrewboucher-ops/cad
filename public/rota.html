@@ -40,6 +40,8 @@
   .shift-chip.status-CLOCKED_OUT { border-color: var(--ink-dim); opacity: .7; }
   .shift-chip.status-NO_SHOW { border-color: var(--emergency); }
   .shift-chip.status-CANCELLED { border-color: var(--ink-dim); opacity: .5; text-decoration: line-through; }
+  .shift-chip.leave-conflict { border-color: var(--priority); }
+  .shift-chip .leave-flag { color: var(--priority); font-weight: 700; }
   .add-hint { font-size: 10.5px; color: var(--ink-dim); opacity: 0; transition: opacity .1s; }
   .rota-cell:hover .add-hint { opacity: 1; }
   form.stack { display: flex; flex-direction: column; gap: 12px; }
@@ -169,8 +171,8 @@ function paintGrid() {
     for (const d of days) {
       const dayShifts = allShifts.filter((s) => s.personnel_id === p.id && sameDay(new Date(s.starts_at), d));
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
-        ${dayShifts.map((s) => `<div class="shift-chip status-${s.status}" data-shift="${s.id}">
-          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</div>
+        ${dayShifts.map((s) => `<div class="shift-chip status-${s.status}${s.on_leave_conflict ? ' leave-conflict' : ''}" data-shift="${s.id}" ${s.on_leave_conflict ? 'title="This person has approved leave covering this day"' : ''}>
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${s.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}</div>
           <div>${esc(s.site_name || s.role_type || '')}${s.is_duty_supervisor ? ' · <strong>duty sup.</strong>' : ''}</div>
         </div>`).join('')}
         <span class="add-hint">+ add shift</span>

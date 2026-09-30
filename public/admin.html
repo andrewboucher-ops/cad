@@ -109,6 +109,7 @@
         <button class="btn primary" id="btnNewBranch" style="padding:7px 14px;font-size:13px" hidden>New branch</button>
         <button class="btn primary" id="btnNewCourse" style="padding:7px 14px;font-size:13px" hidden>New course</button>
         <button class="btn primary" id="btnNewApplicant" style="padding:7px 14px;font-size:13px" hidden>New applicant</button>
+        <button class="btn primary" id="btnNewLeave" style="padding:7px 14px;font-size:13px" hidden>New leave request</button>
       </span>
     </div>
     <div class="tabs">
@@ -125,6 +126,7 @@
       <button id="tabBranches">Branches</button>
       <button id="tabTraining">Training</button>
       <button id="tabApplicants">Applicants</button>
+      <button id="tabLeave">Leave</button>
     </div>
 
     <div id="viewAccounts">
@@ -246,6 +248,19 @@
       </div>
       <div id="apTableWrap"></div>
     </div>
+
+    <div id="viewLeave" class="hide">
+      <div class="toolbar">
+        <select id="lvStatus">
+          <option value="">All statuses</option>
+          <option value="PENDING">Pending</option>
+          <option value="APPROVED">Approved</option>
+          <option value="REJECTED">Rejected</option>
+          <option value="CANCELLED">Cancelled</option>
+        </select>
+      </div>
+      <div id="lvTableWrap"></div>
+    </div>
   </div>
 </main>
 
@@ -273,18 +288,18 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user', CLIENT: 'Client' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : '');
 
-let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [], allCourses = [], allApplicants = [];
+let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [], allCourses = [], allApplicants = [], allLeaveRequests = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches, allCourses, allApplicants] = await Promise.all([
+  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches, allCourses, allApplicants, allLeaveRequests] = await Promise.all([
     api('GET', '/api/users'), api('GET', '/api/personnel'), api('GET', '/api/mdts'),
     api('GET', '/api/callsigns'), api('GET', '/api/sites'), api('GET', '/api/patrol-schedules'),
     api('GET', '/api/vehicles'), api('GET', '/api/assets'), api('GET', '/api/beats'),
     api('GET', '/api/clients'), api('GET', '/api/client-requests'), api('GET', '/api/branches'),
-    api('GET', '/api/training-courses?all=1'), api('GET', '/api/applicants'),
+    api('GET', '/api/training-courses?all=1'), api('GET', '/api/applicants'), api('GET', '/api/leave-requests'),
   ]);
   allForms = await api('GET', '/api/form-definitions?all=1');
-  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests(); paintBranches(); paintCourses(); paintApplicants();
+  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests(); paintBranches(); paintCourses(); paintApplicants(); paintLeaveRequests();
 }
 function branchOptions(selected) {
   return '<option value="">— none / shared —</option>' + allBranches.map((b) =>
@@ -316,6 +331,9 @@ function showTab(name) {
   el('#tabApplicants').classList.toggle('active', name === 'applicants');
   el('#viewApplicants').classList.toggle('hide', name !== 'applicants');
   el('#btnNewApplicant').hidden = name !== 'applicants';
+  el('#tabLeave').classList.toggle('active', name === 'leave');
+  el('#viewLeave').classList.toggle('hide', name !== 'leave');
+  el('#btnNewLeave').hidden = name !== 'leave';
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
@@ -346,6 +364,7 @@ el('#tabClients').onclick = () => showTab('clients');
 el('#tabBranches').onclick = () => showTab('branches');
 el('#tabTraining').onclick = () => showTab('training');
 el('#tabApplicants').onclick = () => showTab('applicants');
+el('#tabLeave').onclick = () => showTab('leave');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -466,6 +485,7 @@ el('#btnNewUser').onclick = () => editModal(null);
 
 /* ---------- personnel ---------- */
 const EMPLOYMENT_LABEL = { ACTIVE: 'Active', LEAVE: 'On leave', TERMINATED: 'Terminated' };
+const EMPLOYMENT_TYPE_LABEL = { EMPLOYED: 'Employed', SUBCONTRACTOR: 'Subcontractor' };
 function paintPersonnel() {
   const q = el('#pnSearch').value.trim().toLowerCase();
   const status = el('#pnStatus').value;
@@ -523,6 +543,13 @@ function personnelForm(p) {
       <input id="npnRank" autocomplete="off" value="${isNew ? '' : esc(p.rank || '')}">
       <label>Employment status</label>
       <select id="npnStatus">${Object.entries(EMPLOYMENT_LABEL).map(([v, label]) => `<option value="${v}" ${!isNew && p.employment_status === v ? 'selected' : ''}>${label}</option>`).join('')}</select>
+      <label>Employment type — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">leave management only applies to employed staff; a subcontractor invoices for their own time</span></label>
+      <select id="npnEmpType">${Object.entries(EMPLOYMENT_TYPE_LABEL).map(([v, label]) => `<option value="${v}" ${(isNew ? 'EMPLOYED' : (p.employment_type || 'EMPLOYED')) === v ? 'selected' : ''}>${label}</option>`).join('')}</select>
+      <div id="npnAllowanceRow" style="${!isNew && p.employment_type === 'SUBCONTRACTOR' ? 'display:none' : ''}">
+        <label>Annual leave allowance (days/year — leave blank for the statutory default of 28)</label>
+        <input id="npnAllowance" type="number" min="0" step="0.5" value="${!isNew && p.annual_leave_allowance_days != null ? p.annual_leave_allowance_days : ''}">
+      </div>
+      ${!isNew && p.leave_balance ? `<p class="dim" style="margin:0">Leave balance: <strong>${p.leave_balance.remaining}</strong> of ${p.leave_balance.allowance} days remaining this leave year (${p.leave_balance.taken} taken)</p>` : ''}
       <label>Call sign (optional)</label>
       <select id="npnCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${c.id}" ${!isNew && p.callsign_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <label>Line manager — who the console phones when no duty supervisor is rostered</label>
@@ -579,9 +606,13 @@ function personnelModal(p) {
       </div>`;
     el('#pnCancel').onclick = closeModal;
     if (el('#pnDelete')) el('#pnDelete').onclick = () => deletePersonnel(p.id);
+    el('#npnEmpType').addEventListener('change', () => {
+      el('#npnAllowanceRow').style.display = el('#npnEmpType').value === 'SUBCONTRACTOR' ? 'none' : '';
+    });
     el('#pnSave').onclick = async () => {
       const name = el('#npnName').value.trim();
       if (!name) { el('#pnError').textContent = 'name is required'; return; }
+      const empType = el('#npnEmpType').value;
       const body = {
         name, employee_no: el('#npnEmpNo').value.trim() || null, rank: el('#npnRank').value.trim(),
         employment_status: el('#npnStatus').value, callsign_id: el('#npnCallsign').value ? Number(el('#npnCallsign').value) : null,
@@ -590,6 +621,8 @@ function personnelModal(p) {
         dbs_certificate_no: el('#npnDbsNo').value.trim() || null, dbs_certificate_type: el('#npnDbsType').value || null,
         dbs_update_service_id: el('#npnDbsUpdateId').value.trim() || null,
         branch_id: el('#npnBranch').value ? Number(el('#npnBranch').value) : null,
+        employment_type: empType,
+        annual_leave_allowance_days: empType === 'SUBCONTRACTOR' ? null : (el('#npnAllowance').value ? Number(el('#npnAllowance').value) : null),
       };
       const supervisorId = el('#npnSupervisor').value ? Number(el('#npnSupervisor').value) : null;
       try {
@@ -2047,6 +2080,89 @@ function hireModal(a) {
   });
 }
 el('#btnNewApplicant').onclick = () => applicantModal(null);
+
+/* ---------- leave ---------- */
+const LEAVE_TYPE_LABEL = { ANNUAL: 'Annual', SICK: 'Sick', UNPAID: 'Unpaid', OTHER: 'Other' };
+const LEAVE_STATUS_LABEL = { PENDING: 'Pending', APPROVED: 'Approved', REJECTED: 'Rejected', CANCELLED: 'Cancelled' };
+function paintLeaveRequests() {
+  const status = el('#lvStatus').value;
+  let rows = allLeaveRequests.slice().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  if (status) rows = rows.filter((r) => r.status === status);
+  el('#lvTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th style="width:140px">Requested</th><th>Person</th><th style="width:90px">Type</th><th style="width:160px">Dates</th><th style="width:60px">Days</th><th style="width:100px">Status</th><th>Note</th><th style="width:170px"></th></tr></thead>
+      <tbody>${rows.map((r) => `<tr>
+        <td class="dim">${esc(new Date(r.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }))}</td>
+        <td>${esc(r.personnel_name || '—')}</td>
+        <td class="dim">${esc(LEAVE_TYPE_LABEL[r.type] || r.type)}</td>
+        <td class="dim">${esc(r.start_date)}${r.end_date !== r.start_date ? ` → ${esc(r.end_date)}` : ''}</td>
+        <td class="dim">${r.days}</td>
+        <td class="dim">${esc(LEAVE_STATUS_LABEL[r.status] || r.status)}${r.status === 'REJECTED' && r.rejection_reason ? `<div style="font-size:11px">${esc(r.rejection_reason)}</div>` : ''}</td>
+        <td class="dim" style="font-size:12px">${esc(r.note || '—')}</td>
+        <td>${r.status === 'PENDING' ? `
+          <button class="btn" data-approve="${r.id}" style="padding:4px 10px;font-size:11px">Approve</button>
+          <button class="btn danger" data-reject="${r.id}" style="padding:4px 10px;font-size:11px">Reject</button>` : ''}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No leave requests yet.</p>';
+  // Approving/rejecting changes a person's derived leave_balance too — refresh
+  // personnel alongside the request list so the two views never disagree.
+  const refreshAfterDecision = async () => {
+    [allLeaveRequests, allPersonnel] = await Promise.all([api('GET', '/api/leave-requests'), api('GET', '/api/personnel')]);
+    paintLeaveRequests(); paintPersonnel();
+  };
+  els('#lvTableWrap [data-approve]').forEach((b) => (b.onclick = async () => {
+    try { await api('PATCH', `/api/leave-requests/${b.dataset.approve}`, { status: 'APPROVED' }); await refreshAfterDecision(); }
+    catch (e) { alert(e.message); }
+  }));
+  els('#lvTableWrap [data-reject]').forEach((b) => (b.onclick = async () => {
+    const reason = prompt('Reason for rejecting this request?');
+    if (!reason) return;
+    try { await api('PATCH', `/api/leave-requests/${b.dataset.reject}`, { status: 'REJECTED', rejection_reason: reason }); await refreshAfterDecision(); }
+    catch (e) { alert(e.message); }
+  }));
+}
+el('#lvStatus').addEventListener('change', paintLeaveRequests);
+function leaveRequestModal() {
+  const employed = allPersonnel.filter((p) => (p.employment_type || 'EMPLOYED') === 'EMPLOYED');
+  modal('New leave request', `
+    <form class="stack" id="lvForm">
+      <label>Person</label>
+      <select id="nlvPerson">${employed.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <label>Type</label>
+      <select id="nlvType">${Object.entries(LEAVE_TYPE_LABEL).map(([v, label]) => `<option value="${v}">${label}</option>`).join('')}</select>
+      <label>Start date</label>
+      <input id="nlvStart" type="date">
+      <label>End date (leave blank for a single day)</label>
+      <input id="nlvEnd" type="date">
+      <label>Note (optional)</label>
+      <textarea id="nlvNote" rows="2"></textarea>
+      <p class="dim" id="lvError" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span></span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="lvCancel">Cancel</button>
+          <button class="btn primary" id="lvSave">Create request</button>
+        </span>
+      </div>`;
+    el('#lvCancel').onclick = closeModal;
+    el('#lvSave').onclick = async () => {
+      if (!el('#nlvPerson').value) { el('#lvError').textContent = 'select a person'; return; }
+      if (!el('#nlvStart').value) { el('#lvError').textContent = 'start date is required'; return; }
+      try {
+        await api('POST', '/api/leave-requests', {
+          personnel: Number(el('#nlvPerson').value), type: el('#nlvType').value,
+          start_date: el('#nlvStart').value, end_date: el('#nlvEnd').value || el('#nlvStart').value,
+          note: el('#nlvNote').value.trim(),
+        });
+        closeModal(); await load(); showTab('leave');
+      } catch (e) { el('#lvError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewLeave').onclick = () => leaveRequestModal();
 
 CCCS.bus((up) => {
   const n = el('#net');

@@ -253,10 +253,11 @@ checkpoint scanning and configurable Forms.
 
 Real `personnel` CRUD, a `shifts` collection with clock-in/out, a
 control-room rota builder (`public/rota.html`), and the shift/clock-in view
-inside `officer.html`. SIA/DBS compliance tracking has since landed too
-(see below). What's left under "Extends HR Rota" below — leave management,
-payroll export, Xero invoicing — all still need a decision or research
-spike before they can be designed, not just built.
+inside `officer.html`. SIA/DBS compliance tracking and leave management
+have since landed too (see below). What's left under "Extends HR Rota"
+below — attendance reporting, onboarding, payroll export, Xero invoicing —
+all still need a decision or research spike before they can be designed,
+not just built.
 
 ## Phase 5 — Asset tracking ✅ done and deployed
 
@@ -311,7 +312,20 @@ tracking's extended roadmap is now fully built out.
 - ~~Supervisor concepts (line manager + duty supervisor) and contact
   routes (click-to-dial, SMS)~~ — done, see above; real-PBX/real-Twilio
   verification still outstanding, not the code
-- Full HR suite: leave management, attendance reporting, onboarding
+- ~~Leave management~~ — done, see README.md. `personnel.employment_type`
+  (`EMPLOYED`/`SUBCONTRACTOR`) gates the whole feature — a subcontractor
+  invoices for their own time and never accrues an entitlement through
+  this business, checked at every entry point in `routes-leave.js`. A
+  running annual-leave balance is always derived
+  (`leaveBalanceForPerson()`), never stored, against a calendar-year
+  default and a 28-day statutory-minimum default allowance, either
+  overridable per person. Self-service from `officer.html`
+  (request/cancel-while-pending), approve/reject from `admin.html`'s Leave
+  tab (rejection requires a reason), and a non-blocking amber conflict
+  flag on `rota.html` when a shift falls inside approved leave. Sick,
+  unpaid and other leave types are logged the same way but never touch
+  the balance. Covered by `test/leave.test.js`.
+- Full HR suite: attendance reporting, onboarding
 - Payroll — likely an export, not a payroll engine; confirm the real
   requirement before designing
 - ~~**SIA licence checks** and **DBS Update Service checks**~~ — research

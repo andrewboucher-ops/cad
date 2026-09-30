@@ -115,6 +115,15 @@
     </div>
   </section>
 
+  <section class="panel hide" id="leavePanel">
+    <header>Leave</header>
+    <div class="body" style="padding:12px">
+      <div id="leaveBalance" class="dim" style="margin-bottom:10px"></div>
+      <div class="btn-row" style="margin:0 0 8px"><button class="btn primary" id="bRequestLeave">Request leave</button></div>
+      <div id="leaveList"><p class="dim">Loading…</p></div>
+    </div>
+  </section>
+
   <section class="panel">
     <header>Reports</header>
     <div class="body" style="padding:12px">
@@ -724,6 +733,59 @@ function openCourse(c) {
   });
 }
 
+/* ---- Leave (self-service requests against the running balance) -------- */
+const LEAVE_TYPE_LABEL = { ANNUAL: 'Annual', SICK: 'Sick', UNPAID: 'Unpaid', OTHER: 'Other' };
+const LEAVE_STATUS_LABEL = { PENDING: 'Pending', APPROVED: 'Approved', REJECTED: 'Rejected', CANCELLED: 'Cancelled' };
+async function refreshLeave() {
+  if (!person || (person.employment_type || 'EMPLOYED') !== 'EMPLOYED') { el('#leavePanel').classList.add('hide'); return; }
+  el('#leavePanel').classList.remove('hide');
+  el('#leaveBalance').textContent = person.leave_balance
+    ? `${person.leave_balance.remaining} of ${person.leave_balance.allowance} days remaining this leave year (${person.leave_balance.taken} taken)`
+    : '';
+  try {
+    const mine = await api('GET', '/api/leave-requests');
+    el('#leaveList').innerHTML = mine.length ? mine.map((r) => `
+      <div class="field" style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line-soft);padding-bottom:8px;margin-bottom:8px">
+        <div style="flex:1">
+          <div>${esc(LEAVE_TYPE_LABEL[r.type] || r.type)} — ${esc(r.start_date)}${r.end_date !== r.start_date ? ` → ${esc(r.end_date)}` : ''} (${r.days}d)</div>
+          <div class="dim" style="font-size:12px">${esc(LEAVE_STATUS_LABEL[r.status] || r.status)}${r.status === 'REJECTED' && r.rejection_reason ? ` — ${esc(r.rejection_reason)}` : ''}</div>
+        </div>
+        ${r.status === 'PENDING' ? `<button type="button" class="btn" data-cancel="${r.id}" style="padding:6px 12px;font-size:12px">Cancel</button>` : ''}
+      </div>`).join('') : '<p class="dim">No leave requests yet.</p>';
+    els('#leaveList [data-cancel]').forEach((b) => (b.onclick = async () => {
+      try { await api('PATCH', `/api/leave-requests/${b.dataset.cancel}`, { status: 'CANCELLED' }); await refreshLeave(); }
+      catch (e) { alert(e.message); }
+    }));
+  } catch (e) { el('#leaveList').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+el('#bRequestLeave').onclick = () => {
+  modal('Request leave', `
+    <label>Type</label>
+    <select id="nlvType">${Object.entries(LEAVE_TYPE_LABEL).map(([v, label]) => `<option value="${v}">${label}</option>`).join('')}</select>
+    <label>Start date</label>
+    <input id="nlvStart" type="date">
+    <label>End date (leave blank for a single day)</label>
+    <input id="nlvEnd" type="date">
+    <label>Note (optional)</label>
+    <textarea id="nlvNote" rows="2"></textarea>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="nlvSave">Submit request</button></div>
+    <p class="err" id="nlvError"></p>`, () => {
+    el('#nlvSave').onclick = async () => {
+      if (!el('#nlvStart').value) { el('#nlvError').textContent = 'start date is required'; return; }
+      try {
+        await api('POST', '/api/leave-requests', {
+          type: el('#nlvType').value, start_date: el('#nlvStart').value,
+          end_date: el('#nlvEnd').value || el('#nlvStart').value, note: el('#nlvNote').value.trim(),
+        });
+        closeModal();
+        const all = await api('GET', '/api/personnel');
+        person = all.find((p) => p.id === me.personnel_id) || person;
+        await refreshLeave();
+      } catch (e) { el('#nlvError').textContent = e.message; }
+    };
+  });
+};
+
 async function refreshReports() {
   try {
     const mine = await api('GET', '/api/form-submissions?limit=10');
@@ -796,6 +858,7 @@ async function boot() {
   await refreshEquipment();
   await refreshReports();
   await refreshTraining();
+  await refreshLeave();
   footTrackingEnabled = await api('GET', '/api/config').then((c) => c.foot_tracking).catch(() => false);
   if (currentShift() && currentShift().status === 'CLOCKED_IN') startFootTracking();
 }

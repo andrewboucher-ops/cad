@@ -91,6 +91,7 @@ const db = {
   clients: [], documents: [], client_requests: [],
   branches: [],
   training_courses: [], training_records: [],
+  leave_requests: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -590,6 +591,39 @@ function trainingStatusForPerson(personnelId) {
     return { course_id: c.id, course_name: c.name, status, completed_at: latest ? latest.completed_at : null, expires_at };
   });
 }
+// A subcontractor invoices for their own time under their own arrangement —
+// they were never accruing a UK-style statutory holiday entitlement through
+// this business, so leave management only ever applies to EMPLOYED.
+const EMPLOYMENT_TYPES = ['EMPLOYED', 'SUBCONTRACTOR'];
+// UK statutory minimum for a full-time worker (5.6 weeks), used only when a
+// person has no allowance of their own set — a starting default, not a
+// promise it's right for every contract; admin.html lets it be overridden
+// per person.
+const DEFAULT_ANNUAL_LEAVE_DAYS = 28;
+/** The leave year is the calendar year, a deliberate default like
+ * DBS_RECHECK_DUE_DAYS's risk-based year above — not a legal requirement,
+ * just the simplest thing that needed picking. Change LEAVE_YEAR_START_MONTH
+ * (0 = January) if the business runs its leave year on a different cycle. */
+const LEAVE_YEAR_START_MONTH = 0;
+function leaveYearRange(now = new Date()) {
+  const y = now.getMonth() < LEAVE_YEAR_START_MONTH ? now.getFullYear() - 1 : now.getFullYear();
+  return { start: new Date(y, LEAVE_YEAR_START_MONTH, 1), end: new Date(y + 1, LEAVE_YEAR_START_MONTH, 1) };
+}
+/** null for a SUBCONTRACTOR — there is no allowance to report, not a zero
+ * one. Only APPROVED annual leave starting within the current leave year
+ * counts against it: PENDING hasn't been decided yet, REJECTED/CANCELLED
+ * never happened, and sick/unpaid/other leave is deliberately not annual
+ * leave and doesn't touch this number. */
+function leaveBalanceForPerson(p) {
+  if ((p.employment_type || 'EMPLOYED') !== 'EMPLOYED') return null;
+  const { start, end } = leaveYearRange();
+  const allowance = p.annual_leave_allowance_days || DEFAULT_ANNUAL_LEAVE_DAYS;
+  const taken = db.leave_requests
+    .filter((r) => r.personnel_id === p.id && r.type === 'ANNUAL' && r.status === 'APPROVED')
+    .filter((r) => { const d = Date.parse(r.start_date); return d >= start.getTime() && d < end.getTime(); })
+    .reduce((sum, r) => sum + r.days, 0);
+  return { allowance, taken, remaining: Math.round((allowance - taken) * 10) / 10 };
+}
 function publicPersonnel(p) {
   const cs = db.callsigns.find((c) => c.id === p.callsign_id);
   const veh = db.vehicles.find((v) => v.id === p.vehicle_id);
@@ -609,6 +643,9 @@ function publicPersonnel(p) {
     notes: p.notes || '', branch_id: p.branch_id || null,
     lat: p.lat ?? null, lon: p.lon ?? null, location_at: p.location_at || null,
     training: trainingStatusForPerson(p.id),
+    employment_type: p.employment_type || 'EMPLOYED',
+    annual_leave_allowance_days: p.annual_leave_allowance_days ?? null,
+    leave_balance: leaveBalanceForPerson(p),
   };
 }
 function publicMdt(m) {
@@ -654,10 +691,22 @@ function publicSiteVisit(v) {
     ],
   };
 }
+/** Warn, don't block: a shift against approved leave is very likely a
+ * mistake, but occasionally isn't (leave gets cancelled after cover was
+ * already arranged, an emergency needs whoever's actually available), so
+ * this only ever surfaces as a flag on the shift for rota.html to show,
+ * never a rejection from the create/update route itself. */
+function onApprovedLeave(personnelId, isoTimestamp) {
+  const day = isoTimestamp.slice(0, 10);
+  return db.leave_requests.some((r) => r.personnel_id === personnelId && r.status === 'APPROVED' && r.start_date <= day && day <= r.end_date);
+}
 function publicShift(s) {
   const p = db.personnel.find((x) => x.id === s.personnel_id);
   const site = s.site_id ? db.sites.find((x) => x.id === s.site_id) : null;
-  return { ...s, personnel_name: p ? p.name : null, personnel_callsign: p ? (db.callsigns.find((c) => c.id === p.callsign_id) || {}).name || null : null, site_name: site ? site.name : null };
+  return {
+    ...s, personnel_name: p ? p.name : null, personnel_callsign: p ? (db.callsigns.find((c) => c.id === p.callsign_id) || {}).name || null : null, site_name: site ? site.name : null,
+    on_leave_conflict: onApprovedLeave(s.personnel_id, s.starts_at),
+  };
 }
 function publicVehicle(v) {
   const p = v.assigned_personnel_id ? db.personnel.find((x) => x.id === v.assigned_personnel_id) : null;
@@ -1410,10 +1459,13 @@ route('POST', '/api/personnel', ADMIN, ({ body }) => {
   if (employeeNo && db.personnel.some((p) => p.employee_no === employeeNo)) throw httpError(409, 'employee number already in use');
   const cs = body.callsign_id ? findCallsign(body.callsign_id) : null;
   const veh = body.vehicle_id ? db.vehicles.find((v) => v.id === Number(body.vehicle_id)) : null;
+  const employmentType = EMPLOYMENT_TYPES.includes(body.employment_type) ? body.employment_type : 'EMPLOYED';
   const p = {
     id: nextId('personnel'), employee_no: employeeNo, name, rank: body.rank || '',
     contact_phone: body.contact_phone || '', contact_email: body.contact_email || '',
     employment_status: ['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status) ? body.employment_status : 'ACTIVE',
+    employment_type: employmentType,
+    annual_leave_allowance_days: employmentType === 'EMPLOYED' && body.annual_leave_allowance_days ? Number(body.annual_leave_allowance_days) : null,
     callsign_id: cs ? cs.id : null, user_id: null, vehicle_id: veh ? veh.id : null,
     welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: null,
     notes: body.notes || '', branch_id: normalizedBranchId(body.branch_id),
@@ -1472,6 +1524,30 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
   // in a certificate number.
   if ('dbs_checked_now' in body && body.dbs_checked_now) p.dbs_last_checked_at = new Date().toISOString();
   if ('notes' in body) p.notes = body.notes || '';
+  // Both fields are validated against the FULL intended result before either
+  // is written — a request that sets both at once (e.g. SUBCONTRACTOR + an
+  // allowance) must be rejected without mutating employment_type first and
+  // leaving the record in a state the request itself never asked for.
+  if ('employment_type' in body && !EMPLOYMENT_TYPES.includes(body.employment_type)) throw httpError(400, 'invalid employment_type');
+  if ('annual_leave_allowance_days' in body && body.annual_leave_allowance_days !== null
+    && (!Number.isFinite(Number(body.annual_leave_allowance_days)) || Number(body.annual_leave_allowance_days) < 0)) {
+    throw httpError(400, 'annual_leave_allowance_days must be a non-negative number, or null');
+  }
+  const nextEmploymentType = 'employment_type' in body ? body.employment_type : (p.employment_type || 'EMPLOYED');
+  if ('annual_leave_allowance_days' in body && nextEmploymentType !== 'EMPLOYED' && body.annual_leave_allowance_days != null) {
+    throw httpError(400, 'only an employed person can have a leave allowance');
+  }
+  if ('employment_type' in body) {
+    p.employment_type = body.employment_type;
+    // Leave entitlement is an EMPLOYED concept — a subcontractor invoices
+    // for their own time and was never accruing it, so switching someone
+    // to SUBCONTRACTOR clears any allowance on file rather than leaving a
+    // stale number that no longer means anything.
+    if (body.employment_type !== 'EMPLOYED' && !('annual_leave_allowance_days' in body)) p.annual_leave_allowance_days = null;
+  }
+  if ('annual_leave_allowance_days' in body) {
+    p.annual_leave_allowance_days = body.annual_leave_allowance_days == null ? null : Number(body.annual_leave_allowance_days);
+  }
   logEvent('personnel.updated', `PERSONNEL ${p.name} UPDATED`, { personnel_id: p.id });
   return publicPersonnel(p);
 });
@@ -3104,6 +3180,11 @@ require('./routes-client.js')({
 // Applicant tracking — see routes-applicants.js for the design.
 require('./routes-applicants.js')({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
+});
+
+// Leave management — see routes-leave.js for the design.
+require('./routes-leave.js')({
+  route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, visibleToUser, findPersonnel,
 });
 
 /* Client reporting — proving service to whoever pays for the contract:

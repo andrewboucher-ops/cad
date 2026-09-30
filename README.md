@@ -572,6 +572,48 @@ stage first, so hiring never overrides a decision that was already made
 about them, only reopens it — and a `HIRED` applicant can't be deleted,
 since the personnel record it became still references that history.
 
+## Leave management
+
+A personnel record now carries `employment_type` — `EMPLOYED` or
+`SUBCONTRACTOR`, defaulting to `EMPLOYED` — because leave entitlement is
+an employed concept: a subcontractor invoices for their own time under
+their own arrangement and was never accruing a UK-style statutory
+entitlement through this business. Every route in `routes-leave.js`
+refuses to create or approve a request against a subcontractor, checked
+at each entry point rather than trusted from one place, the same
+repeated-check convention `routes-client.js` already uses for site
+ownership.
+
+The balance itself (`leaveBalanceForPerson()` in `server.js`, embedded in
+`publicPersonnel()` next to `compliance` and `training`) is always
+derived, never stored: `allowance` (a per-person override, or the
+statutory-minimum default of 28 days) minus `taken` (the sum of `days`
+across a person's `APPROVED` `ANNUAL` requests whose `start_date` falls in
+the current leave year). Sick, unpaid and other leave are logged the same
+way but deliberately never touch it — they aren't annual leave. The leave
+year defaults to the calendar year (`LEAVE_YEAR_START_MONTH`), a
+deliberate v1 default rather than a promise it fits every contract, the
+same spirit as `DBS_RECHECK_DUE_DAYS`.
+
+Requests are append-only and self-service, mirroring the applicant and
+client-request pipelines: an officer requests their own leave from
+`officer.html` (`POST /api/leave-requests` silently ignores any
+`personnel` a `FIELD_USER` names — their own record is always used, never
+honoured from the body), control approves or rejects from `admin.html`'s
+Leave tab, and only the requester (while still `PENDING`) or control can
+touch a request after that — a rejection requires a reason. An `MDT_USER`
+has no legitimate reason to file or see leave requests and is refused
+outright, the same access-control shape as the rest of this codebase's
+control-vs-field split.
+
+The rota shows, but never blocks on, a conflict: `publicShift()` carries
+an `on_leave_conflict` flag (`onApprovedLeave()` — does an `APPROVED`
+request cover this shift's calendar day) that `rota.html` renders as an
+amber-flagged chip. Creating or keeping a shift against approved leave is
+never refused — this is a warning for a human to notice and resolve, not
+a rule the system enforces, the same "warn, don't block" philosophy the
+foot-tracking auto-progression already follows.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it

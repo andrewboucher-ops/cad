@@ -51,6 +51,7 @@ const TABLES = [
   'branches',
   'training_courses', 'training_records',
   'applicants',
+  'leave_requests',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */
