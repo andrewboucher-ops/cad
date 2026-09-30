@@ -462,6 +462,42 @@ itself). A job or patrol visit with no `site_id` — an ad-hoc job raised
 with a location string, say — has nothing to scope it to, so it reads as
 shared too.
 
+## Live tracking (foot officers)
+
+Vehicle terminals have always reported continuous GPS; a foot officer's own
+position was, until now, only ever captured as a single fix the moment they
+raised an emergency — a materially different, much less intrusive, privacy
+position (see `docs/PRIVACY.md`). This closes that gap, but strictly
+opt-in at the deployment level: set `FOOT_TRACKING=on` and it's live;
+leave it unset (the default) and `POST /api/personnel/:id/location`
+refuses outright, not just quietly unused — a half-built feature nobody
+enabled by accident is worse than no feature.
+
+Once on, `officer.html` reports a fix roughly every 30 seconds — an
+interval poll via `getCurrentPosition`, not the browser's own
+continuous-tracking `watchPosition`, deliberately costing one fix at a
+time rather than draining a phone in someone's pocket all shift — but only
+while that officer is actually clocked in, stopping the instant they clock
+out or sign out. A visible strip on `officer.html` says plainly that their
+location is being shared for as long as it actually is; `docs/PRIVACY.md`
+has the staff-notice wording and the legitimate-interest-assessment
+reminder that has to happen before an operator sets the flag, not after.
+
+A reported position does two things, mirroring exactly what an MDT's own
+location report already does: `control.html`'s map shows the officer as a
+live dot (their own marker kind, so clicking one opens the personnel
+detail panel, not the MDT one), and `checkAutoProgressForPerson()` — the
+foot-officer twin of the existing `checkAutoJobProgress()` — advances
+whichever of their own active job or patrol visit they're assigned to
+through ACKNOWLEDGED → EN_ROUTE → ON_SCENE by proximity, without anyone
+touching a button, the same arrival/movement thresholds a vehicle already
+gets. A person can only ever report their own position (`FIELD_USER`,
+matching `personnel_id`) — there's no legitimate reason for anyone else to
+phone in someone else's GPS fix, unlike an MDT's console-operable
+terminal. Erasing someone's location history
+(`POST /api/personnel/:id/erase-location-history`) also clears their
+last-known dot, not just the history behind it.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it

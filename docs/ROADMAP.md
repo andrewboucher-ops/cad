@@ -343,10 +343,21 @@ tracking's extended roadmap is now fully built out.
   change to `routes-forms.js`'s `canRead()`, not a bolt-on), and there's no
   live push to the portal yet (nothing broadcasts with `siteIds` yet, so
   it polls) — see README for both.
-- Live employee tracking + geofencing for foot officers (a real gap today —
-  see `docs/PRIVACY.md`). Per-organisation confirmation: the legal
-  groundwork (LIA/DPIA/staff notice) is already done or in progress, so
-  this can be built to go live once ready, not gated behind it.
+- ~~Live employee tracking + geofencing for foot officers~~ — done. Off by
+  deployment default (`FOOT_TRACKING` env var, per the confirmation that
+  the legal groundwork is already done/in progress — the flag is how you
+  actually flip it on when ready). Once on, `officer.html` reports a fix
+  every ~30s while clocked in; `control.html`'s map shows the officer live;
+  `checkAutoProgressForPerson()` — the foot-officer twin of the existing
+  MDT proximity check — auto-progresses their own job/visit through
+  EN_ROUTE/ON_SCENE by distance, which is the "geofencing" this item asked
+  for (arrival-radius detection, not a separate zone-drawing feature — see
+  README's Live tracking section for that scoping call). Covered by
+  `test/foot-tracking.test.js`: off-by-default refusal, own-record-only
+  reporting, both auto-progress paths, and erasure clearing the live dot
+  too. See `docs/PRIVACY.md` for the updated data table, staff-notice
+  wording, and the legitimate-interest-assessment reminder that has to
+  happen before an operator sets the flag.
 - Training/academy module, applicant tracking
 - ~~**Multi-branch**~~ — done. Decision made: a staff-visibility split, not
   full tenant separation — `SUPERVISOR`/`FIELD_USER`/`MDT_USER` see only

@@ -78,6 +78,10 @@
     <button class="btn" id="welfareCheckIn" style="padding:4px 10px;font-size:12px">Check in</button>
   </div>
 
+  <div class="welfare-strip hide" id="trackingStrip" style="border-color:var(--accent-dim,var(--line))">
+    <span style="flex:1">Your location is being shared with control while you're clocked in.</span>
+  </div>
+
   <section class="panel">
     <header>My details</header>
     <div class="body" id="whoBody" style="padding:12px"></div>
@@ -310,8 +314,8 @@ function paintShift() {
       rest.map((s) => `<div class="field"><span>${esc(fmtShiftTime(s.starts_at))}</span><div>${esc(s.site_name || s.role_type || '—')}</div></div>`).join('');
   }
   el('#shiftBody').innerHTML = html;
-  if (el('#shClockIn')) el('#shClockIn').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-in`, {}); await refreshShifts(); };
-  if (el('#shClockOut')) el('#shClockOut').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-out`, {}); await refreshShifts(); };
+  if (el('#shClockIn')) el('#shClockIn').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-in`, {}); startFootTracking(); await refreshShifts(); };
+  if (el('#shClockOut')) el('#shClockOut').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-out`, {}); stopFootTracking(); await refreshShifts(); };
   refreshPassdown();
 }
 async function refreshShifts() {
@@ -624,6 +628,30 @@ el('#bEmg').onclick = async () => {
   if (r.queued) el('#alertHost').innerHTML = '<p class="err">Emergency queued — no link, will send when it returns.</p>';
 };
 
+/* Foot-officer live location — off by deployment default (FOOT_TRACKING),
+ * checked once at boot via /api/config. When on, reports a fix every 30s
+ * only while this officer is clocked in, an interval poll rather than
+ * watchPosition so it costs one fix at a time rather than the browser's own
+ * continuous-tracking battery/GPS profile. Stops the moment they clock out
+ * or leave the tab — there is no tracking without this loop running. The
+ * strip in the UI is not optional: PRIVACY.md is explicit that officers
+ * must be told plainly that this data exists while it's being collected. */
+let footTrackingEnabled = false, trackingTimer = null;
+async function startFootTracking() {
+  if (!footTrackingEnabled || trackingTimer || !person) return;
+  const report = async () => {
+    const fix = await freshFix(8000);
+    if (fix) api('POST', `/api/personnel/${person.id}/location`, fix).catch(() => {});
+  };
+  report();
+  trackingTimer = setInterval(report, 30000);
+  el('#trackingStrip').classList.remove('hide');
+}
+function stopFootTracking() {
+  if (trackingTimer) { clearInterval(trackingTimer); trackingTimer = null; }
+  el('#trackingStrip').classList.add('hide');
+}
+
 const bus = CCCS.bus((up) => {
   el('#net').textContent = up ? 'link up' : 'link down';
   el('#net').classList.toggle('up', up);
@@ -707,6 +735,8 @@ async function boot() {
   await refreshShifts();
   await refreshEquipment();
   await refreshReports();
+  footTrackingEnabled = await api('GET', '/api/config').then((c) => c.foot_tracking).catch(() => false);
+  if (currentShift() && currentShift().status === 'CLOCKED_IN') startFootTracking();
 }
 boot();
 

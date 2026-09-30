@@ -510,16 +510,24 @@ function renderShift() {
 let map = null;
 function renderMap() {
   if (!map) return;
-  const units = state.mdts.filter((m) => m.lat != null).map((m) => ({
-    ...m, callsign: m.callsign || m.mdt_code, status: m.emergency ? 'EMERGENCY' : (!m.connected ? 'OFFLINE' : (m.duty_status || 'AVAILABLE')),
+  const mdtUnits = state.mdts.filter((m) => m.lat != null).map((m) => ({
+    ...m, _kind: 'm', callsign: m.callsign || m.mdt_code, status: m.emergency ? 'EMERGENCY' : (!m.connected ? 'OFFLINE' : (m.duty_status || 'AVAILABLE')),
   }));
+  // A foot officer's dot only ever appears once they're reporting a
+  // position at all (FOOT_TRACKING on, clocked in) — its mere presence
+  // already means "on task", so unlike an MDT there's no separate
+  // duty_status to reflect; ON_TASK is a reasonable single colour for it.
+  const personnelUnits = state.personnel.filter((p) => p.lat != null).map((p) => ({
+    ...p, _kind: 'p', callsign: p.callsign || p.name, status: 'ON_TASK',
+  }));
+  const units = [...mdtUnits, ...personnelUnits];
   // Visits ride the job-marker layer with their own reference, so the map
   // shows every place someone is due to attend, not only incidents.
   const markers = [
     ...state.jobs.filter((j) => !CLOSED_JOB.includes(j.status)),
     ...state.site_visits.filter((v) => !CLOSED_VISIT.includes(v.status) && v.lat != null).map((v) => ({ ...v, priority: 'ROUTINE' })),
   ];
-  map.render(units, markers, (u) => select('m', u.id));
+  map.render(units, markers, (u) => select(u._kind, u.id));
 }
 
 function renderLog() {
@@ -1065,6 +1073,7 @@ bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderShift(); rend
    .on('welfare.started', ({ personnel }) => onPersonChange(personnel))
    .on('welfare.checked_in', onPersonChange)
    .on('welfare.stopped', onPersonChange)
+   .on('personnel.location', (p) => { upsert(state.personnel, p); renderMap(); })
    .on('event.logged', (e) => {
      state.events.push(e); if (state.events.length > 400) state.events.shift(); renderLog();
      // A PBX-placed call settles later; refresh the officer's contact log

@@ -133,10 +133,9 @@ const EN_ROUTE_DELTA_M = 25;
  * needs, and it's meaningless once the job is no longer being tracked, so it
  * is simply left stale rather than cleaned up.
  *
- * MDT-only for now: a driving patrol's vehicle terminal is the one thing
- * that already reports GPS on every move. A foot-patrol officer's own
- * position (once Phase C's personnel-facing terminal reports it) is a
- * natural place to extend this, not something to build ahead of that. */
+ * Originally MDT-only: a driving patrol's vehicle terminal was the one
+ * thing that already reported GPS on every move. checkAutoProgressForPerson
+ * below extends the same idea to a foot officer once FOOT_TRACKING is on. */
 function checkAutoJobProgress(mdt, lat, lon) {
   const jobId = mdt.job_id;
   if (!jobId) return;
@@ -153,6 +152,47 @@ function checkAutoJobProgress(mdt, lat, lon) {
   j.status = newStatus; stampJobStatus(j, newStatus); j.updated_at = new Date().toISOString();
   broadcast('job.status_changed', publicJob(j));
   logEvent('job.status_changed', `JOB ${j.reference} → ${newStatus} (auto)`, { job_id: j.id });
+}
+/** The foot-officer half of the same idea: whichever of their own active
+ * job or patrol visit they're assigned to, advanced by proximity exactly
+ * like an MDT's job. A visit's "site" stands in for a job's own lat/lon,
+ * and last_distance_m lives on the visit itself rather than a separate
+ * assignment row, since a visit has no job_assignments equivalent. Only
+ * ever called once FOOT_TRACKING is on and the report passed the route's
+ * own "is this your own record" check — this has no auth of its own. */
+function checkAutoProgressForPerson(personnelId, lat, lon) {
+  const a = db.job_assignments.find((x) => x.personnel_id === personnelId);
+  if (a) {
+    const j = db.jobs.find((x) => x.id === a.job_id);
+    if (j && j.lat != null && !['ON_SCENE', 'TRANSPORTING', 'COMPLETED', 'CANCELLED'].includes(j.status)) {
+      const dist = haversineMeters(lat, lon, j.lat, j.lon);
+      let newStatus = null;
+      if (['ACKNOWLEDGED', 'EN_ROUTE'].includes(j.status) && dist < ON_SCENE_RADIUS_M) newStatus = 'ON_SCENE';
+      else if (j.status === 'ACKNOWLEDGED' && a.last_distance_m != null && dist < a.last_distance_m - EN_ROUTE_DELTA_M) newStatus = 'EN_ROUTE';
+      a.last_distance_m = dist;
+      if (newStatus) {
+        j.status = newStatus; stampJobStatus(j, newStatus); j.updated_at = new Date().toISOString();
+        broadcast('job.status_changed', publicJob(j));
+        logEvent('job.status_changed', `JOB ${j.reference} → ${newStatus} (auto)`, { job_id: j.id });
+      }
+    }
+  }
+  const v = db.site_visits.find((x) => x.personnel_id === personnelId || (x.additional_personnel || []).includes(personnelId));
+  if (v) {
+    const site = db.sites.find((s) => s.id === v.site_id);
+    if (site && site.lat != null && !['ON_SCENE', 'COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) {
+      const dist = haversineMeters(lat, lon, site.lat, site.lon);
+      let newStatus = null;
+      if (['ACKNOWLEDGED', 'EN_ROUTE'].includes(v.status) && dist < ON_SCENE_RADIUS_M) newStatus = 'ON_SCENE';
+      else if (v.status === 'ACKNOWLEDGED' && v.last_distance_m != null && dist < v.last_distance_m - EN_ROUTE_DELTA_M) newStatus = 'EN_ROUTE';
+      v.last_distance_m = dist;
+      if (newStatus) {
+        v.status = newStatus; stampVisitStatus(v, newStatus); v.updated_at = new Date().toISOString();
+        broadcast('site_visit.status_changed', publicSiteVisit(v));
+        logEvent('site_visit.status_changed', `VISIT ${v.reference} → ${newStatus} (auto)`, { site_visit_id: v.id });
+      }
+    }
+  }
 }
 const PRIORITIES = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
 // CLIENT is external — a customer's own login, not staff. It is a valid role
@@ -431,7 +471,7 @@ setInterval(() => {
 }, HEARTBEAT_MS).unref?.();
 
 function broadcast(type, payload, opts = {}) {
-  const targeted = Boolean(opts.mdtIds || opts.personnelIds || opts.siteIds);
+  const targeted = Boolean(opts.mdtIds || opts.personnelIds || opts.siteIds || opts.controlOnly);
   for (const c of sockets) {
     // CLIENT is an external trust boundary, not just another internal role:
     // it never gets the "untargeted reaches everyone" default and never gets
@@ -538,6 +578,7 @@ function publicPersonnel(p) {
     dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
     compliance: personnelCompliance(p),
     notes: p.notes || '', branch_id: p.branch_id || null,
+    lat: p.lat ?? null, lon: p.lon ?? null, location_at: p.location_at || null,
   };
 }
 function publicMdt(m) {
@@ -1346,6 +1387,7 @@ route('POST', '/api/personnel', ADMIN, ({ body }) => {
     callsign_id: cs ? cs.id : null, user_id: null, vehicle_id: veh ? veh.id : null,
     welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: null,
     notes: body.notes || '', branch_id: normalizedBranchId(body.branch_id),
+    lat: null, lon: null, location_at: null,
   };
   db.personnel.push(p);
   logEvent('personnel.created', `PERSONNEL ${name} ADDED`, { personnel_id: p.id });
@@ -2246,9 +2288,36 @@ route('POST', '/api/personnel/:id/erase-location-history', ADMIN, ({ params, use
   const before = db.locations.length;
   db.locations = db.locations.filter((l) => l.personnel_id !== p.id);
   const removed = before - db.locations.length;
+  // The last-known dot on the map is itself a piece of that movement
+  // history — an "erased" officer who still shows a position would not be
+  // erased at all, just quiet about the history behind it.
+  p.lat = null; p.lon = null; p.location_at = null;
   logEvent('retention.erasure', `LOCATION HISTORY ERASED FOR ${callsignOf(p)} (${removed} points) BY ${user.username}`, { personnel_id: p.id, removed });
   store.flushNow();
   return { personnel: p.name, removed };
+});
+
+/* Foot-officer live location — see docs/PRIVACY.md and README's Live
+ * tracking section for the full reasoning. Off by default (FOOT_TRACKING
+ * env var): continuous personal location tracking is a
+ * materially different privacy position from the single GPS fix an
+ * emergency already takes, and needs its own legitimate interest
+ * assessment before a deployment turns it on — this route refuses outright
+ * until that flag is set, rather than silently accepting reports nobody
+ * asked for. A FIELD_USER can only ever report their own position: there
+ * is no legitimate reason for anyone else to phone in someone else's GPS
+ * fix, unlike an MDT's console-operable terminal. */
+route('POST', '/api/personnel/:id/location', ['FIELD_USER'], ({ params, body, user }) => {
+  if (process.env.FOOT_TRACKING !== 'on') throw httpError(403, 'foot officer tracking is not enabled on this deployment');
+  const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
+  if (user.personnel_id !== p.id) throw httpError(403, 'you can only report your own position');
+  const lat = Number(body.lat), lon = Number(body.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw httpError(400, 'lat and lon required');
+  p.lat = lat; p.lon = lon; p.location_at = new Date().toISOString();
+  db.locations.push({ id: nextId('locations'), mdt_id: null, personnel_id: p.id, lat, lon, speed: null, heading: null, at: p.location_at });
+  checkAutoProgressForPerson(p.id, lat, lon);
+  broadcast('personnel.location', publicPersonnel(p), { controlOnly: true });
+  return { ok: true };
 });
 
 /* ------------------------------------------------------------------ *
@@ -3049,6 +3118,7 @@ route('GET', '/api/sites/:id/report', CONTROL, ({ params, query, user }) => {
 
 route('GET', '/api/config', ALL, () => ({
   audio: process.env.AUDIO !== 'off',
+  foot_tracking: process.env.FOOT_TRACKING === 'on',
 }));
 
 route('GET', '/api/openapi.json', null, () => require('./openapi.json'));
