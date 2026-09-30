@@ -106,6 +106,7 @@
         <button class="btn primary" id="btnNewAsset" style="padding:7px 14px;font-size:13px" hidden>New asset</button>
         <button class="btn primary" id="btnNewForm" style="padding:7px 14px;font-size:13px" hidden>New form</button>
         <button class="btn primary" id="btnNewClient" style="padding:7px 14px;font-size:13px" hidden>New client</button>
+        <button class="btn primary" id="btnNewBranch" style="padding:7px 14px;font-size:13px" hidden>New branch</button>
       </span>
     </div>
     <div class="tabs">
@@ -119,6 +120,7 @@
       <button id="tabPatrols">Patrol schedules</button>
       <button id="tabForms">Forms</button>
       <button id="tabClients">Clients</button>
+      <button id="tabBranches">Branches</button>
     </div>
 
     <div id="viewAccounts">
@@ -213,6 +215,11 @@
       <h3 style="margin:22px 0 8px;font-size:14px">Client requests</h3>
       <div id="crTableWrap"></div>
     </div>
+
+    <div id="viewBranches" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">A branch scopes what supervisors and field/MDT users see — dispatchers and admins always see every branch. A site, person, vehicle or asset with no branch set is shared and visible to everyone.</p>
+      <div id="brTableWrap"></div>
+    </div>
   </div>
 </main>
 
@@ -240,17 +247,21 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user', CLIENT: 'Client' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : '');
 
-let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [];
+let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests] = await Promise.all([
+  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches] = await Promise.all([
     api('GET', '/api/users'), api('GET', '/api/personnel'), api('GET', '/api/mdts'),
     api('GET', '/api/callsigns'), api('GET', '/api/sites'), api('GET', '/api/patrol-schedules'),
     api('GET', '/api/vehicles'), api('GET', '/api/assets'), api('GET', '/api/beats'),
-    api('GET', '/api/clients'), api('GET', '/api/client-requests'),
+    api('GET', '/api/clients'), api('GET', '/api/client-requests'), api('GET', '/api/branches'),
   ]);
   allForms = await api('GET', '/api/form-definitions?all=1');
-  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests();
+  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests(); paintBranches();
+}
+function branchOptions(selected) {
+  return '<option value="">— none / shared —</option>' + allBranches.map((b) =>
+    `<option value="${b.id}" ${b.id === selected ? 'selected' : ''}>${esc(b.name)}</option>`).join('');
 }
 
 /* ---------- tabs ---------- */
@@ -269,6 +280,9 @@ function showTab(name) {
   el('#tabClients').classList.toggle('active', name === 'clients');
   el('#viewClients').classList.toggle('hide', name !== 'clients');
   el('#btnNewClient').hidden = name !== 'clients';
+  el('#tabBranches').classList.toggle('active', name === 'branches');
+  el('#viewBranches').classList.toggle('hide', name !== 'branches');
+  el('#btnNewBranch').hidden = name !== 'branches';
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
@@ -296,6 +310,7 @@ el('#tabBeats').onclick = () => showTab('beats');
 el('#tabPatrols').onclick = () => showTab('patrols');
 el('#tabForms').onclick = () => showTab('forms');
 el('#tabClients').onclick = () => showTab('clients');
+el('#tabBranches').onclick = () => showTab('branches');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -360,6 +375,8 @@ function userForm(u) {
       <select id="fMdt">${mdtOptions(isNew ? null : u.mdt_id)}</select>
       <label>Linked client (for a client portal account)</label>
       <select id="fClient">${clientOptions(isNew ? null : u.client_id)}</select>
+      <label>Branch (scopes what a supervisor or field/MDT user sees — leave shared if you don't use branches)</label>
+      <select id="fBranch">${branchOptions(isNew ? null : u.branch_id)}</select>
       <label>${isNew ? 'Password' : 'New password (leave blank to keep current)'}</label>
       <input id="fPassword" type="password" autocomplete="new-password" placeholder="${isNew ? 'min. 8 characters' : ''}">
       <p class="dim" id="fError" style="min-height:16px;margin:0"></p>
@@ -392,6 +409,7 @@ function editModal(u) {
         personnel_id: el('#fPersonnel').value ? Number(el('#fPersonnel').value) : null,
         mdt_id: el('#fMdt').value ? Number(el('#fMdt').value) : null,
         client_id: el('#fClient').value ? Number(el('#fClient').value) : null,
+        branch_id: el('#fBranch').value ? Number(el('#fBranch').value) : null,
       };
       const password = el('#fPassword').value;
       try {
@@ -496,6 +514,8 @@ function personnelForm(p) {
         <span class="dim" id="pnDbsChecked">${p.dbs_last_checked_at ? 'Last checked ' + new Date(p.dbs_last_checked_at).toLocaleDateString('en-GB') : 'Never checked'}</span>
         <button type="button" class="btn" id="pnDbsCheckNow" style="padding:4px 10px;font-size:11px">Mark checked today</button>
       </div>${p.compliance && p.compliance.dbs === 'overdue' ? '<p class="err" style="margin:0">Recheck overdue</p>' : ''}` : ''}
+      <label>Branch (optional — leave shared if you don't use branches)</label>
+      <select id="npnBranch">${branchOptions(isNew ? null : p.branch_id)}</select>
       <label>Notes</label>
       <textarea id="npnNotes" rows="2">${isNew ? '' : esc(p.notes || '')}</textarea>
       <p class="dim" id="pnError" style="min-height:16px;margin:0"></p>
@@ -524,6 +544,7 @@ function personnelModal(p) {
         sia_licence_no: el('#npnSiaNo').value.trim() || null, sia_licence_expiry: el('#npnSiaExpiry').value || null,
         dbs_certificate_no: el('#npnDbsNo').value.trim() || null, dbs_certificate_type: el('#npnDbsType').value || null,
         dbs_update_service_id: el('#npnDbsUpdateId').value.trim() || null,
+        branch_id: el('#npnBranch').value ? Number(el('#npnBranch').value) : null,
       };
       const supervisorId = el('#npnSupervisor').value ? Number(el('#npnSupervisor').value) : null;
       try {
@@ -680,6 +701,8 @@ function vehicleForm(v) {
       <select id="nvStatus">${['ACTIVE', 'IN_SERVICE', 'OFF_ROAD'].map((s) => `<option value="${s}" ${!isNew && v.status === s ? 'selected' : ''}>${s.replace('_', ' ')}</option>`).join('')}</select>
       <label>Assigned to (optional)</label>
       <select id="nvAssigned">${assignedPersonnelOptions(isNew ? null : v.assigned_personnel_id)}</select>
+      <label>Branch (optional — leave shared if you don't use branches)</label>
+      <select id="nvBranch">${branchOptions(isNew ? null : v.branch_id)}</select>
       <label>Notes</label>
       <textarea id="nvNotes" rows="2">${isNew ? '' : esc(v.notes || '')}</textarea>
       ${v ? `
@@ -756,6 +779,7 @@ function vehicleModal(v) {
         condition: el('#nvCondition').value.trim(), status: el('#nvStatus').value,
         assigned_personnel_id: el('#nvAssigned').value ? Number(el('#nvAssigned').value) : null,
         notes: el('#nvNotes').value.trim(),
+        branch_id: el('#nvBranch').value ? Number(el('#nvBranch').value) : null,
       };
       try {
         if (v) await api('PATCH', `/api/vehicles/${v.id}`, body);
@@ -824,6 +848,8 @@ function assetForm(a) {
       <select id="naSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${!isNew && a.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       <label>Purchase date</label>
       <input id="naPurchase" type="date" value="${!isNew && a.purchase_date ? a.purchase_date.slice(0, 10) : ''}">
+      <label>Branch (optional — leave shared if you don't use branches)</label>
+      <select id="naBranch">${branchOptions(isNew ? null : a.branch_id)}</select>
       <label>Notes</label>
       <textarea id="naNotes" rows="2">${isNew ? '' : esc(a.notes || '')}</textarea>
       ${a ? `
@@ -876,7 +902,7 @@ function assetModal(a) {
         description, category: el('#naCategory').value, tag: el('#naTag').value.trim() || null, serial_no: el('#naSerial').value.trim(),
         status: el('#naStatus').value, assigned_to: el('#naAssigned').value ? Number(el('#naAssigned').value) : null,
         site_id: el('#naSite').value ? Number(el('#naSite').value) : null, purchase_date: el('#naPurchase').value || null,
-        notes: el('#naNotes').value.trim(),
+        notes: el('#naNotes').value.trim(), branch_id: el('#naBranch').value ? Number(el('#naBranch').value) : null,
       };
       try {
         if (a) await api('PATCH', `/api/assets/${a.id}`, body);
@@ -962,6 +988,8 @@ function siteForm(s) {
       <input id="nsEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(s.contact_email || '')}">
       <label>Alarm response SLA (minutes, optional)</label>
       <input id="nsSla" type="number" min="1" autocomplete="off" value="${isNew || s.response_sla_minutes == null ? '' : s.response_sla_minutes}">
+      <label>Branch (optional — leave shared if you don't use branches)</label>
+      <select id="nsBranch">${branchOptions(isNew ? null : s.branch_id)}</select>
       <label>On-scene checklist</label>
       <div id="siteChecklistRows"></div>
       <button type="button" class="btn" id="sAddTask" style="align-self:flex-start;padding:6px 12px;font-size:12px">+ Add task</button>
@@ -1055,6 +1083,7 @@ function siteModal(s) {
         name, address: el('#nsAddress').value.trim(), keyholder: el('#nsKeyholder').value.trim(),
         contact_email: el('#nsEmail').value.trim(), checklist: editor.get(),
         response_sla_minutes: el('#nsSla').value ? Number(el('#nsSla').value) : null,
+        branch_id: el('#nsBranch').value ? Number(el('#nsBranch').value) : null,
       };
       try {
         if (s) await api('PATCH', `/api/sites/${s.id}`, body);
@@ -1601,6 +1630,64 @@ function paintClientRequests() {
     allClientRequests = await api('GET', '/api/client-requests'); paintClientRequests();
   }));
 }
+
+/* ---------- branches ---------- */
+function paintBranches() {
+  const rows = allBranches.slice().sort((a, b) => a.name.localeCompare(b.name));
+  el('#brTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Name</th><th style="width:100px">Sites</th><th style="width:100px">Personnel</th><th style="width:100px">Vehicles</th><th style="width:100px">Assets</th><th style="width:70px"></th></tr></thead>
+      <tbody>${rows.map((b) => `<tr class="clickable" data-branch="${b.id}">
+        <td>${esc(b.name)}</td>
+        <td class="dim">${allSites.filter((s) => s.branch_id === b.id).length}</td>
+        <td class="dim">${allPersonnel.filter((p) => p.branch_id === b.id).length}</td>
+        <td class="dim">${allVehicles.filter((v) => v.branch_id === b.id).length}</td>
+        <td class="dim">${allAssets.filter((a) => a.branch_id === b.id).length}</td>
+        <td><button class="btn danger" data-delbranch="${b.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No branches yet — everything is shared until you add one.</p>';
+  els('#brTableWrap [data-branch]').forEach((row) => row.addEventListener('click', (e) => {
+    if (e.target.closest('[data-delbranch]')) return;
+    branchModal(allBranches.find((b) => b.id === Number(row.dataset.branch)));
+  }));
+  els('#brTableWrap [data-delbranch]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteBranch(Number(b.dataset.delbranch)); }));
+}
+async function deleteBranch(id) {
+  const b = allBranches.find((x) => x.id === id);
+  if (!b || !confirm(`Delete branch ${b.name}? This cannot be undone.`)) return;
+  try { await api('DELETE', `/api/branches/${id}`); closeModal(); await load(); showTab('branches'); }
+  catch (e) { alert(e.message); }
+}
+function branchModal(b) {
+  modal(b ? `Edit — ${b.name}` : 'New branch', `
+    <form class="stack" id="brForm">
+      <label>Name</label>
+      <input id="nbrName" autocomplete="off" value="${b ? esc(b.name) : ''}">
+      <p class="dim" id="brError" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${b ? '<button class="btn danger" id="brDelete">Delete branch</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="brCancel">Cancel</button>
+          <button class="btn primary" id="brSave">${b ? 'Save changes' : 'Create branch'}</button>
+        </span>
+      </div>`;
+    el('#brCancel').onclick = closeModal;
+    if (el('#brDelete')) el('#brDelete').onclick = () => deleteBranch(b.id);
+    el('#brSave').onclick = async () => {
+      const name = el('#nbrName').value.trim();
+      if (!name) { el('#brError').textContent = 'name is required'; return; }
+      try {
+        if (b) await api('PATCH', `/api/branches/${b.id}`, { name });
+        else await api('POST', '/api/branches', { name });
+        closeModal(); await load(); showTab('branches');
+      } catch (e) { el('#brError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewBranch').onclick = () => branchModal(null);
 
 CCCS.bus((up) => {
   const n = el('#net');

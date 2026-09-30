@@ -348,11 +348,18 @@ tracking's extended roadmap is now fully built out.
   groundwork (LIA/DPIA/staff notice) is already done or in progress, so
   this can be built to go live once ready, not gated behind it.
 - Training/academy module, applicant tracking
-- **Multi-branch** — confirmed worth building: Echelon operates multiple
-  branches today. Needs a design decision before it can be built: whether
-  branches get fully separate sites/personnel/control rooms, or share the
-  fleet-wide data and split only reporting/access — a bigger call than the
-  other items here, not yet made.
+- ~~**Multi-branch**~~ — done. Decision made: a staff-visibility split, not
+  full tenant separation — `SUPERVISOR`/`FIELD_USER`/`MDT_USER` see only
+  their own branch's sites/personnel/vehicles/assets (and jobs/visits at
+  those sites); `DISPATCHER`/`SYSTEM_ADMIN` always see every branch. Opt-in
+  per record and per account, so nothing changes for an install that never
+  sets a `branch_id`. `admin.html`'s new Branches tab manages branches;
+  every relevant editor gets a Branch picker. Deliberately not scoped:
+  MDTs, and the emergency/audit-log feeds — see README's Multi-branch
+  section for why. Covered by `test/branches.test.js`: cross-branch
+  isolation on every scoped resource, shared (no-branch) records staying
+  visible to everyone, an unassigned scoped-role account seeing
+  everything, and dispatcher/admin never being filtered.
 - AI assistant — revisit once the core product has real usage data
 
 ## What I'd defer or skip entirely

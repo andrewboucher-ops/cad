@@ -434,6 +434,34 @@ deliberately omits the incident list: `routes-forms.js`'s `canRead()` is
 an owning client is a real change to that file's security invariant,
 worth its own careful pass rather than a bolt-on here.
 
+## Multi-branch
+
+A staff-visibility split, not a tenancy wall like the client portal: a
+`SUPERVISOR`, `FIELD_USER` or `MDT_USER` sees only their own branch's
+sites, personnel, vehicles and assets (and the jobs/patrol visits at those
+sites) — for day-to-day work and reporting, not as a security boundary.
+`DISPATCHER` and `SYSTEM_ADMIN` always see every branch, no exceptions:
+company-wide oversight and cross-branch dispatch stay with them, by
+explicit decision when this was scoped.
+
+It's opt-in per record and per account, so an install that never touches
+branches sees no behaviour change: a site/person/vehicle/asset with no
+`branch_id` is shared and visible to everyone regardless of role, and a
+scoped-role account with no `branch_id` of its own also sees everything.
+`admin.html`'s new Branches tab creates branches and shows how many sites,
+personnel, vehicles and assets are on each; every other editor (Site,
+Personnel, Vehicle, Asset, and the Accounts form for a
+Supervisor/Field/MDT account) gets a Branch picker.
+
+Deliberately **not** scoped, on purpose: MDTs (not one of the named
+resources this was built for), and the emergency feed and audit log on
+`GET /api/state` (hiding either from any signed-in internal role would be
+a safety/oversight regression, not a feature — the RESTRICTED-forms
+invariant already keeps the truly sensitive content out of the log
+itself). A job or patrol visit with no `site_id` — an ad-hoc job raised
+with a location string, say — has nothing to scope it to, so it reads as
+shared too.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it

@@ -89,6 +89,7 @@ const db = {
   dial_log: [],
   form_definitions: [], form_submissions: [], form_grants: [],
   clients: [], documents: [], client_requests: [],
+  branches: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -455,6 +456,35 @@ function broadcast(type, payload, opts = {}) {
 }
 const isControlRole = (role) => ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(role);
 
+/* Multi-branch — a staff-visibility split, not a tenancy wall. DISPATCHER
+ * and SYSTEM_ADMIN always see everything, every branch, no exceptions:
+ * company-wide oversight and cross-branch dispatch stay with them. A
+ * SUPERVISOR, FIELD_USER or MDT_USER sees only their own branch's
+ * personnel/vehicles/assets/sites (and the jobs/visits at those sites) —
+ * for reporting and day-to-day work, not as a security boundary the way
+ * CLIENT is. A record with no branch_id is shared/unassigned and visible
+ * to everyone regardless of role: multi-branch is opt-in per record, so an
+ * install that never sets branch_id anywhere sees no behaviour change. */
+const BRANCH_SCOPED_ROLES = ['SUPERVISOR', 'FIELD_USER', 'MDT_USER'];
+const branchFilterActive = (user) => BRANCH_SCOPED_ROLES.includes(user.role) && Boolean(user.branch_id);
+const visibleToUser = (record, user) => !branchFilterActive(user) || record.branch_id == null || record.branch_id === user.branch_id;
+/** Same rule, for a job/visit whose own "branch" is really its site's. No
+ * site_id (an ad-hoc emergency job, say) reads as shared, same as a site
+ * with no branch_id — there's nothing to scope it to. */
+function siteVisibleTo(siteId, user) {
+  if (!branchFilterActive(user) || !siteId) return true;
+  const site = db.sites.find((s) => s.id === siteId);
+  return !site || site.branch_id == null || site.branch_id === user.branch_id;
+}
+/** Normalizes a branch_id write: null clears it (shared/unassigned), any
+ * other value must reference a real branch. */
+function normalizedBranchId(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const id = Number(raw);
+  if (!db.branches.some((b) => b.id === id)) throw httpError(400, 'branch_id must reference an existing branch');
+  return id;
+}
+
 /* ------------------------------------------------------------------ *
  * Domain logic
  * ------------------------------------------------------------------ */
@@ -507,7 +537,7 @@ function publicPersonnel(p) {
     dbs_certificate_no: p.dbs_certificate_no || null, dbs_certificate_type: p.dbs_certificate_type || null,
     dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
     compliance: personnelCompliance(p),
-    notes: p.notes || '',
+    notes: p.notes || '', branch_id: p.branch_id || null,
   };
 }
 function publicMdt(m) {
@@ -770,7 +800,7 @@ function handleUpgrade(req, socket) {
   socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${wsAccept(key)}`, '\r\n'].join('\r\n'));
   socket.setNoDelay(true);
   const conn = new Conn(socket, user);
-  conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, personnel_id: user.personnel_id, mdt_id: user.mdt_id, client_id: user.client_id || null, ui_prefs: normalizeUiPrefs(user.ui_prefs) } });
+  conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, personnel_id: user.personnel_id, mdt_id: user.mdt_id, client_id: user.client_id || null, branch_id: user.branch_id || null, ui_prefs: normalizeUiPrefs(user.ui_prefs) } });
 }
 server.on('upgrade', handleUpgrade);
 httpsServer?.on('upgrade', handleUpgrade);
@@ -814,7 +844,7 @@ function normalizeUiPrefs(p) {
     reduce_motion: Boolean(p.reduce_motion),
   };
 }
-const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs) });
+const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, branch_id: u.branch_id || null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs) });
 
 route('POST', '/api/auth/login', null, ({ body }) => {
   const user = db.users.find((u) => u.username === String(body.username || '').toLowerCase());
@@ -1054,7 +1084,7 @@ route('DELETE', '/api/mdts/:id', ADMIN, ({ params }) => {
   return { ok: true };
 });
 const VEHICLE_STATUSES = ['ACTIVE', 'IN_SERVICE', 'OFF_ROAD'];
-route('GET', '/api/vehicles', ALL, () => db.vehicles.map(publicVehicle));
+route('GET', '/api/vehicles', ALL, ({ user }) => db.vehicles.filter((v) => visibleToUser(v, user)).map(publicVehicle));
 route('POST', '/api/vehicles', ADMIN, ({ body }) => {
   const registration = String(body.registration || '').trim().toUpperCase();
   if (!registration) throw httpError(400, 'registration required');
@@ -1066,6 +1096,7 @@ route('POST', '/api/vehicles', ADMIN, ({ body }) => {
     mileage: body.mileage != null && body.mileage !== '' ? Number(body.mileage) : null, condition: body.condition || '',
     assigned_personnel_id: p ? p.id : null,
     status: VEHICLE_STATUSES.includes(body.status) ? body.status : 'ACTIVE', notes: body.notes || '',
+    branch_id: normalizedBranchId(body.branch_id),
   };
   db.vehicles.push(v);
   logEvent('vehicle.created', `VEHICLE ${registration} ADDED`, { vehicle_id: v.id });
@@ -1087,6 +1118,7 @@ route('PATCH', '/api/vehicles/:id', ADMIN, ({ params, body }) => {
   if ('mileage' in body) v.mileage = body.mileage != null && body.mileage !== '' ? Number(body.mileage) : null;
   if ('condition' in body) v.condition = body.condition || '';
   if ('assigned_personnel_id' in body) { const p = body.assigned_personnel_id ? db.personnel.find((x) => x.id === Number(body.assigned_personnel_id)) : null; v.assigned_personnel_id = p ? p.id : null; }
+  if ('branch_id' in body) v.branch_id = normalizedBranchId(body.branch_id);
   if ('status' in body) { if (!VEHICLE_STATUSES.includes(body.status)) throw httpError(400, 'invalid status'); v.status = body.status; }
   if ('notes' in body) v.notes = body.notes || '';
   logEvent('vehicle.updated', `VEHICLE ${v.registration} UPDATED`, { vehicle_id: v.id });
@@ -1204,8 +1236,8 @@ route('DELETE', '/api/maintenance-logs/:id', ADMIN, ({ params }) => {
 
 const ASSET_CATEGORIES = ['EQUIPMENT', 'UNIFORM', 'KEY', 'DEVICE', 'OTHER'];
 const ASSET_STATUSES = ['IN_USE', 'IN_STORE', 'LOST', 'RETIRED'];
-route('GET', '/api/assets', ALL, ({ query }) => {
-  let rows = db.assets.map(publicAsset);
+route('GET', '/api/assets', ALL, ({ query, user }) => {
+  let rows = db.assets.filter((a) => visibleToUser(a, user)).map(publicAsset);
   if (query.get('assigned_to')) rows = rows.filter((a) => a.assigned_to === Number(query.get('assigned_to')));
   if (query.get('category')) rows = rows.filter((a) => a.category === query.get('category').toUpperCase());
   return rows;
@@ -1223,6 +1255,7 @@ route('POST', '/api/assets', ADMIN, ({ body }) => {
     assigned_to: p ? p.id : null, site_id: site ? site.id : null,
     status: ASSET_STATUSES.includes(body.status) ? body.status : 'IN_STORE',
     purchase_date: body.purchase_date || null, last_checked_at: null, notes: body.notes || '',
+    branch_id: normalizedBranchId(body.branch_id),
   };
   db.assets.push(a);
   logEvent('asset.created', `ASSET ${tag || description} ADDED`, { asset_id: a.id });
@@ -1243,6 +1276,7 @@ route('PATCH', '/api/assets/:id', ADMIN, ({ params, body }) => {
   if ('status' in body) { if (!ASSET_STATUSES.includes(body.status)) throw httpError(400, 'invalid status'); a.status = body.status; }
   if ('purchase_date' in body) a.purchase_date = body.purchase_date || null;
   if ('notes' in body) a.notes = body.notes || '';
+  if ('branch_id' in body) a.branch_id = normalizedBranchId(body.branch_id);
   if (body.check_now) a.last_checked_at = new Date().toISOString();
   logEvent('asset.updated', `ASSET ${a.tag || a.description} UPDATED`, { asset_id: a.id });
   return publicAsset(a);
@@ -1297,7 +1331,7 @@ route('POST', '/api/assets/:id/return', ALL, ({ params, user }) => {
   logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
   return publicAsset(a);
 });
-route('GET', '/api/personnel', ALL, () => db.personnel.map(publicPersonnel));
+route('GET', '/api/personnel', ALL, ({ user }) => db.personnel.filter((p) => visibleToUser(p, user)).map(publicPersonnel));
 route('POST', '/api/personnel', ADMIN, ({ body }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');
@@ -1311,7 +1345,7 @@ route('POST', '/api/personnel', ADMIN, ({ body }) => {
     employment_status: ['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status) ? body.employment_status : 'ACTIVE',
     callsign_id: cs ? cs.id : null, user_id: null, vehicle_id: veh ? veh.id : null,
     welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: null,
-    notes: body.notes || '',
+    notes: body.notes || '', branch_id: normalizedBranchId(body.branch_id),
   };
   db.personnel.push(p);
   logEvent('personnel.created', `PERSONNEL ${name} ADDED`, { personnel_id: p.id });
@@ -1334,6 +1368,7 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
   }
   if ('callsign_id' in body) { const cs = body.callsign_id ? findCallsign(body.callsign_id) : null; p.callsign_id = cs ? cs.id : null; }
   if ('vehicle_id' in body) { const veh = body.vehicle_id ? db.vehicles.find((v) => v.id === Number(body.vehicle_id)) : null; p.vehicle_id = veh ? veh.id : null; }
+  if ('branch_id' in body) p.branch_id = normalizedBranchId(body.branch_id);
   // Line management: stable and HR-owned, the fallback when no duty
   // supervisor is rostered (see routes-contact.js supervisorFor). Refused
   // rather than silently dropped when it points nowhere, because a console
@@ -1425,8 +1460,8 @@ route('DELETE', '/api/callsigns/:id/assign', CONTROL, ({ params, body }) => {
 
 
 // Jobs
-route('GET', '/api/jobs', ALL, ({ query }) => {
-  let jobs = db.jobs.map(publicJob);
+route('GET', '/api/jobs', ALL, ({ query, user }) => {
+  let jobs = db.jobs.filter((j) => siteVisibleTo(j.site_id, user)).map(publicJob);
   if (query.get('status')) jobs = jobs.filter((j) => j.status === query.get('status').toUpperCase());
   return jobs;
 });
@@ -2107,10 +2142,16 @@ route('GET', '/api/events', ALL, ({ query }) => {
   if (since) ev = ev.filter((e) => e.at >= since);
   return ev.slice(-Number(query.get('limit') || 200));
 });
-route('GET', '/api/state', ALL, () => ({
-  mdts: db.mdts.map(publicMdt), jobs: db.jobs.map(publicJob),
-  personnel: db.personnel.map(publicPersonnel), sites: db.sites,
-  site_visits: db.site_visits.map(publicSiteVisit),
+route('GET', '/api/state', ALL, ({ user }) => ({
+  // mdts, emergencies and events are deliberately never branch-filtered:
+  // an MDT isn't itself a named resource multi-branch was asked to scope,
+  // and hiding an emergency or an audit-log entry from any signed-in
+  // internal role would be a safety/oversight regression, not a feature.
+  mdts: db.mdts.map(publicMdt),
+  jobs: db.jobs.filter((j) => siteVisibleTo(j.site_id, user)).map(publicJob),
+  personnel: db.personnel.filter((p) => visibleToUser(p, user)).map(publicPersonnel),
+  sites: db.sites.filter((s) => visibleToUser(s, user)),
+  site_visits: db.site_visits.filter((v) => siteVisibleTo(v.site_id, user)).map(publicSiteVisit),
   emergencies: db.emergency_events.filter((e) => e.state !== 'RESOLVED'),
   events: db.audit_logs.slice(-80), server_time: new Date().toISOString(),
 }));
@@ -2363,7 +2404,7 @@ route('DELETE', '/api/personnel/:id/welfare', ALL, ({ params, user }) => {
 });
 
 /* Sites under contract — what alarm response jobs are attached to. */
-route('GET', '/api/sites', ALL, () => db.sites);
+route('GET', '/api/sites', ALL, ({ user }) => db.sites.filter((s) => visibleToUser(s, user)));
 route('POST', '/api/sites', CONTROL, ({ body }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');
@@ -2372,6 +2413,7 @@ route('POST', '/api/sites', CONTROL, ({ body }) => {
     id: nextId('sites'), name, address: body.address || '', lat: Number(body.lat) || null, lon: Number(body.lon) || null,
     keyholder: body.keyholder || '', contact_email: body.contact_email || '', contract: 'ACTIVE', checklist: [],
     response_sla_minutes: body.response_sla_minutes ? Number(body.response_sla_minutes) : null,
+    branch_id: normalizedBranchId(body.branch_id),
   };
   db.sites.push(site);
   logEvent('site.created', `SITE ${name} ADDED`);
@@ -2387,6 +2429,7 @@ route('PATCH', '/api/sites/:id', ADMIN, ({ params, body }) => {
     site.name = name;
   }
   if ('address' in body) site.address = body.address || '';
+  if ('branch_id' in body) site.branch_id = normalizedBranchId(body.branch_id);
   if ('lat' in body) site.lat = body.lat === null || body.lat === '' ? null : Number(body.lat);
   if ('lon' in body) site.lon = body.lon === null || body.lon === '' ? null : Number(body.lon);
   if ('keyholder' in body) site.keyholder = body.keyholder || '';
@@ -2586,8 +2629,8 @@ route('DELETE', '/api/patrol-schedules/:id', ADMIN, ({ params }) => {
 function nextVisitReference() {
   return `VISIT-${new Date().getFullYear()}-${String(nextId('visitref') + 40).padStart(5, '0')}`;
 }
-route('GET', '/api/site-visits', ALL, ({ query }) => {
-  let rows = db.site_visits.map(publicSiteVisit);
+route('GET', '/api/site-visits', ALL, ({ query, user }) => {
+  let rows = db.site_visits.filter((v) => siteVisibleTo(v.site_id, user)).map(publicSiteVisit);
   if (query.get('status')) rows = rows.filter((v) => v.status === query.get('status').toUpperCase());
   if (query.get('site_id')) rows = rows.filter((v) => v.site_id === Number(query.get('site_id')));
   return rows;
@@ -3033,7 +3076,7 @@ route('POST', '/api/users', ADMIN, ({ body }) => {
   if (personnelId && db.personnel.some((p) => p.id === personnelId && p.user_id)) throw httpError(409, 'that personnel record already has a login');
   const clientId = body.client_id || null;
   if (clientId && !db.clients.some((c) => c.id === clientId)) throw httpError(400, 'client_id must reference an existing client');
-  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: personnelId, mdt_id: body.mdt_id || null, client_id: clientId, email, created_at: new Date().toISOString() };
+  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: personnelId, mdt_id: body.mdt_id || null, client_id: clientId, branch_id: normalizedBranchId(body.branch_id), email, created_at: new Date().toISOString() };
   db.users.push(u);
   if (personnelId) { const p = db.personnel.find((x) => x.id === personnelId); if (p) p.user_id = u.id; }
   logEvent('user.created', `USER ${username} CREATED (${u.role})`);
@@ -3066,6 +3109,7 @@ route('PATCH', '/api/users/:id', ADMIN, ({ params, body }) => {
     if (nextClientId && !db.clients.some((c) => c.id === nextClientId)) throw httpError(400, 'client_id must reference an existing client');
     u.client_id = nextClientId;
   }
+  if ('branch_id' in body) u.branch_id = normalizedBranchId(body.branch_id);
   if ('password' in body && body.password) {
     if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
     u.password_hash = hashPassword(String(body.password));
@@ -3080,6 +3124,44 @@ route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
   if (u.personnel_id) { const p = db.personnel.find((x) => x.id === u.personnel_id); if (p && p.user_id === u.id) p.user_id = null; }
   db.users = db.users.filter((x) => x.id !== u.id);
   logEvent('user.deleted', `USER ${u.username} DELETED`, { user_id: u.id });
+  return { ok: true };
+});
+
+/* Branches — see the comment on BRANCH_SCOPED_ROLES for what this does and
+ * doesn't restrict. Read is open to ALL (a name is not sensitive, and every
+ * scoped role needs the list for its own branch's label); only ADMIN
+ * manages the branches themselves. */
+route('GET', '/api/branches', ALL, () => db.branches);
+route('POST', '/api/branches', ADMIN, ({ body }) => {
+  const name = String(body.name || '').trim();
+  if (!name) throw httpError(400, 'name required');
+  if (db.branches.some((b) => b.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'branch already exists');
+  const b = { id: nextId('branches'), name, created_at: new Date().toISOString() };
+  db.branches.push(b);
+  logEvent('branch.created', `BRANCH ${name} ADDED`);
+  return { __status: 201, __body: b };
+});
+route('PATCH', '/api/branches/:id', ADMIN, ({ params, body }) => {
+  const b = db.branches.find((x) => x.id === Number(params.id));
+  if (!b) throw httpError(404, 'branch not found');
+  if ('name' in body) {
+    const name = String(body.name || '').trim();
+    if (!name) throw httpError(400, 'name required');
+    if (db.branches.some((x) => x.id !== b.id && x.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'branch already exists');
+    b.name = name;
+  }
+  logEvent('branch.updated', `BRANCH ${b.name} UPDATED`, { branch_id: b.id });
+  return b;
+});
+route('DELETE', '/api/branches/:id', ADMIN, ({ params }) => {
+  const b = db.branches.find((x) => x.id === Number(params.id));
+  if (!b) throw httpError(404, 'branch not found');
+  const inUse = db.sites.some((s) => s.branch_id === b.id) || db.personnel.some((p) => p.branch_id === b.id)
+    || db.vehicles.some((v) => v.branch_id === b.id) || db.assets.some((a) => a.branch_id === b.id)
+    || db.users.some((u) => u.branch_id === b.id);
+  if (inUse) throw httpError(409, 'branch is still in use — reassign its sites, personnel, vehicles, assets and accounts first');
+  db.branches = db.branches.filter((x) => x.id !== b.id);
+  logEvent('branch.deleted', `BRANCH ${b.name} DELETED`);
   return { ok: true };
 });
 
