@@ -287,8 +287,15 @@ tracking's extended roadmap is now fully built out.
   equipment.
 - **Retention.** Audit logs and location history grow without bound.
   Partition `locations` by month and drop old partitions.
-- **Access review.** Who can reset an emergency, and how you'd know if the
-  wrong person did.
+- ~~**Access review.**~~ — done, see `docs/ACCESS.md`. Emergency
+  ack/resolve was already correctly control-role-only; the real finding was
+  a role check repeated across six routes (`role === 'FIELD_USER'`) that
+  meant `MDT_USER` fell through unrestricted on every one, including
+  silently clearing or cancelling another officer's welfare alarm — fixed
+  to check `!isControlRole()` instead. Also fixed: `resolved_by` was never
+  recorded on an emergency (only `acknowledged_by` was), welfare actions
+  never named who acted on someone else's timer, and any login could mark
+  someone else's message read. Covered by `test/access-review.test.js`.
 
 ## The extended roadmap (beyond Phase 3–5, roughly by what it extends)
 

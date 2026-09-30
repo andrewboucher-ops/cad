@@ -224,6 +224,13 @@ notice you can adapt. It is not legal advice; have someone qualified read it.
 
 Implemented: scrypt password hashing, HMAC-signed session tokens with expiry, constant-time signature and password comparison, role-based authorisation on every route, ownership checks (a field user can only update jobs assigned to them and cannot acknowledge their own emergency), WebSocket authentication at the handshake, request body size limits, input validation, per-IP rate limiting, path traversal protection on static files, and an audit row for every meaningful action including failed logins.
 
+[`docs/ACCESS.md`](docs/ACCESS.md) is a plain walk-through of who can act on
+someone else's record and how you'd know if the wrong person did — done in
+response to a specific open question in `docs/ROADMAP.md`. It found and fixed
+a real gap: an `MDT_USER` (a vehicle terminal, not a person) could silently
+clear or cancel another officer's welfare alarm, among five other routes with
+the same blind spot. Re-run its closing grep after touching any role gate.
+
 Not implemented, and needed before any real deployment: TLS, refresh tokens and revocation, CSRF defence for cookie-based sessions, account lockout, per-role rate limits, secrets management, and penetration testing.
 
 ## Known limitations

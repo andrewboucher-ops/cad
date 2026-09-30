@@ -1396,7 +1396,7 @@ route('POST', '/api/assets/:id/return', ALL, ({ params, user }) => {
   const a = db.assets.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'asset not found');
   const co = db.asset_checkouts.find((c) => c.asset_id === a.id && !c.returned_at);
   if (!co) throw httpError(409, 'asset is not currently checked out');
-  if (user.role === 'FIELD_USER' && user.personnel_id !== co.personnel_id) throw httpError(403, 'not your checkout');
+  if (!isControlRole(user.role) && user.personnel_id !== co.personnel_id) throw httpError(403, 'not your checkout');
   co.returned_at = new Date().toISOString(); co.returned_by = user.id;
   a.assigned_to = null; a.status = 'IN_STORE'; a.last_checked_at = new Date().toISOString();
   logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
@@ -2138,7 +2138,7 @@ route('POST', '/api/emergency', ALL, ({ body, user }) => {
     id: nextId('emergency_events'), kind: 'EMERGENCY', personnel_id: person ? person.id : null, mdt_id: mdt ? mdt.id : null,
     mdt_code: mdt ? mdt.mdt_code : null, callsign,
     lat: who.lat, lon: who.lon, state: 'ACTIVE', activated_at: new Date().toISOString(),
-    acknowledged_at: null, acknowledged_by: null, resolved_at: null, job_id: null,
+    acknowledged_at: null, acknowledged_by: null, resolved_at: null, resolved_by: null, job_id: null,
   };
   db.emergency_events.push(ev);
   createEmergencyJob(ev);
@@ -2159,7 +2159,7 @@ route('POST', '/api/emergency/:id/ack', CONTROL, ({ params, user }) => {
 });
 route('POST', '/api/emergency/:id/resolve', CONTROL, ({ params, user }) => {
   const ev = db.emergency_events.find((e) => e.id === Number(params.id)); if (!ev) throw httpError(404, 'emergency not found');
-  ev.state = 'RESOLVED'; ev.resolved_at = new Date().toISOString();
+  ev.state = 'RESOLVED'; ev.resolved_at = new Date().toISOString(); ev.resolved_by = user.display_name;
   const mdt = db.mdts.find((m) => m.id === ev.mdt_id);
   if (mdt) { mdt.emergency = false; broadcast('mdt.status_changed', publicMdt(mdt)); }
   broadcast('emergency.resolved', ev);
@@ -2198,8 +2198,14 @@ route('POST', '/api/messages', ALL, ({ body, user }) => {
   logEvent('message.sent', `${msg.from_label} ✉ ${msg.to_label}: ${msg.body.slice(0, 60)}`, { message_id: msg.id });
   return { __status: 201, __body: msg };
 });
-route('POST', '/api/messages/:id/read', ALL, ({ params }) => {
+route('POST', '/api/messages/:id/read', ALL, ({ params, user }) => {
   const m = db.messages.find((x) => x.id === Number(params.id)); if (!m) throw httpError(404, 'message not found');
+  // A read receipt is the recipient's own signal — anyone else marking it
+  // read would show a false "seen" against a message they never got.
+  const isRecipient = (user.role === 'FIELD_USER' && m.to_personnel_id === user.personnel_id)
+    || (user.role === 'MDT_USER' && m.to_mdt_id === user.mdt_id)
+    || (isControlRole(user.role) && m.to_personnel_id == null && m.to_mdt_id == null);
+  if (!isRecipient) throw httpError(403, 'not your message to mark read');
   m.state = 'READ'; m.read_at = new Date().toISOString();
   broadcast('message.read', m);
   return m;
@@ -2398,7 +2404,7 @@ route('GET', '/api/calls/requests', ALL, ({ query }) => {
 route('POST', '/api/calls/requests/:id/clear', ALL, ({ params, user }) => {
   const req = db.call_requests.find((r) => r.id === Number(params.id));
   if (!req) throw httpError(404, 'request not found');
-  if (user.role === 'FIELD_USER' && user.personnel_id !== req.personnel_id) throw httpError(403, 'not your request');
+  if (!isControlRole(user.role) && user.personnel_id !== req.personnel_id) throw httpError(403, 'not your request');
   if (req.state !== 'PENDING') return req;
   const byOfficer = user.role === 'FIELD_USER';
   req.state = byOfficer ? 'CANCELLED' : 'ANSWERED';
@@ -2421,7 +2427,13 @@ route('POST', '/api/calls/requests/:id/clear', ALL, ({ params, user }) => {
 const WELFARE_TICK_MS = Number(process.env.WELFARE_TICK_MS || 5000);
 const WELFARE_WARN_S = Number(process.env.WELFARE_WARN_S || 60);
 
-function startWelfare(person, intervalS, note) {
+// `user` is the acting login, not the subject `person` — the same person
+// for a FIELD_USER managing their own timer, but a different one whenever
+// control (or, now correctly gated, nobody else) acts on someone else's.
+// Recorded on every welfare action for the same reason emergency ack/resolve
+// already name their actor: "who checked this person in" is exactly the
+// question you need answered the one time it turns out to matter.
+function startWelfare(person, intervalS, note, user) {
   if (!Number.isFinite(intervalS) || intervalS < 30 || intervalS > 8 * 3600) {
     throw httpError(400, 'welfare interval must be between 30 seconds and 8 hours');
   }
@@ -2431,30 +2443,30 @@ function startWelfare(person, intervalS, note) {
   person.welfare_note = note || null;
   const payload = { personnel: publicPersonnel(person), note: person.welfare_note };
   broadcast('welfare.started', payload);
-  logEvent('welfare.started', `${callsignOf(person)} WELFARE TIMER ${person.welfare_interval_s}s${note ? ' — ' + note : ''}`, { personnel_id: person.id });
+  logEvent('welfare.started', `${callsignOf(person)} WELFARE TIMER ${person.welfare_interval_s}s${note ? ' — ' + note : ''} (started by ${user.display_name})`, { personnel_id: person.id, started_by: user.id });
   return person;
 }
 
-function checkInWelfare(person) {
+function checkInWelfare(person, user) {
   if (!person.welfare_due_at) throw httpError(409, 'no welfare timer running');
   person.welfare_due_at = new Date(Date.now() + person.welfare_interval_s * 1000).toISOString();
   person.welfare_warned = false;
   // Clear any overdue alarm this person had raised.
   for (const ev of db.emergency_events) {
     if (ev.personnel_id === person.id && ev.kind === 'WELFARE' && ev.state !== 'RESOLVED') {
-      ev.state = 'RESOLVED'; ev.resolved_at = new Date().toISOString();
+      ev.state = 'RESOLVED'; ev.resolved_at = new Date().toISOString(); ev.resolved_by = user.display_name;
       broadcast('emergency.resolved', ev);
     }
   }
   broadcast('welfare.checked_in', publicPersonnel(person));
-  logEvent('welfare.checked_in', `${callsignOf(person)} CHECKED IN`, { personnel_id: person.id });
+  logEvent('welfare.checked_in', `${callsignOf(person)} CHECKED IN (by ${user.display_name})`, { personnel_id: person.id, checked_in_by: user.id });
   return person;
 }
 
-function stopWelfare(person, reason = 'cancelled') {
+function stopWelfare(person, reason = 'cancelled', user) {
   person.welfare_interval_s = null; person.welfare_due_at = null; person.welfare_warned = false; person.welfare_note = null;
   broadcast('welfare.stopped', publicPersonnel(person));
-  logEvent('welfare.stopped', `${callsignOf(person)} WELFARE TIMER ${reason.toUpperCase()}`, { personnel_id: person.id });
+  logEvent('welfare.stopped', `${callsignOf(person)} WELFARE TIMER ${reason.toUpperCase()} (by ${user.display_name})`, { personnel_id: person.id, stopped_by: user.id });
   return person;
 }
 
@@ -2469,7 +2481,7 @@ function welfareTick() {
         id: nextId('emergency_events'), kind: 'WELFARE', personnel_id: person.id,
         callsign: callsignOf(person), lat: null, lon: null, state: 'ACTIVE',
         note: person.welfare_note || null,
-        activated_at: new Date().toISOString(), acknowledged_at: null, acknowledged_by: null, resolved_at: null,
+        activated_at: new Date().toISOString(), acknowledged_at: null, acknowledged_by: null, resolved_at: null, resolved_by: null,
       };
       db.emergency_events.push(ev);
       createEmergencyJob(ev);
@@ -2487,19 +2499,19 @@ function welfareTick() {
 
 route('POST', '/api/personnel/:id/welfare', ALL, ({ params, body, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
-  if (user.role === 'FIELD_USER' && user.personnel_id !== p.id) throw httpError(403, 'not you');
-  return publicPersonnel(startWelfare(p, Number(body.interval_s), body.note));
+  if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
+  return publicPersonnel(startWelfare(p, Number(body.interval_s), body.note, user));
 });
 route('POST', '/api/personnel/:id/welfare/check', ALL, ({ params, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
-  if (user.role === 'FIELD_USER' && user.personnel_id !== p.id) throw httpError(403, 'not you');
-  return publicPersonnel(checkInWelfare(p));
+  if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
+  return publicPersonnel(checkInWelfare(p, user));
 });
 route('DELETE', '/api/personnel/:id/welfare', ALL, ({ params, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
-  if (user.role === 'FIELD_USER' && user.personnel_id !== p.id) throw httpError(403, 'not you');
+  if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
   if (!p.welfare_due_at) throw httpError(409, 'no welfare timer running');
-  return publicPersonnel(stopWelfare(p, user.role === 'FIELD_USER' ? 'cancelled by officer' : 'cancelled by control'));
+  return publicPersonnel(stopWelfare(p, user.role === 'FIELD_USER' ? 'cancelled by officer' : 'cancelled by control', user));
 });
 
 /* Sites under contract — what alarm response jobs are attached to. */
@@ -3397,7 +3409,7 @@ route('POST', '/api/personnel/:id/training-records', ADMIN, ({ params, body, use
 });
 route('GET', '/api/personnel/:id/training-records', ALL, ({ params, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
-  if (user.role === 'FIELD_USER' && user.personnel_id !== p.id) throw httpError(403, 'not your training record');
+  if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not your training record');
   return db.training_records.filter((r) => r.personnel_id === p.id)
     .sort((a, b) => (a.completed_at < b.completed_at ? 1 : -1))
     .map((r) => ({ ...r, course_name: (db.training_courses.find((c) => c.id === r.course_id) || {}).name || 'Unknown course' }));
