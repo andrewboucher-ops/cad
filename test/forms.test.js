@@ -287,3 +287,60 @@ test('defaults install only on an empty database and never overwrite an admin\'s
   assert.equal(d.name, 'Trespass advisal (edited)');
   d.name = name;
 });
+
+/* ---------------- client reporting (GET /api/sites/:id/report) ---------------- */
+test('a site service report aggregates alarm response against SLA, patrol visits, and incidents — restricted ones excluded for a reader without a grant', async () => {
+  const site = (await call('POST', '/api/sites', { name: 'Report Test Site', response_sla_minutes: 10 }, adminT)).body;
+
+  const siteJob = (await call('POST', '/api/jobs', { priority: 'AMBER', incident_type: 'Alarm activation', site: site.id }, dispT)).body;
+  await call('POST', `/api/jobs/${siteJob.id}/assign`, { resources: [dan.id] }, dispT);
+  await call('PATCH', `/api/jobs/${siteJob.id}`, { status: 'ON_SCENE' }, dispT);
+  await call('PATCH', `/api/jobs/${siteJob.id}`, { status: 'COMPLETED' }, dispT);
+
+  const visit = (await call('POST', '/api/site-visits', { site_id: site.id, scheduled_for: new Date().toISOString() }, dispT)).body;
+  await call('PATCH', `/api/site-visits/${visit.id}`, { status: 'COMPLETED' }, dispT);
+
+  // Filed by control — readable to a control-role reader without needing a grant.
+  const standard = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: siteJob.id,
+    values: {
+      person_description: 'Male, 30s', advised_at: new Date().toISOString(), left_site: true,
+      narrative: 'Trespasser advised and left.', officer_signature: sig('Dan Whitfield'),
+    },
+  }, dispT);
+  assert.equal(standard.status, 201, JSON.stringify(standard.body));
+
+  // Filed by the assigned officer, not by the dispatcher who will read the
+  // report below — so the exclusion check actually exercises canRead()
+  // rather than passing trivially because the reader is also the filer.
+  const restricted = await call('POST', '/api/form-submissions', {
+    definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: siteJob.id,
+    values: {
+      concern_about: 'A member of the public', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      what_happened: 'Confidential detail that must not leak into any aggregate report.',
+      action_taken: 'Safeguarding lead notified.', officer_signature: sig('Dan Whitfield'),
+    },
+  }, danT);
+  assert.equal(restricted.status, 201, JSON.stringify(restricted.body));
+
+  const asDispatcher = await call('GET', `/api/sites/${site.id}/report`, undefined, dispT);
+  assert.equal(asDispatcher.status, 200);
+  assert.equal(asDispatcher.body.jobs.total, 1);
+  assert.equal(asDispatcher.body.jobs.completed, 1);
+  assert.equal(asDispatcher.body.jobs.sla_minutes, 10);
+  assert.ok(asDispatcher.body.jobs.avg_response_minutes >= 0, 'response time computed from created_at to on_scene_at');
+  assert.equal(asDispatcher.body.jobs.within_sla, 1, 'an instant test response is well within a 10-minute SLA');
+  assert.equal(asDispatcher.body.visits.total, 1);
+  assert.equal(asDispatcher.body.visits.completed, 1);
+  assert.equal(asDispatcher.body.incidents.length, 1, 'the dispatcher has no grant, so the restricted safeguarding report is excluded');
+  assert.equal(asDispatcher.body.incidents[0].reference, standard.body.reference);
+  assert.ok(!asDispatcher.raw?.includes?.('Confidential detail'), 'restricted content never reaches an ungranted reader, even in a rollup');
+
+  const asFiler = await call('GET', `/api/sites/${site.id}/report`, undefined, danT);
+  assert.equal(asFiler.status, 403, 'a field user is not a control role');
+
+  const bad = await call('GET', `/api/sites/${site.id}/report?from=not-a-date`, undefined, dispT);
+  assert.equal(bad.status, 400);
+
+  assert.equal((await call('GET', '/api/sites/999999/report', undefined, dispT)).status, 404);
+});

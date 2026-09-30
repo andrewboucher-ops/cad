@@ -71,8 +71,8 @@ Asset tracking" item: a `maintenance_logs` collection against a vehicle
 /api/vehicles/:id/maintenance-logs` (control-only to log — an officer
 doesn't coordinate a garage visit), `DELETE` admin-only. Logging one with
 `next_due_at` also updates the vehicle's `service_due_at`, and `admin.html`'s
-Vehicles table flags an overdue one in red. Covered by tests. Needs the same
-deploy treatment as the rest.
+Vehicles table flags an overdue one in red. Covered by tests. Live on the
+container.
 
 **Asset checkout/return audit trail — done, not yet deployed.** The third
 "Extends Asset tracking" item, closing out that section: a dedicated
@@ -82,7 +82,7 @@ and `/return`, `GET /api/assets/:id/checkouts`. A `FIELD_USER` can only check
 an asset out to themselves and only return their own checkout; control can
 act on anyone's. `admin.html`'s asset editor shows the history and the
 checkout/return action; `officer.html` has a "My equipment" panel with a
-Return button per item. Covered by tests. Needs the same deploy treatment.
+Return button per item. Covered by tests. Live on the container.
 
 **Beats — done, not yet deployed.** The last "Extends Sites/Patrols" item: a
 `beats` collection — a named patrol route within a site with an ordered
@@ -94,7 +94,7 @@ one; any visit it generates inherits it, and a manually created visit can
 set one directly. `admin.html` has a Beats tab and a beat picker on the
 patrol schedule form (scoped to the schedule's site); control room and
 `officer.html` show the beat name alongside the site wherever a visit
-appears. Covered by tests. Needs the same deploy treatment.
+appears. Covered by tests. Live on the container.
 
 **Dashboard + theming — done, not yet deployed.** Not from the roadmap list
 above — a direct request once the roadmap sweep landed. Two pieces:
@@ -120,8 +120,7 @@ above — a direct request once the roadmap sweep landed. Two pieces:
 
 Covered by a new preferences test. Verified live in-browser: every theme
 switch, surface knob, and the colour-blind ramp visibly took effect
-immediately and survived a full page reload before this was deployed.
-Needs the same deploy treatment as the rest.
+immediately and survived a full page reload. Live on the container.
 
 **Guard Tour checkpoint scanning — done, not yet deployed.** The one
 remaining "Extends Sites/Patrols" item that wasn't just a decision away —
@@ -138,7 +137,7 @@ the scan; control sees live coverage on the visit, and a completed visit's
 resolution report includes a scan-coverage line. Covered by a new test.
 Verified live in-browser (scan/mismatch/progress round-tripped through
 officer.html and control.html; caught and fixed a real popup-blocked crash
-in the admin print flow along the way). Needs the same deploy treatment.
+in the admin print flow along the way). Live on the container.
 
 That closed every "Extends Sites/Patrols" item except configurable Forms at
 the time — see below, it's since landed too.
@@ -273,10 +272,17 @@ tracking's extended roadmap is now fully built out.
   state honestly rather than faking it. What remains is deciding your
   retention: the queue lives in browser storage, so clearing app data
   discards it.
-- **Client reporting.** Commercial security lives on proving service: patrol
-  visit logs, response times against SLA, incident reports per site. Once
-  Phase 3 lands, `GET /api/sites/:id/report` should aggregate from
-  `site_visits` directly rather than re-deriving from the audit log.
+- ~~**Client reporting.**~~ — done. `GET /api/sites/:id/report?from=&to=`
+  (control roles, default last 30 days) aggregates alarm jobs (count,
+  completed/cancelled, average `created_at`→`on_scene_at` response time
+  against the site's own optional `response_sla_minutes` and how many fell
+  within it), patrol visit counts (completed/missed/cancelled), and incident
+  reports filed against the site or any job/visit at it in the period.
+  Incidents go through `forms.canRead()` exactly like every other read — a
+  RESTRICTED safeguarding report doesn't surface in the rollup for a reader
+  without a grant, covered by a dedicated test alongside the existing leak
+  tests. `admin.html`'s site editor has a new SLA field and a "Service
+  report" button with a date-range picker.
 - **Device/asset provisioning.** Issuing and retiring MDTs, vehicles and
   equipment.
 - **Retention.** Audit logs and location history grow without bound.

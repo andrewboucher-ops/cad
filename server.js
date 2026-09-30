@@ -2349,6 +2349,7 @@ route('POST', '/api/sites', CONTROL, ({ body }) => {
   const site = {
     id: nextId('sites'), name, address: body.address || '', lat: Number(body.lat) || null, lon: Number(body.lon) || null,
     keyholder: body.keyholder || '', contact_email: body.contact_email || '', contract: 'ACTIVE', checklist: [],
+    response_sla_minutes: body.response_sla_minutes ? Number(body.response_sla_minutes) : null,
   };
   db.sites.push(site);
   logEvent('site.created', `SITE ${name} ADDED`);
@@ -2368,6 +2369,12 @@ route('PATCH', '/api/sites/:id', ADMIN, ({ params, body }) => {
   if ('lon' in body) site.lon = body.lon === null || body.lon === '' ? null : Number(body.lon);
   if ('keyholder' in body) site.keyholder = body.keyholder || '';
   if ('contact_email' in body) site.contact_email = body.contact_email || '';
+  if ('response_sla_minutes' in body) {
+    if (body.response_sla_minutes !== null && (!Number.isFinite(Number(body.response_sla_minutes)) || Number(body.response_sla_minutes) <= 0)) {
+      throw httpError(400, 'response_sla_minutes must be a positive number of minutes, or null');
+    }
+    site.response_sla_minutes = body.response_sla_minutes === null ? null : Number(body.response_sla_minutes);
+  }
   if ('checklist' in body) {
     if (!Array.isArray(body.checklist)) throw httpError(400, 'checklist must be an array');
     site.checklist = body.checklist.map((item) => ({
@@ -2911,6 +2918,63 @@ require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, f
 const forms = require('./routes-forms.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
+});
+
+/* Client reporting — proving service to whoever pays for the contract:
+ * patrol visit counts, alarm response time against the site's own SLA (if
+ * one is set), and incident reports for the period. Incident visibility
+ * goes through forms.canRead() like every other read of a submission — a
+ * RESTRICTED safeguarding report doesn't become visible just because it's
+ * being rolled up into a site total. Defaults to the last 30 days. */
+route('GET', '/api/sites/:id/report', CONTROL, ({ params, query, user }) => {
+  const site = db.sites.find((x) => x.id === Number(params.id));
+  if (!site) throw httpError(404, 'site not found');
+
+  const to = query.get('to') ? new Date(query.get('to')) : new Date();
+  const from = query.get('from') ? new Date(query.get('from')) : new Date(to.getTime() - 30 * 86400000);
+  if (isNaN(from.getTime()) || isNaN(to.getTime())) throw httpError(400, 'invalid from/to date');
+  const inRange = (iso) => { const t = Date.parse(iso); return !isNaN(t) && t >= from.getTime() && t <= to.getTime(); };
+
+  const jobs = db.jobs.filter((j) => j.site_id === site.id && inRange(j.created_at));
+  const visits = db.site_visits.filter((v) => v.site_id === site.id && inRange(v.scheduled_for));
+
+  const responseMinutes = jobs.filter((j) => j.on_scene_at).map((j) => (Date.parse(j.on_scene_at) - Date.parse(j.created_at)) / 60000);
+  const avgResponseMinutes = responseMinutes.length ? Math.round((responseMinutes.reduce((a, b) => a + b, 0) / responseMinutes.length) * 10) / 10 : null;
+
+  const jobIds = new Set(jobs.map((j) => j.id));
+  const visitIds = new Set(visits.map((v) => v.id));
+  const incidents = db.form_submissions
+    .filter((s) => inRange(s.submitted_at))
+    .filter((s) => (s.subject_type === 'SITE' && s.subject_id === site.id)
+      || (s.subject_type === 'JOB' && jobIds.has(s.subject_id))
+      || (s.subject_type === 'SITE_VISIT' && visitIds.has(s.subject_id)))
+    .filter((s) => forms.canRead(s, user))
+    .sort((a, b) => (a.submitted_at < b.submitted_at ? 1 : -1))
+    .map((s) => ({
+      id: s.id, reference: s.reference, definition_name: s.definition_name,
+      visibility: forms.effectiveVisibility(s), subject_type: s.subject_type,
+      submitted_by: s.submitted_by_name, submitted_at: s.submitted_at,
+    }));
+
+  return {
+    site: { id: site.id, name: site.name, address: site.address },
+    from: from.toISOString(), to: to.toISOString(),
+    jobs: {
+      total: jobs.length,
+      completed: jobs.filter((j) => j.status === 'COMPLETED').length,
+      cancelled: jobs.filter((j) => j.status === 'CANCELLED').length,
+      avg_response_minutes: avgResponseMinutes,
+      sla_minutes: site.response_sla_minutes || null,
+      within_sla: site.response_sla_minutes ? responseMinutes.filter((m) => m <= site.response_sla_minutes).length : null,
+    },
+    visits: {
+      total: visits.length,
+      completed: visits.filter((v) => v.status === 'COMPLETED').length,
+      missed: visits.filter((v) => v.status === 'MISSED').length,
+      cancelled: visits.filter((v) => v.status === 'CANCELLED').length,
+    },
+    incidents,
+  };
 });
 
 route('GET', '/api/config', ALL, () => ({
