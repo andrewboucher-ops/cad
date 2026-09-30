@@ -212,6 +212,14 @@ async function load() {
     el('#systemBody').innerHTML = Object.entries(byRole).map(([role, n]) =>
       `<div class="list-row"><span style="flex:1">${esc(role.replace('_', ' '))} accounts</span><b>${n}</b></div>`).join('')
       + `<div class="list-row"><span style="flex:1">Sites under contract</span><b>${state.sites.length}</b></div>`;
+    const siaFlagged = state.personnel.filter((p) => p.compliance && (p.compliance.sia === 'expired' || p.compliance.sia === 'expiring'));
+    const dbsOverdue = state.personnel.filter((p) => p.compliance && p.compliance.dbs === 'overdue');
+    if (siaFlagged.length) {
+      el('#systemBody').innerHTML += `<div class="list-row"><span style="flex:1;color:var(--emergency)">SIA licences expiring or expired</span><b style="color:var(--emergency)">${siaFlagged.length}</b></div>`;
+    }
+    if (dbsOverdue.length) {
+      el('#systemBody').innerHTML += `<div class="list-row"><span style="flex:1;color:var(--emergency)">DBS rechecks overdue</span><b style="color:var(--emergency)">${dbsOverdue.length}</b></div>`;
+    }
   }
 }
 load().catch((e) => { el('#activityBody').innerHTML = `<p class="empty-note">${esc(e.message)}</p>`; });

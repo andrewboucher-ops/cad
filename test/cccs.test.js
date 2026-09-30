@@ -535,6 +535,35 @@ test('personnel can be created, updated and deleted, with a unique employee numb
   assert.equal((await call('DELETE', `/api/personnel/${a.body.id}`, undefined, adminT)).status, 200);
 });
 
+/* ---------------- SIA / DBS compliance tracking ---------------- */
+test('SIA licence and DBS check fields compute a compliance flag, and are validated', async () => {
+  const p = await call('POST', '/api/personnel', { name: 'Compliance Test' }, adminT);
+  assert.deepEqual(p.body.compliance, { sia: 'unset', dbs: 'unset' }, 'no data recorded yet');
+
+  const badExpiry = await call('PATCH', `/api/personnel/${p.body.id}`, { sia_licence_expiry: 'not-a-date' }, adminT);
+  assert.equal(badExpiry.status, 400);
+  const badType = await call('PATCH', `/api/personnel/${p.body.id}`, { dbs_certificate_type: 'NONSENSE' }, adminT);
+  assert.equal(badType.status, 400);
+
+  const expired = await call('PATCH', `/api/personnel/${p.body.id}`, { sia_licence_no: 'SIA-1', sia_licence_expiry: new Date(Date.now() - 86400000).toISOString() }, adminT);
+  assert.equal(expired.body.compliance.sia, 'expired');
+
+  const expiring = await call('PATCH', `/api/personnel/${p.body.id}`, { sia_licence_expiry: new Date(Date.now() + 10 * 86400000).toISOString() }, adminT);
+  assert.equal(expiring.body.compliance.sia, 'expiring');
+
+  const ok = await call('PATCH', `/api/personnel/${p.body.id}`, { sia_licence_expiry: new Date(Date.now() + 200 * 86400000).toISOString() }, adminT);
+  assert.equal(ok.body.compliance.sia, 'ok');
+
+  const withCert = await call('PATCH', `/api/personnel/${p.body.id}`, { dbs_certificate_no: 'DBS-1', dbs_certificate_type: 'ENHANCED' }, adminT);
+  assert.equal(withCert.body.compliance.dbs, 'unset', 'recording a certificate number is not the same as performing the check');
+
+  const checked = await call('PATCH', `/api/personnel/${p.body.id}`, { dbs_checked_now: true }, adminT);
+  assert.equal(checked.body.compliance.dbs, 'ok');
+  assert.ok(checked.body.dbs_last_checked_at);
+
+  await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT);
+});
+
 test('personnel cannot be deleted while assigned to an open job or site visit, or linked to a login', async () => {
   const p = await call('POST', '/api/personnel', { name: 'Temp Officer' }, adminT);
   const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Test site' }, dispT);

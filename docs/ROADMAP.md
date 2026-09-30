@@ -140,25 +140,47 @@ Verified live in-browser (scan/mismatch/progress round-tripped through
 officer.html and control.html; caught and fixed a real popup-blocked crash
 in the admin print flow along the way). Needs the same deploy treatment.
 
-That closes every "Extends Sites/Patrols" item except configurable Forms
-(trespass advisals, patient care, safeguarding — the last one needs a
-restricted-visibility design, not just a form builder).
+That closed every "Extends Sites/Patrols" item except configurable Forms at
+the time — see below, it's since landed too.
 
-**Control room redesign — done, not yet deployed.** Also not from the
-roadmap list — a direct request. `control.html`'s job and patrol-visit
-detail views (status stepper, resources, notes, assign/complete/cancel,
-checkpoint coverage) moved out of popup modals into the existing Detail
-panel (renamed from "Resource Detail", since it now shows whichever of
-person/MDT/job/visit was last selected), matching how personnel/MDT detail
-already worked. The panel stays live via the same WebSocket events that
-already update the lists, guarded against clobbering an operator's
-in-progress typing (checked via `document.activeElement` before
-re-rendering). Smaller, occasional-action modals (create job/visit, assign
-by call sign, send a message, push notification setup) were deliberately
-left as modals — that's a scope decision, not an oversight; flag it if the
-intent was to remove modals everywhere. `LAYOUT_VERSION` bumped so a saved
-panel layout with the old "Resource Detail" title doesn't linger. Needs the
-same deploy treatment as the rest.
+**Control room redesign — first pass done and deployed (later superseded).**
+`control.html`'s job and patrol-visit detail views (status stepper,
+resources, notes, assign/complete/cancel, checkpoint coverage) moved out of
+popup modals into the existing Detail panel (renamed from "Resource Detail").
+That first pass deliberately left the smaller, occasional-action modals
+(create job/visit, assign by call sign, send a message, push notification
+setup) alone. **A separate, later effort (`feat/control-redesign`, built
+with another agent while this session waited on a usage reset) went further
+and is what's now live**: map-primary layout, translucent docked panels, a
+merged Dispatch panel (jobs + visits together) with a "needs attendance"
+filter, an On-shift panel grouped by shift, and genuinely zero modals —
+create/assign/message are Detail-panel modes now, not popups. GoldenLayout
+was removed entirely in that pass (multi-monitor popouts went with it).
+
+**Configurable Forms — done and deployed**, also via `feat/control-redesign`.
+Five default types (trespass advisal, parking citation, vehicle inspection,
+patient care, safeguarding); patient care and safeguarding are `RESTRICTED`
+by default. Restriction is enforced server-side in projection — a canary
+leak test asserts a restricted report never appears in any other user's
+response or raw WebSocket traffic, and is proven to fail when the rule is
+broken. Officers file from `officer.html` with a canvas signature pad;
+reports are read in a new `forms.html`; an admin form builder
+(`routes-forms.js`) defines types and named readers rather than the five
+defaults being hardcoded forever.
+
+**New, not from this roadmap — contact routes (click-to-dial + SMS).** Also
+from `feat/control-redesign`'s stack of branches. `personnel.supervisor_id`
+(line management) and `shifts.is_duty_supervisor` (operational, per shift)
+are both settable for the first time — deliberately two separate concepts,
+since they can disagree. An officer's contact resolves to the duty
+supervisor first, falling back to the line manager. Dial records an
+`ATTEMPTED` outcome only — nothing on that path may claim `ANSWERED` without
+a real PBX event confirming it; SMS goes via Twilio, logged-only by default
+(`SMS_LIVE=off`). **Not yet verified**: a real call has never been placed
+through it, and Twilio has never sent a real webhook here — both need
+hands-on access this session doesn't have (FreePBX GUI, a phone, a public
+Twilio callback URL). See `HANDOVER.md` for the full detail and the honest
+list of what's unverified.
 
 ---
 
@@ -232,9 +254,10 @@ checkpoint scanning and configurable Forms.
 
 Real `personnel` CRUD, a `shifts` collection with clock-in/out, a
 control-room rota builder (`public/rota.html`), and the shift/clock-in view
-inside `officer.html`. What's left under "Extends HR Rota" below — leave
-management, payroll export, SIA/DBS checks, Xero invoicing — all need a
-decision or research spike before they can be designed, not just built.
+inside `officer.html`. SIA/DBS compliance tracking has since landed too
+(see below). What's left under "Extends HR Rota" below — leave management,
+payroll export, Xero invoicing — all still need a decision or research
+spike before they can be designed, not just built.
 
 ## Phase 5 — Asset tracking ✅ done and deployed
 
@@ -267,19 +290,28 @@ tracking's extended roadmap is now fully built out.
 - ~~Guard Tour checkpoint scanning (NFC/QR/geofence points per site)~~ — done, see above (QR + NFC, not geofence)
 - ~~Beats (patrol routes as their own entity)~~ — done, see above
 - ~~Passdown logs (per-site shift-handover notes)~~ — done, see above
-- Forms: trespass advisals, parking citations, vehicle inspections,
-  patient care/first-aid reports, safeguarding reports (the latter needs
-  restricted-visibility handling given its sensitivity)
+- ~~Forms: trespass advisals, parking citations, vehicle inspections,
+  patient care/first-aid reports, safeguarding reports~~ — done, see above
+  (`feat/control-redesign`); this section is now fully built out.
 
 **Extends HR Rota**
+- ~~Supervisor concepts (line manager + duty supervisor) and contact
+  routes (click-to-dial, SMS)~~ — done, see above; real-PBX/real-Twilio
+  verification still outstanding, not the code
 - Full HR suite: leave management, attendance reporting, onboarding
 - Payroll — likely an export, not a payroll engine; confirm the real
   requirement before designing
-- **SIA licence checks** and **DBS Update Service checks** — needs a research
-  spike before design: verify the actual integration mechanism (public
-  API vs. employer portal vs. commercial integration) before building
-  `personnel.sia_licence_no/expiry/status` and
-  `personnel.dbs_certificate_no/type/status`
+- ~~**SIA licence checks** and **DBS Update Service checks**~~ — research
+  spike done: neither service has a public API (confirmed via SIA FOI 0622,
+  24 Aug 2026, and the DBS employer guide, updated 28 Aug 2026); the only
+  sanctioned mechanisms are a manual web portal (SIA) and a manual,
+  consent-based per-person check (DBS Update Service), and DBS never
+  proactively notifies of changes. Built as compliance *tracking* instead —
+  `personnel.sia_licence_no/expiry` and
+  `personnel.dbs_certificate_no/type/update_service_id/last_checked_at`
+  (`db/schema-compliance.sql`), a computed `compliance: { sia, dbs }` flag
+  on `GET /api/personnel`, fields and a "Mark checked today" action in
+  `admin.html`, and counts on the dashboard System panel — see README.md
 - Automated invoicing via **Xero** (not QuickBooks) — contract/rate fields on
   `sites`, an invoice-generation routine
 

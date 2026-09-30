@@ -446,6 +446,33 @@ const isControlRole = (role) => ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].inc
  * personnel no longer can be. welfare_note is kept (control needs to see
  * it), but nothing here is ever handed to a role that isn't control or
  * this exact person -- callers gate that themselves. */
+/* SIA licence and DBS Update Service status are both, today, checked by a
+ * human against the regulator's own site — neither the SIA nor the DBS
+ * publishes an API for this (SIA confirmed it in an FOI response, 24 Aug
+ * 2026: no API for single or bulk checks, not even for the paid third-party
+ * "SIA Verify"/"SIA Checker" services; the DBS Update Service is a
+ * consent-based per-person web check with no automation route either). So
+ * these fields record what an admin found when they last actually checked,
+ * not a live status — compliance() below just turns "did anyone remember to
+ * recheck this" into a visible flag, the same idea as a missed patrol visit
+ * or an overdue vehicle service. */
+const SIA_EXPIRY_WARN_DAYS = 30;
+const DBS_RECHECK_DUE_DAYS = 365; // DBS sets no fixed frequency; a year is a common risk-based default, not a legal requirement
+function personnelCompliance(p) {
+  const now = Date.now();
+  let sia = 'unset';
+  if (p.sia_licence_expiry) {
+    const expiry = Date.parse(p.sia_licence_expiry);
+    if (expiry < now) sia = 'expired';
+    else if (expiry - now < SIA_EXPIRY_WARN_DAYS * 86400000) sia = 'expiring';
+    else sia = 'ok';
+  }
+  let dbs = 'unset';
+  if (p.dbs_last_checked_at) {
+    dbs = (now - Date.parse(p.dbs_last_checked_at)) > DBS_RECHECK_DUE_DAYS * 86400000 ? 'overdue' : 'ok';
+  }
+  return { sia, dbs };
+}
 function publicPersonnel(p) {
   const cs = db.callsigns.find((c) => c.id === p.callsign_id);
   const veh = db.vehicles.find((v) => v.id === p.vehicle_id);
@@ -458,6 +485,10 @@ function publicPersonnel(p) {
     has_login: Boolean(p.user_id), supervisor_id: p.supervisor_id || null,
     welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
     welfare_note: p.welfare_note || null,
+    sia_licence_no: p.sia_licence_no || null, sia_licence_expiry: p.sia_licence_expiry || null,
+    dbs_certificate_no: p.dbs_certificate_no || null, dbs_certificate_type: p.dbs_certificate_type || null,
+    dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
+    compliance: personnelCompliance(p),
     notes: p.notes || '',
   };
 }
@@ -1295,6 +1326,22 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
       p.supervisor_id = sup.id;
     }
   }
+  if ('sia_licence_no' in body) p.sia_licence_no = body.sia_licence_no ? String(body.sia_licence_no).trim() : null;
+  if ('sia_licence_expiry' in body) {
+    if (body.sia_licence_expiry && isNaN(Date.parse(body.sia_licence_expiry))) throw httpError(400, 'invalid sia_licence_expiry');
+    p.sia_licence_expiry = body.sia_licence_expiry || null;
+  }
+  if ('dbs_certificate_no' in body) p.dbs_certificate_no = body.dbs_certificate_no ? String(body.dbs_certificate_no).trim() : null;
+  if ('dbs_certificate_type' in body) {
+    if (body.dbs_certificate_type && !['STANDARD', 'ENHANCED'].includes(body.dbs_certificate_type)) throw httpError(400, 'invalid dbs_certificate_type');
+    p.dbs_certificate_type = body.dbs_certificate_type || null;
+  }
+  if ('dbs_update_service_id' in body) p.dbs_update_service_id = body.dbs_update_service_id ? String(body.dbs_update_service_id).trim() : null;
+  // Set explicitly, not auto-stamped by touching the other DBS fields — the
+  // whole point is recording WHEN a human actually performed the manual
+  // Update Service check, which does not happen just because someone typed
+  // in a certificate number.
+  if ('dbs_checked_now' in body && body.dbs_checked_now) p.dbs_last_checked_at = new Date().toISOString();
   if ('notes' in body) p.notes = body.notes || '';
   logEvent('personnel.updated', `PERSONNEL ${p.name} UPDATED`, { personnel_id: p.id });
   return publicPersonnel(p);

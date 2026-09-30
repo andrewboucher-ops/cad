@@ -300,6 +300,34 @@ blocked while they're assigned to an open job or site visit, have an
 upcoming or active shift, or still have a login linked — unlink or resolve
 those first.
 
+### SIA licence / DBS compliance tracking
+
+There is no integration with either service, because none exists to build:
+the SIA's own Freedom of Information response (FOI 0622, 24 Aug 2026)
+confirms it provides no API, data feed or special access for single or bulk
+licence checks — not even to the paid third-party checker services — and the
+DBS Update Service is, by design, a manual, consent-based, per-person web
+check with no automation route (see the DBS employer guide, updated 28 Aug
+2026); DBS does not proactively notify of status changes either. A handful
+of unofficial GitHub projects exist that either browser-scrape the SIA's
+public checker form or call an undocumented endpoint of the DBS Update
+Service's own web app — neither is a sanctioned integration, and CCCS
+deliberately does not build against either.
+
+So `admin.html`'s Personnel tab instead records what an admin found when
+they last actually performed the check by hand — SIA licence number and
+expiry, DBS certificate number/type and Update Service ID, and a dedicated
+"Mark checked today" action that stamps when the DBS check was actually
+run (typing in a certificate number is not the same act as performing the
+check, so it's never inferred from editing the other fields). `GET
+/api/personnel` returns a computed `compliance: { sia, dbs }` flag per
+person — `expiring`/`expired` for a licence within 30 days of or past its
+expiry, `overdue` for a DBS recheck more than a year old (a risk-based
+default, not a legal requirement, since DBS sets no fixed frequency) — the
+same "make the silent gap visible" pattern already used for overdue vehicle
+service and missed patrol visits, surfaced as a red flag on the personnel
+table and counted on the admin dashboard's System panel.
+
 ## Asset tracking
 
 Vehicles are a real, editable record (`admin.html`'s Vehicles tab) — make,
