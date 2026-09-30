@@ -42,6 +42,15 @@ const TABLES = [
   // Filed paperwork is evidence, and form_grants records who may read the
   // restricted kind — neither can be allowed to vanish on a restart.
   'form_definitions', 'form_submissions', 'form_grants',
+  // Client portal, multi-branch and training all followed this same
+  // whole-collection pattern but were missed from this list when they
+  // landed — each would otherwise lose every real record on the next
+  // restart, not just in a crash window, since load()/flushNow() only
+  // ever look at what's named here.
+  'clients', 'documents', 'client_requests',
+  'branches',
+  'training_courses', 'training_records',
+  'applicants',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

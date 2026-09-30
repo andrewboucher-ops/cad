@@ -372,9 +372,22 @@ tracking's extended roadmap is now fully built out.
   and a retired course dropping out of the live summary. See README's
   Training section for the full design and the deliberate v1
   simplifications (no course versioning, no DELETE — retire via `active:
-  false`). **Applicant tracking is still outstanding** — a genuinely
-  separate feature (a recruitment pipeline before someone becomes a real
-  personnel record), not yet started.
+  false`). ~~Applicant tracking~~ — also done: a recruitment pipeline
+  (APPLIED → SCREENING → INTERVIEW → OFFER, freely, plus REJECTED/
+  WITHDRAWN) gated to control roles, not ALL, since a field/MDT user has no
+  reason to see who's applying. `HIRED` is deliberately not a plain stage
+  change — only `POST /api/applicants/:id/hire` creates it, because that's
+  the actual point of the feature: it creates a real `personnel` record so
+  everything else in CCCS picks the person up from that moment on, without
+  creating a login (a separate, explicit Accounts-tab decision, same as
+  any new personnel record). `admin.html`'s new Applicants tab handles
+  notes, interview scheduling and CV upload. Covered by
+  `test/applicants.test.js`. See README's Applicant tracking section.
+  **Also found and fixed while building this**: `store.js`'s persistence
+  whitelist never included the client portal, multi-branch or training
+  collections — they were never actually surviving a restart. Fixed, and
+  `test/persistence.test.js` now guards against it happening again for
+  any future collection, applicants included.
 - ~~**Multi-branch**~~ — done. Decision made: a staff-visibility split, not
   full tenant separation — `SUPERVISOR`/`FIELD_USER`/`MDT_USER` see only
   their own branch's sites/personnel/vehicles/assets (and jobs/visits at

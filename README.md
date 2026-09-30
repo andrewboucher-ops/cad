@@ -250,6 +250,17 @@ Postgres target if you outgrow it; `store.js` is the only file that changes.
 A hard crash loses at most one flush interval — a location fix or two. Emergencies,
 welfare alarms and audit rows flush immediately.
 
+`store.js`'s `TABLES` is a hand-maintained whitelist — `load()`/`flushNow()`
+only ever look at what's named there, so a new collection that forgets to
+be added to it doesn't error, it just silently never survives a restart.
+That exact thing happened to the client portal, multi-branch and training
+records when they first landed (found and fixed while building applicant
+tracking) — every test in this suite runs with `PERSISTENCE=off`, so none
+of them would ever have caught it. `test/persistence.test.js` now asserts
+every key on `db` is in `TABLES`, so the next new collection can't repeat
+it quietly, plus a real round-trip test (write, force a real restart via
+`require.cache`, read back) for one of the previously-broken ones.
+
 ## Lone worker welfare timers
 
 The feature your insurer and your lone-worker policy will ask about. An officer
@@ -523,6 +534,36 @@ resolve their `course_id`; editing a course's content in place, with no
 `form_definitions`-style versioning, is a deliberate v1 simplification —
 a quiz's wording changing later doesn't carry the audit-fidelity stakes a
 restricted safeguarding report does.
+
+## Applicant tracking
+
+A recruitment pipeline for candidates before they become staff — genuinely
+separate from training records, which are about people who already are.
+Pure back-office HR data: a `FIELD_USER`/`MDT_USER` has no legitimate
+reason to see who's applying for a job, so `routes-applicants.js` gates
+the whole surface to control roles, not `ALL`, and branch-scopes it the
+same way personnel/vehicles/sites already are.
+
+An applicant moves through `APPLIED → SCREENING → INTERVIEW → OFFER`
+fairly freely — `admin.html`'s Applicants tab lets you set any stage, add
+timestamped notes (append-only, always attributed to who wrote them,
+never edited or removed), schedule an interview, and upload a CV
+(magic-byte checked, same as every other upload in this codebase).
+Rejecting one requires a reason.
+
+`HIRED` is different on purpose: it's never a plain stage change. It only
+happens through `POST /api/applicants/:id/hire` — the actual point of the
+feature — which creates a real `personnel` record from the applicant's
+details (name, contact info, `role_applied_for` falling back into `rank`)
+so everything else in CCCS — compliance tracking, training, branch
+assignment, the rota — picks them up from that moment on like any other
+member of staff. It deliberately does not create a login; that stays a
+separate, explicit decision from the Accounts tab, the same as it already
+is for any new personnel record. Hiring is blocked for a candidate
+already marked `REJECTED` or `WITHDRAWN` — move them back to an earlier
+stage first, so hiring never overrides a decision that was already made
+about them, only reopens it — and a `HIRED` applicant can't be deleted,
+since the personnel record it became still references that history.
 
 ## Working without a link
 

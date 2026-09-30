@@ -108,6 +108,7 @@
         <button class="btn primary" id="btnNewClient" style="padding:7px 14px;font-size:13px" hidden>New client</button>
         <button class="btn primary" id="btnNewBranch" style="padding:7px 14px;font-size:13px" hidden>New branch</button>
         <button class="btn primary" id="btnNewCourse" style="padding:7px 14px;font-size:13px" hidden>New course</button>
+        <button class="btn primary" id="btnNewApplicant" style="padding:7px 14px;font-size:13px" hidden>New applicant</button>
       </span>
     </div>
     <div class="tabs">
@@ -123,6 +124,7 @@
       <button id="tabClients">Clients</button>
       <button id="tabBranches">Branches</button>
       <button id="tabTraining">Training</button>
+      <button id="tabApplicants">Applicants</button>
     </div>
 
     <div id="viewAccounts">
@@ -227,6 +229,23 @@
       <p class="dim" style="margin:0 0 10px;font-size:13px">A course with an assessment is taken in-app from the officer terminal, scored server-side. A course without one is logged — by an admin, from a person's own record — after it happens elsewhere (a classroom session, a toolbox talk).</p>
       <div id="tcTableWrap"></div>
     </div>
+
+    <div id="viewApplicants" class="hide">
+      <div class="toolbar">
+        <input id="apSearch" placeholder="Search name, role…">
+        <select id="apStatus">
+          <option value="">All stages</option>
+          <option value="APPLIED">Applied</option>
+          <option value="SCREENING">Screening</option>
+          <option value="INTERVIEW">Interview</option>
+          <option value="OFFER">Offer</option>
+          <option value="HIRED">Hired</option>
+          <option value="REJECTED">Rejected</option>
+          <option value="WITHDRAWN">Withdrawn</option>
+        </select>
+      </div>
+      <div id="apTableWrap"></div>
+    </div>
   </div>
 </main>
 
@@ -254,18 +273,18 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user', CLIENT: 'Client' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : '');
 
-let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [], allCourses = [];
+let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [], allCourses = [], allApplicants = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches, allCourses] = await Promise.all([
+  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches, allCourses, allApplicants] = await Promise.all([
     api('GET', '/api/users'), api('GET', '/api/personnel'), api('GET', '/api/mdts'),
     api('GET', '/api/callsigns'), api('GET', '/api/sites'), api('GET', '/api/patrol-schedules'),
     api('GET', '/api/vehicles'), api('GET', '/api/assets'), api('GET', '/api/beats'),
     api('GET', '/api/clients'), api('GET', '/api/client-requests'), api('GET', '/api/branches'),
-    api('GET', '/api/training-courses?all=1'),
+    api('GET', '/api/training-courses?all=1'), api('GET', '/api/applicants'),
   ]);
   allForms = await api('GET', '/api/form-definitions?all=1');
-  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests(); paintBranches(); paintCourses();
+  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests(); paintBranches(); paintCourses(); paintApplicants();
 }
 function branchOptions(selected) {
   return '<option value="">— none / shared —</option>' + allBranches.map((b) =>
@@ -294,6 +313,9 @@ function showTab(name) {
   el('#tabTraining').classList.toggle('active', name === 'training');
   el('#viewTraining').classList.toggle('hide', name !== 'training');
   el('#btnNewCourse').hidden = name !== 'training';
+  el('#tabApplicants').classList.toggle('active', name === 'applicants');
+  el('#viewApplicants').classList.toggle('hide', name !== 'applicants');
+  el('#btnNewApplicant').hidden = name !== 'applicants';
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
@@ -323,6 +345,7 @@ el('#tabForms').onclick = () => showTab('forms');
 el('#tabClients').onclick = () => showTab('clients');
 el('#tabBranches').onclick = () => showTab('branches');
 el('#tabTraining').onclick = () => showTab('training');
+el('#tabApplicants').onclick = () => showTab('applicants');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -1854,6 +1877,176 @@ function courseModal(c) {
   });
 }
 el('#btnNewCourse').onclick = () => courseModal(null);
+
+/* ---------- applicants ---------- */
+const APPLICANT_STATUS_LABEL = { APPLIED: 'Applied', SCREENING: 'Screening', INTERVIEW: 'Interview', OFFER: 'Offer', HIRED: 'Hired', REJECTED: 'Rejected', WITHDRAWN: 'Withdrawn' };
+function paintApplicants() {
+  const q = el('#apSearch').value.trim().toLowerCase();
+  const status = el('#apStatus').value;
+  let rows = allApplicants.slice().sort((a, b) => (a.applied_at < b.applied_at ? 1 : -1));
+  if (status) rows = rows.filter((a) => a.status === status);
+  if (q) rows = rows.filter((a) => a.name.toLowerCase().includes(q) || (a.role_applied_for || '').toLowerCase().includes(q));
+  el('#apTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Name</th><th style="width:160px">Role applied for</th><th style="width:110px">Stage</th><th style="width:110px">Applied</th><th style="width:100px">Source</th></tr></thead>
+      <tbody>${rows.map((a) => `<tr class="clickable" data-applicant="${a.id}">
+        <td>${esc(a.name)}</td>
+        <td class="dim">${esc(a.role_applied_for || '—')}</td>
+        <td class="dim">${esc(APPLICANT_STATUS_LABEL[a.status] || a.status)}</td>
+        <td class="dim">${esc(new Date(a.applied_at).toLocaleDateString('en-GB'))}</td>
+        <td class="dim">${esc(a.source || '—')}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No applicants yet.</p>';
+  els('#apTableWrap [data-applicant]').forEach((row) => row.addEventListener('click', () => applicantModal(allApplicants.find((a) => a.id === Number(row.dataset.applicant)))));
+}
+el('#apSearch').addEventListener('input', paintApplicants);
+el('#apStatus').addEventListener('change', paintApplicants);
+async function deleteApplicant(id) {
+  const a = allApplicants.find((x) => x.id === id);
+  if (!a || !confirm(`Delete applicant ${a.name}? This cannot be undone.`)) return;
+  try { await api('DELETE', `/api/applicants/${id}`); closeModal(); await load(); showTab('applicants'); }
+  catch (e) { alert(e.message); }
+}
+
+function applicantForm(a) {
+  const isNew = !a;
+  return `
+    <form class="stack" id="apForm">
+      <label>Name</label>
+      <input id="napName" autocomplete="off" value="${isNew ? '' : esc(a.name)}">
+      <label>Email</label>
+      <input id="napEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(a.email || '')}">
+      <label>Phone</label>
+      <input id="napPhone" autocomplete="off" value="${isNew ? '' : esc(a.phone || '')}">
+      <label>Role applied for</label>
+      <input id="napRole" autocomplete="off" value="${isNew ? '' : esc(a.role_applied_for || '')}">
+      <label>Source (optional)</label>
+      <input id="napSource" autocomplete="off" placeholder="Indeed, referral, walk-in…" value="${isNew ? '' : esc(a.source || '')}">
+      <label>Branch (optional — leave shared if you don't use branches)</label>
+      <select id="napBranch">${branchOptions(isNew ? null : a.branch_id)}</select>
+      ${!isNew ? `
+      <label>Stage</label>
+      <select id="napStatus">${['APPLIED', 'SCREENING', 'INTERVIEW', 'OFFER', 'REJECTED', 'WITHDRAWN'].map((s) => `<option value="${s}" ${a.status === s ? 'selected' : ''}>${esc(APPLICANT_STATUS_LABEL[s])}</option>`).join('')}</select>
+      <label>Interview date/time (optional)</label>
+      <input id="napInterviewAt" type="datetime-local" value="${a.interview_at ? a.interview_at.slice(0, 16) : ''}">
+      <div id="napRejectWrap" style="${a.status === 'REJECTED' ? '' : 'display:none'}">
+        <label>Rejection reason</label>
+        <input id="napRejectReason" autocomplete="off" value="${esc(a.rejected_reason || '')}">
+      </div>
+      <label>CV</label>
+      <div id="apCvWrap" class="dim">${a.cv ? `<a href="/api/applicants/${a.id}/cv?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(a.cv.filename)}</a>` : 'No CV uploaded yet.'}</div>
+      <div style="display:flex;gap:8px">
+        <input type="file" id="apCvFile" accept="application/pdf,image/png,image/jpeg" style="flex:1">
+        <button type="button" class="btn" id="apCvUpload">Upload</button>
+      </div>
+      <label>Notes</label>
+      <div id="apNotesList" class="dim">${a.notes_log.length ? '' : 'No notes yet.'}</div>
+      <div style="display:flex;gap:8px">
+        <input id="apNoteBody" placeholder="Add a note" style="flex:1">
+        <button type="button" class="btn" id="apAddNote">Add</button>
+      </div>` : ''}
+      <p class="dim" id="apError" style="min-height:16px;margin:0"></p>
+    </form>`;
+}
+function renderApplicantNotes(a) {
+  el('#apNotesList').innerHTML = a.notes_log.length
+    ? `<div class="log" style="max-height:160px;overflow:auto">${a.notes_log.slice().reverse().map((n) => `<div><span class="t">${esc(new Date(n.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(n.author)}: ${esc(n.body)}</div>`).join('')}</div>`
+    : '<p class="dim">No notes yet.</p>';
+}
+function applicantModal(a) {
+  modal(a ? `${a.name} — ${APPLICANT_STATUS_LABEL[a.status]}` : 'New applicant', applicantForm(a), () => {
+    if (a) renderApplicantNotes(a);
+    if (a && el('#napStatus')) el('#napStatus').addEventListener('change', () => {
+      el('#napRejectWrap').style.display = el('#napStatus').value === 'REJECTED' ? '' : 'none';
+    });
+    if (a) el('#apAddNote').onclick = async () => {
+      const body = el('#apNoteBody').value.trim();
+      if (!body) return;
+      try {
+        const updated = await api('POST', `/api/applicants/${a.id}/notes`, { body });
+        el('#apNoteBody').value = ''; renderApplicantNotes(updated);
+        Object.assign(a, updated);
+        allApplicants = allApplicants.map((x) => (x.id === a.id ? updated : x));
+      } catch (e) { el('#apError').textContent = e.message; }
+    };
+    if (a) el('#apCvUpload').onclick = () => {
+      const file = el('#apCvFile').files[0];
+      if (!file) { el('#apError').textContent = 'choose a file first'; return; }
+      if (!['application/pdf', 'image/png', 'image/jpeg'].includes(file.type)) { el('#apError').textContent = 'must be a PDF, PNG or JPEG'; return; }
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const data = reader.result.split(',')[1];
+        try {
+          const updated = await api('POST', `/api/applicants/${a.id}/cv`, { mimetype: file.type, filename: file.name, data });
+          await load(); showTab('applicants'); applicantModal(allApplicants.find((x) => x.id === a.id));
+        } catch (e) { el('#apError').textContent = e.message; }
+      };
+      reader.readAsDataURL(file);
+    };
+    const foot = document.querySelector('#modalHost .foot');
+    const canHire = a && !['HIRED', 'REJECTED', 'WITHDRAWN'].includes(a.status);
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${a ? '<button class="btn danger" id="apDelete">Delete</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          ${canHire ? '<button type="button" class="btn ok" id="apHire">Hire</button>' : ''}
+          <button class="btn" id="apCancel">Cancel</button>
+          <button class="btn primary" id="apSave">${a ? 'Save changes' : 'Create applicant'}</button>
+        </span>
+      </div>`;
+    el('#apCancel').onclick = closeModal;
+    if (el('#apDelete')) el('#apDelete').onclick = () => deleteApplicant(a.id);
+    if (el('#apHire')) el('#apHire').onclick = () => hireModal(a);
+    el('#apSave').onclick = async () => {
+      const name = el('#napName').value.trim();
+      if (!name) { el('#apError').textContent = 'name is required'; return; }
+      const body = {
+        name, email: el('#napEmail').value.trim(), phone: el('#napPhone').value.trim(),
+        role_applied_for: el('#napRole').value.trim(), source: el('#napSource').value.trim(),
+        branch_id: el('#napBranch').value ? Number(el('#napBranch').value) : null,
+      };
+      if (a) {
+        body.status = el('#napStatus').value;
+        body.interview_at = el('#napInterviewAt').value || null;
+        if (body.status === 'REJECTED') body.rejected_reason = el('#napRejectReason').value.trim();
+      }
+      try {
+        if (a) await api('PATCH', `/api/applicants/${a.id}`, body);
+        else await api('POST', '/api/applicants', body);
+        closeModal(); await load(); showTab('applicants');
+      } catch (e) { el('#apError').textContent = e.message; }
+    };
+  });
+}
+function hireModal(a) {
+  modal(`Hire — ${a.name}`, `
+    <form class="stack" id="hireForm">
+      <label>Employee number (optional)</label>
+      <input id="hireEmpNo" autocomplete="off">
+      <label>Rank</label>
+      <input id="hireRank" autocomplete="off" value="${esc(a.role_applied_for || '')}">
+      <label>Phone</label>
+      <input id="hirePhone" autocomplete="off" value="${esc(a.phone || '')}">
+      <label>Email</label>
+      <input id="hireEmail" type="email" autocomplete="off" value="${esc(a.email || '')}">
+      <p class="dim" style="font-size:13px;margin:0">This creates a real personnel record from this applicant's details. It does not create a login — do that from the Accounts tab afterwards if they need one.</p>
+      <p class="dim" id="hireError" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `<div class="foot-split"><span></span><span class="btn-row" style="margin:0"><button class="btn" id="hireCancel">Cancel</button><button class="btn primary ok" id="hireConfirm">Confirm hire</button></span></div>`;
+    el('#hireCancel').onclick = () => applicantModal(a);
+    el('#hireConfirm').onclick = async () => {
+      try {
+        await api('POST', `/api/applicants/${a.id}/hire`, {
+          employee_no: el('#hireEmpNo').value.trim() || null, rank: el('#hireRank').value.trim(),
+          contact_phone: el('#hirePhone').value.trim(), contact_email: el('#hireEmail').value.trim(),
+        });
+        closeModal(); await load(); showTab('applicants');
+      } catch (e) { el('#hireError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewApplicant').onclick = () => applicantModal(null);
 
 CCCS.bus((up) => {
   const n = el('#net');

@@ -3089,6 +3089,11 @@ require('./routes-client.js')({
   route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
 });
 
+// Applicant tracking — see routes-applicants.js for the design.
+require('./routes-applicants.js')({
+  route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
+});
+
 /* Client reporting — proving service to whoever pays for the contract:
  * patrol visit counts, alarm response time against the site's own SLA (if
  * one is set), and incident reports for the period. Incident visibility
