@@ -44,6 +44,7 @@
   }
   .role-pill.admin { color: #f87171; border-color: rgba(248,113,113,.4); }
   .role-pill.control { color: var(--accent); border-color: rgba(20,184,166,.4); }
+  .role-pill.client { color: #a78bfa; border-color: rgba(167,139,250,.4); }
   form.stack { display: flex; flex-direction: column; gap: 12px; }
   form.stack label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: -6px; }
   .foot-split { display: flex; justify-content: space-between; align-items: center; width: 100%; }
@@ -104,6 +105,7 @@
         <button class="btn primary" id="btnNewVehicle" style="padding:7px 14px;font-size:13px" hidden>New vehicle</button>
         <button class="btn primary" id="btnNewAsset" style="padding:7px 14px;font-size:13px" hidden>New asset</button>
         <button class="btn primary" id="btnNewForm" style="padding:7px 14px;font-size:13px" hidden>New form</button>
+        <button class="btn primary" id="btnNewClient" style="padding:7px 14px;font-size:13px" hidden>New client</button>
       </span>
     </div>
     <div class="tabs">
@@ -116,6 +118,7 @@
       <button id="tabBeats">Beats</button>
       <button id="tabPatrols">Patrol schedules</button>
       <button id="tabForms">Forms</button>
+      <button id="tabClients">Clients</button>
     </div>
 
     <div id="viewAccounts">
@@ -128,6 +131,7 @@
           <option value="SUPERVISOR">Supervisor</option>
           <option value="FIELD_USER">Field user</option>
           <option value="MDT_USER">MDT user</option>
+          <option value="CLIENT">Client</option>
         </select>
       </div>
       <div id="uTableWrap"></div>
@@ -200,6 +204,15 @@
       </div>
       <div id="pTableWrap"></div>
     </div>
+
+    <div id="viewClients" class="hide">
+      <div class="toolbar">
+        <input id="clSearch" placeholder="Search client name…">
+      </div>
+      <div id="clTableWrap"></div>
+      <h3 style="margin:22px 0 8px;font-size:14px">Client requests</h3>
+      <div id="crTableWrap"></div>
+    </div>
   </div>
 </main>
 
@@ -224,19 +237,20 @@ function modal(title, html, onMount) {
 const closeModal = () => (el('#modalHost').innerHTML = '');
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user' };
-const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : '');
+const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user', CLIENT: 'Client' };
+const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : '');
 
-let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [];
+let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [];
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats] = await Promise.all([
+  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests] = await Promise.all([
     api('GET', '/api/users'), api('GET', '/api/personnel'), api('GET', '/api/mdts'),
     api('GET', '/api/callsigns'), api('GET', '/api/sites'), api('GET', '/api/patrol-schedules'),
     api('GET', '/api/vehicles'), api('GET', '/api/assets'), api('GET', '/api/beats'),
+    api('GET', '/api/clients'), api('GET', '/api/client-requests'),
   ]);
   allForms = await api('GET', '/api/form-definitions?all=1');
-  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms();
+  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests();
 }
 
 /* ---------- tabs ---------- */
@@ -252,6 +266,9 @@ function showTab(name) {
   el('#tabForms').classList.toggle('active', name === 'forms');
   el('#viewForms').classList.toggle('hide', name !== 'forms');
   el('#btnNewForm').hidden = name !== 'forms';
+  el('#tabClients').classList.toggle('active', name === 'clients');
+  el('#viewClients').classList.toggle('hide', name !== 'clients');
+  el('#btnNewClient').hidden = name !== 'clients';
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
@@ -278,9 +295,11 @@ el('#tabSites').onclick = () => showTab('sites');
 el('#tabBeats').onclick = () => showTab('beats');
 el('#tabPatrols').onclick = () => showTab('patrols');
 el('#tabForms').onclick = () => showTab('forms');
+el('#tabClients').onclick = () => showTab('clients');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
+  if (u.client_id) { const c = allClients.find((x) => x.id === u.client_id); return c ? `Client ${esc(c.name)}` : '—'; }
   return '—';
 }
 function paint() {
@@ -318,6 +337,10 @@ function personnelOptions(selected) {
     .filter((p) => !p.has_login || p.id === selected)
     .map((p) => `<option value="${p.id}" ${p.id === selected ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
 }
+function clientOptions(selected) {
+  return '<option value="">— none —</option>' + allClients.map((c) =>
+    `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+}
 
 function userForm(u) {
   const isNew = !u;
@@ -335,6 +358,8 @@ function userForm(u) {
       <select id="fPersonnel">${personnelOptions(isNew ? null : u.personnel_id)}</select>
       <label>Linked MDT (for an MDT user account)</label>
       <select id="fMdt">${mdtOptions(isNew ? null : u.mdt_id)}</select>
+      <label>Linked client (for a client portal account)</label>
+      <select id="fClient">${clientOptions(isNew ? null : u.client_id)}</select>
       <label>${isNew ? 'Password' : 'New password (leave blank to keep current)'}</label>
       <input id="fPassword" type="password" autocomplete="new-password" placeholder="${isNew ? 'min. 8 characters' : ''}">
       <p class="dim" id="fError" style="min-height:16px;margin:0"></p>
@@ -366,6 +391,7 @@ function editModal(u) {
         email: el('#fEmail').value.trim() || null,
         personnel_id: el('#fPersonnel').value ? Number(el('#fPersonnel').value) : null,
         mdt_id: el('#fMdt').value ? Number(el('#fMdt').value) : null,
+        client_id: el('#fClient').value ? Number(el('#fClient').value) : null,
       };
       const password = el('#fPassword').value;
       try {
@@ -940,6 +966,17 @@ function siteForm(s) {
       <div id="siteChecklistRows"></div>
       <button type="button" class="btn" id="sAddTask" style="align-self:flex-start;padding:6px 12px;font-size:12px">+ Add task</button>
       ${s ? `
+      <label>Documents — contracts and site paperwork</label>
+      <div id="sDocsList" class="dim">Loading…</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="sDocType" style="width:150px">
+          <option value="CONTRACT">Contract</option>
+          <option value="SITE_DOCUMENT">Site document</option>
+        </select>
+        <input type="file" id="sDocFile" accept="application/pdf,image/png,image/jpeg" style="flex:1">
+        <button type="button" class="btn" id="sDocUpload">Upload</button>
+      </div>
+      <p class="dim" id="sDocError" style="min-height:16px;margin:0"></p>
       <label>Passdown — shift-handover notes</label>
       <div id="sPassdownLog" class="dim">Loading…</div>
       <div style="display:flex;gap:8px">
@@ -954,6 +991,36 @@ function siteModal(s) {
     const editor = checklistEditor(s ? (s.checklist || []) : []);
     el('#sAddTask').onclick = () => editor.add();
     if (s) {
+      const DOC_TYPE_LABEL = { CONTRACT: 'Contract', SITE_DOCUMENT: 'Site document' };
+      const paintDocs = (docs) => {
+        el('#sDocsList').innerHTML = docs.length
+          ? docs.map((d) => `<div class="dim" style="display:flex;align-items:center;gap:8px;padding:4px 0">
+              <span style="flex:1">${esc(DOC_TYPE_LABEL[d.type] || d.type)} — <a href="/api/documents/${d.id}/file?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(d.filename)}</a></span>
+              <span style="font-size:11px">${esc(new Date(d.uploaded_at).toLocaleDateString('en-GB'))}</span>
+              <button type="button" class="btn danger" data-deldoc="${d.id}" style="padding:3px 8px;font-size:11px">Delete</button>
+            </div>`).join('')
+          : '<p class="dim">No documents uploaded yet.</p>';
+        els('#sDocsList [data-deldoc]').forEach((b) => (b.onclick = async () => {
+          await api('DELETE', `/api/documents/${b.dataset.deldoc}`);
+          paintDocs(await api('GET', `/api/sites/${s.id}/documents`));
+        }));
+      };
+      api('GET', `/api/sites/${s.id}/documents`).then(paintDocs).catch(() => (el('#sDocsList').textContent = 'Failed to load.'));
+      el('#sDocUpload').onclick = () => {
+        const file = el('#sDocFile').files[0];
+        if (!file) { el('#sDocError').textContent = 'choose a file first'; return; }
+        if (!['application/pdf', 'image/png', 'image/jpeg'].includes(file.type)) { el('#sDocError').textContent = 'must be a PDF, PNG or JPEG'; return; }
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const data = reader.result.split(',')[1];
+          try {
+            await api('POST', `/api/sites/${s.id}/documents`, { type: el('#sDocType').value, mimetype: file.type, filename: file.name, data });
+            el('#sDocError').textContent = ''; el('#sDocFile').value = '';
+            paintDocs(await api('GET', `/api/sites/${s.id}/documents`));
+          } catch (e) { el('#sDocError').textContent = e.message; }
+        };
+        reader.readAsDataURL(file);
+      };
       const paintPassdown = (logs) => {
         el('#sPassdownLog').innerHTML = logs.length
           ? `<div class="log" style="max-height:160px;overflow:auto">${logs.map((l) => `<div><span class="t">${esc(new Date(l.created_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(l.author_name)}: ${esc(l.body)}</div>`).join('')}</div>`
@@ -1430,6 +1497,110 @@ function scheduleModal(s) {
   });
 }
 el('#btnNewSchedule').onclick = () => scheduleModal(null);
+
+/* ---------- clients (client portal) ---------- */
+function paintClients() {
+  const q = el('#clSearch').value.trim().toLowerCase();
+  let rows = allClients.slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (q) rows = rows.filter((c) => c.name.toLowerCase().includes(q));
+  el('#clTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Name</th><th style="width:200px">Contact email</th><th>Sites</th><th style="width:70px"></th></tr></thead>
+      <tbody>${rows.map((c) => `<tr class="clickable" data-client="${c.id}">
+        <td>${esc(c.name)}</td>
+        <td class="dim">${esc(c.contact_email || '—')}</td>
+        <td class="dim">${c.site_ids.length ? c.site_ids.map((id) => esc((allSites.find((s) => s.id === id) || {}).name || '?')).join(', ') : 'none linked'}</td>
+        <td><button class="btn danger" data-delclient="${c.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No clients yet.</p>';
+  els('#clTableWrap [data-client]').forEach((row) => row.addEventListener('click', (e) => {
+    if (e.target.closest('[data-delclient]')) return;
+    clientModal(allClients.find((c) => c.id === Number(row.dataset.client)));
+  }));
+  els('#clTableWrap [data-delclient]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteClient(Number(b.dataset.delclient)); }));
+}
+el('#clSearch').addEventListener('input', paintClients);
+async function deleteClient(id) {
+  const c = allClients.find((x) => x.id === id);
+  if (!c || !confirm(`Delete client ${c.name}? This cannot be undone.`)) return;
+  try { await api('DELETE', `/api/clients/${id}`); closeModal(); await load(); showTab('clients'); }
+  catch (e) { alert(e.message); }
+}
+function clientForm(c) {
+  const isNew = !c;
+  return `
+    <form class="stack" id="clForm">
+      <label>Name</label>
+      <input id="nclName" autocomplete="off" value="${isNew ? '' : esc(c.name)}">
+      <label>Contact email</label>
+      <input id="nclEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(c.contact_email || '')}">
+      <label>Sites this client can see</label>
+      <div id="nclSites" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:10px">
+        ${allSites.map((s) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;text-transform:none;letter-spacing:0;font-weight:400">
+          <input type="checkbox" data-siteid="${s.id}" ${!isNew && c.site_ids.includes(s.id) ? 'checked' : ''}> ${esc(s.name)}
+        </label>`).join('')}
+      </div>
+      <p class="dim" id="clError" style="min-height:16px;margin:0"></p>
+    </form>`;
+}
+function clientModal(c) {
+  modal(c ? `Edit — ${c.name}` : 'New client', clientForm(c), () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${c ? '<button class="btn danger" id="clDelete">Delete client</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="clCancel">Cancel</button>
+          <button class="btn primary" id="clSave">${c ? 'Save changes' : 'Create client'}</button>
+        </span>
+      </div>`;
+    el('#clCancel').onclick = closeModal;
+    if (el('#clDelete')) el('#clDelete').onclick = () => deleteClient(c.id);
+    el('#clSave').onclick = async () => {
+      const name = el('#nclName').value.trim();
+      if (!name) { el('#clError').textContent = 'name is required'; return; }
+      const site_ids = els('#nclSites [data-siteid]:checked').map((cb) => Number(cb.dataset.siteid));
+      const body = { name, contact_email: el('#nclEmail').value.trim(), site_ids };
+      try {
+        if (c) await api('PATCH', `/api/clients/${c.id}`, body);
+        else await api('POST', '/api/clients', body);
+        closeModal(); await load(); showTab('clients');
+      } catch (e) { el('#clError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewClient').onclick = () => clientModal(null);
+
+const CLIENT_REQ_LABEL = { OPEN: 'Open', ACKNOWLEDGED: 'In hand', CLOSED: 'Closed' };
+function paintClientRequests() {
+  const rows = allClientRequests.slice().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  el('#crTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th style="width:110px">Received</th><th style="width:160px">Client</th><th style="width:160px">Site</th><th>Subject</th><th style="width:110px">Status</th><th style="width:150px"></th></tr></thead>
+      <tbody>${rows.map((r) => {
+        const client = allClients.find((c) => c.id === r.client_id);
+        const site = allSites.find((s) => s.id === r.site_id);
+        return `<tr>
+        <td class="dim">${esc(new Date(r.created_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</td>
+        <td>${esc(client ? client.name : '—')}</td>
+        <td class="dim">${esc(site ? site.name : '—')}</td>
+        <td>${esc(r.subject)}${r.body ? `<div class="dim" style="font-size:12px;margin-top:2px">${esc(r.body)}</div>` : ''}</td>
+        <td class="dim">${esc(CLIENT_REQ_LABEL[r.status] || r.status)}</td>
+        <td>${r.status !== 'CLOSED' ? `
+          ${r.status === 'OPEN' ? `<button class="btn" data-ackreq="${r.id}" style="padding:4px 10px;font-size:11px">Acknowledge</button>` : ''}
+          <button class="btn" data-closereq="${r.id}" style="padding:4px 10px;font-size:11px">Close</button>` : ''}</td>
+      </tr>`;
+      }).join('')}</tbody>
+    </table>` : '<p class="empty-note">No client requests yet.</p>';
+  els('#crTableWrap [data-ackreq]').forEach((b) => (b.onclick = async () => {
+    await api('PATCH', `/api/client-requests/${b.dataset.ackreq}`, { status: 'ACKNOWLEDGED' });
+    allClientRequests = await api('GET', '/api/client-requests'); paintClientRequests();
+  }));
+  els('#crTableWrap [data-closereq]').forEach((b) => (b.onclick = async () => {
+    await api('PATCH', `/api/client-requests/${b.dataset.closereq}`, { status: 'CLOSED' });
+    allClientRequests = await api('GET', '/api/client-requests'); paintClientRequests();
+  }));
+}
 
 CCCS.bus((up) => {
   const n = el('#net');

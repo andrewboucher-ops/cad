@@ -327,13 +327,32 @@ tracking's extended roadmap is now fully built out.
 - ~~Asset checkout/return audit trail~~ — done, see above
 
 **New surfaces, larger lifts**
-- Client portal — a genuinely new external-facing role, its own auth/access
-  model
+- ~~Client portal~~ — done. A new `CLIENT` role, deliberately excluded from
+  `ALL` (see README's Client portal section for why) so it gets nothing by
+  default. `client.html`: a client's own sites, open jobs/visits (no
+  personnel names), the same service-report numbers admin gets, uploaded
+  documents (contracts/site paperwork), and a two-way request channel.
+  `admin.html`'s new Clients tab manages client orgs, site access, and
+  requests. `broadcast()` now treats CLIENT sockets as opt-in only via a new
+  `siteIds` option — never the default "everyone" delivery, never the
+  control-role bypass. Covered by a leak test in the same spirit as the
+  forms RESTRICTED test: cross-tenant isolation on every route (a site
+  that isn't theirs is a 404), and an untargeted broadcast reaching a
+  CLIENT socket. Two things deliberately deferred, not silently skipped:
+  the incident list isn't shown to clients yet (would need a careful
+  change to `routes-forms.js`'s `canRead()`, not a bolt-on), and there's no
+  live push to the portal yet (nothing broadcasts with `siteIds` yet, so
+  it polls) — see README for both.
 - Live employee tracking + geofencing for foot officers (a real gap today —
-  see `docs/PRIVACY.md`)
+  see `docs/PRIVACY.md`). Per-organisation confirmation: the legal
+  groundwork (LIA/DPIA/staff notice) is already done or in progress, so
+  this can be built to go live once ready, not gated behind it.
 - Training/academy module, applicant tracking
-- Multi-branch — only worth building if the business genuinely operates as
-  multiple branches
+- **Multi-branch** — confirmed worth building: Echelon operates multiple
+  branches today. Needs a design decision before it can be built: whether
+  branches get fully separate sites/personnel/control rooms, or share the
+  fleet-wide data and split only reporting/access — a bigger call than the
+  other items here, not yet made.
 - AI assistant — revisit once the core product has real usage data
 
 ## What I'd defer or skip entirely

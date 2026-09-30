@@ -158,6 +158,7 @@ if (next) el('#dest').value = next;
 function landingFor(role, dest) {
   if (role === 'FIELD_USER' && dest !== '/officer.html') return '/officer.html';
   if (role === 'MDT_USER' && dest !== '/mdt.html') return '/mdt.html';
+  if (role === 'CLIENT' && dest !== '/client.html') return '/client.html';
   return dest;
 }
 

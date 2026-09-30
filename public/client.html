@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — client portal</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Client">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { display: flex; justify-content: center; min-height: 100vh; padding-bottom: 40px; }
+  .wrap { width: min(880px, 100%); padding: 0 16px; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 14px 0; }
+  .topbar img { height: 22px; }
+  .topbar .spacer { flex: 1; }
+  .page-head h1 { margin: 18px 0 2px; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .page-head p { margin: 0 0 18px; color: var(--ink-dim); font-size: 13px; }
+  .site-picker { margin: 0 0 18px; }
+  .site-picker select { max-width: 320px; }
+  .section-card { background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur)); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 18px; }
+  .section-card > header { padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .section-card .body { padding: 12px 16px 14px; }
+  .list-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
+  .list-row:last-child { border-bottom: none; }
+  .list-row .t { color: var(--ink-dim); font-family: var(--mono); font-size: 11px; min-width: 78px; }
+  .empty-note { color: var(--ink-dim); padding: 14px 0; text-align: center; font-size: 13px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; background: var(--panel-3); color: var(--ink-dim); }
+  .pill.open { background: rgba(234,179,8,.15); color: #eab308; }
+  .pill.completed { background: rgba(34,197,94,.15); color: #22c55e; }
+  .pill.missed, .pill.cancelled { background: rgba(239,68,68,.15); color: var(--emergency); }
+  .stat-row { display: flex; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
+  .stat-tile { border: 1px solid var(--line); border-radius: 8px; padding: 12px; flex: 1; min-width: 150px; }
+  .stat-tile .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-dim); }
+  .stat-tile .num { font-size: 22px; font-weight: 700; margin: 2px 0; font-variant-numeric: tabular-nums; }
+  .range-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 14px; }
+  .range-row label { display: block; font-size: 11px; color: var(--ink-dim); margin-bottom: 4px; }
+  .doc-row a { color: var(--accent); text-decoration: none; }
+  .doc-row a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon">
+    <span class="spacer"></span>
+    <span class="link-net" id="net">link down</span>
+    <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
+  </div>
+
+  <div class="page-head">
+    <h1 id="clientName">Client portal</h1>
+    <p>Your sites, what's happened at them, and your documents.</p>
+  </div>
+
+  <div class="site-picker" id="sitePickerWrap" style="display:none">
+    <label style="display:block;font-size:11px;color:var(--ink-dim);margin-bottom:4px">Site</label>
+    <select id="sitePicker"></select>
+  </div>
+
+  <div id="siteAddress" class="dim" style="margin:-10px 0 16px;font-size:12.5px"></div>
+
+  <div class="section-card">
+    <header>Open jobs &amp; patrol visits</header>
+    <div class="body" id="activityBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card">
+    <header>Service report</header>
+    <div class="body">
+      <div class="range-row">
+        <div><label>From</label><input type="date" id="repFrom"></div>
+        <div><label>To</label><input type="date" id="repTo"></div>
+        <button type="button" class="btn" id="repRun">Run</button>
+      </div>
+      <div id="reportBody"><p class="empty-note">Loading…</p></div>
+    </div>
+  </div>
+
+  <div class="section-card">
+    <header>Documents</header>
+    <div class="body" id="docsBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card">
+    <header>Raise a request</header>
+    <div class="body">
+      <div class="stack" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
+        <input id="reqSubject" placeholder="Subject" autocomplete="off">
+        <textarea id="reqBody" rows="3" placeholder="Details (optional)"></textarea>
+        <button type="button" class="btn primary" id="reqSend" style="align-self:flex-start">Send request</button>
+        <p class="err" id="reqError" style="margin:0"></p>
+      </div>
+      <div id="reqList"><p class="empty-note">Loading…</p></div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+const { el, esc, api, requireAuth, getSession, bus } = CCCS;
+if (!requireAuth(['CLIENT'])) throw new Error('auth');
+const me = getSession().user;
+
+el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+
+let client = null, sites = [], currentSiteId = null;
+
+function fmtDate(iso) { return iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '—'; }
+function fmtDateTime(iso) { return iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'; }
+function statusPill(s) {
+  const cls = ['COMPLETED'].includes(s) ? 'completed' : ['MISSED', 'CANCELLED'].includes(s) ? 'missed' : 'open';
+  return `<span class="pill ${cls}">${esc(s.replace('_', ' '))}</span>`;
+}
+
+async function paintActivity() {
+  const [jobs, visits] = await Promise.all([
+    api('GET', `/api/client/jobs?site_id=${currentSiteId}`),
+    api('GET', `/api/client/site-visits?site_id=${currentSiteId}`),
+  ]);
+  const openJobs = jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status));
+  const openVisits = visits.filter((v) => !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status));
+  const rows = [
+    ...openJobs.map((j) => ({ t: fmtDateTime(j.created_at), label: `${j.incident_type || 'Job'} — ${j.reference}`, status: j.status })),
+    ...openVisits.map((v) => ({ t: fmtDateTime(v.scheduled_for), label: `Patrol visit — ${v.reference}`, status: v.status })),
+  ];
+  el('#activityBody').innerHTML = rows.length
+    ? rows.map((r) => `<div class="list-row"><span class="t">${esc(r.t)}</span><span style="flex:1">${esc(r.label)}</span>${statusPill(r.status)}</div>`).join('')
+    : '<p class="empty-note">Nothing open right now.</p>';
+}
+
+function renderReport(r) {
+  el('#reportBody').innerHTML = `
+    <div class="stat-row">
+      <div class="stat-tile"><div class="label">Alarm jobs</div><div class="num">${r.jobs.total}</div><div class="dim" style="font-size:12px">${r.jobs.completed} completed${r.jobs.cancelled ? `, ${r.jobs.cancelled} cancelled` : ''}</div></div>
+      <div class="stat-tile"><div class="label">Avg response</div><div class="num">${r.jobs.avg_response_minutes != null ? r.jobs.avg_response_minutes + ' min' : '—'}</div><div class="dim" style="font-size:12px">${r.jobs.sla_minutes ? `SLA ${r.jobs.sla_minutes} min — ${r.jobs.within_sla}/${r.jobs.total} within` : 'no SLA set on this site'}</div></div>
+      <div class="stat-tile"><div class="label">Patrol visits</div><div class="num">${r.visits.total}</div><div class="dim" style="font-size:12px">${r.visits.completed} completed${r.visits.missed ? `, ${r.visits.missed} missed` : ''}</div></div>
+    </div>`;
+}
+async function runReport() {
+  el('#reportBody').innerHTML = '<p class="empty-note">Loading…</p>';
+  try {
+    const from = el('#repFrom').value, to = el('#repTo').value;
+    const r = await api('GET', `/api/client/sites/${currentSiteId}/report?from=${from}T00:00:00.000Z&to=${to}T23:59:59.999Z`);
+    renderReport(r);
+  } catch (e) { el('#reportBody').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+el('#repRun').onclick = runReport;
+
+const DOC_LABEL = { CONTRACT: 'Contract', SITE_DOCUMENT: 'Site document' };
+async function paintDocs() {
+  const docs = await api('GET', `/api/client/documents?site_id=${currentSiteId}`);
+  el('#docsBody').innerHTML = docs.length
+    ? docs.map((d) => `<div class="list-row doc-row"><span class="t">${esc(DOC_LABEL[d.type] || d.type)}</span><a href="/api/client/documents/${d.id}/file?token=${encodeURIComponent(getSession().token)}" target="_blank" style="flex:1">${esc(d.filename)}</a><span class="dim" style="font-size:11px">${esc(fmtDate(d.uploaded_at))}</span></div>`).join('')
+    : '<p class="empty-note">No documents on file for this site yet.</p>';
+}
+
+const REQ_LABEL = { OPEN: 'Open', ACKNOWLEDGED: 'In hand', CLOSED: 'Closed' };
+async function paintRequests() {
+  const all = await api('GET', '/api/client-requests');
+  const mine = all.filter((r) => r.site_id === currentSiteId);
+  el('#reqList').innerHTML = mine.length
+    ? mine.map((r) => `<div class="list-row"><span class="t">${esc(fmtDate(r.created_at))}</span><span style="flex:1">${esc(r.subject)}</span><span class="pill ${r.status === 'CLOSED' ? 'completed' : r.status === 'OPEN' ? 'open' : ''}">${esc(REQ_LABEL[r.status] || r.status)}</span></div>`).join('')
+    : '<p class="empty-note">You haven\'t raised any requests yet.</p>';
+}
+el('#reqSend').onclick = async () => {
+  const subject = el('#reqSubject').value.trim();
+  if (!subject) { el('#reqError').textContent = 'subject is required'; return; }
+  try {
+    await api('POST', '/api/client-requests', { site_id: currentSiteId, subject, body: el('#reqBody').value.trim() });
+    el('#reqSubject').value = ''; el('#reqBody').value = ''; el('#reqError').textContent = '';
+    await paintRequests();
+  } catch (e) { el('#reqError').textContent = e.message; }
+};
+
+async function loadSite() {
+  const site = sites.find((s) => s.id === currentSiteId);
+  el('#siteAddress').textContent = site ? site.address || '' : '';
+  const today = new Date(), monthAgo = new Date(today.getTime() - 30 * 86400000);
+  el('#repFrom').value = monthAgo.toISOString().slice(0, 10);
+  el('#repTo').value = today.toISOString().slice(0, 10);
+  await Promise.all([paintActivity(), runReport(), paintDocs(), paintRequests()]);
+}
+
+(async function init() {
+  client = await api('GET', '/api/client/me');
+  sites = client.sites;
+  el('#clientName').textContent = client.name;
+  if (!sites.length) {
+    el('#activityBody').innerHTML = '<p class="empty-note">No sites are linked to this account yet — contact Echelon to have them added.</p>';
+    el('#reportBody').innerHTML = ''; el('#docsBody').innerHTML = ''; el('#reqList').innerHTML = '';
+    return;
+  }
+  currentSiteId = sites[0].id;
+  if (sites.length > 1) {
+    el('#sitePickerWrap').style.display = '';
+    el('#sitePicker').innerHTML = sites.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+    el('#sitePicker').addEventListener('change', () => { currentSiteId = Number(el('#sitePicker').value); loadSite(); });
+  } else {
+    el('#siteAddress').style.marginTop = '-10px';
+  }
+  await loadSite();
+})().catch((e) => { el('#activityBody').innerHTML = `<p class="err">${esc(e.message)}</p>`; });
+
+CCCS.bus((up) => {
+  const n = el('#net');
+  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
+});
+</script>
+</body>
+</html>

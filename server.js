@@ -88,6 +88,7 @@ const db = {
   passdown_logs: [], fuel_logs: [], asset_checkouts: [], maintenance_logs: [], beats: [],
   dial_log: [],
   form_definitions: [], form_submissions: [], form_grants: [],
+  clients: [], documents: [], client_requests: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -153,7 +154,12 @@ function checkAutoJobProgress(mdt, lat, lon) {
   logEvent('job.status_changed', `JOB ${j.reference} → ${newStatus} (auto)`, { job_id: j.id });
 }
 const PRIORITIES = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
-const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'FIELD_USER', 'MDT_USER'];
+// CLIENT is external — a customer's own login, not staff. It is a valid role
+// (for user creation/validation) but deliberately NOT part of ALL below: ALL
+// gates most of the API, and a new role landing in it by default would hand
+// an outside party every site, every person, every form submission. CLIENT
+// only ever gets what routes-client.js explicitly grants.
+const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'FIELD_USER', 'MDT_USER', 'CLIENT'];
 
 const { createStore } = require('./store.js');
 const store = createStore(db, seq);
@@ -424,8 +430,20 @@ setInterval(() => {
 }, HEARTBEAT_MS).unref?.();
 
 function broadcast(type, payload, opts = {}) {
-  const targeted = Boolean(opts.mdtIds || opts.personnelIds);
+  const targeted = Boolean(opts.mdtIds || opts.personnelIds || opts.siteIds);
   for (const c of sockets) {
+    // CLIENT is an external trust boundary, not just another internal role:
+    // it never gets the "untargeted reaches everyone" default and never gets
+    // the control-role bypass below. It receives ONLY a broadcast explicitly
+    // scoped with siteIds that includes one of its own sites — opt-in, not
+    // opt-out, same reasoning as the RESTRICTED-forms default-deny.
+    if (c.user.role === 'CLIENT') {
+      if (opts.siteIds) {
+        const client = db.clients.find((cl) => cl.id === c.user.client_id);
+        if (client && opts.siteIds.some((id) => client.site_ids.includes(id))) c.send(type, payload);
+      }
+      continue;
+    }
     let deliver = !targeted;
     if (targeted) {
       if (opts.mdtIds && c.mdtId && opts.mdtIds.includes(c.mdtId)) deliver = true;
@@ -752,7 +770,7 @@ function handleUpgrade(req, socket) {
   socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${wsAccept(key)}`, '\r\n'].join('\r\n'));
   socket.setNoDelay(true);
   const conn = new Conn(socket, user);
-  conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, personnel_id: user.personnel_id, mdt_id: user.mdt_id, ui_prefs: normalizeUiPrefs(user.ui_prefs) } });
+  conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, personnel_id: user.personnel_id, mdt_id: user.mdt_id, client_id: user.client_id || null, ui_prefs: normalizeUiPrefs(user.ui_prefs) } });
 }
 server.on('upgrade', handleUpgrade);
 httpsServer?.on('upgrade', handleUpgrade);
@@ -760,9 +778,13 @@ httpsServer?.on('upgrade', handleUpgrade);
 /* ------------------------------------------------------------------ *
  * REST API
  * ------------------------------------------------------------------ */
-const ALL = ROLES;
+// The five internal/staff roles — everything gated ALL today predates CLIENT
+// and was written assuming "any authenticated user" meant "any employee". Not
+// ROLES, deliberately: see the comment on ROLES above.
+const ALL = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'FIELD_USER', 'MDT_USER'];
 const CONTROL = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
 const ADMIN = ['SYSTEM_ADMIN'];
+const CLIENT = ['CLIENT'];
 
 /* Per-operator UI preferences (theme, mode, surface, sound) — stored on the
  * user row so they follow a login to any terminal, not per-browser
@@ -792,7 +814,7 @@ function normalizeUiPrefs(p) {
     reduce_motion: Boolean(p.reduce_motion),
   };
 }
-const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs) });
+const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs) });
 
 route('POST', '/api/auth/login', null, ({ body }) => {
   const user = db.users.find((u) => u.username === String(body.username || '').toLowerCase());
@@ -2920,6 +2942,11 @@ const forms = require('./routes-forms.js')({
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
 });
 
+// Client portal — see routes-client.js for the trust-boundary invariants.
+require('./routes-client.js')({
+  route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
+});
+
 /* Client reporting — proving service to whoever pays for the contract:
  * patrol visit counts, alarm response time against the site's own SLA (if
  * one is set), and incident reports for the period. Incident visibility
@@ -3004,7 +3031,9 @@ route('POST', '/api/users', ADMIN, ({ body }) => {
   const email = normalizeEmail(body.email) ?? null;
   const personnelId = body.personnel_id || null;
   if (personnelId && db.personnel.some((p) => p.id === personnelId && p.user_id)) throw httpError(409, 'that personnel record already has a login');
-  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: personnelId, mdt_id: body.mdt_id || null, email, created_at: new Date().toISOString() };
+  const clientId = body.client_id || null;
+  if (clientId && !db.clients.some((c) => c.id === clientId)) throw httpError(400, 'client_id must reference an existing client');
+  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: personnelId, mdt_id: body.mdt_id || null, client_id: clientId, email, created_at: new Date().toISOString() };
   db.users.push(u);
   if (personnelId) { const p = db.personnel.find((x) => x.id === personnelId); if (p) p.user_id = u.id; }
   logEvent('user.created', `USER ${username} CREATED (${u.role})`);
@@ -3032,6 +3061,11 @@ route('PATCH', '/api/users/:id', ADMIN, ({ params, body }) => {
     u.personnel_id = nextPersonnelId;
   }
   if ('mdt_id' in body) u.mdt_id = body.mdt_id || null;
+  if ('client_id' in body) {
+    const nextClientId = body.client_id || null;
+    if (nextClientId && !db.clients.some((c) => c.id === nextClientId)) throw httpError(400, 'client_id must reference an existing client');
+    u.client_id = nextClientId;
+  }
   if ('password' in body && body.password) {
     if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
     u.password_hash = hashPassword(String(body.password));

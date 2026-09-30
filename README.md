@@ -399,6 +399,41 @@ when, and (if available) where; control sees live scan coverage ("3 / 5
 scanned, missing: Loading bay") on the visit, and a completed visit's
 resolution report includes the same summary as proof of coverage.
 
+## Client portal
+
+The first genuinely external-facing role: a customer logs in and lands on
+`client.html`, not any internal terminal. `CLIENT` is a real role but
+deliberately **not** part of `ALL` — the constant most of the API is gated
+on — because `ALL` predates this role and assumed "authenticated" meant
+"staff". A new role landing in it by default would hand an outside party
+every site, every person, every form submission; `routes-client.js` is the
+only place CLIENT gets anything, and every route re-checks the caller's own
+`client` record's `site_ids` rather than trusting an id the request supplies
+— a site that isn't theirs is a 404, not a 403, same reasoning as a
+restricted form submission elsewhere in this codebase.
+
+A client sees, for their own sites only: open jobs and patrol visits
+(status only — no personnel names, no keyholder, no internal notes), the
+same service-report numbers admin gets (alarm response against the site's
+SLA, patrol visit counts), uploaded documents (contracts and site
+paperwork, PDF/PNG/JPEG, magic-byte checked like every other upload in this
+codebase), and a two-way request channel — they raise one, control
+acknowledges and closes it from `admin.html`'s Clients tab. Admin manages
+client organisations and which sites each can see from the same tab, and
+grants a CLIENT-role login from the Accounts tab exactly like a field-user
+or MDT login.
+
+`broadcast()` treats a CLIENT socket as an external trust boundary: it
+never gets the default "untargeted reaches everyone" delivery and never
+gets the control-role bypass, only a message explicitly scoped with
+`siteIds` that includes one of its own sites. Nothing broadcasts with
+`siteIds` yet, so `client.html` polls rather than subscribing — safe by
+construction, live-push is a v2 item. The client-facing service report also
+deliberately omits the incident list: `routes-forms.js`'s `canRead()` is
+"control roles, the filer, or a named grant", and widening that to include
+an owning client is a real change to that file's security invariant,
+worth its own careful pass rather than a bolt-on here.
+
 ## Working without a link
 
 A van drops into a dead spot mid-job. The MDT and officer terminal keep working: whoever's on it
