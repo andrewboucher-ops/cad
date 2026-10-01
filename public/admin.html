@@ -48,6 +48,24 @@
   form.stack { display: flex; flex-direction: column; gap: 12px; }
   form.stack label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: -6px; }
   .foot-split { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+  .admin-layout { display: grid; grid-template-columns: 200px 1fr; gap: 24px; align-items: start; }
+  .admin-nav { display: flex; flex-direction: column; gap: 0; border: none; margin: 0; position: sticky; top: 0; }
+  .admin-nav .an-group { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); padding: 14px 10px 4px; }
+  .admin-nav .an-group:first-child { padding-top: 0; }
+  .admin-nav button { text-align: left; margin: 0; padding: 8px 10px; border-radius: 8px; font-size: 13.5px; }
+  .admin-nav button:hover { background: var(--panel-2); color: var(--ink); }
+  .admin-nav button.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+  .admin-nav button.active::after { display: none; }
+  .admin-content { min-width: 0; }
+  .admin-title h2 { margin: 0; font-size: 17px; }
+  .admin-title p { margin: 4px 0 14px; font-size: 13px; max-width: 760px; }
+  .admin-nav-select { display: none; margin-bottom: 12px; font-size: 16px; }
+  @media (max-width: 900px) {
+    .admin-layout { grid-template-columns: 1fr; }
+    .admin-nav { display: none; }
+    .admin-nav-select { display: block; width: 100%; }
+    .page-body { padding: 14px; }
+  }
 </style>
 </head>
 <body>
@@ -90,25 +108,34 @@
         <button class="btn primary" id="btnNewShiftType" style="padding:7px 14px;font-size:13px" hidden>New shift type</button>
       </span>
     </div>
-    <div class="tabs">
-      <button class="active" id="tabAccounts">Accounts</button>
-      <button id="tabPersonnel">Personnel</button>
-      <button id="tabMdts">MDTs</button>
-      <button id="tabVehicles">Vehicles</button>
-      <button id="tabAssets">Assets</button>
-      <button id="tabSites">Sites</button>
-      <button id="tabBeats">Beats</button>
-      <button id="tabPatrols">Patrol schedules</button>
-      <button id="tabForms">Forms</button>
-      <button id="tabClients">Clients</button>
-      <button id="tabBranches">Branches</button>
-      <button id="tabTraining">Training</button>
-      <button id="tabApplicants">Applicants</button>
-      <button id="tabLeave">Leave</button>
-      <button id="tabShiftTypes">Shift types</button>
-      <button id="tabStock">Stock</button>
-      <button id="tabMenu">Menu &amp; sections</button>
-    </div>
+    <div class="admin-layout">
+    <nav class="tabs admin-nav" aria-label="Admin sections">
+      <div class="an-group">People</div>
+      <button class="active" id="tabAccounts" data-tab="accounts" data-desc="Logins — who can sign in and with what role.">Accounts</button>
+      <button id="tabPersonnel" data-tab="personnel" data-desc="Staff records: call signs, licences, vetting, line managers, welfare timers.">Personnel</button>
+      <button id="tabApplicants" data-tab="applicants" data-desc="Job applications from the public form, and moving people through hiring.">Applicants</button>
+      <button id="tabTraining" data-tab="training" data-desc="Training courses and assessments staff complete in the app.">Training</button>
+      <button id="tabLeave" data-tab="leave" data-desc="Leave requests and balances.">Leave</button>
+      <div class="an-group">Reports &amp; forms</div>
+      <button id="tabForms" data-tab="forms" data-desc="Every report officers fill in — incident, vehicle check, fuel-up, deep clean, safeguarding and the job application. Click a form to edit its questions, who can read it, and who is emailed.">Forms</button>
+      <div class="an-group">Sites &amp; rota</div>
+      <button id="tabClients" data-tab="clients" data-desc="Customers, their portals and their requests.">Clients</button>
+      <button id="tabSites" data-tab="sites" data-desc="Sites you work at, their documents and instructions.">Sites</button>
+      <button id="tabBeats" data-tab="beats" data-desc="Patrol routes and checkpoints (QR / NFC) at a site.">Beats</button>
+      <button id="tabPatrols" data-tab="patrols" data-desc="Recurring patrol visits that are created automatically.">Patrol schedules</button>
+      <button id="tabShiftTypes" data-tab="shiftTypes" data-desc="The kinds of shift used on the rota, with default pay and charge rates.">Shift types</button>
+      <div class="an-group">Fleet &amp; kit</div>
+      <button id="tabVehicles" data-tab="vehicles" data-desc="Vehicles, MOT / service / tax dates and deep-clean interval.">Vehicles</button>
+      <button id="tabMdts" data-tab="mdts" data-desc="In-vehicle terminals.">MDTs</button>
+      <button id="tabAssets" data-tab="assets" data-desc="Equipment issued to people — radios, body cams, keys.">Assets</button>
+      <button id="tabStock" data-tab="stock" data-desc="Consumable stock levels and movements.">Stock</button>
+      <div class="an-group">System</div>
+      <button id="tabMenu" data-tab="menu" data-desc="Which roles see which parts of the site, on desktop and on phones.">Menu &amp; sections</button>
+      <button id="tabBranches" data-tab="branches" data-desc="Branches, if you split staff and sites between offices.">Branches</button>
+    </nav>
+    <select id="adminNavSelect" class="admin-nav-select" aria-label="Admin section"></select>
+    <div class="admin-content">
+    <div class="admin-title"><h2 id="adminTitle">Accounts</h2><p class="dim" id="adminDesc"></p></div>
 
     <div id="viewAccounts">
       <div class="toolbar">
@@ -260,6 +287,8 @@
       <p class="dim" style="margin:0 0 10px;font-size:13px">Every stock-tracked asset's current level, derived from its own ledger (Assets tab → open the asset → Stock movements) — never a number anyone sets directly.</p>
       <div id="stockTableWrap"></div>
     </div>
+    </div>
+    </div>
   </div>
 </main>
 
@@ -383,6 +412,25 @@ function showTab(name) {
   el('#btnNewSite').hidden = name !== 'sites';
   el('#btnNewBeat').hidden = name !== 'beats';
   el('#btnNewSchedule').hidden = name !== 'patrols';
+  // Section title, explanation, phone dropdown and address bar follow the tab,
+  // so a refresh or a shared link comes back to the same place.
+  const btn = document.querySelector(`.admin-nav [data-tab="${name}"]`);
+  if (btn) {
+    el('#adminTitle').textContent = btn.textContent;
+    el('#adminDesc').textContent = btn.dataset.desc || '';
+    el('#adminNavSelect').value = name;
+    if (location.hash !== `#${name}`) history.replaceState(null, '', `${location.pathname}${location.search}#${name}`);
+  }
+}
+// The phone version of the section list: one dropdown, grouped the same way.
+{
+  let html = '', open = false;
+  for (const n of document.querySelectorAll('.admin-nav > *')) {
+    if (n.classList.contains('an-group')) { html += `${open ? '</optgroup>' : ''}<optgroup label="${esc(n.textContent)}">`; open = true; }
+    else html += `<option value="${n.dataset.tab}">${esc(n.textContent)}</option>`;
+  }
+  el('#adminNavSelect').innerHTML = html + (open ? '</optgroup>' : '');
+  el('#adminNavSelect').onchange = () => showTab(el('#adminNavSelect').value);
 }
 el('#tabAccounts').onclick = () => showTab('accounts');
 el('#tabPersonnel').onclick = () => showTab('personnel');
@@ -1486,7 +1534,7 @@ function paintForms() {
   const rows = allForms.slice().sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
   el('#fTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
-      <thead><tr><th>Form</th><th style="width:110px">Visibility</th><th style="width:170px">Filed against</th><th style="width:70px">Fields</th><th style="width:60px">Ver.</th><th style="width:200px">Named readers</th></tr></thead>
+      <thead><tr><th>Form</th><th style="width:110px">Visibility</th><th style="width:170px">Filed against</th><th style="width:70px">Fields</th><th style="width:60px">Ver.</th><th style="width:200px">Named readers</th><th style="width:80px"></th></tr></thead>
       <tbody>${rows.map((f) => `<tr class="clickable" data-form="${f.id}" style="${f.active ? '' : 'opacity:.5'}">
         <td>${esc(f.name)}${f.active ? '' : ' <span class="dim">(retired)</span>'}</td>
         <td>${f.visibility === 'RESTRICTED' ? '<span class="pri pri-RED">RESTRICTED</span>' : '<span class="dim">Standard</span>'}</td>
@@ -1494,6 +1542,7 @@ function paintForms() {
         <td class="dim">${f.fields.length}</td>
         <td class="dim">v${f.version}</td>
         <td class="dim">${f.visibility === 'RESTRICTED' ? (f.grants.length ? f.grants.map((g) => esc(g.display_name)).join(', ') : '<span style="color:var(--priority)">nobody yet</span>') : '—'}</td>
+        <td><button class="btn" style="padding:4px 12px;font-size:12px">Edit</button></td>
       </tr>`).join('')}</tbody>
     </table>` : '<p class="empty-note">No forms.</p>';
   els('#fTableWrap [data-form]').forEach((row) => row.addEventListener('click', () => formModal(allForms.find((f) => f.id === Number(row.dataset.form)))));
@@ -2535,7 +2584,8 @@ CCCS.bus((up) => {
 // (the Fleet page's "Edit check questions").
 load().then(() => {
   const q = new URLSearchParams(location.search);
-  if (q.get('tab')) showTab(q.get('tab'));
+  const start = q.get('tab') || location.hash.slice(1);
+  showTab(document.querySelector(`.admin-nav [data-tab="${start}"]`) ? start : 'accounts');
   const f = q.get('form') && allForms.find((x) => x.id === Number(q.get('form')));
   if (f) formModal(f);
 });
