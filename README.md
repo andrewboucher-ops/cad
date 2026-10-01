@@ -318,6 +318,38 @@ blocked while they're assigned to an open job or site visit, have an
 upcoming or active shift, or still have a login linked — unlink or resolve
 those first.
 
+**A shift is a slot, not a person.** `shifts` (site, shift type, time
+window, `required_headcount`, pay/bill rate, uniform/PPE, briefing, a typed
+`detail` blob per shift type) is separate from `shift_assignments` (who's
+actually on it — role, confirmed/declined, attendance, clock in/out). This
+is what lets a shift eventually need more than one person; a shift's own
+`status` (`PUBLISHED`/`IN_PROGRESS`/`COMPLETED`/`CANCELLED`, plus an unused
+`DRAFT` reserved for a real draft-then-publish workflow later) never carries
+one person's attendance, and `assigned_count`/`coverage_gap` are always
+derived from the live assignments, never stored — the same "make the gap
+visible, don't cache it" pattern as `personnel.compliance`/`leave_balance`.
+Shift types (`shift_types`: Control Room, Mobile Patrol, Alarm Response,
+Event, Static Guard, and a General catch-all) are an admin-extensible
+collection, not a hardcoded enum, seeded once on first boot the same way
+`forms.installDefaults()` seeds the standard report forms.
+
+Clock-in/out, duty-supervisor and the leave-conflict flag all moved from
+the shift to the assignment they're actually about — `routes-contact.js`'s
+"call supervisor" resolution and the rota's on-leave warning both read the
+assignment now, not the shift. A live production database on the old
+single-assignment shape upgrades via
+`deploy/migrate-shifts-to-assignments.js` (dry-run first; safe to run
+either before or after deploying this code, since the new server tolerates
+an old-shaped shift — it just shows as unfilled until migrated).
+
+This is intentionally the first of several increments toward a fuller
+scheduling platform (shift templates/recurrence, staff self-service
+apply-for-a-shift, vehicle/asset allocation per shift with a stock ledger,
+SMS/email/iCal notifications, a versioned site-document store) — see
+`docs/ROADMAP.md`. This increment is the structural one everything else
+builds on; it deliberately adds no new screen, only restructures shifts
+under the UI that already existed.
+
 ### SIA licence / DBS compliance tracking
 
 There is no integration with either service, because none exists to build:

@@ -195,7 +195,7 @@ async function load() {
     <div class="list-row"><span style="flex:1">MDTs online</span><b>${mdtByStatus.online} / ${state.mdts.length}</b></div>
     <div class="list-row"><span style="flex:1">Vehicles in fleet</span><b>${vehicles.length}</b></div>
     <div class="list-row"><span style="flex:1">Shifts today</span><b>${shifts.length}</b></div>
-    <div class="list-row"><span style="flex:1">Clocked in now</span><b>${shifts.filter((s) => s.status === 'CLOCKED_IN').length}</b></div>`;
+    <div class="list-row"><span style="flex:1">Clocked in now</span><b>${shifts.reduce((n, s) => n + s.assignments.filter((a) => a.clocked_in_at && !a.clocked_out_at).length, 0)}</b></div>`;
   const overdueVehicles = vehicles.filter((v) => v.service_due_at && Date.parse(v.service_due_at) < Date.now());
   if (overdueVehicles.length) {
     el('#fleetBody').innerHTML += `<div class="list-row"><span style="flex:1;color:var(--emergency)">Vehicles overdue for service</span><b style="color:var(--emergency)">${overdueVehicles.length}</b></div>`;

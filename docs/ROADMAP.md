@@ -298,6 +298,68 @@ tracking's extended roadmap is now fully built out.
   never named who acted on someone else's timer, and any login could mark
   someone else's message read. Covered by `test/access-review.test.js`.
 
+## Phase 7 — Full scheduling platform (in progress)
+
+A much larger brief: shift templates/recurrence, staff self-service
+apply-for-a-shift with an approval workflow, vehicle/asset allocation per
+shift with a stock ledger, SMS/email/iCal notifications, and a versioned
+site-document store (assignment instructions, site maps). Working through
+it incrementally, same as everything else in this document — one
+self-contained slice at a time, tested and deployed before the next.
+
+- ~~**Increment 1 — shifts become slots.**~~ — done. `shifts` restructured
+  from one person inline to a slot (`site_id`, `shift_type_id`, time
+  window, `required_headcount`, pay/bill rate, uniform/PPE, briefing, a
+  typed `detail` blob) with a new `shift_assignments` table carrying who's
+  actually on it (role, confirmed/declined, attendance, clock in/out) —
+  the prerequisite for every later increment that needs a shift to hold
+  more than one person. `shift_types` is a new admin-extensible collection
+  (Control Room, Mobile Patrol, Alarm Response, Event, Static Guard,
+  General), seeded once on boot like `forms.installDefaults()`. Duty
+  supervisor, clock state and the leave-conflict flag all moved from the
+  shift to the assignment; `routes-contact.js`'s "call supervisor"
+  resolution, the passdown-access check, and the personnel-delete guard
+  were all updated to match. `deploy/migrate-shifts-to-assignments.js`
+  upgrades a live single-assignment database (dry-run first; safe to run
+  before or after deploying, since the new code tolerates an old-shaped
+  shift — it just shows unfilled until migrated). Deliberately added no
+  new screen: `rota.html`, `officer.html` and `control.html`'s "on shift"
+  board all needed updating to read the new shape, but every existing
+  capability (create/edit/delete a shift, clock in/out, duty supervisor,
+  the leave-conflict warning) works exactly as before — the only visible
+  addition is a required "Shift type" field. `required_headcount` > 1 and
+  the multi-assignment editing UI are supported by the API (see
+  `test/cccs.test.js`) but not yet reachable from `rota.html` — that's
+  Increment 2. Covered by `test/cccs.test.js`, `test/contact.test.js`,
+  `test/leave.test.js` and the new `test/migrate-shifts.test.js`.
+- **Increment 2 — shift types + extended site/vehicle/asset fields.**
+  Admin CRUD for shift types; `sites` gains code/postcode/timezone/
+  risk_level/access_instructions/`is_control_room`; `vehicles` gains a
+  home-base site and MOT/tax dates; the real multi-assignment editing UI
+  (add/remove a second person on a shift) lands in `rota.html`.
+- **Increment 3 — site document store.** Versioned assignment-instruction
+  PDFs and site maps, extending the existing `documents`
+  collection/upload pattern with a current/archived flag, a version
+  number, and streamed (not whole-file-in-memory) serving.
+- **Increment 4 — rota grid rework.** Coverage-gap/over-staffing colour
+  coding, a by-shift-type filter view, bulk actions (publish, duplicate
+  week forward).
+- **Increment 5 — shift requests/applications.** Staff apply for a
+  published open shift; control approves/rejects — mirrors the leave
+  request pipeline's append-only, actor-and-timestamp-stamped shape.
+- **Increment 6 — vehicle/asset allocation + stock ledger.** Per-shift
+  vehicle/asset allocation with conflict checking, a stock-movements
+  ledger for consumables (never overwrite a balance without a ledger
+  entry, matching this codebase's audit-trail conventions elsewhere), and
+  a stock dashboard.
+- **Increment 7 — notifications.** SMS via the existing `sms.js` (already
+  built, currently only operator-triggered) wired to shift
+  assigned/changed/cancelled events; email via the existing MS Graph
+  `sendMail` path; a personal iCal feed per staff member.
+- **Increment 8 — permissions hardening + performance pass.** Site-level
+  (not just branch-level) supervisor scoping; a Finance/read-only role;
+  index/eager-load audit on the rota queries.
+
 ## The extended roadmap (beyond Phase 3–5, roughly by what it extends)
 
 **Extends Sites/Patrols**

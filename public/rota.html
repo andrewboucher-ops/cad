@@ -135,7 +135,17 @@ function startOfWeek(d) {
   return x;
 }
 let weekStart = startOfWeek(new Date());
-let allPersonnel = [], allSites = [], allShifts = [];
+let allPersonnel = [], allSites = [], allShifts = [], allShiftTypes = [];
+/** A shift chip shows one person's own involvement — their assignment
+ * carries the clock/attendance state now, the shift itself only carries
+ * DRAFT/PUBLISHED/IN_PROGRESS/COMPLETED/CANCELLED. */
+function chipStatusClass(shift, a) {
+  if (shift.status === 'CANCELLED') return 'CANCELLED';
+  if (a.attendance === 'NO_SHOW') return 'NO_SHOW';
+  if (a.clocked_out_at) return 'CLOCKED_OUT';
+  if (a.clocked_in_at) return 'CLOCKED_IN';
+  return 'SCHEDULED';
+}
 
 function weekDays() {
   return Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(d.getDate() + i); return d; });
@@ -152,9 +162,10 @@ async function load() {
   const from = new Date(days[0]); from.setHours(0, 0, 0, 0);
   const to = new Date(days[6]); to.setHours(23, 59, 59, 999);
   el('#weekRange').textContent = `${days[0].toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${days[6].toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
-  [allPersonnel, allSites, allShifts] = await Promise.all([
+  [allPersonnel, allSites, allShifts, allShiftTypes] = await Promise.all([
     api('GET', '/api/personnel'), api('GET', '/api/sites'),
     api('GET', `/api/shifts?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`),
+    api('GET', '/api/shift-types'),
   ]);
   paintGrid();
 }
@@ -169,12 +180,15 @@ function paintGrid() {
   for (const p of rows) {
     html += `<div class="person-name">${esc(p.name)}<span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
     for (const d of days) {
-      const dayShifts = allShifts.filter((s) => s.personnel_id === p.id && sameDay(new Date(s.starts_at), d));
+      const dayShifts = allShifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.assignments.some((a) => a.personnel_id === p.id));
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
-        ${dayShifts.map((s) => `<div class="shift-chip status-${s.status}${s.on_leave_conflict ? ' leave-conflict' : ''}" data-shift="${s.id}" ${s.on_leave_conflict ? 'title="This person has approved leave covering this day"' : ''}>
-          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${s.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}</div>
-          <div>${esc(s.site_name || s.role_type || '')}${s.is_duty_supervisor ? ' · <strong>duty sup.</strong>' : ''}</div>
-        </div>`).join('')}
+        ${dayShifts.map((s) => {
+          const a = s.assignments.find((x) => x.personnel_id === p.id);
+          return `<div class="shift-chip status-${chipStatusClass(s, a)}${a.on_leave_conflict ? ' leave-conflict' : ''}" data-shift="${s.id}" ${a.on_leave_conflict ? 'title="This person has approved leave covering this day"' : ''}>
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${a.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}</div>
+          <div>${esc(s.site_name || s.shift_type_name || '')}${a.is_duty_supervisor ? ' · <strong>duty sup.</strong>' : ''}</div>
+        </div>`;
+        }).join('')}
         <span class="add-hint">+ add shift</span>
       </div>`;
     }
@@ -184,7 +198,8 @@ function paintGrid() {
 
   els('.shift-chip').forEach((chip) => chip.addEventListener('click', (e) => {
     e.stopPropagation();
-    shiftModal(allShifts.find((s) => s.id === Number(chip.dataset.shift)));
+    const cell = chip.closest('.rota-cell');
+    shiftModal(allShifts.find((s) => s.id === Number(chip.dataset.shift)), null, Number(cell.dataset.personnel));
   }));
   els('.rota-cell').forEach((cell) => cell.addEventListener('click', () => {
     shiftModal(null, { personnelId: Number(cell.dataset.personnel), date: cell.dataset.date });
@@ -195,38 +210,46 @@ el('#prevWeek').onclick = () => { weekStart.setDate(weekStart.getDate() - 7); lo
 el('#nextWeek').onclick = () => { weekStart.setDate(weekStart.getDate() + 7); load(); };
 el('#thisWeek').onclick = () => { weekStart = startOfWeek(new Date()); load(); };
 
-function shiftForm(s, defaults) {
+function shiftForm(s, defaults, myAssignment) {
   const isNew = !s;
   const d = defaults || {};
   const startDefault = isNew ? `${d.date}T09:00` : new Date(s.starts_at).toISOString().slice(0, 16);
   const endDefault = isNew ? `${d.date}T17:00` : new Date(s.ends_at).toISOString().slice(0, 16);
   return `
     <form class="stack" id="shForm">
-      <label>Personnel</label>
-      <select id="shPersonnel">${allPersonnel.map((p) => `<option value="${p.id}" ${(isNew ? d.personnelId : s.personnel_id) === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+      ${isNew
+        ? `<label>Personnel</label>
+      <select id="shPersonnel">${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`
+        : `<label>Personnel</label><p class="dim" style="margin:0">${esc(myAssignment.personnel_name)}</p>`}
+      <label>Shift type</label>
+      <select id="shType">${allShiftTypes.map((t) => `<option value="${t.id}" ${!isNew && s.shift_type_id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
       <label>Site (optional)</label>
       <select id="shSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${!isNew && s.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       <label>Starts</label>
       <input id="shStart" type="datetime-local" value="${startDefault}">
       <label>Ends</label>
       <input id="shEnd" type="datetime-local" value="${endDefault}">
-      <label>Role</label>
-      <input id="shRole" autocomplete="off" value="${isNew ? '' : esc(s.role_type || '')}" placeholder="Patrol, static guard…">
-      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDuty" ${!isNew && s.is_duty_supervisor ? 'checked' : ''}> Duty supervisor for this shift — the console calls them first for any officer's "call supervisor"</label>
+      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDuty" ${!isNew && myAssignment.is_duty_supervisor ? 'checked' : ''}> Duty supervisor for this shift — the console calls them first for any officer's "call supervisor"</label>
       <label>Notes</label>
       <textarea id="shNotes" rows="2">${isNew ? '' : esc(s.notes || '')}</textarea>
       ${isNew ? '' : `<label>Status</label>
-      <select id="shStatus">${['SCHEDULED', 'CONFIRMED', 'CLOCKED_IN', 'CLOCKED_OUT', 'NO_SHOW', 'CANCELLED'].map((v) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
+      <select id="shStatus">${['DRAFT', 'PUBLISHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((v) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>
+      ${myAssignment.clocked_in_at ? `<p class="dim" style="margin:0">Clocked in ${new Date(myAssignment.clocked_in_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${myAssignment.clocked_out_at ? `, out ${new Date(myAssignment.clocked_out_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : ''}</p>` : ''}`}
       <p class="dim" id="shError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
-function shiftModal(s, defaults) {
-  modal(s ? `Shift — ${s.personnel_name}` : 'New shift', shiftForm(s, defaults), () => {
+function shiftModal(s, defaults, personnelId) {
+  const myAssignment = s ? s.assignments.find((a) => a.personnel_id === personnelId) : null;
+  modal(s ? `Shift — ${myAssignment.personnel_name}` : 'New shift', shiftForm(s, defaults, myAssignment), () => {
     const foot = document.querySelector('#modalHost .foot');
+    const canClockIn = myAssignment && !myAssignment.clocked_in_at;
+    const canClockOut = myAssignment && myAssignment.clocked_in_at && !myAssignment.clocked_out_at;
     foot.innerHTML = `
       <div class="foot-split">
         <span>${s ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
+          ${canClockIn ? '<button class="btn" id="shClockIn">Clock in</button>' : ''}
+          ${canClockOut ? '<button class="btn" id="shClockOut">Clock out</button>' : ''}
           <button class="btn" id="shCancel">Cancel</button>
           <button class="btn primary" id="shSave">${s ? 'Save changes' : 'Create shift'}</button>
         </span>
@@ -237,21 +260,30 @@ function shiftModal(s, defaults) {
       try { await api('DELETE', `/api/shifts/${s.id}`); closeModal(); await load(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
+    if (el('#shClockIn')) el('#shClockIn').onclick = async () => {
+      try { await api('POST', `/api/shift-assignments/${myAssignment.id}/clock-in`, {}); closeModal(); await load(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    };
+    if (el('#shClockOut')) el('#shClockOut').onclick = async () => {
+      try { await api('POST', `/api/shift-assignments/${myAssignment.id}/clock-out`, {}); closeModal(); await load(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    };
     el('#shSave').onclick = async () => {
       const body = {
-        personnel: Number(el('#shPersonnel').value),
+        shift_type_id: Number(el('#shType').value),
         site_id: el('#shSite').value ? Number(el('#shSite').value) : null,
         starts_at: new Date(el('#shStart').value).toISOString(),
         ends_at: new Date(el('#shEnd').value).toISOString(),
-        role_type: el('#shRole').value.trim(),
         notes: el('#shNotes').value.trim(),
-        is_duty_supervisor: el('#shDuty').checked,
       };
       try {
         if (s) {
           if (el('#shStatus')) body.status = el('#shStatus').value;
           await api('PATCH', `/api/shifts/${s.id}`, body);
+          await api('PATCH', `/api/shift-assignments/${myAssignment.id}`, { is_duty_supervisor: el('#shDuty').checked });
         } else {
+          body.personnel = Number(el('#shPersonnel').value);
+          body.is_duty_supervisor = el('#shDuty').checked;
           await api('POST', '/api/shifts', body);
         }
         closeModal(); await load();

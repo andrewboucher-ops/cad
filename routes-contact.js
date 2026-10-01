@@ -46,16 +46,24 @@ module.exports = function registerContactRoutes({
    * be able to see, so `source` is recorded on the row and in the log line.
    * ---------------------------------------------------------------- */
 
+  /** The duty supervisor now lives on the assignment (a shift can carry
+   * several people; is_duty_supervisor picks out which one), so this looks
+   * for a live assignment rather than a live shift directly. */
+  function activeDutySupervisorAssignment() {
+    const now = Date.now();
+    return db.shift_assignments.find((a) => {
+      if (!a.is_duty_supervisor || !['ASSIGNED', 'CONFIRMED'].includes(a.status)) return false;
+      const s = db.shifts.find((x) => x.id === a.shift_id);
+      return s && ['PUBLISHED', 'IN_PROGRESS'].includes(s.status) && Date.parse(s.starts_at) <= now && Date.parse(s.ends_at) >= now;
+    });
+  }
   function supervisorFor(personnelId) {
     const person = db.personnel.find((p) => p.id === Number(personnelId));
     if (!person) return null;
-    const now = Date.now();
-    const dutyShift = db.shifts.find((s) => s.is_duty_supervisor
-      && ['SCHEDULED', 'CONFIRMED', 'CLOCKED_IN'].includes(s.status)
-      && Date.parse(s.starts_at) <= now && Date.parse(s.ends_at) >= now);
-    if (dutyShift) {
-      const onDuty = db.personnel.find((p) => p.id === dutyShift.personnel_id);
-      if (onDuty && onDuty.contact_phone) return { person: onDuty, source: 'DUTY_SUPERVISOR', shift_id: dutyShift.id };
+    const dutyAssignment = activeDutySupervisorAssignment();
+    if (dutyAssignment) {
+      const onDuty = db.personnel.find((p) => p.id === dutyAssignment.personnel_id);
+      if (onDuty && onDuty.contact_phone) return { person: onDuty, source: 'DUTY_SUPERVISOR', shift_id: dutyAssignment.shift_id };
     }
     const line = person.supervisor_id ? db.personnel.find((p) => p.id === person.supervisor_id) : null;
     if (line && line.contact_phone) return { person: line, source: 'LINE_MANAGER', shift_id: null };

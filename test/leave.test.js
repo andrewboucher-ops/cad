@@ -114,17 +114,18 @@ test('only APPROVED annual leave counts against the balance — sick/unpaid/othe
 
 test('a shift against approved leave is flagged on the shift, never blocked at creation', async () => {
   const year = new Date().getFullYear() + 1;
+  const typeId = (await call('GET', '/api/shift-types', undefined, dispT)).body[0].id;
   const leave = (await call('POST', '/api/leave-requests', { type: 'ANNUAL', start_date: `${year}-09-10`, end_date: `${year}-09-10` }, danT)).body;
 
-  const shiftBeforeApproval = await call('POST', '/api/shifts', { personnel: dan.id, starts_at: `${year}-09-10T09:00:00.000Z`, ends_at: `${year}-09-10T17:00:00.000Z` }, dispT);
+  const shiftBeforeApproval = await call('POST', '/api/shifts', { personnel: dan.id, shift_type_id: typeId, starts_at: `${year}-09-10T09:00:00.000Z`, ends_at: `${year}-09-10T17:00:00.000Z` }, dispT);
   assert.equal(shiftBeforeApproval.status, 201);
-  assert.equal(shiftBeforeApproval.body.on_leave_conflict, false, 'a merely-pending request is not a conflict yet');
+  assert.equal(shiftBeforeApproval.body.assignments[0].on_leave_conflict, false, 'a merely-pending request is not a conflict yet');
 
   await call('PATCH', `/api/leave-requests/${leave.id}`, { status: 'APPROVED' }, dispT);
   const shifts = await call('GET', `/api/shifts?from=${year}-09-01T00:00:00.000Z&to=${year}-09-30T00:00:00.000Z`, undefined, dispT);
   const flagged = shifts.body.find((s) => s.id === shiftBeforeApproval.body.id);
-  assert.equal(flagged.on_leave_conflict, true, 'the same shift is now flagged once the leave is approved — creation was never blocked, this is a warning');
+  assert.equal(flagged.assignments[0].on_leave_conflict, true, 'the same shift is now flagged once the leave is approved — creation was never blocked, this is a warning');
 
-  const clearDayShift = await call('POST', '/api/shifts', { personnel: dan.id, starts_at: `${year}-09-11T09:00:00.000Z`, ends_at: `${year}-09-11T17:00:00.000Z` }, dispT);
-  assert.equal(clearDayShift.body.on_leave_conflict, false, 'a shift the day after is unaffected');
+  const clearDayShift = await call('POST', '/api/shifts', { personnel: dan.id, shift_type_id: typeId, starts_at: `${year}-09-11T09:00:00.000Z`, ends_at: `${year}-09-11T17:00:00.000Z` }, dispT);
+  assert.equal(clearDayShift.body.assignments[0].on_leave_conflict, false, 'a shift the day after is unaffected');
 });

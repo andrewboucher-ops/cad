@@ -111,10 +111,12 @@ test('a rostered duty supervisor takes precedence over the line manager', async 
   const dan = person('Dan Whitfield'), ryan = person('Ryan Cole');
   const now = Date.now();
   const shift = {
-    id: 990001, personnel_id: ryan.id, site_id: null, is_duty_supervisor: true, status: 'CLOCKED_IN',
+    id: 990001, site_id: null, shift_type_id: app.db.shift_types[0].id, status: 'PUBLISHED', required_headcount: 1,
     starts_at: new Date(now - 3600e3).toISOString(), ends_at: new Date(now + 3600e3).toISOString(),
   };
+  const assignment = { id: 990001, shift_id: shift.id, personnel_id: ryan.id, is_duty_supervisor: true, status: 'CONFIRMED', clocked_in_at: null, clocked_out_at: null };
   app.db.shifts.push(shift);
+  app.db.shift_assignments.push(assignment);
   try {
     const contact = await call('GET', `/api/personnel/${dan.id}/contact`, undefined, dispT);
     assert.equal(contact.body.supervisor.name, 'Ryan Cole');
@@ -126,14 +128,17 @@ test('a rostered duty supervisor takes precedence over the line manager', async 
     assert.match(logged.summary, /\(duty supervisor\)/);
   } finally {
     app.db.shifts = app.db.shifts.filter((s) => s.id !== shift.id);
+    app.db.shift_assignments = app.db.shift_assignments.filter((a) => a.id !== assignment.id);
   }
 });
 
 test('a duty shift that has ended does not count, and no supervisor at all is a clear 400', async () => {
   const dan = person('Dan Whitfield'), ryan = person('Ryan Cole');
-  const past = { id: 990002, personnel_id: ryan.id, is_duty_supervisor: true, status: 'CLOCKED_IN',
+  const past = { id: 990002, shift_type_id: app.db.shift_types[0].id, status: 'COMPLETED', required_headcount: 1,
     starts_at: new Date(Date.now() - 7200e3).toISOString(), ends_at: new Date(Date.now() - 3600e3).toISOString() };
+  const assignment = { id: 990002, shift_id: past.id, personnel_id: ryan.id, is_duty_supervisor: true, status: 'CONFIRMED', clocked_in_at: null, clocked_out_at: null };
   app.db.shifts.push(past);
+  app.db.shift_assignments.push(assignment);
   dan.supervisor_id = null;
   try {
     const contact = await call('GET', `/api/personnel/${dan.id}/contact`, undefined, dispT);
@@ -143,6 +148,7 @@ test('a duty shift that has ended does not count, and no supervisor at all is a 
     assert.match(r.body.error, /no supervisor/);
   } finally {
     app.db.shifts = app.db.shifts.filter((s) => s.id !== past.id);
+    app.db.shift_assignments = app.db.shift_assignments.filter((a) => a.id !== assignment.id);
   }
 });
 
@@ -265,17 +271,19 @@ test('line manager and duty supervisor are settable through the real routes, and
 
   const now = Date.now();
   const shift = await call('POST', '/api/shifts', {
-    personnel: ryan.id, starts_at: new Date(now - 3600e3).toISOString(), ends_at: new Date(now + 3600e3).toISOString(), is_duty_supervisor: true,
+    personnel: ryan.id, shift_type_id: app.db.shift_types[0].id,
+    starts_at: new Date(now - 3600e3).toISOString(), ends_at: new Date(now + 3600e3).toISOString(), is_duty_supervisor: true,
   }, dispT);
   assert.equal(shift.status, 201);
-  assert.equal(shift.body.is_duty_supervisor, true);
+  assert.equal(shift.body.assignments[0].is_duty_supervisor, true);
+  const assignmentId = shift.body.assignments[0].id;
   const c = await call('GET', `/api/personnel/${dan.id}/contact`, undefined, dispT);
   assert.equal(c.body.supervisor.name, 'Ryan Cole');
   assert.equal(c.body.supervisor.source, 'DUTY_SUPERVISOR');
 
-  const off = await call('PATCH', `/api/shifts/${shift.body.id}`, { is_duty_supervisor: false }, dispT);
-  assert.equal(off.body.is_duty_supervisor, false);
-  assert.ok(app.db.audit_logs.some((e) => e.type === 'shift.updated' && /Ryan Cole\) UPDATED — NO LONGER DUTY SUPERVISOR/.test(e.summary)), 'the change is logged by name');
+  const off = await call('PATCH', `/api/shift-assignments/${assignmentId}`, { is_duty_supervisor: false }, dispT);
+  assert.equal(off.body.assignments[0].is_duty_supervisor, false);
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'shift_assignment.updated' && /Ryan Cole ON SHIFT/.test(e.summary)), 'the change is logged by name');
   assert.equal((await call('GET', `/api/personnel/${dan.id}/contact`, undefined, dispT)).body.supervisor.source, 'LINE_MANAGER');
   await call('PATCH', `/api/personnel/${dan.id}`, { supervisor_id: null }, adminT);
 });

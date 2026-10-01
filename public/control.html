@@ -359,12 +359,31 @@ function dispatchItems() {
   return out;
 }
 
+/** A shift now carries several people (assignments), so control's "who's on"
+ * view works over one flattened row per person per shift rather than over
+ * shifts directly — everything downstream (grouping, clocked-in counts,
+ * "find this person's shift") reads personnel_id/clocked_in/starts_at off
+ * these rows exactly as it used to read them off a shift itself. */
+function personShiftRows(shifts) {
+  const rows = [];
+  for (const s of shifts) {
+    for (const a of s.assignments) {
+      if (['REMOVED', 'DECLINED'].includes(a.status)) continue;
+      rows.push({
+        personnel_id: a.personnel_id, clocked_in: Boolean(a.clocked_in_at && !a.clocked_out_at), clocked_in_at: a.clocked_in_at,
+        is_duty_supervisor: a.is_duty_supervisor,
+        shift_id: s.id, shift_status: s.status, starts_at: s.starts_at, ends_at: s.ends_at, site_name: s.site_name,
+      });
+    }
+  }
+  return rows;
+}
 /** Shifts that are live now: clocked in, or rostered to have started and not
  * clocked in (shown so control sees a no-show forming, not only after it). */
 function liveShifts() {
   const now = Date.now();
-  return state.shifts.filter((s) => s.status === 'CLOCKED_IN'
-    || (['SCHEDULED', 'CONFIRMED'].includes(s.status) && Date.parse(s.starts_at) <= now && Date.parse(s.ends_at) > now));
+  return personShiftRows(state.shifts).filter((s) => s.clocked_in
+    || (['PUBLISHED', 'IN_PROGRESS'].includes(s.shift_status) && Date.parse(s.starts_at) <= now && Date.parse(s.ends_at) > now));
 }
 const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 function shiftBand(s) {
@@ -447,7 +466,7 @@ function personCard(p, shift) {
   const emg = emergencyFor(p), job = openJobFor(p), visit = openVisitFor(p);
   const task = job || visit;
   const pill = emg ? ['emg', 'EMERGENCY'] : task ? [busyCls(task.status), jobStatusLabel(task.status)] : ['on', 'AVAILABLE'];
-  const clockedIn = shift && shift.status === 'CLOCKED_IN';
+  const clockedIn = shift && shift.clocked_in;
   const sel = state.selected && state.selected.kind === 'p' && state.selected.id === p.id;
   return `<div class="card ${sel ? 'sel' : ''} ${emg ? 'alarm' : ''}" data-p="${p.id}" style="${clockedIn || !shift ? '' : 'opacity:.7'}">
     <div class="card-top">
@@ -467,20 +486,20 @@ function personCard(p, shift) {
 function renderShift() {
   const live = liveShifts();
   const byPerson = new Map();
-  for (const s of live) if (!byPerson.has(s.personnel_id) || s.status === 'CLOCKED_IN') byPerson.set(s.personnel_id, s);
+  for (const s of live) if (!byPerson.has(s.personnel_id) || s.clocked_in) byPerson.set(s.personnel_id, s);
   const onShift = [...byPerson.values()];
-  const clockedIn = onShift.filter((s) => s.status === 'CLOCKED_IN');
+  const clockedIn = onShift.filter((s) => s.clocked_in);
   const people = (s) => state.personnel.find((p) => p.id === s.personnel_id);
   const available = clockedIn.map(people).filter((p) => p && isAvailable(p));
   const mdtsFree = state.mdts.filter((m) => m.connected && !m.emergency && !m.job_id && (m.duty_status || 'AVAILABLE') === 'AVAILABLE');
   el('#shiftCount').textContent = `${clockedIn.length} clocked in`;
 
-  // Group by the shift itself: same start and end is the same shift.
+  // Group by the shift itself, not by matching times — several distinct
+  // shifts can share a start/end, and one shift now carries several people.
   const groups = new Map();
   for (const s of onShift) {
-    const key = `${s.starts_at}|${s.ends_at}`;
-    if (!groups.has(key)) groups.set(key, { s, rows: [] });
-    groups.get(key).rows.push(s);
+    if (!groups.has(s.shift_id)) groups.set(s.shift_id, { s, rows: [] });
+    groups.get(s.shift_id).rows.push(s);
   }
   const ordered = [...groups.values()].sort((a, b) => Date.parse(a.s.starts_at) - Date.parse(b.s.starts_at));
   // Anyone on a job or with a welfare timer but no live shift is still shown,
@@ -494,7 +513,7 @@ function renderShift() {
       ${mdtsFree.map((m) => `<button class="chip" data-m="${m.id}">${esc(m.mdt_code)}${m.callsign ? ' · ' + esc(m.callsign) : ''}</button>`).join('')}
       ${available.length + mdtsFree.length ? '' : '<span class="dim" style="font-size:12px">None free right now.</span>'}</div>
     ${ordered.map((g) => `
-      <div class="grp"><span>${shiftBand(g.s)} · ${hhmm(g.s.starts_at)}–${hhmm(g.s.ends_at)}</span><span>${g.rows.filter((s) => s.status === 'CLOCKED_IN').length}/${g.rows.length}</span></div>
+      <div class="grp"><span>${shiftBand(g.s)} · ${hhmm(g.s.starts_at)}–${hhmm(g.s.ends_at)}</span><span>${g.rows.filter((s) => s.clocked_in).length}/${g.rows.length}</span></div>
       ${g.rows.map((s) => { const p = people(s); return p ? personCard(p, s) : ''; }).join('')}`).join('')
       || '<p class="dim" style="margin-top:10px">Nobody is rostered on right now.</p>'}
     ${offRota.length ? `<div class="grp"><span>Working, not on the rota</span><span>${offRota.length}</span></div>${offRota.map((p) => personCard(p, null)).join('')}` : ''}
@@ -722,7 +741,7 @@ function renderPerson(body) {
       ${emg ? '<span class="status-pill emg">EMERGENCY</span>' : task ? `<span class="status-pill busy">${esc(task.reference)}</span>` : '<span class="status-pill on">AVAILABLE</span>'}
     </div>
     <dl class="kv">
-      <dt>Shift</dt><dd>${shift ? `${hhmm(shift.starts_at)}–${hhmm(shift.ends_at)} · ${shift.status === 'CLOCKED_IN' ? 'clocked in ' + hhmm(shift.clocked_in_at) : '<span style="color:var(--priority)">not clocked in</span>'}${shift.site_name ? ' · ' + esc(shift.site_name) : ''}` : '<span class="dim">not rostered now</span>'}</dd>
+      <dt>Shift</dt><dd>${shift ? `${hhmm(shift.starts_at)}–${hhmm(shift.ends_at)} · ${shift.clocked_in ? 'clocked in ' + hhmm(shift.clocked_in_at) : '<span style="color:var(--priority)">not clocked in</span>'}${shift.site_name ? ' · ' + esc(shift.site_name) : ''}` : '<span class="dim">not rostered now</span>'}</dd>
       <dt>Vehicle</dt><dd>${esc(p.vehicle || '—')}</dd>
       <dt>Welfare</dt><dd>${p.welfare_due_at ? `${welfareLeft(p)} remaining${p.welfare_note ? ' — ' + esc(p.welfare_note) : ''}` : 'no timer'}</dd>
     </dl>
@@ -861,7 +880,7 @@ function renderNewJob(body) {
     <label>Description</label><textarea id="nDesc" rows="2"></textarea>
     <label>Caller</label><input id="nCaller">
     <label>Dispatch now (optional)</label>
-    <div class="chips" id="nRes">${state.personnel.filter((p) => liveShifts().some((s) => s.personnel_id === p.id && s.status === 'CLOCKED_IN') && isAvailable(p)).map((p) => `<button type="button" class="chip" data-v="${p.id}">${esc(p.callsign || p.name)}</button>`).join('')}
+    <div class="chips" id="nRes">${state.personnel.filter((p) => liveShifts().some((s) => s.personnel_id === p.id && s.clocked_in) && isAvailable(p)).map((p) => `<button type="button" class="chip" data-v="${p.id}">${esc(p.callsign || p.name)}</button>`).join('')}
       ${state.mdts.filter((m) => m.connected && !m.job_id).map((m) => `<button type="button" class="chip" data-v="${esc(m.mdt_code)}">${esc(m.mdt_code)}</button>`).join('') || ''}</div>
     <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="nGo">Create job</button><button class="btn" id="nBack">Cancel</button></div>
     <p class="err" id="detailErr"></p>`;

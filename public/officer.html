@@ -301,11 +301,15 @@ async function refreshEquipment() {
 
 let shifts = [];
 function fmtShiftTime(iso) { return new Date(iso).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); }
+// A shift's own status is now the slot's (published/in_progress/…); each
+// GET /api/shifts?personnel_id= row carries `my` — this officer's own
+// assignment — which is where clock state and attendance actually live.
+const clockedIn = (s) => Boolean(s.my && s.my.clocked_in_at && !s.my.clocked_out_at);
 function currentShift() {
   const now = Date.now();
   const upcoming = shifts.filter((s) => !['CANCELLED'].includes(s.status)).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
-  return upcoming.find((s) => s.status === 'CLOCKED_IN')
-    || upcoming.find((s) => ['SCHEDULED', 'CONFIRMED'].includes(s.status) && Date.parse(s.starts_at) - 3600000 <= now && Date.parse(s.ends_at) >= now)
+  return upcoming.find(clockedIn)
+    || upcoming.find((s) => ['PUBLISHED', 'IN_PROGRESS'].includes(s.status) && Date.parse(s.starts_at) - 3600000 <= now && Date.parse(s.ends_at) >= now)
     || null;
 }
 function paintShift() {
@@ -318,20 +322,20 @@ function paintShift() {
   let html = '';
   if (current) {
     html += `
-      <div class="field"><span>${current.status === 'CLOCKED_IN' ? 'Clocked in' : 'Next shift'}</span><div>${esc(fmtShiftTime(current.starts_at))} – ${esc(fmtShiftTime(current.ends_at))}</div></div>
+      <div class="field"><span>${clockedIn(current) ? 'Clocked in' : 'Next shift'}</span><div>${esc(fmtShiftTime(current.starts_at))} – ${esc(fmtShiftTime(current.ends_at))}</div></div>
       <div class="field"><span>Site</span><div>${esc(current.site_name || '—')}</div></div>
-      <div class="field"><span>Role</span><div>${esc(current.role_type || '—')}</div></div>
+      <div class="field"><span>Role</span><div>${esc(current.shift_type_name || '—')}</div></div>
       <div class="btn-row" style="margin-top:8px">
-        ${current.status !== 'CLOCKED_IN' ? `<button class="btn ok" id="shClockIn">Clock in</button>` : `<button class="btn danger" id="shClockOut">Clock out</button>`}
+        ${!clockedIn(current) ? `<button class="btn ok" id="shClockIn">Clock in</button>` : `<button class="btn danger" id="shClockOut">Clock out</button>`}
       </div>`;
   }
   if (rest.length) {
     html += `<label style="margin-top:${current ? '14px' : '0'}">Upcoming</label>` +
-      rest.map((s) => `<div class="field"><span>${esc(fmtShiftTime(s.starts_at))}</span><div>${esc(s.site_name || s.role_type || '—')}</div></div>`).join('');
+      rest.map((s) => `<div class="field"><span>${esc(fmtShiftTime(s.starts_at))}</span><div>${esc(s.site_name || s.shift_type_name || '—')}</div></div>`).join('');
   }
   el('#shiftBody').innerHTML = html;
-  if (el('#shClockIn')) el('#shClockIn').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-in`, {}); startFootTracking(); await refreshShifts(); };
-  if (el('#shClockOut')) el('#shClockOut').onclick = async () => { await api('POST', `/api/shifts/${current.id}/clock-out`, {}); stopFootTracking(); await refreshShifts(); };
+  if (el('#shClockIn')) el('#shClockIn').onclick = async () => { await api('POST', `/api/shift-assignments/${current.my.id}/clock-in`, {}); startFootTracking(); await refreshShifts(); };
+  if (el('#shClockOut')) el('#shClockOut').onclick = async () => { await api('POST', `/api/shift-assignments/${current.my.id}/clock-out`, {}); stopFootTracking(); await refreshShifts(); };
   refreshPassdown();
 }
 async function refreshShifts() {
@@ -860,7 +864,7 @@ async function boot() {
   await refreshTraining();
   await refreshLeave();
   footTrackingEnabled = await api('GET', '/api/config').then((c) => c.foot_tracking).catch(() => false);
-  if (currentShift() && currentShift().status === 'CLOCKED_IN') startFootTracking();
+  if (currentShift() && clockedIn(currentShift())) startFootTracking();
 }
 boot();
 
@@ -903,8 +907,8 @@ bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === pe
      visit = null; paintVisit();
    })
    .on('site_visit.acknowledged', ({ visit: v }) => { if (visit && v.id === visit.id) { visit = v; paintVisit(); } })
-   .on('shift.created', (s) => { if (person && s.personnel_id === person.id) refreshShifts(); })
-   .on('shift.updated', (s) => { if (person && s.personnel_id === person.id) refreshShifts(); })
+   .on('shift.created', (s) => { if (person && s.assignments.some((a) => a.personnel_id === person.id)) refreshShifts(); })
+   .on('shift.updated', (s) => { if (person && s.assignments.some((a) => a.personnel_id === person.id)) refreshShifts(); })
    .on('emergency.acknowledged', () => { el('#alertHost').innerHTML = '<p class="dim">Emergency acknowledged by control.</p>'; })
    .on('emergency.resolved', () => { el('#alertHost').innerHTML = ''; })
    .on('message.received', (m) => {

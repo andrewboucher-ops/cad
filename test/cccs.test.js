@@ -592,44 +592,57 @@ test('linking a user to a personnel record updates has_login both ways, and unli
 });
 
 /* ---------------- HR rota: shifts ---------------- */
-test('a shift is created, and only the assigned officer or control can clock in and out', async () => {
+const patrolTypeId = () => app.db.shift_types.find((t) => t.key === 'MOBILE_PATROL').id;
+
+test('a shift is created with an initial assignment, and only that officer or control can clock in and out', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 9 * 3600000).toISOString();
-  const shift = await call('POST', '/api/shifts', { personnel: danId, starts_at: start, ends_at: end, role_type: 'Patrol' }, dispT);
+  const shift = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT);
   assert.equal(shift.status, 201);
-  assert.equal(shift.body.status, 'SCHEDULED');
-  assert.equal(shift.body.personnel_name, 'Dan Whitfield');
+  assert.equal(shift.body.status, 'PUBLISHED');
+  assert.equal(shift.body.assignments.length, 1);
+  assert.equal(shift.body.assignments[0].personnel_name, 'Dan Whitfield');
+  const assignmentId = shift.body.assignments[0].id;
 
-  assert.equal((await call('POST', `/api/shifts/${shift.body.id}/clock-in`, {}, ellieT)).status, 403);
-  const in1 = await call('POST', `/api/shifts/${shift.body.id}/clock-in`, {}, danT);
-  assert.equal(in1.body.status, 'CLOCKED_IN');
-  assert.ok(in1.body.clocked_in_at);
+  assert.equal((await call('POST', `/api/shift-assignments/${assignmentId}/clock-in`, {}, ellieT)).status, 403);
+  const in1 = await call('POST', `/api/shift-assignments/${assignmentId}/clock-in`, {}, danT);
+  assert.equal(in1.body.status, 'IN_PROGRESS', 'clocking in moves the whole shift into progress');
+  assert.ok(in1.body.assignments[0].clocked_in_at);
 
-  const out1 = await call('POST', `/api/shifts/${shift.body.id}/clock-out`, {}, danT);
-  assert.equal(out1.body.status, 'CLOCKED_OUT');
-  assert.ok(out1.body.clocked_out_at);
-  assert.equal((await call('POST', `/api/shifts/${shift.body.id}/clock-out`, {}, danT)).status, 409, 'cannot clock out twice');
+  const out1 = await call('POST', `/api/shift-assignments/${assignmentId}/clock-out`, {}, danT);
+  assert.ok(out1.body.assignments[0].clocked_out_at);
+  assert.equal(out1.body.assignments[0].attendance, 'ATTENDED');
+  assert.equal((await call('POST', `/api/shift-assignments/${assignmentId}/clock-out`, {}, danT)).status, 409, 'cannot clock out twice');
 });
 
 test('shifts reject a bad time range and can be filtered by personnel', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
-  const bad = await call('POST', '/api/shifts', { personnel: ryanId, starts_at: start, ends_at: start }, dispT);
+  const bad = await call('POST', '/api/shifts', { personnel: ryanId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: start }, dispT);
   assert.equal(bad.status, 400);
 
   const end = new Date(Date.now() + 8 * 3600000).toISOString();
-  await call('POST', '/api/shifts', { personnel: ryanId, starts_at: start, ends_at: end }, dispT);
+  await call('POST', '/api/shifts', { personnel: ryanId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT);
   const mine = await call('GET', `/api/shifts?personnel_id=${ryanId}`, undefined, dispT);
-  assert.ok(mine.body.every((s) => s.personnel_id === ryanId));
+  assert.ok(mine.body.every((s) => s.assignments.some((a) => a.personnel_id === ryanId)));
+  assert.ok(mine.body.every((s) => s.my && s.my.personnel_id === ryanId), 'the "my" convenience field points at the queried person');
   assert.ok(mine.body.length >= 1);
 });
 
-test('a shift can be edited and deleted by control', async () => {
+test('a shift can be edited and deleted by control, and a second person can be added', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 5 * 3600000).toISOString();
-  const shift = await call('POST', '/api/shifts', { personnel: ellieId, starts_at: start, ends_at: end }, dispT);
-  const edited = await call('PATCH', `/api/shifts/${shift.body.id}`, { notes: 'Cover for Dan', status: 'CONFIRMED' }, dispT);
+  const shift = await call('POST', '/api/shifts', { personnel: ellieId, shift_type_id: patrolTypeId(), required_headcount: 2, starts_at: start, ends_at: end }, dispT);
+  const edited = await call('PATCH', `/api/shifts/${shift.body.id}`, { notes: 'Cover for Dan', status: 'PUBLISHED' }, dispT);
   assert.equal(edited.body.notes, 'Cover for Dan');
-  assert.equal(edited.body.status, 'CONFIRMED');
+  assert.equal(edited.body.status, 'PUBLISHED');
+  assert.equal(edited.body.coverage_gap, 1, 'one seat still open against a headcount of 2');
+
+  const added = await call('POST', `/api/shifts/${shift.body.id}/assignments`, { personnel: danId }, dispT);
+  assert.equal(added.status, 201);
+  assert.equal(added.body.assignments.length, 2);
+  assert.equal(added.body.coverage_gap, 0);
+  assert.equal((await call('POST', `/api/shifts/${shift.body.id}/assignments`, { personnel: danId }, dispT)).status, 409, 'already on this shift');
+
   assert.equal((await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, dispT)).status, 403, 'delete is admin-only');
   assert.equal((await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, adminT)).status, 200);
 });
@@ -709,7 +722,7 @@ test('a field officer gains passdown access to a site once they have a shift or 
 
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 9 * 3600000).toISOString();
-  await call('POST', '/api/shifts', { personnel: ryanId, site_id: meridian.id, starts_at: start, ends_at: end }, dispT);
+  await call('POST', '/api/shifts', { personnel: ryanId, site_id: meridian.id, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT);
 
   const posted = await call('POST', '/api/passdown-logs', { site_id: meridian.id, body: 'Fire panel silenced after false trigger in zone 2.' }, ryanT);
   assert.equal(posted.status, 201);
