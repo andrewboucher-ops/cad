@@ -454,15 +454,19 @@ el('#bCalSync').onclick = () => CCCS.calendarSync();
 
 async function refreshEquipment() {
   if (!person) return;
-  const assets = await api('GET', `/api/assets?assigned_to=${person.id}`);
-  if (!assets.length) { el('#equipmentPanel').classList.add('hide'); return; }
+  // Tagged kit checked out to them, and stock issued to them (uniform, PPE).
+  const [assets, held] = await Promise.all([api('GET', `/api/assets?assigned_to=${person.id}`).catch(() => []), api('GET', '/api/stock/holdings').catch(() => [])]);
+  const kit = assets.filter((a) => !a.is_stock_tracked);
+  if (!kit.length && !held.length) { el('#equipmentPanel').classList.add('hide'); return; }
   el('#equipmentPanel').classList.remove('hide');
-  el('#equipmentBody').innerHTML = assets.map((a) => `
+  el('#equipmentBody').innerHTML = (kit.length ? '<h3>Signed out to you</h3>' + kit.map((a) => `
     <div class="field" style="display:flex;align-items:center;gap:8px">
       <div style="flex:1"><span>${esc(a.tag || a.category)}</span><div>${esc(a.description)}</div></div>
-      <button class="btn" style="padding:4px 10px;font-size:12px" data-return="${a.id}">Return</button>
-    </div>`).join('');
-  CCCS.els('[data-return]').forEach((b) => (b.onclick = async () => { await api('POST', `/api/assets/${b.dataset.return}/return`, {}); await refreshEquipment(); }));
+      <button class="btn" style="padding:8px 14px" data-return="${a.id}">Return</button>
+    </div>`).join('') : '')
+    + (held.length ? `<h3 style="margin-top:${kit.length ? '16px' : '0'}">Issued to you</h3>` + held.map((h) => `
+    <div class="field"><span>${esc(new Date(h.last_issued_at || Date.now()).toLocaleDateString('en-GB'))}</span><div>${h.quantity} × ${esc(h.item)}</div></div>`).join('') : '');
+  CCCS.els('[data-return]').forEach((b) => (b.onclick = async () => { if (!confirm('Hand this back to the store now?')) return; await api('POST', `/api/assets/${b.dataset.return}/return`, {}); await refreshEquipment(); }));
 }
 
 let shifts = [];

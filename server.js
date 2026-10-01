@@ -94,6 +94,7 @@ const db = {
   training_courses: [], training_records: [],
   leave_requests: [],
   ui_settings: [],
+  stock_locations: [], asset_events: [], stocktakes: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -1586,8 +1587,44 @@ route('DELETE', '/api/maintenance-logs/:id', ADMIN, ({ params }) => {
   return { ok: true };
 });
 
-const ASSET_CATEGORIES = ['EQUIPMENT', 'UNIFORM', 'KEY', 'DEVICE', 'OTHER'];
-const ASSET_STATUSES = ['IN_USE', 'IN_STORE', 'LOST', 'RETIRED'];
+const ASSET_CATEGORIES = ['EQUIPMENT', 'UNIFORM', 'KEY', 'DEVICE', 'RADIO', 'BODY_CAMERA', 'PPE', 'FIRST_AID', 'IT', 'CONSUMABLE', 'OTHER'];
+const ASSET_STATUSES = ['IN_USE', 'IN_STORE', 'IN_REPAIR', 'LOST', 'RETIRED'];
+const ASSET_CONDITIONS = ['NEW', 'GOOD', 'FAIR', 'POOR', 'DAMAGED'];
+/** The asset-register and stock-catalogue details (routes-inventory.js):
+ * shared by create and edit, each field optional and validated. */
+function applyAssetExtras(a, body) {
+  const str = (k, max = 120) => { if (k in body) a[k] = String(body[k] ?? '').trim().slice(0, max); };
+  const num = (k) => {
+    if (!(k in body)) return;
+    if (body[k] === null || body[k] === '') { a[k] = null; return; }
+    const n = Number(body[k]);
+    if (!Number.isFinite(n) || n < 0) throw httpError(400, `${k.replace(/_/g, ' ')} must be a number of 0 or more`);
+    a[k] = n;
+  };
+  const date = (k) => {
+    if (!(k in body)) return;
+    if (!body[k]) { a[k] = null; return; }
+    if (!/^\d{4}-\d{2}-\d{2}/.test(String(body[k])) || isNaN(Date.parse(body[k]))) throw httpError(400, `${k.replace(/_/g, ' ')} must be a date`);
+    a[k] = String(body[k]).slice(0, 10);
+  };
+  ['make', 'model', 'supplier', 'unit', 'size', 'check_type'].forEach((k) => str(k));
+  if ('sku' in body) {
+    const sku = String(body.sku || '').trim().slice(0, 60) || null;
+    if (sku && db.assets.some((x) => x.id !== a.id && x.sku === sku)) throw httpError(409, 'another item already uses that code');
+    a.sku = sku;
+  }
+  ['purchase_cost', 'unit_cost', 'reorder_qty', 'check_interval_days'].forEach(num);
+  ['warranty_expires_at', 'next_check_due_at'].forEach(date);
+  if ('condition' in body) {
+    if (body.condition && !ASSET_CONDITIONS.includes(body.condition)) throw httpError(400, `condition must be one of ${ASSET_CONDITIONS.join(', ')}`);
+    a.condition = body.condition || null;
+  }
+  if ('location_id' in body) {
+    const loc = body.location_id ? (db.stock_locations || []).find((l) => l.id === Number(body.location_id)) : null;
+    if (body.location_id && !loc) throw httpError(400, 'store location not found');
+    a.location_id = loc ? loc.id : null;
+  }
+}
 route('GET', '/api/assets', ALL, ({ query, user }) => {
   let rows = db.assets.filter((a) => visibleToUser(a, user)).map((a) => publicAsset(a));
   if (query.get('assigned_to')) rows = rows.filter((a) => a.assigned_to === Number(query.get('assigned_to')));
@@ -1615,6 +1652,7 @@ route('POST', '/api/assets', ADMIN, ({ body, user }) => {
     expiry_date: isStockTracked ? (body.expiry_date || null) : null,
     parent_asset_id: parent ? parent.id : null,
   };
+  applyAssetExtras(a, body);
   db.assets.push(a);
   if (isStockTracked && body.initial_quantity != null && body.initial_quantity !== '' && Number(body.initial_quantity) > 0) {
     recordStockMovement(a.id, Number(body.initial_quantity), 'RESTOCK', 'Initial stock on creation', null, user);
@@ -1655,6 +1693,7 @@ route('PATCH', '/api/assets/:id', ADMIN, ({ params, body }) => {
     if (parent && parent.id === a.id) throw httpError(400, 'an asset cannot be its own parent');
     a.parent_asset_id = parent ? parent.id : null;
   }
+  applyAssetExtras(a, body);
   if (body.check_now) a.last_checked_at = new Date().toISOString();
   logEvent('asset.updated', `ASSET ${a.tag || a.description} UPDATED`, { asset_id: a.id });
   return publicAsset(a);
@@ -1692,20 +1731,25 @@ route('POST', '/api/assets/:id/checkout', ALL, ({ params, body, user }) => {
     id: nextId('asset_checkouts'), asset_id: a.id, personnel_id: personnelId,
     checked_out_at: new Date().toISOString(), checked_out_by: user.id,
     returned_at: null, returned_by: null, notes: body.notes || '',
+    expected_return_at: body.expected_return_at && !isNaN(Date.parse(body.expected_return_at)) ? new Date(body.expected_return_at).toISOString() : null,
+    condition_out: ASSET_CONDITIONS.includes(body.condition) ? body.condition : (a.condition || null),
   };
+  if (['LOST', 'RETIRED', 'IN_REPAIR'].includes(a.status)) throw httpError(409, `this asset is ${a.status.replace('_', ' ').toLowerCase()} — it cannot be issued`);
   db.asset_checkouts.push(co);
   a.assigned_to = personnelId; a.status = 'IN_USE';
   const p = db.personnel.find((x) => x.id === personnelId);
   logEvent('asset.checked_out', `ASSET ${a.tag || a.description} CHECKED OUT TO ${p ? p.name : personnelId}`, { asset_id: a.id, checkout_id: co.id });
   return { __status: 201, __body: publicAsset(a) };
 });
-route('POST', '/api/assets/:id/return', ALL, ({ params, user }) => {
+route('POST', '/api/assets/:id/return', ALL, ({ params, body, user }) => {
   const a = db.assets.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'asset not found');
   const co = db.asset_checkouts.find((c) => c.asset_id === a.id && !c.returned_at);
   if (!co) throw httpError(409, 'asset is not currently checked out');
   if (!isControlRole(user.role) && user.personnel_id !== co.personnel_id) throw httpError(403, 'not your checkout');
   co.returned_at = new Date().toISOString(); co.returned_by = user.id;
-  a.assigned_to = null; a.status = 'IN_STORE'; a.last_checked_at = new Date().toISOString();
+  if (body && ASSET_CONDITIONS.includes(body.condition)) { co.condition_in = body.condition; a.condition = body.condition; }
+  if (body && body.notes) co.return_notes = String(body.notes).slice(0, 500);
+  a.assigned_to = null; a.status = body && body.condition === 'DAMAGED' ? 'IN_REPAIR' : 'IN_STORE'; a.last_checked_at = new Date().toISOString();
   logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
   return publicAsset(a);
 });
@@ -3784,6 +3828,12 @@ route('GET', '/api/rota/ical/:token.ics', null, ({ params }) => {
 });
 require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow: () => store.flushNow() });
 
+
+// Stock and asset management — see routes-inventory.js.
+const inventory = require('./routes-inventory.js')({
+  route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, visibleToUser, isControlRole,
+  publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, flushNow: () => store.flushNow(),
+});
 
 // Which roles see which section of the menus — see ui-sections.js.
 const sections = require('./ui-sections.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });

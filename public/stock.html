@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — stock</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+</head>
+<body>
+<div class="k-top">
+  <h1>Stock</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary" id="bReceive">Receive delivery</button>
+  <button class="btn" id="bStocktake">Stocktake</button>
+  <button class="btn admin-only hide" id="bNewItem">New item</button>
+  <button class="btn admin-only hide" id="bLocations">Locations</button>
+  <button class="btn" id="bExport">Export CSV</button>
+</div>
+<div class="k-body">
+  <div class="tiles" id="tiles"></div>
+  <div class="bar" id="views">
+    <button class="chip on" data-view="items">Items</button>
+    <button class="chip" data-view="reorder">To reorder</button>
+    <button class="chip" data-view="holdings">Who holds what</button>
+    <button class="chip" data-view="movements">Movements</button>
+    <button class="chip" data-view="stocktakes">Stocktakes</button>
+  </div>
+  <div class="bar" id="filters">
+    <input id="q" placeholder="Search item, size or code">
+    <select id="fLoc"></select>
+    <select id="fCat"></select>
+  </div>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
+if (isAdmin) els('.admin-only').forEach((b) => b.classList.remove('hide'));
+const { modal, close, foot, wire, v, numOrNull, money, date, when, words, options } = KIT;
+
+const CATEGORIES = ['UNIFORM', 'PPE', 'FIRST_AID', 'CONSUMABLE', 'EQUIPMENT', 'DEVICE', 'OTHER'];
+const REASON = { RESTOCK: 'Received', ISSUED: 'Issued', RETURNED: 'Returned', RETURNED_DISPOSED: 'Returned (written off)', TRANSFER_IN: 'Transfer in', TRANSFER_OUT: 'Transfer out', DAMAGED: 'Damaged', EXPIRED: 'Expired', LOST: 'Lost', FOUND: 'Found', AUDIT_CORRECTION: 'Count correction', ALLOCATED: 'Allocated to shift', USED_ON_SHIFT: 'Used on shift' };
+let data = null, people = [], sites = [], view = 'items';
+
+const locName = (id) => (data.locations.find((l) => l.id === Number(id)) || {}).name || '—';
+const activeLocs = () => data.locations.filter((l) => l.active !== false);
+const locOpts = (sel, blank) => options(activeLocs().map((l) => [l.id, l.name]), sel, blank);
+const itemName = (i) => `${i.description}${i.size ? ` (${i.size})` : ''}`;
+const itemOpts = (sel) => options(data.items.map((i) => [i.id, itemName(i)]), sel, '— choose item —');
+const peopleOpts = (sel) => options(people.map((p) => [p.id, p.name]), sel, '— choose person —');
+const levelHere = (i) => (el('#fLoc').value ? (i.levels[el('#fLoc').value] || 0) : i.total);
+
+async function load() {
+  try {
+    [data, people, sites] = await Promise.all([api('GET', '/api/stock/overview'), people.length ? people : api('GET', '/api/personnel'), sites.length ? sites : api('GET', '/api/sites')]);
+    people = people.filter((p) => (p.employment_status || 'ACTIVE') === 'ACTIVE').sort((a, b) => a.name.localeCompare(b.name));
+  } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  const keepLoc = el('#fLoc').value, keepCat = el('#fCat').value;
+  el('#fLoc').innerHTML = locOpts(keepLoc, 'All locations');
+  el('#fCat').innerHTML = options(CATEGORIES.map((c) => [c, words(c)]), keepCat, 'All categories');
+  paint();
+}
+
+function paintTiles() {
+  const s = data.summary;
+  const t = (n, l, cls, go) => `<button class="tile ${cls}" data-go="${go}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
+  el('#tiles').innerHTML = [
+    t(s.items, 'Items', '', 'items'), t(money(s.value), 'Stock value', '', 'items'),
+    t(s.below_reorder, 'To reorder', s.below_reorder ? 'bad' : 'good', 'reorder'),
+    t(s.expiring, 'Expired / expiring', s.expiring ? 'warn' : 'good', 'items'),
+    t(s.issued_out, 'Issued to people', '', 'holdings'),
+  ].join('');
+  els('#tiles [data-go]').forEach((b) => (b.onclick = () => setView(b.dataset.go)));
+}
+function setView(vw) { view = vw; els('#views .chip').forEach((c) => c.classList.toggle('on', c.dataset.view === vw)); paint(); }
+els('#views .chip').forEach((c) => (c.onclick = () => setView(c.dataset.view)));
+['#q', '#fLoc', '#fCat'].forEach((s) => el(s).addEventListener(s === '#q' ? 'input' : 'change', () => paint()));
+
+function filtered() {
+  const q = el('#q').value.trim().toLowerCase(), cat = el('#fCat').value;
+  return data.items.filter((i) => (!cat || i.category === cat)
+    && (!q || [i.description, i.size, i.sku, i.supplier].some((x) => String(x || '').toLowerCase().includes(q))));
+}
+function paint() {
+  if (!data) return;
+  paintTiles();
+  el('#filters').style.display = ['items', 'reorder', 'movements'].includes(view) ? '' : 'none';
+  ({ items: paintItems, reorder: paintReorder, holdings: paintHoldings, movements: paintMovements, stocktakes: paintStocktakes })[view]();
+}
+
+function paintItems() {
+  const rows = filtered();
+  const loc = el('#fLoc').value;
+  el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k">
+    <thead><tr><th>Item</th><th>Code</th><th>Category</th><th class="num">${loc ? esc(locName(loc)) : 'In stock'}</th><th class="num">Reorder at</th><th class="num">Value</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows.map((i) => {
+      const lvl = levelHere(i);
+      const flags = [i.below_reorder ? '<span class="pill bad">Reorder</span>' : '', i.expired ? '<span class="pill bad">Expired</span>' : i.expiring_soon ? `<span class="pill warn">Expires ${esc(date(i.expiry_date))}</span>` : '', i.issued_out ? `<span class="pill info">${i.issued_out} issued</span>` : ''].join(' ');
+      const where = !loc && Object.keys(i.levels).filter((k) => i.levels[k]).length > 1 ? `<div class="dim" style="font-size:11.5px">${Object.entries(i.levels).filter(([, n]) => n).map(([k, n]) => `${esc(locName(k))}: ${n}`).join(' · ')}</div>` : '';
+      return `<tr>
+        <td><strong>${esc(i.description)}</strong>${i.size ? ` <span class="dim">· ${esc(i.size)}</span>` : ''}${i.supplier ? `<div class="dim" style="font-size:11.5px">${esc(i.supplier)}</div>` : ''}</td>
+        <td class="mono dim">${esc(i.sku || '—')}</td>
+        <td class="dim">${esc(words(i.category))}</td>
+        <td class="num"><strong>${lvl}</strong> <span class="dim">${esc(i.unit || '')}</span>${where}</td>
+        <td class="num dim">${i.low_stock_threshold ?? '—'}</td>
+        <td class="num">${money(i.value)}</td>
+        <td>${flags}</td>
+        <td><div class="acts">
+          <button class="btn" data-a="receive" data-id="${i.id}">Receive</button>
+          <button class="btn" data-a="issue" data-id="${i.id}">Issue</button>
+          <button class="btn" data-a="return" data-id="${i.id}">Return</button>
+          <button class="btn" data-a="transfer" data-id="${i.id}">Move</button>
+          <button class="btn" data-a="adjust" data-id="${i.id}">Adjust</button>
+          <button class="btn" data-a="history" data-id="${i.id}">History</button>
+          ${isAdmin ? `<button class="btn" data-a="edit" data-id="${i.id}">Edit</button>` : ''}
+        </div></td></tr>`;
+    }).join('')}</tbody></table></div>` : `<p class="dim">${data.items.length ? 'No items match.' : 'No stock items yet.' + (isAdmin ? ' Press <strong>New item</strong> to add your first one (e.g. "Hi-vis vest", size L).' : ' An admin adds items.')}</p>`;
+  els('#main [data-a]').forEach((b) => (b.onclick = () => ACTIONS[b.dataset.a](data.items.find((i) => i.id === Number(b.dataset.id)))));
+}
+
+function paintReorder() {
+  const rows = filtered().filter((i) => i.below_reorder);
+  const bySupplier = new Map();
+  for (const i of rows) { const k = i.supplier || 'No supplier set'; if (!bySupplier.has(k)) bySupplier.set(k, []); bySupplier.get(k).push(i); }
+  el('#main').innerHTML = rows.length ? [...bySupplier].map(([sup, list]) => `
+    <h3 style="font-size:14px;margin:14px 0 6px">${esc(sup)}</h3>
+    <table class="k"><thead><tr><th>Item</th><th>Code</th><th class="num">In stock</th><th class="num">Reorder at</th><th class="num">Order</th><th class="num">Est. cost</th><th></th></tr></thead>
+    <tbody>${list.map((i) => `<tr><td>${esc(itemName(i))}</td><td class="mono dim">${esc(i.sku || '—')}</td><td class="num">${i.total}</td><td class="num dim">${i.low_stock_threshold}</td>
+      <td class="num"><strong>${i.suggested_order}</strong> ${esc(i.unit || '')}</td><td class="num">${i.unit_cost != null ? money(i.unit_cost * i.suggested_order) : '—'}</td>
+      <td><button class="btn" data-a="receive" data-id="${i.id}" style="padding:3px 9px;font-size:12px">Receive</button></td></tr>`).join('')}</tbody></table>`).join('')
+    : '<p class="dim">Nothing is at or below its reorder level.</p>';
+  els('#main [data-a]').forEach((b) => (b.onclick = () => ACTIONS.receive(data.items.find((i) => i.id === Number(b.dataset.id)))));
+}
+
+async function paintHoldings() {
+  el('#main').innerHTML = '<p class="dim">Loading…</p>';
+  const rows = await api('GET', '/api/stock/holdings').catch((e) => { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return null; });
+  if (!rows) return;
+  const byPerson = new Map();
+  for (const r of rows) { if (!byPerson.has(r.personnel_id)) byPerson.set(r.personnel_id, { name: r.personnel_name, rows: [] }); byPerson.get(r.personnel_id).rows.push(r); }
+  el('#main').innerHTML = rows.length ? `<table class="k"><thead><tr><th>Person</th><th>Holds</th><th class="num">Qty</th><th>Last issued</th><th></th></tr></thead><tbody>
+    ${[...byPerson].map(([pid, g]) => g.rows.map((r, n) => `<tr><td>${n === 0 ? `<strong>${esc(g.name)}</strong>` : ''}</td><td>${esc(r.item)}</td><td class="num">${r.quantity} <span class="dim">${esc(r.unit)}</span></td><td class="dim">${esc(date(r.last_issued_at))}</td>
+      <td><button class="btn" data-ret="${r.item_id}" data-p="${pid}" style="padding:3px 9px;font-size:12px">Return</button></td></tr>`).join('')).join('')}</tbody></table>`
+    : '<p class="dim">Nothing is issued to anyone. Issue stock from the Items list.</p>';
+  els('#main [data-ret]').forEach((b) => (b.onclick = () => ACTIONS.return(data.items.find((i) => i.id === Number(b.dataset.ret)), Number(b.dataset.p))));
+}
+
+async function paintMovements(itemId) {
+  el('#main').innerHTML = '<p class="dim">Loading…</p>';
+  const q = new URLSearchParams({ limit: '500' });
+  if (el('#fLoc').value) q.set('location_id', el('#fLoc').value);
+  const rows = await api('GET', `/api/stock/movements?${q}`).catch(() => []);
+  const text = el('#q').value.trim().toLowerCase();
+  const shown = rows.filter((m) => !text || m.item.toLowerCase().includes(text));
+  el('#main').innerHTML = shown.length ? movementTable(shown, true) : '<p class="dim">No movements yet.</p>';
+}
+function movementTable(rows, withItem) {
+  return `<div style="overflow-x:auto"><table class="k"><thead><tr><th>When</th>${withItem ? '<th>Item</th>' : ''}<th>What</th><th class="num">Qty</th><th>Location</th><th>Who / where</th><th>By</th><th>Note</th></tr></thead><tbody>
+    ${rows.map((m) => `<tr><td class="dim" style="white-space:nowrap">${esc(when(m.recorded_at))}</td>${withItem ? `<td>${esc(m.item)}</td>` : ''}
+      <td>${esc(REASON[m.reason] || words(m.reason))}</td>
+      <td class="num" style="color:${m.delta > 0 ? 'var(--available)' : m.delta < 0 ? 'var(--emergency)' : 'inherit'}">${m.delta > 0 ? '+' : ''}${m.delta || (m.person_delta ? '0' : '')}</td>
+      <td class="dim">${esc(m.location_name)}</td>
+      <td>${esc(m.personnel_name || m.site_name || (m.supplier ? `from ${m.supplier}` : '') || '')}${m.reference ? ` <span class="dim">ref ${esc(m.reference)}</span>` : ''}</td>
+      <td class="dim">${esc(m.recorded_by || '')}</td><td class="dim">${esc(m.note || '')}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+async function paintStocktakes() {
+  const rows = await api('GET', '/api/stock/stocktakes').catch(() => []);
+  el('#main').innerHTML = rows.length ? rows.map((t) => {
+    const off = t.lines.filter((l) => l.diff);
+    return `<div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+      <strong>${esc(t.location_name)}</strong> <span class="dim">· ${esc(when(t.at))} · ${esc(t.by)} · ${t.lines.length} counted, ${off.length} corrected</span>${t.note ? `<div class="dim">${esc(t.note)}</div>` : ''}
+      ${off.length ? `<ul style="margin:6px 0 0 18px;padding:0;font-size:13px">${off.map((l) => `<li>${esc(l.item)}: expected ${l.expected}, counted ${l.counted} (<span style="color:${l.diff > 0 ? 'var(--available)' : 'var(--emergency)'}">${l.diff > 0 ? '+' : ''}${l.diff}</span>)</li>`).join('')}</ul>` : ''}
+    </div>`;
+  }).join('') : '<p class="dim">No stocktakes yet. Press <strong>Stocktake</strong> to count a location.</p>';
+}
+
+/* ---------------- actions ---------------- */
+const done = async (msg) => { close(); await load(); if (msg) flash(msg); };
+function flash(msg) { el('#updated').textContent = msg; setTimeout(() => (el('#updated').textContent = ''), 4000); }
+const ACTIONS = {
+  receive(i) {
+    modal('Receive delivery', `<div class="k-form">
+      <div class="full"><label>Item</label><select id="rItem">${itemOpts(i && i.id)}</select></div>
+      <div><label>Quantity</label><input id="rQty" type="number" min="1" inputmode="numeric"></div>
+      <div><label>Into</label><select id="rLoc">${locOpts(el('#fLoc').value)}</select></div>
+      <div><label>Unit cost (£)</label><input id="rCost" type="number" min="0" step="0.01" value="${i && i.unit_cost != null ? i.unit_cost : ''}"></div>
+      <div><label>Supplier</label><input id="rSup" value="${esc((i && i.supplier) || '')}"></div>
+      <div class="full"><label>Delivery note / PO reference</label><input id="rRef"></div>
+      <div class="full"><label>Note</label><input id="rNote"></div></div>${foot('Receive')}`, (root) => {
+      root.querySelector('#rItem').onchange = () => { const x = data.items.find((y) => y.id === Number(v(root, '#rItem'))); if (x) { root.querySelector('#rCost').value = x.unit_cost ?? ''; root.querySelector('#rSup').value = x.supplier || ''; } };
+      wire(root, async () => {
+        if (!v(root, '#rItem')) throw new Error('choose an item');
+        await api('POST', `/api/stock/${v(root, '#rItem')}/receive`, { quantity: Number(v(root, '#rQty')), location_id: Number(v(root, '#rLoc')), unit_cost: numOrNull(v(root, '#rCost')), supplier: v(root, '#rSup'), reference: v(root, '#rRef'), note: v(root, '#rNote') });
+        await done('Received.');
+      });
+    });
+  },
+  issue(i) {
+    modal(`Issue — ${itemName(i)}`, `<div class="k-form">
+      <div><label>To</label><select id="iTo"><option value="p">A person</option><option value="s">A site</option></select></div>
+      <div id="iWho"><label>Person</label><select id="iP">${peopleOpts()}</select></div>
+      <div id="iWhere" class="hide"><label>Site</label><select id="iS">${options(sites.map((s) => [s.id, s.name]), '', '— choose site —')}</select></div>
+      <div><label>Quantity</label><input id="iQty" type="number" min="1" value="1"></div>
+      <div><label>From</label><select id="iLoc">${locOpts(el('#fLoc').value)}</select></div>
+      <div class="full"><label>Note</label><input id="iNote" placeholder="e.g. new starter kit"></div></div>
+      <p class="dim" style="font-size:12.5px">In stock: ${Object.entries(i.levels).filter(([, n]) => n).map(([k, n]) => `${esc(locName(k))} ${n}`).join(', ') || 'none'}</p>${foot('Issue')}`, (root) => {
+      root.querySelector('#iTo').onchange = () => { const s = v(root, '#iTo') === 's'; root.querySelector('#iWho').classList.toggle('hide', s); root.querySelector('#iWhere').classList.toggle('hide', !s); };
+      wire(root, async () => {
+        const toSite = v(root, '#iTo') === 's';
+        await api('POST', `/api/stock/${i.id}/issue`, { quantity: Number(v(root, '#iQty')), location_id: Number(v(root, '#iLoc')), personnel_id: toSite ? null : numOrNull(v(root, '#iP')), site_id: toSite ? numOrNull(v(root, '#iS')) : null, note: v(root, '#iNote') });
+        await done('Issued.');
+      });
+    });
+  },
+  async return(i, personId) {
+    const holders = (await api('GET', '/api/stock/holdings').catch(() => [])).filter((h) => h.item_id === i.id);
+    if (!holders.length) { alert(`Nobody holds any ${itemName(i)}.`); return; }
+    modal(`Return — ${itemName(i)}`, `<div class="k-form">
+      <div class="full"><label>From</label><select id="tP">${options(holders.map((h) => [h.personnel_id, `${h.personnel_name} (holds ${h.quantity})`]), personId)}</select></div>
+      <div><label>Quantity</label><input id="tQty" type="number" min="1" value="1"></div>
+      <div><label>Back into</label><select id="tLoc">${locOpts(el('#fLoc').value)}</select></div>
+      <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13.5px"><input type="checkbox" id="tRe" checked style="width:18px;height:18px"> Fit to re-issue — put it back in stock (untick if worn out or damaged)</label></div>
+      <div class="full"><label>Note</label><input id="tNote"></div></div>${foot('Return')}`, (root) => wire(root, async () => {
+      await api('POST', `/api/stock/${i.id}/return`, { personnel_id: Number(v(root, '#tP')), quantity: Number(v(root, '#tQty')), location_id: Number(v(root, '#tLoc')), restock: root.querySelector('#tRe').checked, note: v(root, '#tNote') });
+      await done('Returned.');
+    }));
+  },
+  transfer(i) {
+    modal(`Move between locations — ${itemName(i)}`, `<div class="k-form">
+      <div><label>From</label><select id="xF">${locOpts(Object.keys(i.levels).find((k) => i.levels[k] > 0))}</select></div>
+      <div><label>To</label><select id="xT">${locOpts()}</select></div>
+      <div><label>Quantity</label><input id="xQty" type="number" min="1" value="1"></div>
+      <div><label>Note</label><input id="xNote"></div></div>${foot('Move')}`, (root) => wire(root, async () => {
+      await api('POST', `/api/stock/${i.id}/transfer`, { from_location_id: Number(v(root, '#xF')), to_location_id: Number(v(root, '#xT')), quantity: Number(v(root, '#xQty')), note: v(root, '#xNote') });
+      await done('Moved.');
+    }));
+  },
+  adjust(i) {
+    modal(`Adjust — ${itemName(i)}`, `<div class="k-form">
+      <div><label>Reason</label><select id="aR"><option value="DAMAGED">Damaged — remove</option><option value="EXPIRED">Expired — remove</option><option value="LOST">Lost — remove</option><option value="FOUND">Found — add</option><option value="AUDIT_CORRECTION">Count correction (+ or −)</option></select></div>
+      <div><label>Quantity</label><input id="aQ" type="number" min="1" value="1"></div>
+      <div><label>At</label><select id="aL">${locOpts(el('#fLoc').value)}</select></div>
+      <div id="aDirW" class="hide"><label>Direction</label><select id="aDir"><option value="-1">Remove</option><option value="1">Add</option></select></div>
+      <div class="full"><label>Note</label><input id="aN"></div></div>${foot('Save')}`, (root) => {
+      root.querySelector('#aR').onchange = () => root.querySelector('#aDirW').classList.toggle('hide', v(root, '#aR') !== 'AUDIT_CORRECTION');
+      wire(root, async () => {
+        const r = v(root, '#aR'), n = Number(v(root, '#aQ'));
+        const sign = r === 'FOUND' ? 1 : r === 'AUDIT_CORRECTION' ? Number(v(root, '#aDir')) : -1;
+        await api('POST', `/api/stock/${i.id}/adjust`, { reason: r, delta: sign * n, location_id: Number(v(root, '#aL')), note: v(root, '#aN') });
+        await done('Adjusted.');
+      });
+    });
+  },
+  async history(i) {
+    modal(`History — ${itemName(i)}`, '<div id="hBody"><p class="dim">Loading…</p></div><div class="btn-row" style="margin-top:10px"><button class="btn" id="hClose">Close</button></div>', async (root) => {
+      root.querySelector('#hClose').onclick = close;
+      const rows = await api('GET', `/api/stock/movements?item_id=${i.id}&limit=500`).catch(() => []);
+      root.querySelector('#hBody').innerHTML = rows.length ? movementTable(rows, false) : '<p class="dim">No movements yet.</p>';
+    }, { wide: true });
+  },
+  edit(i) { itemEditor(i); },
+};
+
+/* ---------------- items (admin) ---------------- */
+function itemEditor(i) {
+  const isNew = !i;
+  modal(isNew ? 'New stock item' : `Edit — ${itemName(i)}`, `<div class="k-form">
+    <div class="full"><label>Name</label><input id="eName" value="${esc(i ? i.description : '')}" placeholder="e.g. Hi-vis vest"></div>
+    <div><label>Size / variant</label><input id="eSize" value="${esc((i && i.size) || '')}" placeholder="e.g. L — one item per size"></div>
+    <div><label>Code / SKU</label><input id="eSku" value="${esc((i && i.sku) || '')}"></div>
+    <div><label>Category</label><select id="eCat">${options(CATEGORIES.map((c) => [c, words(c)]), i ? i.category : 'UNIFORM')}</select></div>
+    <div><label>Unit</label><input id="eUnit" value="${esc((i && i.unit) || '')}" placeholder="each, pair, box"></div>
+    <div><label>Supplier</label><input id="eSup" value="${esc((i && i.supplier) || '')}"></div>
+    <div><label>Unit cost (£)</label><input id="eCost" type="number" min="0" step="0.01" value="${i && i.unit_cost != null ? i.unit_cost : ''}"></div>
+    <div><label>Reorder when at or below</label><input id="eRe" type="number" min="0" value="${i && i.low_stock_threshold != null ? i.low_stock_threshold : ''}"></div>
+    <div><label>Reorder quantity</label><input id="eRq" type="number" min="0" value="${i && i.reorder_qty != null ? i.reorder_qty : ''}"></div>
+    <div><label>Expiry date (if it has one)</label><input id="eExp" type="date" value="${esc((i && i.expiry_date) || '')}"></div>
+    ${isNew ? `<div class="k-section">Opening stock</div>
+      <div><label>Quantity now</label><input id="eQty" type="number" min="0" value="0"></div>
+      <div><label>At</label><select id="eLoc">${locOpts()}</select></div>` : ''}
+    <div class="full"><label>Notes</label><textarea id="eNotes" rows="2">${esc((i && i.notes) || '')}</textarea></div></div>
+    ${foot(isNew ? 'Create item' : 'Save', isNew ? '' : '<button type="button" class="btn danger" id="eDel">Delete item</button>')}`, (root) => {
+    if (!isNew) root.querySelector('#eDel').onclick = async () => {
+      if (i.total || i.issued_out) { alert('This item still has stock or is issued to people. Write it off or get it back first.'); return; }
+      if (!confirm(`Delete ${itemName(i)}? Its history goes with it.`)) return;
+      try { await api('DELETE', `/api/assets/${i.id}`); await done('Deleted.'); } catch (e) { alert(e.message); }
+    };
+    wire(root, async () => {
+      const body = {
+        description: v(root, '#eName'), size: v(root, '#eSize'), sku: v(root, '#eSku'), category: v(root, '#eCat'), unit: v(root, '#eUnit'),
+        supplier: v(root, '#eSup'), unit_cost: numOrNull(v(root, '#eCost')), low_stock_threshold: numOrNull(v(root, '#eRe')),
+        reorder_qty: numOrNull(v(root, '#eRq')), expiry_date: v(root, '#eExp') || null, notes: v(root, '#eNotes'), is_stock_tracked: true,
+      };
+      if (isNew) {
+        const created = await api('POST', '/api/assets', body);
+        const q = Number(v(root, '#eQty'));
+        if (q > 0) await api('POST', `/api/stock/${created.id}/receive`, { quantity: q, location_id: Number(v(root, '#eLoc')), note: 'Opening stock', unit_cost: body.unit_cost });
+      } else await api('PATCH', `/api/assets/${i.id}`, body);
+      await done(isNew ? 'Item created.' : 'Saved.');
+    });
+  });
+}
+el('#bNewItem').onclick = () => itemEditor(null);
+el('#bReceive').onclick = () => ACTIONS.receive(null);
+
+/* ---------------- stocktake ---------------- */
+el('#bStocktake').onclick = () => {
+  modal('Stocktake', `<div class="k-form">
+    <div><label>Location</label><select id="sLoc">${locOpts(el('#fLoc').value)}</select></div>
+    <div><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13.5px;margin-top:22px"><input type="checkbox" id="sBlind" style="width:18px;height:18px"> Blind count (hide what the system expects)</label></div>
+    <div class="full" id="sList"></div>
+    <div class="full"><label>Note</label><input id="sNote" placeholder="e.g. quarterly count"></div></div>
+    <p class="dim" style="font-size:12.5px">Leave a box empty to skip that item. Any difference is booked as a count correction.</p>${foot('Submit count')}`, (root) => {
+    const paintList = () => {
+      const loc = v(root, '#sLoc'), blind = root.querySelector('#sBlind').checked;
+      root.querySelector('#sList').innerHTML = `<table class="k"><thead><tr><th>Item</th>${blind ? '' : '<th class="num">Expected</th>'}<th class="num" style="width:110px">Counted</th></tr></thead><tbody>
+        ${data.items.map((i) => `<tr><td>${esc(itemName(i))}</td>${blind ? '' : `<td class="num dim">${i.levels[loc] || 0}</td>`}<td><input type="number" min="0" inputmode="numeric" data-count="${i.id}" style="width:100px"></td></tr>`).join('')}</tbody></table>`;
+    };
+    root.querySelector('#sLoc').onchange = paintList; root.querySelector('#sBlind').onchange = paintList; paintList();
+    wire(root, async () => {
+      const counts = [...root.querySelectorAll('[data-count]')].filter((x) => x.value !== '').map((x) => ({ item_id: Number(x.dataset.count), counted: Number(x.value) }));
+      if (!counts.length) throw new Error('enter at least one count');
+      const t = await api('POST', '/api/stock/stocktake', { location_id: Number(v(root, '#sLoc')), counts, note: v(root, '#sNote') });
+      await done(`Stocktake saved — ${t.lines.filter((l) => l.diff).length} correction(s).`);
+      setView('stocktakes');
+    });
+  }, { wide: true });
+};
+
+/* ---------------- locations (admin) ---------------- */
+el('#bLocations').onclick = function locations() {
+  modal('Store locations', `<p class="dim" style="margin-top:0">Where stock is kept — the main store, a van, a cupboard on site.</p>
+    <table class="k"><tbody>${data.locations.map((l) => `<tr><td>${esc(l.name)}${l.is_main ? ' <span class="dim">(main)</span>' : ''}${l.active === false ? ' <span class="pill off">closed</span>' : ''}</td><td class="dim">${esc(words(l.kind))}</td>
+      <td class="num">${l.is_main ? '' : `<button class="btn" data-lt="${l.id}" style="padding:3px 9px;font-size:12px">${l.active === false ? 'Reopen' : 'Close'}</button>`}</td></tr>`).join('')}</tbody></table>
+    <div class="k-form" style="margin-top:12px"><div><label>New location</label><input id="lName" placeholder="e.g. VAN-101 kit store"></div>
+    <div><label>Kind</label><select id="lKind">${options(['STORE', 'VEHICLE', 'SITE', 'OTHER'].map((k) => [k, words(k)]), 'STORE')}</select></div></div>${foot('Add location')}`, (root) => {
+    root.querySelectorAll('[data-lt]').forEach((b) => (b.onclick = async () => {
+      const l = data.locations.find((x) => x.id === Number(b.dataset.lt));
+      try { await api('PATCH', `/api/stock/locations/${l.id}`, { active: l.active === false }); await load(); locations(); } catch (e) { alert(e.message); }
+    }));
+    wire(root, async () => { await api('POST', '/api/stock/locations', { name: v(root, '#lName'), kind: v(root, '#lKind') }); await load(); locations(); });
+  });
+};
+
+el('#bExport').onclick = () => KIT.csv(`stock-${new Date().toISOString().slice(0, 10)}.csv`,
+  ['Item', 'Size', 'Code', 'Category', 'Unit', ...data.locations.map((l) => l.name), 'Total', 'Issued to people', 'Reorder at', 'Reorder qty', 'Unit cost', 'Value', 'Supplier', 'Expiry'],
+  data.items.map((i) => [i.description, i.size, i.sku, words(i.category), i.unit, ...data.locations.map((l) => i.levels[l.id] || 0), i.total, i.issued_out, i.low_stock_threshold, i.reorder_qty, i.unit_cost, i.value, i.supplier, i.expiry_date]));
+
+load();
+setInterval(() => { if (!document.querySelector('.modal-back')) load(); }, 60000);
+</script>
+</body>
+</html>

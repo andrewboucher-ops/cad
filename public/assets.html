@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — assets</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+</head>
+<body>
+<div class="k-top">
+  <h1>Assets</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary admin-only hide" id="bNew">New asset</button>
+  <button class="btn" id="bLabels">Print labels</button>
+  <button class="btn" id="bExport">Export CSV</button>
+</div>
+<div class="k-body">
+  <div class="tiles" id="tiles"></div>
+  <div class="bar" id="chips"></div>
+  <div class="bar">
+    <input id="q" placeholder="Search tag, name, serial, person">
+    <select id="fCat"></select>
+    <select id="fLoc"></select>
+  </div>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
+if (isAdmin) els('.admin-only').forEach((b) => b.classList.remove('hide'));
+const { modal, close, foot, wire, v, numOrNull, money, date, when, words, options } = KIT;
+
+const CATEGORIES = ['RADIO', 'BODY_CAMERA', 'DEVICE', 'IT', 'KEY', 'EQUIPMENT', 'PPE', 'FIRST_AID', 'UNIFORM', 'OTHER'];
+const CONDITIONS = ['NEW', 'GOOD', 'FAIR', 'POOR', 'DAMAGED'];
+const STATUS_PILL = { IN_STORE: ['In store', 'ok'], IN_USE: ['Issued', 'info'], IN_REPAIR: ['In repair', 'warn'], LOST: ['Lost', 'bad'], RETIRED: ['Retired', 'off'] };
+const FILTERS = {
+  all: ['All', (a) => a.status !== 'RETIRED'],
+  store: ['In store', (a) => a.status === 'IN_STORE'],
+  issued: ['Issued', (a) => a.checkout || a.status === 'IN_USE'],
+  overdue: ['Overdue back', (a) => a.checkout && a.checkout.overdue],
+  checks: ['Check due', (a) => a.status !== 'RETIRED' && ['OVERDUE', 'DUE_SOON'].includes(a.check_state)],
+  repair: ['In repair', (a) => a.status === 'IN_REPAIR'],
+  lost: ['Lost', (a) => a.status === 'LOST'],
+  retired: ['Retired', (a) => a.status === 'RETIRED'],
+};
+let data = null, people = [], sites = [], locations = [], filter = 'all';
+
+async function load() {
+  try {
+    [data, people, sites, locations] = await Promise.all([api('GET', '/api/assets/register'), people.length ? people : api('GET', '/api/personnel'), sites.length ? sites : api('GET', '/api/sites'), api('GET', '/api/stock/locations')]);
+    people = people.filter((p) => (p.employment_status || 'ACTIVE') === 'ACTIVE').sort((a, b) => a.name.localeCompare(b.name));
+  } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  const kc = el('#fCat').value, kl = el('#fLoc').value;
+  el('#fCat').innerHTML = options(CATEGORIES.map((c) => [c, words(c)]), kc, 'All categories');
+  el('#fLoc').innerHTML = options(locations.map((l) => [l.id, l.name]), kl, 'All locations');
+  paint();
+}
+['#q', '#fCat', '#fLoc'].forEach((s) => el(s).addEventListener(s === '#q' ? 'input' : 'change', () => paint()));
+
+function paint() {
+  const s = data.summary;
+  const t = (n, l, cls, f) => `<button class="tile ${cls}" data-f="${f}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
+  el('#tiles').innerHTML = [
+    t(s.total, 'Assets', '', 'all'), t(s.in_store, 'In store', '', 'store'), t(s.issued, 'Issued', '', 'issued'),
+    t(s.overdue_returns, 'Overdue back', s.overdue_returns ? 'bad' : 'good', 'overdue'),
+    t(s.checks_due, 'Checks due', s.checks_due ? 'warn' : 'good', 'checks'),
+    t(s.in_repair, 'In repair', s.in_repair ? 'warn' : '', 'repair'), t(s.lost, 'Lost', s.lost ? 'bad' : '', 'lost'),
+    t(money(s.value), 'Value', '', 'all'),
+  ].join('');
+  el('#chips').innerHTML = Object.entries(FILTERS).map(([k, [lbl]]) => `<button class="chip ${k === filter ? 'on' : ''}" data-f="${k}">${lbl}</button>`).join('');
+  els('[data-f]').forEach((b) => (b.onclick = () => { filter = b.dataset.f; paint(); }));
+
+  const q = el('#q').value.trim().toLowerCase(), cat = el('#fCat').value, loc = el('#fLoc').value;
+  const rows = data.assets.filter(FILTERS[filter][1]).filter((a) => (!cat || a.category === cat) && (!loc || a.location_id === Number(loc))
+    && (!q || [a.tag, a.description, a.make, a.model, a.serial_no, a.checkout && a.checkout.personnel_name, a.assigned_to_name].some((x) => String(x || '').toLowerCase().includes(q))));
+  el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k">
+    <thead><tr><th>Tag</th><th>Asset</th><th>Category</th><th>Status</th><th>With / where</th><th>Condition</th><th>Next check</th><th></th></tr></thead>
+    <tbody>${rows.map((a) => {
+      const [sl, sc] = STATUS_PILL[a.status] || [words(a.status), 'off'];
+      const co = a.checkout;
+      const withWho = co ? `<strong>${esc(co.personnel_name || '—')}</strong><div class="dim" style="font-size:11.5px">since ${esc(date(co.checked_out_at))}${co.expected_return_at ? ` · due back ${esc(date(co.expected_return_at))}` : ''}</div>${co.overdue ? '<span class="pill bad">Overdue</span>' : ''}`
+        : a.assigned_to_name ? esc(a.assigned_to_name) : esc([a.location_name, a.site_name].filter(Boolean).join(' · ') || '—');
+      const chk = a.next_check_due_at ? `<span class="pill ${a.check_state === 'OVERDUE' ? 'bad' : a.check_state === 'DUE_SOON' ? 'warn' : 'ok'}">${esc(date(a.next_check_due_at))}</span>${a.check_type ? `<div class="dim" style="font-size:11.5px">${esc(a.check_type)}</div>` : ''}` : '<span class="dim">—</span>';
+      const live = !['RETIRED', 'LOST'].includes(a.status);
+      return `<tr>
+        <td class="mono" style="white-space:nowrap"><strong>${esc(a.tag || '—')}</strong></td>
+        <td>${esc(a.description)}<div class="dim" style="font-size:11.5px">${esc([a.make, a.model].filter(Boolean).join(' '))}${a.serial_no ? ` · SN ${esc(a.serial_no)}` : ''}</div></td>
+        <td class="dim">${esc(words(a.category))}</td>
+        <td><span class="pill ${sc}">${sl}</span></td>
+        <td>${withWho}</td>
+        <td class="dim">${esc(a.condition ? words(a.condition) : '—')}</td>
+        <td>${chk}</td>
+        <td><div class="acts">
+          ${co ? `<button class="btn" data-a="checkin" data-id="${a.id}">Return</button>` : live && a.status !== 'IN_REPAIR' ? `<button class="btn primary" data-a="checkout" data-id="${a.id}">Check out</button>` : ''}
+          ${live ? `<button class="btn" data-a="inspect" data-id="${a.id}">Inspect</button>` : ''}
+          <button class="btn" data-a="status" data-id="${a.id}">Status</button>
+          <button class="btn" data-a="history" data-id="${a.id}">History</button>
+          ${isAdmin ? `<button class="btn" data-a="edit" data-id="${a.id}">Edit</button>` : ''}
+        </div></td></tr>`;
+    }).join('')}</tbody></table></div>`
+    : `<p class="dim">${data.assets.length ? 'No assets match.' : 'No assets yet.' + (isAdmin ? ' Press <strong>New asset</strong> to add radios, body cameras, keys and other tagged kit.' : ' An admin adds them.')}</p>`;
+  els('#main [data-a]').forEach((b) => (b.onclick = () => ACTIONS[b.dataset.a](data.assets.find((x) => x.id === Number(b.dataset.id)))));
+}
+
+const done = async (msg) => { close(); await load(); if (msg) { el('#updated').textContent = msg; } };
+const name = (a) => `${a.tag ? a.tag + ' — ' : ''}${a.description}`;
+const condOpts = (sel) => options(CONDITIONS.map((c) => [c, words(c)]), sel, '—');
+const ACTIONS = {
+  checkout(a) {
+    const inWeek = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+    modal(`Check out — ${name(a)}`, `<div class="k-form">
+      <div class="full"><label>To</label><select id="cP">${options(people.map((p) => [p.id, p.name]), '', '— choose person —')}</select></div>
+      <div><label>Due back (optional)</label><input id="cDue" type="date" placeholder="${inWeek}"></div>
+      <div><label>Condition going out</label><select id="cCond">${condOpts(a.condition)}</select></div>
+      <div class="full"><label>Note</label><input id="cNote" placeholder="e.g. with charger and spare battery"></div></div>${foot('Check out')}`, (root) => wire(root, async () => {
+      if (!v(root, '#cP')) throw new Error('choose who it is going to');
+      await api('POST', `/api/assets/${a.id}/checkout`, { personnel_id: Number(v(root, '#cP')), expected_return_at: v(root, '#cDue') || null, condition: v(root, '#cCond') || undefined, notes: v(root, '#cNote') });
+      await done('Checked out.');
+    }));
+  },
+  checkin(a) {
+    modal(`Return — ${name(a)}`, `<p style="margin-top:0">From <strong>${esc(a.checkout.personnel_name)}</strong>, out since ${esc(when(a.checkout.checked_out_at))}.</p>
+      <div class="k-form"><div><label>Condition coming back</label><select id="rCond">${condOpts(a.condition)}</select></div>
+      <div class="full"><label>Note</label><input id="rNote" placeholder="anything missing or wrong?"></div></div>
+      <p class="dim" style="font-size:12.5px">Returned as Damaged, it goes to In repair instead of back in store.</p>${foot('Return')}`, (root) => wire(root, async () => {
+      await api('POST', `/api/assets/${a.id}/return`, { condition: v(root, '#rCond') || undefined, notes: v(root, '#rNote') });
+      await done('Returned.');
+    }));
+  },
+  inspect(a) {
+    modal(`Inspect — ${name(a)}`, `<div class="k-form">
+      <div><label>${esc(a.check_type || 'Check')}</label><select id="iR"><option value="PASS">Passed</option><option value="FAIL">Failed</option></select></div>
+      ${a.check_interval_days ? `<div><label>Next due</label><input disabled value="in ${a.check_interval_days} days"></div>` : '<div><label>Next due (optional)</label><input id="iNext" type="date"></div>'}
+      <div class="full"><label>Note</label><input id="iN" placeholder="e.g. PAT tested, label applied"></div></div>
+      <p class="dim" style="font-size:12.5px">A failed check marks it damaged and, if it is in store, sends it to In repair.</p>${foot('Record')}`, (root) => wire(root, async () => {
+      await api('POST', `/api/assets/${a.id}/inspect`, { result: v(root, '#iR'), note: v(root, '#iN'), next_check_due_at: v(root, '#iNext') || undefined });
+      await done('Inspection recorded.');
+    }));
+  },
+  status(a) {
+    const choices = [['IN_STORE', a.status === 'LOST' ? 'Found — back in store' : 'Back in store'], ['IN_REPAIR', 'Send for repair'], ['LOST', 'Report lost'], ['RETIRED', 'Retire / dispose of']].filter(([s]) => s !== a.status);
+    modal(`Status — ${name(a)}`, `<p style="margin-top:0">Now: <strong>${esc((STATUS_PILL[a.status] || [a.status])[0])}</strong>${a.checkout ? ` — checked out to ${esc(a.checkout.personnel_name)}` : ''}</p>
+      <div class="k-form"><div class="full"><label>Change to</label><select id="sS">${options(choices, choices[0] && choices[0][0])}</select></div>
+      <div class="full"><label>Reason</label><input id="sN" placeholder="required for repair, lost and retire"></div></div>
+      ${a.checkout ? '<p class="dim" style="font-size:12.5px">Only "Report lost" works while it is checked out — that ends the check-out against that person.</p>' : ''}${foot('Change status')}`, (root) => wire(root, async () => {
+      await api('POST', `/api/assets/${a.id}/status`, { status: v(root, '#sS'), note: v(root, '#sN') });
+      await done('Status changed.');
+    }));
+  },
+  history(a) {
+    const LABEL = { CHECKED_OUT: 'Checked out', RETURNED: 'Returned', INSPECTED: 'Inspected', FAILED_INSPECTION: 'Failed inspection', SENT_FOR_REPAIR: 'Sent for repair', REPORTED_LOST: 'Reported lost', FOUND: 'Found', BACK_IN_STORE: 'Back in store', RETIRED: 'Retired' };
+    modal(`History — ${name(a)}`, `<dl class="k-form" style="margin:0 0 10px">
+        <div><label>Purchased</label>${esc(date(a.purchase_date))}${a.purchase_cost != null ? ` · ${money(a.purchase_cost)}` : ''}${a.supplier ? ` · ${esc(a.supplier)}` : ''}</div>
+        <div><label>Warranty</label>${a.warranty_expires_at ? `until ${esc(date(a.warranty_expires_at))}` : '—'}</div>
+        <div><label>Last checked</label>${esc(date(a.last_checked_at))}</div>
+        <div><label>Kept at</label>${esc([a.location_name, a.site_name].filter(Boolean).join(' · ') || '—')}</div>
+      </dl><ul class="tl" id="hList"><li class="dim">Loading…</li></ul><div class="btn-row" style="margin-top:10px"><button class="btn" id="hClose">Close</button></div>`, async (root) => {
+      root.querySelector('#hClose').onclick = close;
+      const rows = await api('GET', `/api/assets/${a.id}/history`).catch(() => []);
+      root.querySelector('#hList').innerHTML = rows.length ? rows.map((r) => `<li><strong>${esc(LABEL[r.type] || words(r.type))}</strong>${r.detail ? ` — ${esc(r.detail)}` : ''}${r.note ? `<div>${esc(r.note)}</div>` : ''}<div class="when">${esc(when(r.at))}${r.by ? ` · ${esc(r.by)}` : ''}</div></li>`).join('') : '<li class="dim">Nothing recorded yet.</li>';
+    }, { wide: true });
+  },
+  edit(a) { editor(a); },
+};
+
+function editor(a) {
+  const isNew = !a;
+  modal(isNew ? 'New asset' : `Edit — ${name(a)}`, `<div class="k-form">
+    <div><label>Asset tag</label><input id="eTag" value="${esc((a && a.tag) || '')}" placeholder="e.g. RAD-014"></div>
+    <div><label>Category</label><select id="eCat">${options(CATEGORIES.map((c) => [c, words(c)]), a ? a.category : 'RADIO')}</select></div>
+    <div class="full"><label>Name</label><input id="eDesc" value="${esc(a ? a.description : '')}" placeholder="e.g. Handheld radio"></div>
+    <div><label>Make</label><input id="eMake" value="${esc((a && a.make) || '')}"></div>
+    <div><label>Model</label><input id="eModel" value="${esc((a && a.model) || '')}"></div>
+    <div><label>Serial number</label><input id="eSerial" value="${esc((a && a.serial_no) || '')}"></div>
+    <div><label>Condition</label><select id="eCond">${condOpts(a ? a.condition : 'NEW')}</select></div>
+    <div class="k-section">Where it lives</div>
+    <div><label>Store location</label><select id="eLoc">${options(locations.map((l) => [l.id, l.name]), a ? a.location_id : (locations.find((l) => l.is_main) || {}).id, '—')}</select></div>
+    <div><label>Or kept at a site</label><select id="eSite">${options(sites.map((s) => [s.id, s.name]), a && a.site_id, '—')}</select></div>
+    <div class="full"><label>Part of a kit (optional)</label><select id="eParent">${options(data.assets.filter((x) => !a || x.id !== a.id).map((x) => [x.id, name(x)]), a && a.parent_asset_id, '— not part of a kit —')}</select></div>
+    <div class="k-section">Purchase</div>
+    <div><label>Purchase date</label><input id="ePDate" type="date" value="${esc((a && a.purchase_date) || '')}"></div>
+    <div><label>Cost (£)</label><input id="eCost" type="number" min="0" step="0.01" value="${a && a.purchase_cost != null ? a.purchase_cost : ''}"></div>
+    <div><label>Supplier</label><input id="eSup" value="${esc((a && a.supplier) || '')}"></div>
+    <div><label>Warranty until</label><input id="eWar" type="date" value="${esc((a && a.warranty_expires_at) || '')}"></div>
+    <div class="k-section">Regular check</div>
+    <div><label>What check</label><input id="eCType" value="${esc((a && a.check_type) || '')}" placeholder="e.g. PAT test, calibration, service"></div>
+    <div><label>Every (days)</label><input id="eCInt" type="number" min="0" value="${a && a.check_interval_days != null ? a.check_interval_days : ''}" placeholder="e.g. 365"></div>
+    <div><label>Next due</label><input id="eCNext" type="date" value="${esc((a && a.next_check_due_at) || '')}"></div>
+    <div class="full"><label>Notes</label><textarea id="eNotes" rows="2">${esc((a && a.notes) || '')}</textarea></div></div>
+    ${foot(isNew ? 'Create asset' : 'Save', isNew ? '' : '<button type="button" class="btn danger" id="eDel">Delete</button>')}`, (root) => {
+    if (!isNew) root.querySelector('#eDel').onclick = async () => {
+      if (a.checkout) { alert('It is checked out — return it first.'); return; }
+      if (!confirm(`Delete ${name(a)} permanently? Retiring it (Status → Retire) keeps its history instead.`)) return;
+      try { await api('DELETE', `/api/assets/${a.id}`); await done('Deleted.'); } catch (e) { alert(e.message); }
+    };
+    wire(root, async () => {
+      const body = {
+        tag: v(root, '#eTag') || null, category: v(root, '#eCat'), description: v(root, '#eDesc'), make: v(root, '#eMake'), model: v(root, '#eModel'),
+        serial_no: v(root, '#eSerial'), condition: v(root, '#eCond') || null, location_id: numOrNull(v(root, '#eLoc')), site_id: numOrNull(v(root, '#eSite')),
+        parent_asset_id: numOrNull(v(root, '#eParent')), purchase_date: v(root, '#ePDate') || null, purchase_cost: numOrNull(v(root, '#eCost')),
+        supplier: v(root, '#eSup'), warranty_expires_at: v(root, '#eWar') || null, check_type: v(root, '#eCType'),
+        check_interval_days: numOrNull(v(root, '#eCInt')), next_check_due_at: v(root, '#eCNext') || null, notes: v(root, '#eNotes'),
+      };
+      if (isNew) await api('POST', '/api/assets', body); else await api('PATCH', `/api/assets/${a.id}`, body);
+      await done(isNew ? 'Asset created.' : 'Saved.');
+    });
+  }, { wide: true });
+}
+el('#bNew').onclick = () => editor(null);
+
+/* Printable tag labels with a QR code of the tag, for the shown list. */
+el('#bLabels').onclick = () => {
+  const q = el('#q').value.trim().toLowerCase();
+  const rows = data.assets.filter(FILTERS[filter][1]).filter((a) => a.tag && (!q || [a.tag, a.description].some((x) => String(x || '').toLowerCase().includes(q))));
+  if (!rows.length) { alert('No tagged assets in this list.'); return; }
+  const w = window.open('', '_blank');
+  w.document.write(`<!doctype html><html><head><title>Asset labels</title><style>
+    body{font-family:Arial,sans-serif;margin:10mm} .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6mm}
+    .lab{border:1px dashed #999;padding:4mm;display:flex;gap:4mm;align-items:center;break-inside:avoid}
+    .t{font-weight:700;font-size:16px} .d{font-size:11px;color:#333} @media print{.lab{border-color:#ccc}}</style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script></head><body>
+    <div class="grid">${rows.map((a) => `<div class="lab"><div id="qr-${a.id}"></div><div><div class="t">${esc(a.tag)}</div><div class="d">${esc(a.description)}</div><div class="d">Property of Echelon</div></div></div>`).join('')}</div>
+    <script>window.onload=function(){${rows.map((a) => `new QRCode(document.getElementById('qr-${a.id}'),{text:${JSON.stringify(a.tag)},width:70,height:70});`).join('')}setTimeout(function(){window.print()},400)}<\/script></body></html>`);
+  w.document.close();
+};
+
+el('#bExport').onclick = () => KIT.csv(`assets-${new Date().toISOString().slice(0, 10)}.csv`,
+  ['Tag', 'Name', 'Category', 'Make', 'Model', 'Serial', 'Status', 'Checked out to', 'Due back', 'Location', 'Site', 'Condition', 'Purchase date', 'Cost', 'Supplier', 'Warranty until', 'Check', 'Next check due'],
+  data.assets.map((a) => [a.tag, a.description, words(a.category), a.make, a.model, a.serial_no, (STATUS_PILL[a.status] || [a.status])[0], a.checkout && a.checkout.personnel_name, a.checkout && a.checkout.expected_return_at && a.checkout.expected_return_at.slice(0, 10), a.location_name, a.site_name, a.condition, a.purchase_date, a.purchase_cost, a.supplier, a.warranty_expires_at, a.check_type, a.next_check_due_at]));
+
+load();
+setInterval(() => { if (!document.querySelector('.modal-back')) load(); }, 60000);
+</script>
+</body>
+</html>

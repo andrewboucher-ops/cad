@@ -62,6 +62,8 @@
     clean: i('<path d="M12 3c3 4 6 7.2 6 10.5a6 6 0 01-12 0C6 10.2 9 7 12 3z" stroke-linejoin="round"/><path d="M9.5 14a2.5 2.5 0 002.5 2.5" stroke-linecap="round"/>'),
     leave: i('<path d="M3 20h18M5 20c0-6 3-10 7-10s7 4 7 10M12 10V4M9 6h6" stroke-linecap="round"/>'),
     training: i('<path d="M2 9l10-5 10 5-10 5z" stroke-linejoin="round"/><path d="M6 11v5c3 2 9 2 12 0v-5" stroke-linecap="round"/>'),
+    asset: i('<path d="M3 7l9-4 9 4v10l-9 4-9-4z" stroke-linejoin="round"/><path d="M3 7l9 4 9-4M12 11v10"/>'),
+    stock: i('<rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/><rect x="8" y="3" width="8" height="8" rx="1"/>'),
     equipment: i('<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2M3 12h18" stroke-linecap="round"/>'),
   };
   const svg = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">${ICON[name] || ICON.reports}</svg>`;

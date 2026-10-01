@@ -55,6 +55,8 @@ const TABLES = [
   'leave_requests',
   // Admin's choice of which roles see which menu section (ui-sections.js).
   'ui_settings',
+  // Stock & asset management (routes-inventory.js).
+  'stock_locations', 'asset_events', 'stocktakes',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

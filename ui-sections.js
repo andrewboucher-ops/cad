@@ -50,6 +50,9 @@ const SECTIONS = [
   { key: 'leave', label: 'Leave', group: 'Fleet & people', icon: 'leave', mobile: '#leave', needs_person: true, allowed: STAFF, default: STAFF },
   { key: 'training', label: 'Training', group: 'Fleet & people', icon: 'training', mobile: '#training', needs_person: true, allowed: STAFF, default: STAFF },
   { key: 'equipment', label: 'My equipment', group: 'Fleet & people', icon: 'equipment', mobile: '#equipment', needs_person: true, allowed: STAFF, default: STAFF },
+  // Stock & assets
+  { key: 'assets', label: 'Assets', group: 'Stock & assets', icon: 'asset', desktop: '/assets.html', mobile: '/assets.html', allowed: CONTROL, default: CONTROL },
+  { key: 'stock', label: 'Stock', group: 'Stock & assets', icon: 'stock', desktop: '/stock.html', mobile: '/stock.html', allowed: CONTROL, default: CONTROL },
   // Finance
   { key: 'finance', label: 'Finance', group: 'Finance', icon: 'finance', desktop: '/finance.html', mobile: '/finance.html', allowed: [...CONTROL, 'FINANCE'], default: [...CONTROL, 'FINANCE'] },
   // System

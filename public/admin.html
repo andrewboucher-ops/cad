@@ -56,6 +56,8 @@
   .admin-nav button:hover { background: var(--panel-2); color: var(--ink); }
   .admin-nav button.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
   .admin-nav button.active::after { display: none; }
+  .admin-nav .an-link { padding: 8px 10px; font-size: 13px; color: var(--ink-dim); text-decoration: none; }
+  .admin-nav .an-link:hover { color: var(--ink); }
   .admin-content { min-width: 0; }
   .admin-title h2 { margin: 0; font-size: 17px; }
   .admin-title p { margin: 4px 0 14px; font-size: 13px; max-width: 760px; }
@@ -98,7 +100,6 @@
         <button class="btn primary" id="btnNewBeat" style="padding:7px 14px;font-size:13px" hidden>New beat</button>
         <button class="btn primary" id="btnNewSchedule" style="padding:7px 14px;font-size:13px" hidden>New patrol schedule</button>
         <button class="btn primary" id="btnNewVehicle" style="padding:7px 14px;font-size:13px" hidden>New vehicle</button>
-        <button class="btn primary" id="btnNewAsset" style="padding:7px 14px;font-size:13px" hidden>New asset</button>
         <button class="btn primary" id="btnNewForm" style="padding:7px 14px;font-size:13px" hidden>New form</button>
         <button class="btn primary" id="btnNewClient" style="padding:7px 14px;font-size:13px" hidden>New client</button>
         <button class="btn primary" id="btnNewBranch" style="padding:7px 14px;font-size:13px" hidden>New branch</button>
@@ -124,11 +125,11 @@
       <button id="tabBeats" data-tab="beats" data-desc="Patrol routes and checkpoints (QR / NFC) at a site.">Beats</button>
       <button id="tabPatrols" data-tab="patrols" data-desc="Recurring patrol visits that are created automatically.">Patrol schedules</button>
       <button id="tabShiftTypes" data-tab="shiftTypes" data-desc="The kinds of shift used on the rota, with default pay and charge rates.">Shift types</button>
-      <div class="an-group">Fleet &amp; kit</div>
+      <div class="an-group">Fleet</div>
       <button id="tabVehicles" data-tab="vehicles" data-desc="Vehicles, MOT / service / tax dates and deep-clean interval.">Vehicles</button>
       <button id="tabMdts" data-tab="mdts" data-desc="In-vehicle terminals.">MDTs</button>
-      <button id="tabAssets" data-tab="assets" data-desc="Equipment issued to people — radios, body cams, keys.">Assets</button>
-      <button id="tabStock" data-tab="stock" data-desc="Consumable stock levels and movements.">Stock</button>
+      <a class="an-link" href="/assets.html">Assets ↗</a>
+      <a class="an-link" href="/stock.html">Stock ↗</a>
       <div class="an-group">System</div>
       <button id="tabMenu" data-tab="menu" data-desc="Which roles see which parts of the site, on desktop and on phones.">Menu &amp; sections</button>
       <button id="tabBranches" data-tab="branches" data-desc="Branches, if you split staff and sites between offices.">Branches</button>
@@ -180,21 +181,6 @@
         <input id="vSearch" placeholder="Search registration, make, model…">
       </div>
       <div id="vTableWrap"></div>
-    </div>
-
-    <div id="viewAssets" class="hide">
-      <div class="toolbar">
-        <input id="asSearch" placeholder="Search tag, description, serial…">
-        <select id="asCategory">
-          <option value="">All categories</option>
-          <option value="EQUIPMENT">Equipment</option>
-          <option value="UNIFORM">Uniform</option>
-          <option value="KEY">Key</option>
-          <option value="DEVICE">Device</option>
-          <option value="OTHER">Other</option>
-        </select>
-      </div>
-      <div id="asTableWrap"></div>
     </div>
 
     <div id="viewForms" class="hide">
@@ -284,10 +270,6 @@
       <div id="stTableWrap"></div>
     </div>
 
-    <div id="viewStock" class="hide">
-      <p class="dim" style="margin:0 0 10px;font-size:13px">Every stock-tracked asset's current level, derived from its own ledger (Assets tab → open the asset → Stock movements) — never a number anyone sets directly.</p>
-      <div id="stockTableWrap"></div>
-    </div>
     </div>
     </div>
   </div>
@@ -358,7 +340,7 @@ async function load() {
     get('/api/training-courses?all=1'), get('/api/applicants'), get('/api/leave-requests'),
     get('/api/shift-types?all=1'), get('/api/form-definitions?all=1'),
   ]);
-  const painters = { Accounts: paint, Personnel: paintPersonnel, MDTs: paintMdts, Vehicles: paintVehicles, Assets: paintAssets, Sites: paintSites, Beats: paintBeats,
+  const painters = { Accounts: paint, Personnel: paintPersonnel, MDTs: paintMdts, Vehicles: paintVehicles, Sites: paintSites, Beats: paintBeats,
     'Patrol schedules': paintSchedules, Forms: paintForms, Clients: paintClients, 'Client requests': paintClientRequests, Branches: paintBranches,
     Training: paintCourses, Applicants: paintApplicants, Leave: paintLeaveRequests, 'Shift types': paintShiftTypes };
   for (const [name, fn] of Object.entries(painters)) {
@@ -378,7 +360,6 @@ function showTab(name) {
   el('#tabPersonnel').classList.toggle('active', name === 'personnel');
   el('#tabMdts').classList.toggle('active', name === 'mdts');
   el('#tabVehicles').classList.toggle('active', name === 'vehicles');
-  el('#tabAssets').classList.toggle('active', name === 'assets');
   el('#tabSites').classList.toggle('active', name === 'sites');
   el('#tabBeats').classList.toggle('active', name === 'beats');
   el('#tabPatrols').classList.toggle('active', name === 'patrols');
@@ -403,9 +384,6 @@ function showTab(name) {
   el('#tabShiftTypes').classList.toggle('active', name === 'shiftTypes');
   el('#viewShiftTypes').classList.toggle('hide', name !== 'shiftTypes');
   el('#btnNewShiftType').hidden = name !== 'shiftTypes';
-  el('#tabStock').classList.toggle('active', name === 'stock');
-  el('#viewStock').classList.toggle('hide', name !== 'stock');
-  if (name === 'stock') paintStock();
   el('#tabMenu').classList.toggle('active', name === 'menu');
   el('#viewMenu').classList.toggle('hide', name !== 'menu');
   if (name === 'menu') paintMenu();
@@ -413,7 +391,6 @@ function showTab(name) {
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
   el('#viewVehicles').classList.toggle('hide', name !== 'vehicles');
-  el('#viewAssets').classList.toggle('hide', name !== 'assets');
   el('#viewSites').classList.toggle('hide', name !== 'sites');
   el('#viewBeats').classList.toggle('hide', name !== 'beats');
   el('#viewPatrols').classList.toggle('hide', name !== 'patrols');
@@ -421,7 +398,6 @@ function showTab(name) {
   el('#btnNewPersonnel').hidden = name !== 'personnel';
   el('#btnNewMdt').hidden = name !== 'mdts';
   el('#btnNewVehicle').hidden = name !== 'vehicles';
-  el('#btnNewAsset').hidden = name !== 'assets';
   el('#btnNewSite').hidden = name !== 'sites';
   el('#btnNewBeat').hidden = name !== 'beats';
   el('#btnNewSchedule').hidden = name !== 'patrols';
@@ -449,7 +425,6 @@ el('#tabAccounts').onclick = () => showTab('accounts');
 el('#tabPersonnel').onclick = () => showTab('personnel');
 el('#tabMdts').onclick = () => showTab('mdts');
 el('#tabVehicles').onclick = () => showTab('vehicles');
-el('#tabAssets').onclick = () => showTab('assets');
 el('#tabSites').onclick = () => showTab('sites');
 el('#tabBeats').onclick = () => showTab('beats');
 el('#tabPatrols').onclick = () => showTab('patrols');
@@ -460,7 +435,6 @@ el('#tabTraining').onclick = () => showTab('training');
 el('#tabApplicants').onclick = () => showTab('applicants');
 el('#tabLeave').onclick = () => showTab('leave');
 el('#tabShiftTypes').onclick = () => showTab('shiftTypes');
-el('#tabStock').onclick = () => showTab('stock');
 el('#tabMenu').onclick = () => showTab('menu');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
@@ -1008,199 +982,6 @@ function vehicleModal(v) {
   });
 }
 el('#btnNewVehicle').onclick = () => vehicleModal(null);
-
-/* ---------- assets ---------- */
-const ASSET_CATEGORY_LABEL = { EQUIPMENT: 'Equipment', UNIFORM: 'Uniform', KEY: 'Key', DEVICE: 'Device', OTHER: 'Other' };
-const ASSET_STATUS_LABEL = { IN_USE: 'In use', IN_STORE: 'In store', LOST: 'Lost', RETIRED: 'Retired' };
-function paintAssets() {
-  const q = el('#asSearch').value.trim().toLowerCase();
-  const category = el('#asCategory').value;
-  let rows = allAssets.slice().sort((a, b) => (a.tag || a.description).localeCompare(b.tag || b.description));
-  if (category) rows = rows.filter((a) => a.category === category);
-  if (q) rows = rows.filter((a) => (a.tag || '').toLowerCase().includes(q) || a.description.toLowerCase().includes(q) || (a.serial_no || '').toLowerCase().includes(q));
-  el('#asTableWrap').innerHTML = rows.length ? `
-    <table class="log-table">
-      <thead><tr><th style="width:100px">Tag</th><th>Description</th><th style="width:100px">Category</th><th>Assigned to</th><th style="width:100px">Status</th><th style="width:70px"></th></tr></thead>
-      <tbody>${rows.map((a) => `<tr class="clickable" data-asset="${a.id}">
-        <td class="mono">${esc(a.tag || '—')}</td>
-        <td>${esc(a.description)}</td>
-        <td class="dim">${esc(ASSET_CATEGORY_LABEL[a.category] || a.category)}</td>
-        <td class="dim">${esc(a.assigned_to_name || a.site_name || '—')}</td>
-        <td class="dim">${esc(ASSET_STATUS_LABEL[a.status] || a.status)}</td>
-        <td><button class="btn danger" data-delasset="${a.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
-      </tr>`).join('')}</tbody>
-    </table>` : '<p class="empty-note">No assets yet.</p>';
-  els('#asTableWrap [data-asset]').forEach((row) => row.addEventListener('click', (e) => {
-    if (e.target.closest('[data-delasset]')) return;
-    assetModal(allAssets.find((a) => a.id === Number(row.dataset.asset)));
-  }));
-  els('#asTableWrap [data-delasset]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteAsset(Number(b.dataset.delasset)); }));
-}
-el('#asSearch').addEventListener('input', paintAssets);
-el('#asCategory').addEventListener('change', paintAssets);
-
-async function deleteAsset(id) {
-  const a = allAssets.find((x) => x.id === id);
-  if (!a || !confirm(`Delete asset ${a.tag || a.description}? This cannot be undone.`)) return;
-  try { await api('DELETE', `/api/assets/${id}`); closeModal(); await load(); showTab('assets'); }
-  catch (e) { alert(e.message); }
-}
-
-function assetForm(a) {
-  const isNew = !a;
-  return `
-    <form class="stack" id="asForm">
-      <label>Description</label>
-      <input id="naDesc" autocomplete="off" value="${isNew ? '' : esc(a.description)}">
-      <label>Category</label>
-      <select id="naCategory">${Object.entries(ASSET_CATEGORY_LABEL).map(([v, label]) => `<option value="${v}" ${!isNew && a.category === v ? 'selected' : ''}>${label}</option>`).join('')}</select>
-      <label>Tag (optional)</label>
-      <input id="naTag" autocomplete="off" value="${isNew ? '' : esc(a.tag || '')}">
-      <label>Serial number</label>
-      <input id="naSerial" autocomplete="off" value="${isNew ? '' : esc(a.serial_no || '')}">
-      <label>Status</label>
-      <select id="naStatus">${Object.entries(ASSET_STATUS_LABEL).map(([v, label]) => `<option value="${v}" ${!isNew && a.status === v ? 'selected' : ''}>${label}</option>`).join('')}</select>
-      <label>Assigned to (optional)</label>
-      <select id="naAssigned">${assignedPersonnelOptions(isNew ? null : a.assigned_to)}</select>
-      <label>Site (optional)</label>
-      <select id="naSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${!isNew && a.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
-      <label>Purchase date</label>
-      <input id="naPurchase" type="date" value="${!isNew && a.purchase_date ? a.purchase_date.slice(0, 10) : ''}">
-      <label>Lives inside (optional — for a consumable kept inside a parent kit)</label>
-      <select id="naParent"><option value="">— none —</option>${allAssets.filter((x) => isNew || x.id !== a.id).map((x) => `<option value="${x.id}" ${!isNew && a.parent_asset_id === x.id ? 'selected' : ''}>${esc(x.tag ? x.tag + ' — ' : '')}${esc(x.description)}</option>`).join('')}</select>
-      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="naStockTracked" ${!isNew && a.is_stock_tracked ? 'checked' : ''}> Stock-tracked — a consumable counted by quantity, not checked out to one person</label>
-      <div id="naStockFields" style="${!isNew && a.is_stock_tracked ? '' : 'display:none'}">
-        ${isNew ? `<label>Initial quantity</label><input id="naInitialQty" type="number" min="0" value="0">` : `<p class="dim" style="margin:0">Current stock: <strong>${a.stock_level ?? 0}</strong></p>`}
-        <label>Low-stock threshold (optional)</label>
-        <input id="naThreshold" type="number" min="0" value="${!isNew && a.low_stock_threshold != null ? a.low_stock_threshold : ''}">
-        <label>Expiry date (optional)</label>
-        <input id="naExpiry" type="date" value="${!isNew && a.expiry_date ? a.expiry_date.slice(0, 10) : ''}">
-      </div>
-      <label>Branch (optional — leave shared if you don't use branches)</label>
-      <select id="naBranch">${branchOptions(isNew ? null : a.branch_id)}</select>
-      <label>Notes</label>
-      <textarea id="naNotes" rows="2">${isNew ? '' : esc(a.notes || '')}</textarea>
-      ${a && a.is_stock_tracked ? `
-      <label>Stock movements</label>
-      <div id="asStockLog" class="dim">Loading…</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <input id="asMoveDelta" type="number" placeholder="+/- quantity" style="width:110px">
-        <select id="asMoveReason" style="width:150px">${['RESTOCK', 'USED_ON_SHIFT', 'DAMAGED', 'AUDIT_CORRECTION'].map((r) => `<option value="${r}">${r.replace('_', ' ')}</option>`).join('')}</select>
-        <input id="asMoveNote" placeholder="Note (optional)" style="flex:1;min-width:140px">
-        <button type="button" class="btn" id="asMoveAdd">Record</button>
-      </div>
-      <p class="dim" id="asMoveError" style="min-height:16px;margin:0"></p>` : ''}
-      ${a ? `
-      <label>Checkout history</label>
-      <div id="asCheckoutLog" class="dim">Loading…</div>
-      <div id="asCheckoutAction"></div>` : ''}
-      <p class="dim" id="asError" style="min-height:16px;margin:0"></p>
-    </form>`;
-}
-function assetModal(a) {
-  modal(a ? `Edit — ${a.tag || a.description}` : 'New asset', assetForm(a), () => {
-    if (a) {
-      const refreshCheckouts = async () => {
-        const checkouts = await api('GET', `/api/assets/${a.id}/checkouts`).catch(() => []);
-        el('#asCheckoutLog').innerHTML = checkouts.length
-          ? `<div class="log" style="max-height:140px;overflow:auto">${checkouts.map((c) => `<div><span class="t">${esc(new Date(c.checked_out_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(c.personnel_name || '—')}${c.returned_at ? ` — returned ${esc(new Date(c.returned_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}` : ' — still out'}</div>`).join('')}</div>`
-          : '<p class="dim">Never checked out.</p>';
-        const open = checkouts.find((c) => !c.returned_at);
-        el('#asCheckoutAction').innerHTML = open
-          ? `<div class="btn-row" style="margin-top:4px"><button type="button" class="btn ok" id="asReturn">Mark returned</button></div>`
-          : `<div style="display:flex;gap:8px;margin-top:4px">
-               <select id="asCheckoutTo">${assignedPersonnelOptions(null)}</select>
-               <button type="button" class="btn" id="asCheckout">Check out</button>
-             </div>`;
-        if (el('#asReturn')) el('#asReturn').onclick = async () => { await api('POST', `/api/assets/${a.id}/return`, {}); await refreshCheckouts(); };
-        if (el('#asCheckout')) el('#asCheckout').onclick = async () => {
-          const personnel_id = el('#asCheckoutTo').value ? Number(el('#asCheckoutTo').value) : null;
-          if (!personnel_id) return;
-          await api('POST', `/api/assets/${a.id}/checkout`, { personnel_id });
-          await refreshCheckouts();
-        };
-      };
-      refreshCheckouts();
-    }
-    if (el('#naStockTracked')) el('#naStockTracked').onchange = () => { el('#naStockFields').style.display = el('#naStockTracked').checked ? '' : 'none'; };
-    if (a && a.is_stock_tracked && el('#asStockLog')) {
-      const refreshStock = async () => {
-        const moves = await api('GET', `/api/assets/${a.id}/stock-movements`).catch(() => []);
-        el('#asStockLog').innerHTML = moves.length
-          ? `<div class="log" style="max-height:140px;overflow:auto">${moves.map((m) => `<div><span class="t">${esc(new Date(m.recorded_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${m.delta > 0 ? '+' : ''}${m.delta} (${esc(m.reason.replace('_', ' '))}) → ${m.resulting_balance}${m.note ? ` — ${esc(m.note)}` : ''} · ${esc(m.recorded_by)}</div>`).join('')}</div>`
-          : '<p class="dim">No movements yet.</p>';
-      };
-      refreshStock();
-      el('#asMoveAdd').onclick = async () => {
-        const delta = Number(el('#asMoveDelta').value);
-        if (!delta) { el('#asMoveError').textContent = 'enter a non-zero quantity'; return; }
-        try {
-          await api('POST', `/api/assets/${a.id}/stock-movements`, { delta, reason: el('#asMoveReason').value, note: el('#asMoveNote').value.trim() });
-          el('#asMoveError').textContent = ''; el('#asMoveDelta').value = ''; el('#asMoveNote').value = '';
-          await refreshStock();
-          closeModal(); await load(); assetModal(allAssets.find((x) => x.id === a.id));
-        } catch (e) { el('#asMoveError').textContent = e.message; }
-      };
-    }
-    const foot = document.querySelector('#modalHost .foot');
-    foot.innerHTML = `
-      <div class="foot-split">
-        <span>${a ? '<button class="btn danger" id="asDelete">Delete asset</button>' : ''}</span>
-        <span class="btn-row" style="margin:0">
-          <button class="btn" id="asCancel">Cancel</button>
-          <button class="btn primary" id="asSave">${a ? 'Save changes' : 'Create asset'}</button>
-        </span>
-      </div>`;
-    el('#asCancel').onclick = closeModal;
-    if (el('#asDelete')) el('#asDelete').onclick = () => deleteAsset(a.id);
-    el('#asSave').onclick = async () => {
-      const description = el('#naDesc').value.trim();
-      if (!description) { el('#asError').textContent = 'description is required'; return; }
-      const isStockTracked = el('#naStockTracked').checked;
-      const body = {
-        description, category: el('#naCategory').value, tag: el('#naTag').value.trim() || null, serial_no: el('#naSerial').value.trim(),
-        status: el('#naStatus').value, assigned_to: el('#naAssigned').value ? Number(el('#naAssigned').value) : null,
-        site_id: el('#naSite').value ? Number(el('#naSite').value) : null, purchase_date: el('#naPurchase').value || null,
-        notes: el('#naNotes').value.trim(), branch_id: el('#naBranch').value ? Number(el('#naBranch').value) : null,
-        parent_asset_id: el('#naParent').value ? Number(el('#naParent').value) : null,
-        is_stock_tracked: isStockTracked,
-        low_stock_threshold: isStockTracked && el('#naThreshold').value ? Number(el('#naThreshold').value) : null,
-        expiry_date: isStockTracked ? (el('#naExpiry').value || null) : null,
-      };
-      if (!a && isStockTracked && el('#naInitialQty').value) body.initial_quantity = Number(el('#naInitialQty').value);
-      try {
-        if (a) await api('PATCH', `/api/assets/${a.id}`, body);
-        else await api('POST', '/api/assets', body);
-        closeModal(); await load(); showTab('assets');
-      } catch (e) { el('#asError').textContent = e.message; }
-    };
-  });
-}
-el('#btnNewAsset').onclick = () => assetModal(null);
-
-/* ---------- stock dashboard ---------- */
-async function paintStock() {
-  el('#stockTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  const rows = (await api('GET', '/api/stock-dashboard').catch(() => [])).sort((a, b) => a.description.localeCompare(b.description));
-  el('#stockTableWrap').innerHTML = rows.length ? `
-    <table class="log-table">
-      <thead><tr><th>Item</th><th style="width:90px">Level</th><th style="width:100px">Threshold</th><th style="width:110px">Expiry</th><th style="width:90px"></th></tr></thead>
-      <tbody>${rows.map((a) => `<tr data-stockasset="${a.id}">
-        <td>${esc(a.description)}${a.parent_asset_description ? `<div class="dim" style="font-size:11px">in ${esc(a.parent_asset_description)}</div>` : ''}</td>
-        <td class="${a.below_threshold ? 'err' : ''}">${a.stock_level}${a.below_threshold ? ' ⚠' : ''}</td>
-        <td class="dim">${a.low_stock_threshold != null ? a.low_stock_threshold : '—'}</td>
-        <td class="${a.expired ? 'err' : a.expiring_soon ? '' : 'dim'}" style="${a.expiring_soon && !a.expired ? 'color:var(--priority)' : ''}">${a.expiry_date ? esc(new Date(a.expiry_date).toLocaleDateString('en-GB')) : '—'}${a.expired ? ' (expired)' : a.expiring_soon ? ' (soon)' : ''}</td>
-        <td><button type="button" class="btn" data-restock="${a.id}" style="padding:4px 10px;font-size:11px">Restock</button></td>
-      </tr>`).join('')}</tbody>
-    </table>` : '<p class="empty-note">No stock-tracked assets yet — tick "Stock-tracked" on an asset in the Assets tab.</p>';
-  els('#stockTableWrap [data-restock]').forEach((b) => (b.onclick = async () => {
-    const qty = prompt('How many are you adding?');
-    const delta = Number(qty);
-    if (!qty || !Number.isFinite(delta) || delta <= 0) return;
-    try { await api('POST', `/api/assets/${b.dataset.restock}/stock-movements`, { delta, reason: 'RESTOCK', note: 'Restocked from Stock dashboard' }); await paintStock(); }
-    catch (e) { alert(e.message); }
-  }));
-}
 
 /* ---------- sites ---------- */
 function paintSites() {
