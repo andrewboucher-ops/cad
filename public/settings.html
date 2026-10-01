@@ -144,6 +144,16 @@
         </dl>
       </div>
       <div class="settings-card">
+        <h2>Layout on this device</h2>
+        <p class="sub" id="layoutDetected"></p>
+        <select id="prLayout" style="max-width:320px">
+          <option value="auto">Automatic</option>
+          <option value="mobile">Phone / tablet layout</option>
+          <option value="desktop">Desktop layout</option>
+        </select>
+        <p class="sub" style="margin-top:8px">Applies straight away and is remembered on this device only.</p>
+      </div>
+      <div class="settings-card">
         <div class="toggle-row">
           <div>
             <div class="t-label">Reduce motion</div>
@@ -271,6 +281,15 @@ setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
 el('#pfUsername').textContent = me.username;
 el('#pfDisplayName').textContent = me.display_name;
 el('#pfRole').textContent = me.role.replace('_', ' ');
+
+// Layout: per device (localStorage), not per account — the same person uses
+// a phone on patrol and a desktop in the office.
+{
+  const kind = { phone: 'a phone', tablet: 'a tablet', desktop: 'a desktop or laptop' }[CCCS.detectedDevice()];
+  el('#layoutDetected').textContent = `This looks like ${kind}. Automatic uses the ${CCCS.detectedDevice() === 'desktop' ? 'desktop' : 'phone / tablet'} layout here.`;
+  el('#prLayout').value = CCCS.viewPreference();
+  el('#prLayout').onchange = () => { CCCS.setViewPreference(el('#prLayout').value); location.reload(); };
+}
 
 const THEMES = [
   { id: 'cosmic', name: 'Cosmic', accent: '#8b5cf6', desc: 'The house look — deep indigo field, violet bloom.' },

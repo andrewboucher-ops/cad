@@ -93,6 +93,7 @@ const db = {
   branches: [],
   training_courses: [], training_records: [],
   leave_requests: [],
+  ui_settings: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -1459,6 +1460,59 @@ function applyVehicleReport(effect, vehicleId, values, user, submission) {
     logEvent('vehicle.deep_cleaned', `${v.registration} DEEP CLEANED (${submission.reference})`, { vehicle_id: v.id, submission_id: submission.id });
   } else if (effect === 'INSPECTION') {
     forwardMileage(values.odometer);
+  }
+}
+/**
+ * A vehicle report was corrected after filing (routes-forms.js, PATCH
+ * /api/form-submissions/:id): bring the vehicle back in line with it.
+ *
+ * Mileage stays forward-only for new readings, with one exception — when
+ * the vehicle's mileage IS the reading being corrected (this report set
+ * it), the typo is taken back out: mileage becomes the highest reading on
+ * record without it. A correction never lowers mileage another record set.
+ * The deep-clean date works the same way.
+ */
+function reapplyVehicleReport(effect, vehicleId, before, after, user, submission) {
+  const v = db.vehicles.find((x) => x.id === Number(vehicleId));
+  if (!v) return;
+  const num = (x) => (x == null || x === '' || !Number.isFinite(Number(x)) ? null : Number(x));
+  const oldOdo = num(before.odometer), newOdo = num(after.odometer);
+  if ((effect === 'FUEL_UP' || effect === 'INSPECTION') && oldOdo !== newOdo) {
+    if (oldOdo != null && Number(v.mileage) === oldOdo) {
+      const others = [
+        ...db.fuel_logs.filter((f) => f.vehicle_id === v.id && f.form_submission_id !== submission.id).map((f) => num(f.odometer)),
+        ...db.form_submissions.filter((s) => s.id !== submission.id && s.subject_type === 'VEHICLE' && s.subject_id === v.id
+          && ['FUEL_UP', 'INSPECTION'].includes(s.effect_applied)).map((s) => num(s.values.odometer)),
+        newOdo,
+      ].filter((x) => x != null);
+      const was = v.mileage;
+      v.mileage = others.length ? Math.max(...others) : null;
+      logEvent('vehicle.mileage_corrected', `${v.registration} MILEAGE ${was} → ${v.mileage ?? 'not recorded'} (${submission.reference} corrected by ${user.display_name})`, { vehicle_id: v.id, submission_id: submission.id });
+    } else if (newOdo != null && (v.mileage == null || newOdo > Number(v.mileage))) {
+      v.mileage = newOdo;
+    }
+  }
+  if (effect === 'FUEL_UP') {
+    const log = db.fuel_logs.find((f) => f.form_submission_id === submission.id);
+    if (log) {
+      const litres = num(after.litres);
+      if (litres && litres > 0) log.litres = litres;
+      log.cost = num(after.cost); log.odometer = newOdo;
+      log.fuel_type = after.fuel_type || ''; log.notes = after.notes || '';
+      log.updated_at = new Date().toISOString();
+    }
+  }
+  if (effect === 'DEEP_CLEAN') {
+    const at = (vals, sub) => (vals.cleaned_at && !isNaN(Date.parse(vals.cleaned_at)) ? new Date(vals.cleaned_at).toISOString() : sub.submitted_at);
+    const oldAt = at(before, submission), newAt = at(after, submission);
+    if (oldAt === newAt) return;
+    if (v.deep_clean_at === oldAt) {
+      const all = db.form_submissions.filter((s) => s.subject_type === 'VEHICLE' && s.subject_id === v.id && s.effect_applied === 'DEEP_CLEAN')
+        .map((s) => (s.id === submission.id ? newAt : at(s.values, s)));
+      v.deep_clean_at = all.sort().pop() || newAt;
+    } else if (!v.deep_clean_at || newAt > v.deep_clean_at) {
+      v.deep_clean_at = newAt;
+    }
   }
 }
 route('POST', '/api/fuel-logs/:id/receipt', ALL, ({ params, body }) => {
@@ -3731,11 +3785,15 @@ route('GET', '/api/rota/ical/:token.ics', null, ({ params }) => {
 require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow: () => store.flushNow() });
 
 
+// Which roles see which section of the menus — see ui-sections.js.
+const sections = require('./ui-sections.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });
+require('./routes-mobile.js')({ route, httpError, db, sections, visibleToUser });
+
 // Configurable forms. Registrar pattern — see routes-forms.js for why.
 const forms = require('./routes-forms.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
-  applyVehicleReport, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html), publicBaseUrl: PUBLIC_BASE_URL,
+  applyVehicleReport, reapplyVehicleReport, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html), publicBaseUrl: PUBLIC_BASE_URL,
 });
 
 // Client portal — see routes-client.js for the trust-boundary invariants.

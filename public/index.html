@@ -127,7 +127,7 @@
         <select id="dest">
           <option value="/dashboard.html">Dashboard</option>
           <option value="/control.html">Control room</option>
-          <option value="/officer.html">Officer terminal</option>
+          <option value="/officer.html">Officer app (phone & tablet)</option>
           <option value="/mdt.html">Mobile data terminal</option>
         </select>
 
@@ -155,8 +155,15 @@ const { el } = CCCS;
 const params = new URLSearchParams(location.search);
 const next = params.get('next');
 if (next) el('#dest').value = next;
+// On a phone the "Open" choice is the mobile app; hide the desktop picker.
+if (CCCS.isMobile() && !next) { el('#dest').closest('select').style.display = 'none'; const l = document.querySelector('label[for="dest"]'); if (l) l.style.display = 'none'; }
 
+// A phone or tablet opens the mobile home screen (officer.html) — the
+// control room and dashboard are desktop views. My settings → Layout
+// overrides the detection.
+const CONTROL_ROLES = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
 function landingFor(role, dest) {
+  if (CCCS.isMobile() && (role === 'FIELD_USER' || (CONTROL_ROLES.includes(role) && ['/control.html', '/dashboard.html'].includes(dest)))) return '/officer.html';
   if (role === 'FIELD_USER' && dest !== '/officer.html') return '/officer.html';
   if (role === 'MDT_USER' && dest !== '/mdt.html') return '/mdt.html';
   if (role === 'CLIENT' && dest !== '/client.html') return '/client.html';

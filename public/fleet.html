@@ -52,6 +52,7 @@
 </div>
 <div class="fl-body">
   <div class="tiles" id="tiles"></div>
+  <p class="dim hide" id="editForms" style="margin:-4px 0 12px;font-size:13px"></p>
   <div class="chips" id="filters">
     <button class="chip on" data-f="all">All vehicles</button>
     <button class="chip" data-f="attention">Needs attention</button>
@@ -100,6 +101,13 @@ function render() {
     tile(s.off_road, 'Off road', s.off_road ? 'warn' : '', 'offroad'),
   ].join('');
   els('#tiles .tile').forEach((t) => (t.onclick = () => { filter = t.dataset.f; render(); }));
+  // Admins: change what each vehicle form asks. A filed check is corrected
+  // from the report itself (open it, "Edit this report").
+  if (CCCS.getSession().user.role === 'SYSTEM_ADMIN' && data.vehicle_forms.length) {
+    el('#editForms').classList.remove('hide');
+    el('#editForms').innerHTML = 'Change the questions: ' + data.vehicle_forms.map((f) => `<a href="/admin.html?tab=forms&form=${f.id}">${esc(f.name)}</a>`).join(' · ')
+      + ' — to correct a check already filed, open it and press <em>Edit this report</em>.';
+  }
   els('#filters .chip').forEach((c) => c.classList.toggle('on', c.dataset.f === filter));
 
   const rows = data.vehicles.filter(FILTERS[filter]).sort((a, b) => Number(needsAttention(b)) - Number(needsAttention(a)) || a.registration.localeCompare(b.registration));
@@ -125,7 +133,7 @@ function render() {
       </dl>
       ${ins && ins.issues.length ? `<ul class="issues">${ins.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}
       <div class="actions">${data.vehicle_forms.map((f) => `<a class="btn ${/inspection/i.test(f.name) ? 'primary' : ''}" href="${formLink(f, v)}">${esc(f.name.replace(/^Vehicle /, '').replace(/^./, (c) => c.toUpperCase()))}</a>`).join('') || '<span class="dim">No vehicle forms set up (Admin → Forms).</span>'}</div>
-      ${v.recent_reports.length > 1 ? `<div class="recent dim" style="font-size:12px">Recent: ${v.recent_reports.map((r) => `<a href="/forms.html?id=${r.id}">${esc(r.reference)}</a>`).join(' · ')}</div>` : ''}
+      ${v.recent_reports.length ? `<div class="recent dim" style="font-size:12px">Recent: ${v.recent_reports.map((r) => `<a href="/forms.html?id=${r.id}">${esc(r.reference)}</a>`).join(' · ')}</div>` : ''}
     </div>`;
   }).join('') : '<p class="dim">No vehicles match.</p>';
 }

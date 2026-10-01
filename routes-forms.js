@@ -230,6 +230,28 @@ const DEFAULT_VEHICLE_FORMS = [
   },
 ];
 
+/** Other forms added after the first release, installed the same way. The
+ * incident report is what the mobile home screen's "Incident report" button
+ * opens: a general write-up of something that happened, separate from the
+ * dispatched job (which may not exist — the officer found it on patrol). */
+const DEFAULT_EXTRA_FORMS = [
+  {
+    key: 'incident-report', name: 'Incident report', visibility: 'STANDARD', subject_types: ['JOB', 'SITE_VISIT', 'SITE'],
+    description: 'Anything that happened on duty that needs writing up.',
+    fields: [
+      { id: 'occurred_at', label: 'When it happened', type: 'datetime', required: true },
+      { id: 'incident_type', label: 'Type', type: 'select', required: true, options: ['Theft', 'Criminal damage', 'Anti-social behaviour', 'Trespass', 'Assault', 'Suspicious activity', 'Fire or alarm', 'Medical', 'Health and safety', 'Other'] },
+      { id: 'location', label: 'Exact location', type: 'text' },
+      { id: 'description', label: 'What happened', type: 'textarea', required: true },
+      { id: 'persons_involved', label: 'People involved (descriptions, names if known)', type: 'textarea' },
+      { id: 'police_attended', label: 'Police attended or were called', type: 'checkbox' },
+      { id: 'police_reference', label: 'Police reference', type: 'text' },
+      { id: 'photo', label: 'Photo', type: 'photo' },
+      { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
+    ],
+  },
+];
+
 /** The public job application form, installed once if no APPLICATION form
  * exists (also on a database that already has the other forms). Fully
  * editable afterwards in Admin → Forms, except that it must keep asking for
@@ -255,7 +277,7 @@ const DEFAULT_APPLICATION_FORM = {
 module.exports = function registerFormRoutes({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow = () => {},
-  applyVehicleReport = () => {}, sendEmail = null, publicBaseUrl = '',
+  applyVehicleReport = () => {}, reapplyVehicleReport = () => {}, sendEmail = null, publicBaseUrl = '',
 }) {
   for (const t of ['form_definitions', 'form_submissions', 'form_grants']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -310,6 +332,7 @@ module.exports = function registerFormRoutes({
       submitted_at: sub.submitted_at,
       status: sub.status || 'OPEN', outcome: sub.outcome || null, feedback: sub.feedback || null,
       actioned_by: sub.actioned_by || null, actioned_at: sub.actioned_at || null,
+      amendments: sub.amendments || [],
     };
   }
 
@@ -439,12 +462,12 @@ module.exports = function registerFormRoutes({
   function ensureVehicleForms() {
     let added = 0;
     const now = new Date().toISOString();
-    for (const f of DEFAULT_VEHICLE_FORMS) {
+    for (const f of [...DEFAULT_VEHICLE_FORMS, ...DEFAULT_EXTRA_FORMS]) {
       if (db.form_definitions.some((d) => d.key === f.key)) continue;
       db.form_definitions.push({
         id: nextId('form_definitions'), key: f.key, name: f.name, description: f.description, version: 1,
         visibility: f.visibility, subject_types: f.subject_types, fields: cleanFields(f.fields), active: true,
-        effect: f.effect, notify_emails: [], created_by: null, created_at: now, updated_at: now,
+        effect: f.effect || null, notify_emails: [], created_by: null, created_at: now, updated_at: now,
       });
       added++;
     }
@@ -744,7 +767,10 @@ module.exports = function registerFormRoutes({
       .map(submissionSummary);
   });
 
-  route('GET', '/api/form-submissions/:id', ALL, ({ params, user }) => publicSubmission(readableSubmission(params.id, user)));
+  route('GET', '/api/form-submissions/:id', ALL, ({ params, user }) => {
+    const sub = readableSubmission(params.id, user);
+    return { ...publicSubmission(sub), editable: canEdit(sub, user) };
+  });
 
   route('GET', '/api/form-submissions/:id/files/:fileId', ALL, ({ params, user }) => {
     const sub = readableSubmission(params.id, user);
@@ -843,6 +869,62 @@ module.exports = function registerFormRoutes({
     return publicSubmission(sub);
   });
 
+  /**
+   * Correcting a vehicle report after it was filed — a mistyped odometer
+   * reading, litres, the wrong clean date, a check ticked by mistake.
+   *
+   * Vehicle reports only: they describe a vehicle, are corrected in the
+   * normal course of running a fleet, and drive its mileage, fuel log and
+   * deep-clean date, which a correction must put right. Incident, patient
+   * care and safeguarding reports are statements, and stay as filed.
+   *
+   * Who: an admin at any time; whoever filed it, while it is still OPEN
+   * and within EDIT_WINDOW_HOURS of filing. A reason is required. Nothing
+   * is overwritten silently — each edit is kept on the report (who, when,
+   * why, every field's old and new value) and shown with it. Photos and
+   * signatures cannot be changed: a new signature would be a new statement.
+   */
+  const EDIT_WINDOW_MS = Number(process.env.FORM_EDIT_WINDOW_HOURS || 24) * 3600000;
+  const EDITABLE_TYPES = new Set(['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime']);
+  function canEdit(sub, user) {
+    if (sub.subject_type !== 'VEHICLE') return false;
+    if (user.role === 'SYSTEM_ADMIN') return true;
+    return sub.submitted_by_user_id === user.id && (sub.status || 'OPEN') === 'OPEN' && Date.now() - Date.parse(sub.submitted_at) < EDIT_WINDOW_MS;
+  }
+  route('PATCH', '/api/form-submissions/:id', ALL, ({ params, body, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if (sub.subject_type !== 'VEHICLE') throw httpError(400, 'only vehicle reports can be edited — other reports stay as filed');
+    if (!canEdit(sub, user)) throw httpError(403, 'you can edit your own vehicle report only while it is open and for 24 hours after filing — ask an admin');
+    const reason = String((body && body.reason) || '').trim().slice(0, 300);
+    if (!reason) throw httpError(400, 'say why you are changing it');
+    const raw = body && body.values;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(400, 'values must be an object');
+    const editable = sub.fields.filter((f) => EDITABLE_TYPES.has(f.type));
+    for (const k of Object.keys(raw)) {
+      const f = sub.fields.find((x) => x.id === k);
+      if (!f) throw httpError(400, `unknown field ${k}`);
+      if (!EDITABLE_TYPES.has(f.type)) throw httpError(400, `${f.label} cannot be changed after filing`);
+    }
+    const merged = {};
+    for (const f of editable) merged[f.id] = Object.hasOwn(raw, f.id) ? raw[f.id] : sub.values[f.id];
+    const { values } = validateValues(editable, merged);
+    const changes = editable.filter((f) => JSON.stringify(values[f.id] ?? null) !== JSON.stringify(sub.values[f.id] ?? null))
+      .map((f) => ({ field: f.id, label: f.label, from: sub.values[f.id] ?? null, to: values[f.id] ?? null }));
+    if (!changes.length) throw httpError(400, 'nothing was changed');
+    const before = { ...sub.values };
+    sub.values = { ...sub.values, ...values };
+    if (!Array.isArray(sub.amendments)) sub.amendments = [];
+    sub.amendments.push({ at: new Date().toISOString(), by: user.display_name, by_user_id: user.id, reason, changes });
+    if (sub.effect_applied) {
+      try { reapplyVehicleReport(sub.effect_applied, sub.subject_id, before, sub.values, user, sub); }
+      catch (e) { console.warn(`[forms] re-applying ${sub.effect_applied} for ${sub.reference} failed:`, e.message); sub.effect_error = e.message; }
+    }
+    const restricted = effectiveVisibility(sub) === 'RESTRICTED';
+    logEvent('form.amended', restricted ? `RESTRICTED REPORT ${sub.reference} EDITED`
+      : `${sub.definition_name.toUpperCase()} ${sub.reference} EDITED BY ${user.display_name}: ${changes.map((c) => c.label).join(', ')} — ${reason}`, { submission_id: sub.id });
+    flushNow();
+    return { ...publicSubmission(sub), editable: canEdit(sub, user) };
+  });
   /** Permanent removal of a report that has already been reviewed. Goes
    * through readableSubmission() like every other read, so a RESTRICTED one
    * needs the admin to be a named reader. A reason is required and kept in

@@ -107,6 +107,7 @@
       <button id="tabLeave">Leave</button>
       <button id="tabShiftTypes">Shift types</button>
       <button id="tabStock">Stock</button>
+      <button id="tabMenu">Menu &amp; sections</button>
     </div>
 
     <div id="viewAccounts">
@@ -172,6 +173,12 @@
       <p class="dim" style="margin:0 0 10px;font-size:13px">Reports from a <strong>restricted</strong> form can be read only by the officer who filed them and by the people named on that form below — not by any role, including this one. Adding or removing a name is logged. <a href="/forms.html">Open reports &amp; review queue</a></p>
       <p class="dim" style="margin:0 0 10px;font-size:13px">The <strong>public job application</strong> form is the one filed against "Public job application" — anyone can fill it in at <a href="/apply.html" target="_blank">/apply.html</a> without logging in, and each one arrives under Applicants. It must keep its required <span class="mono">full_name</span> and <span class="mono">email</span> fields and can't have photo fields; retire it to close applications.</p>
       <div id="fTableWrap"></div>
+    </div>
+
+    <div id="viewMenu" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">Choose which sections each role sees — in the side menu on a desktop, and in the burger menu and home-screen buttons on a phone or tablet. A box you can't tick is a page that role can't use at all. Hiding a section takes it out of the menus; the page's own permissions still apply. <strong>Active users</strong> shows phone numbers, so it is checked on the server too.</p>
+      <div id="menuWrap"><p class="empty-note">Loading…</p></div>
+      <div class="btn-row" style="margin-top:12px"><button class="btn primary" id="menuSave">Save</button><button class="btn" id="menuReset">Back to defaults</button><span class="dim" id="menuMsg"></span></div>
     </div>
 
     <div id="viewSites" class="hide">
@@ -357,6 +364,9 @@ function showTab(name) {
   el('#tabStock').classList.toggle('active', name === 'stock');
   el('#viewStock').classList.toggle('hide', name !== 'stock');
   if (name === 'stock') paintStock();
+  el('#tabMenu').classList.toggle('active', name === 'menu');
+  el('#viewMenu').classList.toggle('hide', name !== 'menu');
+  if (name === 'menu') paintMenu();
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
@@ -390,6 +400,7 @@ el('#tabApplicants').onclick = () => showTab('applicants');
 el('#tabLeave').onclick = () => showTab('leave');
 el('#tabShiftTypes').onclick = () => showTab('shiftTypes');
 el('#tabStock').onclick = () => showTab('stock');
+el('#tabMenu').onclick = () => showTab('menu');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -2484,12 +2495,50 @@ function shiftTypeModal(t) {
 }
 el('#btnNewShiftType').onclick = () => shiftTypeModal(null);
 
+/* ---------- Menu & sections (ui-sections.js) ---------- */
+let menuData = null;
+const MENU_ROLE_LABEL = { FIELD_USER: 'Officer', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', SYSTEM_ADMIN: 'Admin', FINANCE: 'Finance', MDT_USER: 'Vehicle terminal' };
+async function paintMenu(fresh = true) {
+  try { if (fresh || !menuData) menuData = await api('GET', '/api/admin/ui-sections'); }
+  catch (e) { el('#menuWrap').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const { roles, sections } = menuData;
+  const where = (s) => [s.desktop ? 'desktop' : '', s.mobile ? 'mobile' : ''].filter(Boolean).join(' + ');
+  let group = '';
+  el('#menuWrap').innerHTML = `<div style="overflow-x:auto"><table class="log-table" style="min-width:640px"><thead><tr><th>Section</th>${roles.map((r) => `<th style="text-align:center">${esc(MENU_ROLE_LABEL[r] || r)}</th>`).join('')}</tr></thead><tbody>
+    ${sections.map((s) => {
+      const head = s.group !== group ? `<tr><td colspan="${roles.length + 1}" class="dim" style="font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding-top:14px">${esc((group = s.group))}</td></tr>` : '';
+      return head + `<tr><td><strong>${esc(s.label)}</strong><div class="dim" style="font-size:11.5px">${esc(where(s))}${s.home ? ' · home-screen button' : ''}${s.needs_person ? ' · officers only' : ''}</div></td>
+        ${roles.map((r) => {
+          const allowed = s.allowed.includes(r), locked = s.locked.includes(r);
+          return `<td style="text-align:center"><input type="checkbox" data-sec="${s.key}" data-role="${r}" style="width:18px;height:18px" ${s.visible_to.includes(r) ? 'checked' : ''} ${!allowed || locked ? 'disabled' : ''} title="${!allowed ? 'This page does not serve this role' : locked ? 'Always shown' : ''}"></td>`;
+        }).join('')}</tr>`;
+    }).join('')}</tbody></table></div>`;
+  el('#menuMsg').textContent = '';
+}
+el('#menuSave').onclick = async () => {
+  const visible_to = {};
+  for (const s of menuData.sections) visible_to[s.key] = els(`#menuWrap [data-sec="${s.key}"]`).filter((c) => c.checked && !c.disabled).map((c) => c.dataset.role);
+  try { const r = await api('PUT', '/api/admin/ui-sections', { visible_to }); el('#menuMsg').textContent = r.changed ? 'Saved — menus update next time each page loads.' : 'No changes.'; sessionStorage.removeItem(`cccs.sections.${CCCS.getSession().user.role}`); await paintMenu(); el('#menuMsg').textContent = r.changed ? 'Saved — menus update next time each page loads.' : 'No changes.'; }
+  catch (e) { el('#menuMsg').textContent = e.message; }
+};
+el('#menuReset').onclick = () => {
+  for (const s of menuData.sections) s.visible_to = [...new Set([...s.default, ...s.locked])];
+  paintMenu(false); el('#menuMsg').textContent = 'Defaults shown — press Save to keep them.';
+};
+
 CCCS.bus((up) => {
   const n = el('#net');
   if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
 });
 
-load();
+// Deep links: /admin.html?tab=forms&form=<id> opens that form's editor
+// (the Fleet page's "Edit check questions").
+load().then(() => {
+  const q = new URLSearchParams(location.search);
+  if (q.get('tab')) showTab(q.get('tab'));
+  const f = q.get('form') && allForms.find((x) => x.id === Number(q.get('form')));
+  if (f) formModal(f);
+});
 </script>
 </body>
 </html>

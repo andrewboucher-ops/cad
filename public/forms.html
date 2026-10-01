@@ -87,7 +87,7 @@ async function open(id) {
   try { sub = await api('GET', `/api/form-submissions/${id}`); }
   catch (e) { el('#detail').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
   el('#detail').innerHTML = '<div id="viewHost"></div><div id="actionHost"></div>';
-  CCCSForms.view(el('#viewHost'), sub);
+  CCCSForms.view(el('#viewHost'), sub, { onChanged: () => refresh() });
   history.replaceState(null, '', `?id=${id}`);
   if (isAdmin && sub.status === 'OPEN') paintAction(sub);
   if (isAdmin && sub.status === 'ACTIONED') paintDelete(sub);

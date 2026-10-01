@@ -272,10 +272,52 @@ a { color: var(--accent); }
 /* Pages laid out without a menu of their own get one from nav.js, which
    adds this class; on a phone the menu steps aside rather than squeeze them. */
 body.with-nav { padding-left: 228px; }
-@media (max-width: 860px) {
-  body.with-nav { padding-left: 0; }
-  body.with-nav .icon-rail { display: none; }
+
+/* ---- phone & tablet menu (nav.js) ----
+   On a phone or tablet, or a narrow window, the side menu is replaced by a
+   burger button and a slide-in drawer. Pages that pad themselves for the
+   side menu lose that padding; a page with no header slot for the burger
+   gets a floating one and a band at the top to keep it clear of content. */
+body.nav-mobile { padding-left: 0 !important; }
+body.nav-float { padding-top: 62px !important; }
+.m-burger {
+  width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel);
+  display: inline-flex; flex-direction: column; justify-content: center; align-items: center; gap: 4px;
+  cursor: pointer; padding: 0; flex: none; color: var(--ink);
 }
+.m-burger span { display: block; width: 20px; height: 2px; background: currentColor; border-radius: 2px; }
+.m-burger-float { position: fixed; top: 9px; left: 10px; z-index: 60; box-shadow: var(--shadow-lg); }
+.m-drawer { position: fixed; inset: 0; z-index: 1100; pointer-events: none; }
+.m-drawer-back { position: absolute; inset: 0; background: rgba(4,7,12,.55); opacity: 0; transition: opacity .2s var(--ease); }
+.m-drawer-panel {
+  position: absolute; top: 0; bottom: 0; left: 0; width: min(310px, 86vw); background: var(--panel);
+  border-right: 1px solid var(--line); transform: translateX(-102%); transition: transform .22s var(--ease);
+  overflow-y: auto; display: flex; flex-direction: column; padding-bottom: env(safe-area-inset-bottom, 12px);
+}
+.m-drawer.open { pointer-events: auto; }
+.m-drawer.open .m-drawer-back { opacity: 1; }
+.m-drawer.open .m-drawer-panel { transform: none; }
+.m-drawer-head { display: flex; align-items: center; gap: 10px; padding: 14px 14px 6px 18px; }
+.m-drawer-head .brand-wordmark { width: 150px; }
+.m-x { margin-left: auto; width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: none; color: var(--ink); font-size: 16px; cursor: pointer; }
+.m-drawer-panel a {
+  display: flex; align-items: center; gap: 14px; padding: 12px 18px; color: var(--ink); text-decoration: none;
+  font-size: 15px; font-weight: 500;
+}
+.m-drawer-panel a svg { width: 20px; height: 20px; flex: none; color: var(--ink-dim); }
+.m-drawer-panel a.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+.m-drawer-panel a:active { background: var(--panel-2); }
+.m-drawer-foot { margin-top: auto; padding: 16px 18px 8px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--line); }
+body.m-drawer-open { overflow: hidden; }
+@media (prefers-reduced-motion: reduce) { .m-drawer-panel, .m-drawer-back { transition: none; } }
+
+/* Desktop pages on a small screen: let wide layouts scroll instead of clip. */
+body.nav-mobile { height: auto !important; min-height: 100vh; overflow: auto !important; }
+body.nav-mobile table { display: block; overflow-x: auto; max-width: 100%; }
+
+/* Calendar sync dialog (CCCS.calendarSync in app.js). */
+.cal-links { display: flex; flex-direction: column; gap: 8px; }
+.cal-links .btn { text-align: center; padding: 11px 14px; font-size: 14px; text-decoration: none; }
 .icon-rail .badge {
   background: var(--emergency); color: #fff; font-size: 9.5px;
   font-weight: 700; border-radius: 20px; padding: 1px 6px; min-width: 15px; line-height: 1.5; text-align: center;
@@ -423,3 +465,5 @@ label { display: block; font-size: 10.5px; font-weight: 600; letter-spacing: .1e
 .mono { font-family: var(--mono); }
 .dim { color: var(--ink-dim); }
 .hide { display: none !important; }
+/* The control room is desktop-only; don't offer links to it on a phone. */
+body.nav-mobile a[href="/control.html"], body.nav-mobile a[href="/dashboard.html"] { display: none !important; }

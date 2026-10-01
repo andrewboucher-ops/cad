@@ -3,186 +3,297 @@
 <head>
 <meta charset="utf-8">
 <script src="/theme-init.js"></script>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CCCS — officer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CCCS</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="CCCS Officer">
+<meta name="apple-mobile-web-app-title" content="CCCS">
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="/console.css">
 <style>
-  body { display: flex; justify-content: center; min-height: 100vh; padding: 0 0 24px; }
-  .wrap { width: min(480px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 0 12px; }
-
-  .o-topbar {
-    display: flex; align-items: center; gap: 10px; padding: 10px 4px; position: sticky; top: 0; z-index: 5;
-    background: var(--bg, #0a0e14);
+  /* The phone & tablet app. Home is a grid of big buttons; each one opens a
+     screen (#hash) with a back button. The welfare countdown and any alert
+     stay pinned under the top bar on every screen. */
+  body { min-height: 100vh; padding-bottom: env(safe-area-inset-bottom, 16px); }
+  .m-top {
+    position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px;
+    padding: calc(env(safe-area-inset-top, 0px) + 8px) 12px 8px; background: var(--bg); border-bottom: 1px solid var(--line);
   }
-  .o-topbar img { height: 20px; }
-  .o-topbar .mid { flex: 1; text-align: right; font-size: 11px; }
-  .o-topbar .clock { font-family: var(--mono); font-size: 13px; }
+  .m-back { width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); font-size: 20px; cursor: pointer; flex: none; }
+  .m-title { flex: 1; min-width: 0; font-weight: 700; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .m-status { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 11px; }
+  .m-status .clock { font-family: var(--mono); font-size: 13px; }
+  .m-pins { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 0; }
+  .m-pins:empty { display: none; }
+  .wrap { width: min(980px, 100%); margin: 0 auto; padding: 12px; }
+  .screen { display: none; }
+  .screen.on { display: block; }
+  .screen .narrow { max-width: 720px; margin: 0 auto; }
+
+  .hello { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .hello .who { flex: 1; min-width: 0; }
+  .hello .name { font-weight: 700; font-size: 17px; }
+  .hello .sub { color: var(--ink-dim); font-size: 13px; margin-top: 2px; }
+  .hello .btn { padding: 12px 16px; font-size: 15px; }
 
   .emg-btn {
-    width: 100%; height: 64px; border: none; border-radius: 10px; cursor: pointer;
+    width: 100%; height: 64px; border: none; border-radius: 14px; cursor: pointer; margin-bottom: 14px;
     background: linear-gradient(180deg, #ef4444, #b91c1c); color: #fff;
-    font-weight: 800; letter-spacing: .12em; font-size: 17px;
+    font-weight: 800; letter-spacing: .12em; font-size: 18px;
   }
   .emg-btn.tx { filter: brightness(1.3); }
 
+  .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  @media (min-width: 430px) { .tiles { grid-template-columns: repeat(3, 1fr); } }
+  @media (min-width: 760px) { .tiles { grid-template-columns: repeat(4, 1fr); gap: 14px; } }
+  .tile {
+    position: relative; display: flex; flex-direction: column; align-items: flex-start; justify-content: space-between; gap: 14px;
+    min-height: 108px; padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel);
+    color: var(--ink); text-decoration: none; font: inherit; text-align: left; cursor: pointer;
+  }
+  .tile:active { transform: scale(.98); background: var(--panel-2); }
+  .tile svg { width: 30px; height: 30px; color: var(--accent); }
+  .tile .t-label { font-weight: 700; font-size: 15px; line-height: 1.2; }
+  .tile .t-badge { position: absolute; top: 10px; right: 10px; min-width: 22px; height: 22px; padding: 0 7px; border-radius: 11px; background: var(--emergency); color: #fff; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .tile .t-badge.calm { background: var(--accent-dim); }
+  .more-h { margin: 18px 2px 8px; font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); }
+  .tiles.small .tile { min-height: 74px; gap: 8px; }
+  .tiles.small .tile svg { width: 22px; height: 22px; }
+  .tiles.small .tile .t-label { font-size: 13.5px; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 12px; }
+  .card h3 { margin: 0 0 10px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); }
+  .card .btn, .screen .btn-row .btn { padding: 10px 14px; font-size: 14px; }
   .field { margin-bottom: 10px; }
   .field span { display: block; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); }
-  .field div { font-size: 14.5px; color: var(--ink); }
+  .field div { font-size: 15px; color: var(--ink); }
+  .screen input, .screen select, .screen textarea { font-size: 16px; } /* 16px stops iOS zooming in on focus */
+  .empty-note { display: none; }
+  .hide + .empty-note { display: block; }
 
-  .checklist-item {
-    display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line-soft);
-  }
+  .checklist-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
   .checklist-item:last-child { border-bottom: none; }
-  .checklist-item input[type="checkbox"] { width: 20px; height: 20px; margin-top: 2px; flex: none; accent-color: var(--accent, #22c55e); }
+  .checklist-item input[type="checkbox"] { width: 22px; height: 22px; margin-top: 2px; flex: none; accent-color: var(--accent, #22c55e); }
   .checklist-item .ci-body { flex: 1; min-width: 0; }
   .checklist-item .ci-title { font-weight: 600; }
   .checklist-item.done .ci-title { text-decoration: line-through; color: var(--ink-dim); }
   .checklist-item .ci-instr { font-size: 12.5px; color: var(--ink-dim); margin-top: 2px; }
-  .checklist-item textarea { width: 100%; margin-top: 6px; font-size: 13px; }
+  .checklist-item textarea { width: 100%; margin-top: 6px; font-size: 14px; }
   .ci-photos { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .ci-photos img { width: 52px; height: 52px; object-fit: cover; border-radius: 5px; border: 1px solid var(--line); }
 
-  .welfare-strip {
-    display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px;
-    background: var(--panel-2); border: 1px solid var(--line);
-  }
-  .welfare-strip .count { font-family: var(--mono); font-weight: 700; font-size: 15px; }
-  .welfare-strip.overdue { border-color: var(--emergency); background: rgba(239,68,68,.1); }
+  .welfare-strip { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); cursor: pointer; }
+  .welfare-strip .count { font-family: var(--mono); font-weight: 700; font-size: 16px; }
+  .welfare-strip.overdue { border-color: var(--emergency); background: rgba(239,68,68,.12); }
+
+  .pick { display: flex; flex-direction: column; gap: 8px; }
+  .pick button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit; font-size: 15px; text-align: left; cursor: pointer; }
+  .pick button:active { background: var(--panel-2); }
+  .pick .reg { font-family: var(--mono); font-weight: 800; background: #facc15; color: #111; padding: 2px 8px; border-radius: 4px; letter-spacing: .04em; }
+  .pick .hint { margin-left: auto; font-size: 12px; color: var(--ink-dim); }
+
+  .thread { display: flex; flex-direction: column; gap: 8px; max-height: 55vh; overflow-y: auto; padding: 4px 0 8px; }
+  .bubble { max-width: 82%; padding: 8px 12px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); align-self: flex-start; white-space: pre-wrap; word-wrap: break-word; }
+  .bubble.mine { align-self: flex-end; background: var(--accent-dim); border-color: var(--accent-dim); color: #fff; }
+  .bubble .meta { display: block; font-size: 11px; opacity: .75; margin-bottom: 2px; }
+  .compose { display: flex; gap: 8px; align-items: flex-end; }
+  .compose textarea { flex: 1; min-height: 46px; }
+  .compose .btn { padding: 12px 16px; }
+
+  .person { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+  .person:last-child { border-bottom: none; }
+  .person .av { width: 40px; height: 40px; border-radius: 50%; background: var(--panel-3); display: flex; align-items: center; justify-content: center; font-weight: 700; flex: none; }
+  .person .info { flex: 1; min-width: 0; }
+  .person .nm { font-weight: 600; }
+  .person .ds { font-size: 12.5px; color: var(--ink-dim); margin-top: 2px; }
+  .person .acts { display: flex; gap: 6px; flex: none; }
+  .person .acts .btn { padding: 10px 14px; font-size: 14px; text-decoration: none; }
+  .chipline { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .chipline .pill { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; padding: 2px 8px; border-radius: 20px; text-transform: uppercase; background: var(--panel-3); color: var(--ink-dim); }
+  .chipline .pill.on { background: rgba(34,197,94,.16); color: var(--available); }
+  .chipline .pill.warn { background: rgba(234,179,8,.18); color: var(--busy); }
+  .chipline .pill.bad { background: rgba(239,68,68,.18); color: var(--emergency); }
+  .toast { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom, 0px) + 18px); transform: translateX(-50%); background: var(--panel-3); border: 1px solid var(--line); color: var(--ink); padding: 12px 16px; border-radius: 12px; z-index: 1200; box-shadow: var(--shadow-lg); max-width: 92vw; }
+  /* On a desktop browser nav.js adds the side menu; the burger is not needed. */
+  body:not(.nav-mobile) .m-top .m-burger { display: none; }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="o-topbar">
-    <img src="/assets/echelon-wordmark.png" alt="Echelon">
-    <div class="mid">
-      <div class="clock" id="clock">--:--:--</div>
-      <span class="link-net" id="net">link down</span>
-    </div>
-  </div>
-
+<header class="m-top">
+  <button class="m-burger" data-nav-burger aria-label="Menu"><span></span><span></span><span></span></button>
+  <button class="m-back hide" id="mBack" aria-label="Back">‹</button>
+  <div class="m-title" id="mTitle">Home</div>
+  <div class="m-status"><span class="clock" id="clock">--:--</span><span class="link-net" id="net">link down</span></div>
+</header>
+<div class="m-pins">
   <div id="alertHost"></div>
-
-  <button class="emg-btn" id="bEmg">EMERGENCY</button>
-
   <div class="welfare-strip hide" id="welfareStrip">
-    <span style="flex:1">Welfare check</span>
+    <span style="flex:1">Welfare check due</span>
     <span class="count" id="welfareCount"></span>
-    <button class="btn" id="welfareCheckIn" style="padding:4px 10px;font-size:12px">Check in</button>
+    <button class="btn ok" id="welfareCheckIn" style="padding:8px 14px">Check in</button>
   </div>
-
-  <div class="welfare-strip hide" id="trackingStrip" style="border-color:var(--accent-dim,var(--line))">
-    <span style="flex:1">Your location is being shared with control while you're clocked in.</span>
+  <div class="welfare-strip hide" id="trackingStrip" style="cursor:default">
+    <span style="flex:1;font-size:13px">Your location is being shared with control while you're clocked in.</span>
   </div>
+</div>
 
-  <section class="panel">
-    <header>My details</header>
-    <div class="body" id="whoBody" style="padding:12px"></div>
-  </section>
-
-  <section class="panel">
-    <header>My shift <button class="btn" id="bCalSync" style="float:right;padding:2px 8px;font-size:11px">Calendar sync</button></header>
-    <div class="body" id="shiftBody" style="padding:12px">
-      <p class="dim">No shift scheduled.</p>
+<div class="wrap">
+  <!-- Home -->
+  <section class="screen on" data-screen="home">
+    <div class="hello" id="hello">
+      <div class="who"><div class="name" id="helloName"></div><div class="sub" id="helloSub"></div></div>
+      <div id="helloAction"></div>
     </div>
+    <button class="emg-btn hide" id="bEmg">EMERGENCY</button>
+    <div class="tiles" id="tiles"></div>
+    <div id="moreTiles"></div>
   </section>
 
-  <section class="panel">
-    <header>Available shifts</header>
-    <div class="body" style="padding:12px">
-      <div id="availableShiftsList"><p class="dim">Loading…</p></div>
-      <label style="margin-top:10px">My applications</label>
-      <div id="myApplicationsList"><p class="dim">Loading…</p></div>
+  <!-- My shift -->
+  <section class="screen" data-screen="shift"><div class="narrow">
+    <div class="card"><h3>My shift</h3><div id="shiftBody"><p class="dim">No shift scheduled.</p></div></div>
+    <div class="card"><h3>My details</h3><div id="whoBody"></div></div>
+  </div></section>
+
+  <!-- Rota -->
+  <section class="screen" data-screen="rota"><div class="narrow">
+    <div class="card">
+      <h3>My upcoming shifts</h3>
+      <div id="rotaList"><p class="dim">Loading…</p></div>
+      <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="bCalSync">Add rota to my calendar</button></div>
     </div>
-  </section>
+    <div class="card"><h3>Open shifts</h3><div id="availableShiftsList"><p class="dim">Loading…</p></div></div>
+    <div class="card"><h3>My shift applications</h3><div id="myApplicationsList"><p class="dim">Loading…</p></div></div>
+  </div></section>
 
-  <section class="panel">
-    <header>Current job</header>
-    <div class="body" id="jobBody" style="padding:12px">
-      <p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>
+  <!-- Current job -->
+  <section class="screen" data-screen="job"><div class="narrow">
+    <div class="card"><div id="jobBody"><p class="dim">No job assigned. Dispatched jobs appear here immediately.</p></div></div>
+  </div></section>
+
+  <!-- Patrol visit -->
+  <section class="screen" data-screen="visit"><div class="narrow">
+    <div class="card"><div id="visitBody"><p class="dim">No patrol visit assigned.</p></div></div>
+  </div></section>
+
+  <!-- Welfare timer -->
+  <section class="screen" data-screen="welfare"><div class="narrow">
+    <div class="card">
+      <h3>Welfare timer</h3>
+      <p class="dim" style="margin-top:0">Set a timer before you go in. Check in before it runs out, or control is alerted with your last known position.</p>
+      <div id="wState" style="margin-bottom:10px"></div>
+      <label for="wMin">Check in within</label>
+      <select id="wMin">
+        <option value="300">5 minutes</option><option value="600" selected>10 minutes</option>
+        <option value="900">15 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option>
+      </select>
+      <label for="wNote">What you are doing</label>
+      <input id="wNote" placeholder="Internal check, Meridian Business Park">
+      <div class="btn-row" style="margin-top:12px">
+        <button class="btn ok" id="wStart">Start timer</button>
+        <button class="btn" id="wCheck">Check in now</button>
+        <button class="btn danger" id="wStop">Cancel timer</button>
+      </div>
+      <p class="err" id="wErr"></p>
     </div>
-  </section>
+  </div></section>
 
-  <section class="panel">
-    <header>Current patrol visit</header>
-    <div class="body" id="visitBody" style="padding:12px">
-      <p class="dim">No patrol visit assigned.</p>
+  <!-- Messages -->
+  <section class="screen" data-screen="messages"><div class="narrow">
+    <div class="card">
+      <div id="msgPickRow" class="hide" style="margin-bottom:10px">
+        <label for="msgWith">Conversation</label>
+        <select id="msgWith"></select>
+      </div>
+      <div class="thread" id="thread"><p class="dim">Loading…</p></div>
+      <div class="compose" id="compose">
+        <textarea id="note" rows="2" placeholder="Message to control"></textarea>
+        <button class="btn primary" id="send">Send</button>
+      </div>
+      <p class="dim" id="msgHint" style="font-size:12.5px"></p>
     </div>
-  </section>
+  </div></section>
 
-  <section class="panel">
-    <header>Training</header>
-    <div class="body" style="padding:12px">
-      <div id="trainingList"><p class="dim">Loading…</p></div>
+  <!-- Active users -->
+  <section class="screen" data-screen="active"><div class="narrow">
+    <div class="card">
+      <h3>Working now <span id="activeCount" style="text-transform:none;letter-spacing:0"></span></h3>
+      <div id="activeList"><p class="dim">Loading…</p></div>
+      <p class="dim" style="font-size:12px;margin-bottom:0">Call uses this phone's own line.</p>
     </div>
-  </section>
+  </div></section>
 
-  <section class="panel hide" id="leavePanel">
-    <header>Leave</header>
-    <div class="body" style="padding:12px">
+  <!-- Incident report -->
+  <section class="screen" data-screen="incident"><div class="narrow">
+    <div class="card"><div id="incidentHost"><p class="dim">Loading…</p></div></div>
+  </div></section>
+
+  <!-- Vehicle check / fuel up / deep clean (one screen, three forms) -->
+  <section class="screen" data-screen="vform"><div class="narrow">
+    <div class="card"><div id="vformHost"><p class="dim">Loading…</p></div></div>
+    <div class="card"><h3>My recent</h3><div id="vformRecent"><p class="dim">Loading…</p></div></div>
+  </div></section>
+
+  <!-- Reports -->
+  <section class="screen" data-screen="reports"><div class="narrow">
+    <div class="card">
+      <div class="btn-row" style="margin:0 0 10px"><button class="btn primary" id="bFileReport">File a report</button></div>
+      <h3>My reports</h3>
+      <div id="myReports"><p class="dim">Loading…</p></div>
+    </div>
+  </div></section>
+
+  <!-- Site handover -->
+  <section class="screen" data-screen="passdown"><div class="narrow">
+    <div class="card hide" id="passdownPanel">
+      <h3>Handover — <span id="passdownSite"></span></h3>
+      <textarea id="passdownNote" rows="3" placeholder="Note for the next person on site" style="width:100%"></textarea>
+      <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="passdownSend">Add note</button></div>
+      <div id="passdownLog" style="margin-top:10px"></div>
+    </div>
+    <p class="empty-note dim">Handover notes appear here when you're on a shift, job or visit at a site.</p>
+  </div></section>
+
+  <!-- Leave -->
+  <section class="screen" data-screen="leave"><div class="narrow">
+    <div class="card hide" id="leavePanel">
       <div id="leaveBalance" class="dim" style="margin-bottom:10px"></div>
       <div class="btn-row" style="margin:0 0 8px"><button class="btn primary" id="bRequestLeave">Request leave</button></div>
       <div id="leaveList"><p class="dim">Loading…</p></div>
     </div>
-  </section>
+    <p class="empty-note dim">Leave is booked here by employed staff.</p>
+  </div></section>
 
-  <section class="panel">
-    <header>Reports</header>
-    <div class="body" style="padding:12px">
-      <div class="btn-row" style="margin:0 0 8px"><button class="btn primary" id="bFileReport">File a report</button></div>
-      <div id="myReports"><p class="dim">Loading…</p></div>
-    </div>
-  </section>
+  <!-- Training -->
+  <section class="screen" data-screen="training"><div class="narrow">
+    <div class="card"><div id="trainingList"><p class="dim">Loading…</p></div></div>
+  </div></section>
 
-  <section class="panel hide" id="equipmentPanel">
-    <header>My equipment</header>
-    <div class="body" id="equipmentBody" style="padding:12px"></div>
-  </section>
-
-  <section class="panel hide" id="passdownPanel">
-    <header>Passdown — <span id="passdownSite"></span></header>
-    <div class="body" style="padding:12px">
-      <textarea id="passdownNote" rows="2" placeholder="Note for the next person on site"></textarea>
-      <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="passdownSend">Add note</button></div>
-      <div id="passdownLog" style="margin-top:10px"></div>
-    </div>
-  </section>
-
-  <section class="panel">
-    <header>Message control</header>
-    <div class="body" style="padding:12px">
-      <textarea id="note" rows="2" placeholder="Message to control"></textarea>
-      <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="send">Send</button></div>
-      <div class="log" id="txtLog" style="max-height:140px;overflow:auto;margin-top:10px"></div>
-    </div>
-  </section>
-
-  <div class="btn-row" style="justify-content:center">
-    <a class="btn" href="/settings.html">My settings</a>
-    <button class="btn" id="signOut">Sign out</button>
-  </div>
+  <!-- Equipment -->
+  <section class="screen" data-screen="equipment"><div class="narrow">
+    <div class="card hide" id="equipmentPanel"><div id="equipmentBody"></div></div>
+    <p class="empty-note dim">No equipment is booked out to you.</p>
+  </div></section>
 </div>
 
 <div id="modalHost"></div>
 <input type="file" id="photoInput" accept="image/*" capture="environment" class="hide">
-<input type="file" id="fuelPhotoInput" accept="image/*" capture="environment" class="hide">
 
 <script src="/app.js"></script>
+<script src="/nav.js"></script>
 <script src="/forms-ui.js"></script>
 <script>
+'use strict';
 const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['FIELD_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const me = CCCS.getSession().user;
-setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
-
-el('#signOut').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+const isControl = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role);
+setInterval(() => (el('#clock').textContent = CCCS.hhmmss().slice(0, 5)), 1000);
+el('#clock').textContent = CCCS.hhmmss().slice(0, 5);
 
 let person = null, job = null, visit = null, pendingPhotoItemId = null, pendingPhotoKind = 'job';
 
@@ -191,109 +302,155 @@ function modal(title, html, onMount) {
   el('#mClose').onclick = closeModal; onMount && onMount();
 }
 const closeModal = () => (el('#modalHost').innerHTML = '');
+function toast(text) {
+  const t = document.createElement('div'); t.className = 'toast'; t.textContent = text;
+  document.body.appendChild(t); setTimeout(() => t.remove(), 3500);
+}
+
+/* ---- Screens ----------------------------------------------------------
+ * Each home button opens a screen by its #hash, so the phone's own back
+ * button and gesture work, and a link like /officer.html#fuel (the menu)
+ * lands straight on it. */
+const SCREENS = {
+  home: { title: 'Home' },
+  shift: { title: 'My shift' },
+  rota: { title: 'Rota', show: () => { refreshShifts(); refreshAvailableShifts(); refreshMyApplications(); } },
+  job: { title: 'Current job' },
+  visit: { title: 'Patrol visit' },
+  welfare: { title: 'Welfare timer', show: () => paintWelfare() },
+  messages: { title: 'Messages', show: () => openMessages() },
+  active: { title: 'Active users', show: () => refreshActive() },
+  incident: { title: 'Incident report', show: () => openIncident() },
+  'vehicle-check': { title: 'Vehicle check', screen: 'vform', show: () => openVehicleForm('vehicle-inspection') },
+  fuel: { title: 'Fuel up', screen: 'vform', show: () => openVehicleForm('vehicle-fuel-up') },
+  clean: { title: 'Deep clean', screen: 'vform', show: () => openVehicleForm('vehicle-deep-clean') },
+  reports: { title: 'Reports', show: () => refreshReports() },
+  passdown: { title: 'Site handover', show: () => refreshPassdown() },
+  leave: { title: 'Leave', show: () => refreshLeave() },
+  training: { title: 'Training', show: () => refreshTraining() },
+  equipment: { title: 'My equipment', show: () => refreshEquipment() },
+};
+let screenKey = 'home';
+function route() {
+  const key = (location.hash || '').slice(1);
+  const def = SCREENS[key] ? SCREENS[key] : SCREENS.home;
+  screenKey = SCREENS[key] ? key : 'home';
+  const screen = def.screen || screenKey;
+  els('.screen').forEach((s) => s.classList.toggle('on', s.dataset.screen === screen));
+  el('#mTitle').textContent = def.title;
+  el('#mBack').classList.toggle('hide', screenKey === 'home');
+  document.title = screenKey === 'home' ? 'CCCS' : `${def.title} — CCCS`;
+  window.scrollTo(0, 0);
+  if (def.show) def.show();
+  if (screenKey === 'home') paintHome();
+}
+window.addEventListener('hashchange', route);
+el('#mBack').onclick = () => { if (history.length > 1 && document.referrer.includes(location.host)) history.back(); else location.hash = ''; };
+const go = (key) => { location.hash = key ? `#${key}` : ''; };
+
+/* ---- Home ---------------------------------------------------------------
+ * The buttons are the sections the admin has given this role (Admin → Menu
+ * & sections), the same list the burger menu shows. */
+function tileHref(s) {
+  if (s.needs_person && !person) return null;
+  if (s.mobile && s.mobile.startsWith('#')) {
+    if (!person && s.desktop && ['rota', 'reports'].includes(s.key)) return s.desktop;
+    return s.mobile;
+  }
+  return s.mobile || null;
+}
+function badgeFor(key) {
+  switch (key) {
+    case 'current_job': return job ? { n: '1' } : null;
+    case 'patrol': return visit ? { n: '1' } : null;
+    case 'messages': return unread() ? { n: String(unread()) } : null;
+    case 'welfare': return person && person.welfare_due_at ? { n: 'ON', calm: true } : null;
+    case 'my_shift': { const c = currentShift(); return c && clockedIn(c) ? { n: 'IN', calm: true } : null; }
+    default: return null;
+  }
+}
+function tileHtml(s) {
+  const href = tileHref(s); if (!href) return '';
+  const b = badgeFor(s.key);
+  return `<a class="tile" href="${esc(href)}" data-key="${esc(s.key)}">${CCCSNav.svg(s.icon)}<span class="t-label">${esc(s.label)}</span>${b ? `<span class="t-badge ${b.calm ? 'calm' : ''}">${esc(b.n)}</span>` : ''}</a>`;
+}
+function paintHome() {
+  const name = person ? (person.callsign ? `${person.callsign} · ${person.name}` : person.name) : me.display_name;
+  el('#helloName').textContent = name;
+  el('#bEmg').classList.toggle('hide', !person);
+  paintHomeShift();
+  const sections = (window.CCCSNav && CCCSNav.sections) || [];
+  const skip = new Set(['settings', 'mobile_app']);
+  const home = sections.filter((s) => s.home && !skip.has(s.key));
+  const more = sections.filter((s) => !s.home && !skip.has(s.key) && tileHref(s));
+  el('#tiles').innerHTML = home.map(tileHtml).join('') || '<p class="dim">Nothing has been enabled for your role yet — ask an admin.</p>';
+  el('#moreTiles').innerHTML = more.length ? `<div class="more-h">More</div><div class="tiles small">${more.map(tileHtml).join('')}</div>` : '';
+}
+function paintHomeShift() {
+  const c = person ? currentShift() : null;
+  let sub, action = '';
+  if (!person) sub = isControl ? 'Control — messages and who\'s working are below.' : '';
+  else if (c && clockedIn(c)) { sub = `Clocked in${c.site_name ? ' at ' + c.site_name : ''} until ${hhmm(c.ends_at)}`; action = '<button class="btn danger" id="hClockOut">Clock out</button>'; }
+  else if (c) { sub = `Next: ${fmtShiftTime(c.starts_at)}${c.site_name ? ' · ' + c.site_name : ''}`; action = '<button class="btn ok" id="hClockIn">Clock in</button>'; }
+  else {
+    const next = shifts.filter((s) => s.status !== 'CANCELLED' && Date.parse(s.starts_at) > Date.now()).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at))[0];
+    sub = next ? `Next shift ${fmtShiftTime(next.starts_at)}${next.site_name ? ' · ' + next.site_name : ''}` : 'No shift scheduled';
+  }
+  el('#helloSub').textContent = sub;
+  el('#helloAction').innerHTML = action;
+  if (el('#hClockIn')) el('#hClockIn').onclick = () => clockIn(c);
+  if (el('#hClockOut')) el('#hClockOut').onclick = () => clockOut(c);
+}
+const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+document.addEventListener('cccs:sections', () => { if (screenKey === 'home') paintHome(); });
 
 function paintWho() {
-  if (!person) return;
+  if (!person) { el('#whoBody').innerHTML = '<p class="dim">No officer record is linked to this login.</p>'; return; }
   el('#whoBody').innerHTML = `
-    <div class="field"><span>Name</span><div>${esc(person.callsign || person.name)}</div></div>
+    <div class="field"><span>Name</span><div>${esc(person.name)}</div></div>
+    <div class="field"><span>Call sign</span><div>${esc(person.callsign || '—')}</div></div>
     <div class="field"><span>Rank</span><div>${esc(person.rank || '—')}</div></div>
-    <div class="field"><span>Vehicle</span><div>${esc(person.vehicle || '—')}${person.vehicle_id ? ' <button class="btn" id="bLogFuel" style="padding:2px 8px;font-size:11px;margin-left:8px">Log fuel</button>' : ''}</div></div>`;
-  if (el('#bLogFuel')) el('#bLogFuel').onclick = openFuelModal;
+    <div class="field"><span>Vehicle</span><div>${esc(person.vehicle || '—')}</div></div>`;
   paintWelfare();
+  if (screenKey === 'home') paintHome();
 }
-let fuelPhotoFile = null;
-function openFuelModal() {
-  if (!person || !person.vehicle_id) return;
-  fuelPhotoFile = null;
-  modal('Log fuel', `
-    <label for="fOdo">Odometer</label>
-    <input id="fOdo" type="number" min="0" inputmode="numeric">
-    <label for="fLitres">Litres</label>
-    <input id="fLitres" type="number" min="0" step="0.01">
-    <label for="fCost">Cost (£)</label>
-    <input id="fCost" type="number" min="0" step="0.01">
-    <label for="fNotes">Notes</label>
-    <textarea id="fNotes" rows="2"></textarea>
-    <div class="btn-row" style="margin-top:10px">
-      <button class="btn" id="fPhotoBtn" type="button">Add receipt photo</button>
-      <span class="dim" id="fPhotoStatus"></span>
-    </div>
-    <div class="btn-row" style="margin-top:12px"><button class="btn ok" id="fSave">Save</button></div>
-    <p class="err" id="fErr"></p>`, () => {
-    el('#fPhotoBtn').onclick = () => el('#fuelPhotoInput').click();
-    el('#fSave').onclick = async () => {
-      const litres = Number(el('#fLitres').value);
-      if (!litres) { el('#fErr').textContent = 'litres is required'; return; }
-      try {
-        const log = await api('POST', `/api/vehicles/${person.vehicle_id}/fuel-logs`, {
-          litres, odometer: el('#fOdo').value || null, cost: el('#fCost').value || null, notes: el('#fNotes').value,
-        });
-        if (fuelPhotoFile) {
-          const data = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result.split(',')[1]);
-            reader.onerror = reject;
-            reader.readAsDataURL(fuelPhotoFile);
-          });
-          await api('POST', `/api/fuel-logs/${log.id}/receipt`, { mimetype: fuelPhotoFile.type, data });
-        }
-        closeModal();
-      } catch (e) { el('#fErr').textContent = e.message; }
-    };
-  });
-}
-el('#fuelPhotoInput').onchange = () => {
-  fuelPhotoFile = el('#fuelPhotoInput').files[0] || null;
-  el('#fuelPhotoInput').value = '';
-  if (el('#fPhotoStatus')) el('#fPhotoStatus').textContent = fuelPhotoFile ? 'Photo attached' : '';
-};
 
+/* ---- Welfare ------------------------------------------------------------ */
 function paintWelfare() {
   const strip = el('#welfareStrip');
-  if (!person || !person.welfare_due_at) { strip.classList.add('hide'); return; }
-  const left = Math.round((Date.parse(person.welfare_due_at) - Date.now()) / 1000);
-  strip.classList.remove('hide');
-  strip.classList.toggle('overdue', left <= 60);
-  el('#welfareCount').textContent = left > 0
-    ? `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`
-    : 'OVERDUE';
+  const running = person && person.welfare_due_at;
+  if (!running) strip.classList.add('hide');
+  else {
+    const left = Math.round((Date.parse(person.welfare_due_at) - Date.now()) / 1000);
+    strip.classList.remove('hide');
+    strip.classList.toggle('overdue', left <= 60);
+    el('#welfareCount').textContent = left > 0
+      ? `${String(Math.floor(left / 60)).padStart(2, '0')}:${String(left % 60).padStart(2, '0')}`
+      : 'OVERDUE';
+  }
+  if (screenKey === 'welfare') {
+    el('#wState').innerHTML = running
+      ? `<p style="margin:0"><strong>Timer running</strong> — check in by ${esc(hhmm(person.welfare_due_at))}${person.welfare_note ? ` · ${esc(person.welfare_note)}` : ''}</p>`
+      : '<p class="dim" style="margin:0">No timer running.</p>';
+    el('#wCheck').classList.toggle('hide', !running);
+    el('#wStop').classList.toggle('hide', !running);
+  }
 }
 setInterval(paintWelfare, 1000);
-el('#welfareStrip').addEventListener('click', (e) => {
-  if (e.target.id === 'welfareCheckIn') return;
-  openWelfareModal();
-});
+el('#welfareStrip').addEventListener('click', (e) => { if (e.target.id !== 'welfareCheckIn') go('welfare'); });
 el('#welfareCheckIn').onclick = async (e) => {
   e.stopPropagation();
   person = await api('POST', `/api/personnel/${person.id}/welfare/check`, {});
-  paintWelfare();
+  paintWelfare(); toast('Checked in.');
 };
-function openWelfareModal() {
-  modal('Welfare timer', `
-  <p class="dim">Set a timer before you go in. Check in before it runs out, or control is alerted with your last known position.</p>
-  <label for="wMin">Check in within</label>
-  <select id="wMin">
-    <option value="300">5 minutes</option><option value="600" selected>10 minutes</option>
-    <option value="900">15 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option>
-  </select>
-  <label for="wNote">What you are doing</label>
-  <input id="wNote" placeholder="Internal check, Meridian Business Park">
-  <div class="btn-row" style="margin-top:12px">
-    <button class="btn ok" id="wStart">Start timer</button>
-    <button class="btn danger" id="wStop">Cancel timer</button>
-  </div>
-  <p class="err" id="wErr"></p>`, () => {
-    const guard = (fn) => async () => { try { await fn(); closeModal(); } catch (e) { el('#wErr').textContent = e.message; } };
-    el('#wStart').onclick = guard(async () => {
-      person = await api('POST', `/api/personnel/${person.id}/welfare`, { interval_s: Number(el('#wMin').value), note: el('#wNote').value });
-      paintWelfare();
-    });
-    el('#wStop').onclick = guard(async () => {
-      person = await api('DELETE', `/api/personnel/${person.id}/welfare`, {});
-      paintWelfare();
-    });
-  });
+{
+  const guard = (fn) => async () => { el('#wErr').textContent = ''; try { await fn(); paintWho(); } catch (e) { el('#wErr').textContent = e.message; } };
+  el('#wStart').onclick = guard(async () => { person = await api('POST', `/api/personnel/${person.id}/welfare`, { interval_s: Number(el('#wMin').value), note: el('#wNote').value }); toast('Welfare timer started.'); });
+  el('#wCheck').onclick = guard(async () => { person = await api('POST', `/api/personnel/${person.id}/welfare/check`, {}); toast('Checked in.'); });
+  el('#wStop').onclick = guard(async () => { person = await api('DELETE', `/api/personnel/${person.id}/welfare`, {}); toast('Welfare timer cancelled.'); });
 }
+
+el('#bCalSync').onclick = () => CCCS.calendarSync();
 
 async function refreshEquipment() {
   if (!person) return;
@@ -326,7 +483,9 @@ function paintShift() {
   const upcoming = shifts.filter((s) => !['CANCELLED'].includes(s.status)).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
   const rest = upcoming.filter((s) => s !== current && Date.parse(s.ends_at) >= Date.now()).slice(0, 4);
 
-  if (!current && !rest.length) { el('#shiftBody').innerHTML = '<p class="dim">No shift scheduled.</p>'; return; }
+  paintRotaList(upcoming.filter((s) => Date.parse(s.ends_at) >= Date.now()));
+  if (screenKey === 'home') paintHomeShift();
+  if (!current && !rest.length) { el('#shiftBody').innerHTML = '<p class="dim">No shift scheduled.</p>'; refreshPassdown(); return; }
 
   let html = '';
   if (current) {
@@ -343,12 +502,30 @@ function paintShift() {
       rest.map((s) => `<div class="field"><span>${esc(fmtShiftTime(s.starts_at))}</span><div>${esc(s.site_name || s.shift_type_name || '—')}</div></div>`).join('');
   }
   el('#shiftBody').innerHTML = html;
-  if (el('#shClockIn')) el('#shClockIn').onclick = async () => { await api('POST', `/api/shift-assignments/${current.my.id}/clock-in`, {}); startFootTracking(); await refreshShifts(); };
-  if (el('#shClockOut')) el('#shClockOut').onclick = async () => { await api('POST', `/api/shift-assignments/${current.my.id}/clock-out`, {}); stopFootTracking(); await refreshShifts(); };
+  if (el('#shClockIn')) el('#shClockIn').onclick = () => clockIn(current);
+  if (el('#shClockOut')) el('#shClockOut').onclick = () => clockOut(current);
   refreshPassdown();
 }
+async function clockIn(s) {
+  try { await api('POST', `/api/shift-assignments/${s.my.id}/clock-in`, {}); startFootTracking(); toast('Clocked in.'); }
+  catch (e) { alert(e.message); }
+  await refreshShifts();
+}
+async function clockOut(s) {
+  if (!confirm('Clock out now?')) return;
+  try { await api('POST', `/api/shift-assignments/${s.my.id}/clock-out`, {}); stopFootTracking(); toast('Clocked out.'); }
+  catch (e) { alert(e.message); }
+  await refreshShifts();
+}
+function paintRotaList(list) {
+  el('#rotaList').innerHTML = list.length ? list.slice(0, 30).map((s) => `
+    <div class="field" style="border-bottom:1px solid var(--line-soft);padding-bottom:8px">
+      <span>${esc(fmtShiftTime(s.starts_at))} – ${esc(hhmm(s.ends_at))}${clockedIn(s) ? ' · clocked in' : ''}</span>
+      <div>${esc(s.site_name || '—')}${s.shift_type_name ? ` <span class="dim">· ${esc(s.shift_type_name)}</span>` : ''}</div>
+    </div>`).join('') : '<p class="dim">No upcoming shifts.</p>';
+}
 async function refreshShifts() {
-  if (!person) return;
+  if (!person) { el('#rotaList').innerHTML = '<p class="dim">No officer record is linked to this login.</p>'; return; }
   const from = new Date(Date.now() - 12 * 3600000).toISOString();
   shifts = await api('GET', `/api/shifts?personnel_id=${person.id}&from=${encodeURIComponent(from)}`);
   paintShift();
@@ -653,15 +830,6 @@ el('#photoInput').onchange = async () => {
   } catch (e) { alert(e.message); }
 };
 
-el('#send').onclick = async () => {
-  const body = el('#note').value.trim();
-  if (!body) return;
-  const r = await CCCS.send('POST', '/api/messages', { to_control: true, body }, 'message to control');
-  el('#note').value = '';
-  const line = r.queued ? `QUEUED: ${body}` : `SENT: ${body}`;
-  const d = document.createElement('div'); d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(line)}`; el('#txtLog').prepend(d);
-};
-
 function freshFix(timeoutMs = 2000) {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
@@ -711,11 +879,7 @@ const bus = CCCS.bus((up) => {
   if (up) CCCS.outbox.flush();
 });
 
-/* ---- Reports (configurable forms) -----------------------------------
- * What an officer can file against is what they are actually dealing with:
- * their current job or visit, the site either one is at, their vehicle, or
- * any contracted site. The server re-checks every one of these (an officer
- * can only file against a job or visit assigned to them). */
+/* ---- Reports, training, shifts, leave --------------------------------- */
 let formDefs = [], allSites = null;
 /* ---- Training (courses logged or taken in-app) ------------------------ */
 const TRAINING_STATUS_LABEL = { never: 'Never done', overdue: 'Overdue', expiring: 'Expires soon', ok: 'Up to date' };
@@ -871,7 +1035,7 @@ async function refreshReports() {
 }
 async function openReport(id) {
   modal('Report', '<div id="rView"><p class="dim">Loading…</p></div>', async () => {
-    try { CCCSForms.view(el('#rView'), await api('GET', `/api/form-submissions/${id}`)); }
+    try { CCCSForms.view(el('#rView'), await api('GET', `/api/form-submissions/${id}`), { onChanged: () => { refreshReports(); vehicles = null; } }); }
     catch (e) { el('#rView').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   });
 }
@@ -915,12 +1079,182 @@ el('#bFileReport').onclick = async () => {
       ['#rDef', '#rSubject', '#rNext'].forEach((q) => (el(q).disabled = true));
       CCCSForms.fill(el('#rFill'), d, subject, {
         signerName: (person && person.name) || me.display_name,
-        onDone: (sub) => { closeModal(); el('#alertHost').innerHTML = `<p class="dim">Report ${esc(sub.reference)} filed.</p>`; refreshReports(); },
+        onDone: (sub) => { closeModal(); toast(`Report ${sub.reference} filed.`); refreshReports(); },
       });
     };
   });
 };
 
+
+/* Home badges follow the job and the visit. */
+{
+  const pj = paintJob, pv = paintVisit;
+  paintJob = function () { pj(); if (screenKey === 'home') paintHome(); };
+  paintVisit = function () { pv(); if (screenKey === 'home') paintHome(); };
+}
+
+/* ---- Messages -----------------------------------------------------------
+ * An officer has one conversation: with control. A control user on a phone
+ * picks who to talk to — the control inbox (everything officers sent to
+ * control) or one officer's thread — and replies to that officer. */
+let messages = [], msgWith = 'control', people = [];
+const isMine = (m) => (isControl ? m.from_label === 'CONTROL' && !m.from_personnel_id : person && m.from_personnel_id === person.id);
+const toMe = (m) => (isControl ? m.to_label === 'CONTROL' && m.to_personnel_id == null && m.to_mdt_id == null : person && m.to_personnel_id === person.id);
+const unread = () => messages.filter((m) => toMe(m) && !m.read_at).length;
+async function loadMessages() {
+  try { messages = await api('GET', '/api/messages?limit=300'); } catch { messages = []; }
+}
+function threadRows() {
+  if (!isControl) return messages;
+  if (msgWith === 'control') return messages.filter(toMe);
+  const id = Number(msgWith);
+  return messages.filter((m) => m.to_personnel_id === id || m.from_personnel_id === id);
+}
+function paintThread() {
+  const rows = threadRows();
+  const t = (iso) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  el('#thread').innerHTML = rows.length ? rows.map((m) => `
+    <div class="bubble ${isMine(m) ? 'mine' : ''}" ${isControl && msgWith === 'control' && m.from_personnel_id ? `data-reply="${m.from_personnel_id}" style="cursor:pointer"` : ''}>
+      <span class="meta">${esc(isMine(m) ? `You → ${m.to_label}` : m.from_label)} · ${esc(t(m.sent_at))}${isMine(m) && m.read_at ? ' · seen' : ''}</span>${esc(m.body)}
+    </div>`).join('') : '<p class="dim">No messages yet.</p>';
+  els('#thread [data-reply]').forEach((b) => (b.onclick = () => { msgWith = b.dataset.reply; el('#msgWith').value = msgWith; paintThread(); }));
+  const box = el('#thread'); box.scrollTop = box.scrollHeight;
+  const canSend = !isControl || msgWith !== 'control';
+  el('#compose').classList.toggle('hide', !canSend);
+  el('#note').placeholder = isControl ? 'Message' : 'Message to control';
+  el('#msgHint').textContent = isControl && msgWith === 'control' ? 'Messages officers sent to control. Tap one to reply to that officer.' : '';
+  // Reading the thread is what marks it read.
+  for (const m of rows) if (toMe(m) && !m.read_at) { m.read_at = new Date().toISOString(); api('POST', `/api/messages/${m.id}/read`, {}).catch(() => {}); }
+}
+async function openMessages() {
+  await loadMessages();
+  if (isControl) {
+    if (!people.length) people = await api('GET', '/api/personnel').catch(() => []);
+    el('#msgPickRow').classList.remove('hide');
+    el('#msgWith').innerHTML = '<option value="control">Control inbox</option>' + people.filter((p) => p.has_login)
+      .map((p) => `<option value="${p.id}">${esc(p.callsign ? `${p.callsign} · ${p.name}` : p.name)}</option>`).join('');
+    el('#msgWith').value = msgWith;
+    el('#msgWith').onchange = () => { msgWith = el('#msgWith').value; paintThread(); };
+  }
+  paintThread();
+}
+el('#send').onclick = async () => {
+  const body = el('#note').value.trim();
+  if (!body) return;
+  const payload = isControl ? { to_personnel: Number(msgWith), body } : { to_control: true, body };
+  el('#send').disabled = true;
+  try {
+    const r = await CCCS.send('POST', '/api/messages', payload, 'message');
+    el('#note').value = '';
+    if (r.queued) toast('No signal — message queued, it will send when you reconnect.');
+    else { if (!messages.some((x) => x.id === r.id)) messages.push(r); paintThread(); }
+  } catch (e) { alert(e.message); }
+  el('#send').disabled = false;
+};
+function onMessage(m) {
+  const mineToSee = isControl || (person && (m.to_personnel_id === person.id || m.from_personnel_id === person.id));
+  if (!mineToSee || messages.some((x) => x.id === m.id)) return;
+  messages.push(m);
+  if (screenKey === 'messages') paintThread();
+  else if (toMe(m)) { toast(`Message from ${m.from_label}: ${m.body.slice(0, 80)}`); if (screenKey === 'home') paintHome(); }
+}
+
+/* ---- Active users -------------------------------------------------------
+ * Who is working now (routes-mobile.js), with Call — a tel: link, so it
+ * rings out from this phone, not through the office phone system. */
+let activeTimer = null;
+async function refreshActive() {
+  clearInterval(activeTimer);
+  activeTimer = setInterval(() => { if (screenKey === 'active') refreshActive(); else clearInterval(activeTimer); }, 30000);
+  let rows;
+  try { rows = await api('GET', '/api/mobile/active-users'); }
+  catch (e) { el('#activeList').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#activeCount').textContent = `· ${rows.filter((r) => r.clocked_in).length} clocked in`;
+  const tel = (p) => String(p).replace(/[^\d+]/g, '');
+  const left = (iso) => { const s = Math.round((Date.parse(iso) - Date.now()) / 1000); return s > 0 ? `${Math.floor(s / 60)}m` : 'OVERDUE'; };
+  el('#activeList').innerHTML = rows.length ? rows.map((r) => `
+    <div class="person">
+      <div class="av">${esc((r.callsign || r.name).slice(0, 2).toUpperCase())}</div>
+      <div class="info">
+        <div class="nm">${esc(r.name)}${r.callsign ? ` <span class="dim">· ${esc(r.callsign)}</span>` : ''}${r.is_me ? ' <span class="dim">(you)</span>' : ''}</div>
+        <div class="ds">${esc(r.site_name || '')}${r.shift_ends_at ? ` · until ${esc(hhmm(r.shift_ends_at))}` : ''}</div>
+        <div class="chipline">
+          ${r.emergency ? '<span class="pill bad">Emergency</span>' : ''}
+          ${r.task ? `<span class="pill warn">${esc(r.task.reference)}</span>` : ''}
+          ${r.clocked_in ? '<span class="pill on">Clocked in</span>' : r.on_rota ? '<span class="pill warn">Not clocked in</span>' : '<span class="pill">Off rota</span>'}
+          ${r.welfare_due_at ? `<span class="pill ${left(r.welfare_due_at) === 'OVERDUE' ? 'bad' : ''}">Welfare ${esc(left(r.welfare_due_at))}</span>` : ''}
+        </div>
+      </div>
+      <div class="acts">
+        ${r.phone && !r.is_me ? `<a class="btn ok" href="tel:${esc(tel(r.phone))}">Call</a>` : ''}
+        ${isControl && !r.is_me ? `<button class="btn" data-msg="${r.id}">Message</button>` : ''}
+      </div>
+    </div>`).join('') : '<p class="dim">Nobody is working right now.</p>';
+  els('#activeList [data-msg]').forEach((b) => (b.onclick = () => { msgWith = b.dataset.msg; go('messages'); }));
+}
+
+/* ---- Forms: incident report, vehicle check / fuel up / deep clean ------ */
+async function defsByKey() {
+  if (!formDefs.length) formDefs = await api('GET', '/api/form-definitions');
+  return (key) => formDefs.find((d) => d.key === key && d.active !== false);
+}
+const signer = () => (person && person.name) || me.display_name;
+
+async function openIncident() {
+  const host = el('#incidentHost');
+  host.innerHTML = '<p class="dim">Loading…</p>';
+  const def = (await defsByKey())('incident-report');
+  if (!def) { host.innerHTML = '<p class="dim">The incident report form is switched off. Use Reports to file another report.</p>'; return; }
+  const subjects = (await reportSubjects()).filter((s) => def.subject_types.includes(s.type));
+  if (!subjects.length) { host.innerHTML = '<p class="dim">There is no site to file this against yet.</p>'; return; }
+  const fill = (s) => CCCSForms.fill(host, def, s, {
+    signerName: signer(), onCancel: () => go(''),
+    onDone: (sub) => { toast(`Incident report ${sub.reference} filed.`); refreshReports(); go(''); },
+  });
+  // Already on a job or visit: that is what it is about — no need to ask.
+  if (subjects[0].type === 'JOB' || subjects[0].type === 'SITE_VISIT') {
+    host.innerHTML = `<p style="margin-top:0">Is this about <strong>${esc(subjects[0].label)}</strong>?</p>
+      <div class="pick"><button data-i="0">Yes — ${esc(CCCSForms.SUBJECT_LABEL[subjects[0].type])} ${esc(subjects[0].label)}</button><button data-i="other">No, pick a site</button></div>`;
+  } else host.innerHTML = '';
+  const pickSite = () => {
+    host.innerHTML = `<p style="margin-top:0">Where did it happen?</p><div class="pick">${subjects.map((s, i) => s.type === 'SITE' ? `<button data-i="${i}">${esc(s.label)}</button>` : '').join('')}</div>`;
+    els('#incidentHost [data-i]').forEach((b) => (b.onclick = () => fill(subjects[Number(b.dataset.i)])));
+  };
+  if (!host.innerHTML) return pickSite();
+  els('#incidentHost [data-i]').forEach((b) => (b.onclick = () => (b.dataset.i === 'other' ? pickSite() : fill(subjects[0]))));
+}
+
+let vehicles = null;
+async function openVehicleForm(key) {
+  const host = el('#vformHost');
+  host.innerHTML = '<p class="dim">Loading…</p>';
+  el('#vformRecent').innerHTML = '';
+  const def = (await defsByKey())(key);
+  if (!def) { host.innerHTML = '<p class="dim">This form is switched off — ask an admin.</p>'; return; }
+  if (!vehicles) vehicles = await api('GET', '/api/vehicles').catch(() => []);
+  const mine = person && person.vehicle_id;
+  const list = vehicles.filter((v) => v.status !== 'DISPOSED')
+    .sort((a, b) => (b.id === mine) - (a.id === mine) || a.registration.localeCompare(b.registration));
+  host.innerHTML = `<p style="margin-top:0">${esc(def.description || def.name)}</p><p style="margin:0 0 8px"><strong>Which vehicle?</strong></p>
+    ${list.length > 8 ? '<input id="vSearch" placeholder="Search registration" style="width:100%;margin-bottom:8px">' : ''}
+    <div class="pick" id="vPick">${list.map((v) => `<button data-v="${v.id}" data-reg="${esc(v.registration.toLowerCase())}"><span class="reg">${esc(v.registration)}</span><span>${esc([v.make, v.model].filter(Boolean).join(' ') || v.type || '')}</span>${v.id === mine ? '<span class="hint">your vehicle</span>' : v.mileage != null ? `<span class="hint">${Number(v.mileage).toLocaleString('en-GB')} mi</span>` : ''}</button>`).join('') || '<p class="dim">No vehicles set up.</p>'}</div>`;
+  if (el('#vSearch')) el('#vSearch').oninput = () => { const q = el('#vSearch').value.trim().toLowerCase(); els('#vPick [data-v]').forEach((b) => (b.style.display = b.dataset.reg.includes(q) ? '' : 'none')); };
+  els('#vPick [data-v]').forEach((b) => (b.onclick = () => {
+    const v = vehicles.find((x) => x.id === Number(b.dataset.v));
+    CCCSForms.fill(host, def, { type: 'VEHICLE', id: v.id, label: v.registration }, {
+      signerName: signer(), onCancel: () => openVehicleForm(key),
+      onDone: (sub) => { vehicles = null; toast(`${def.name} ${sub.reference} filed for ${v.registration}.`); go(''); },
+    });
+    window.scrollTo(0, 0);
+  }));
+  try {
+    const rows = await api('GET', `/api/form-submissions?definition_id=${def.id}&limit=50`);
+    const own = rows.filter((r) => r.submitted_by === me.display_name).slice(0, 8);
+    CCCSForms.list(el('#vformRecent'), own, openReport, 'Nothing filed yet.');
+  } catch { el('#vformRecent').innerHTML = ''; }
+}
+
+/* ---- Start -------------------------------------------------------------- */
 async function boot() {
   const all = await api('GET', '/api/personnel');
   person = all.find((p) => p.id === me.personnel_id) || null;
@@ -932,36 +1266,13 @@ async function boot() {
   visit = visits.find((v) => v.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) || null;
   paintVisit();
   await refreshShifts();
-  await refreshEquipment();
-  await refreshReports();
-  await refreshTraining();
-  await refreshAvailableShifts();
-  await refreshMyApplications();
-  await refreshLeave();
+  await loadMessages();
+  route();
+  refreshEquipment(); refreshLeave();
   footTrackingEnabled = await api('GET', '/api/config').then((c) => c.foot_tracking).catch(() => false);
   if (currentShift() && clockedIn(currentShift())) startFootTracking();
-  el('#bCalSync').onclick = openCalSyncModal;
 }
 boot();
-
-async function openCalSyncModal() {
-  const { url } = await api('GET', '/api/me/ical-feed');
-  modal('Calendar sync', `
-    <p>Subscribe to this link from your phone or desktop calendar app to see your shifts automatically. Anyone with this link can see your rota, so don't share it.</p>
-    <input id="calUrl" readonly style="width:100%" value="${esc(url)}">
-    <div class="btn-row" style="margin-top:10px">
-      <button class="btn" id="calCopy">Copy link</button>
-      <button class="btn danger" id="calRegen">Regenerate link</button>
-    </div>
-    <p class="dim" id="calMsg" style="margin-top:8px"></p>`, () => {
-    el('#calCopy').onclick = async () => { await navigator.clipboard.writeText(el('#calUrl').value); el('#calMsg').textContent = 'Copied.'; };
-    el('#calRegen').onclick = async () => {
-      if (!confirm('The old link will stop working. Continue?')) return;
-      const r = await api('POST', '/api/me/ical-feed/regenerate', {});
-      el('#calUrl').value = r.url; el('#calMsg').textContent = 'Link regenerated — update it in your calendar app.';
-    };
-  });
-}
 
 bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === person.id) { person = personnel; paintWho(); } })
    .on('welfare.checked_in', (p) => { if (person && p.id === person.id) { person = p; paintWho(); } })
@@ -970,7 +1281,7 @@ bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === pe
    .on('job.assigned_to_you', (j) => {
      if (!person || !j.resources.some((r) => r.personnel === person.name)) return;
      job = j; paintJob();
-     el('#alertHost').innerHTML = `<div class="err" style="border:1px solid var(--priority);border-radius:8px;padding:10px">New job ${esc(j.reference)} — ${esc(j.location)}</div>`;
+     el('#alertHost').innerHTML = `<a href="#job" class="err" style="display:block;border:1px solid var(--priority);border-radius:10px;padding:12px;text-decoration:none">New job ${esc(j.reference)} — ${esc(j.location)} · tap to open</a>`;
    })
    .on('job.status_changed', (j) => {
      if (!job || j.id !== job.id) return;
@@ -986,7 +1297,7 @@ bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === pe
    .on('site_visit.dispatched', (v) => {
      if (!person || !v.resources.some((r) => r.personnel === person.name)) return;
      visit = v; paintVisit();
-     el('#alertHost').innerHTML = `<div class="err" style="border:1px solid var(--priority);border-radius:8px;padding:10px">New patrol visit ${esc(v.reference)} — ${esc(v.site_name || '')}</div>`;
+     el('#alertHost').innerHTML = `<a href="#visit" class="err" style="display:block;border:1px solid var(--priority);border-radius:10px;padding:12px;text-decoration:none">New patrol visit ${esc(v.reference)} — ${esc(v.site_name || '')} · tap to open</a>`;
    })
    .on('site_visit.status_changed', (v) => {
      if (!visit || v.id !== visit.id) {
@@ -1006,10 +1317,7 @@ bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === pe
    .on('shift.updated', (s) => { if (person && s.assignments.some((a) => a.personnel_id === person.id)) refreshShifts(); })
    .on('emergency.acknowledged', () => { el('#alertHost').innerHTML = '<p class="dim">Emergency acknowledged by control.</p>'; })
    .on('emergency.resolved', () => { el('#alertHost').innerHTML = ''; })
-   .on('message.received', (m) => {
-     if (!person || m.to_personnel_id !== person.id) return;
-     const d = document.createElement('div'); d.innerHTML = `<span class="t">${CCCS.hhmmss()}</span>${esc(m.from_label)}: ${esc(m.body)}`; el('#txtLog').prepend(d);
-   })
+   .on('message.received', onMessage)
    .on('error', () => {});
 </script>
 </body>

@@ -53,6 +53,8 @@ const TABLES = [
   'training_courses', 'training_records',
   'applicants',
   'leave_requests',
+  // Admin's choice of which roles see which menu section (ui-sections.js).
+  'ui_settings',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

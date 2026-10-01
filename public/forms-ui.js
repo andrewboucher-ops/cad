@@ -215,7 +215,8 @@ const CCCSForms = (() => {
 
   const fmt = (iso) => (iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
 
-  function view(host, sub) {
+  /** `onChanged(sub)` is called after an edit is saved (to refresh lists). */
+  function view(host, sub, { onChanged } = {}) {
     const valueHtml = (f) => {
       const v = sub.values[f.id];
       if (v === null || v === undefined || v === '') return '<span class="dim">—</span>';
@@ -240,8 +241,68 @@ const CCCSForms = (() => {
           <div style="font-weight:700">${esc(OUTCOME_LABEL[sub.outcome] || sub.outcome)} <span class="dim" style="font-weight:400;font-size:12px">by ${esc(sub.actioned_by)} · ${esc(fmt(sub.actioned_at))}</span></div>
           ${sub.feedback ? `<div style="white-space:pre-wrap;margin-top:4px">${esc(sub.feedback)}</div>` : ''}</div>` : ''}
         ${sub.fields.map((f) => `<div class="ff-field"><span>${esc(f.label)}</span><div>${valueHtml(f)}</div></div>`).join('')}
+        ${(sub.amendments || []).length ? `<div style="border-top:1px solid var(--line);padding-top:8px;margin-top:4px">
+          <div class="dim" style="font-size:11px;letter-spacing:.1em;text-transform:uppercase">Edits</div>
+          ${sub.amendments.map((a) => `<div style="font-size:12.5px;margin-top:6px"><strong>${esc(a.by)}</strong> <span class="dim">${esc(fmt(a.at))}</span> — ${esc(a.reason)}
+            <ul style="margin:2px 0 0 18px;padding:0">${a.changes.map((c) => `<li>${esc(c.label)}: <span class="dim">${esc(shortVal(c.from))}</span> → ${esc(shortVal(c.to))}</li>`).join('')}</ul></div>`).join('')}
+        </div>` : ''}
+        ${sub.editable ? '<div class="btn-row"><button type="button" class="btn" data-ff-edit>Edit this report</button></div>' : ''}
       </div>`;
     loadImages(host);
+    const btn = host.querySelector('[data-ff-edit]');
+    if (btn) btn.onclick = () => edit(host, sub, {
+      onSaved: (updated) => { view(host, updated, { onChanged }); onChanged && onChanged(updated); },
+      onCancel: () => view(host, sub, { onChanged }),
+    });
+  }
+  const shortVal = (v) => {
+    if (v === null || v === undefined || v === '') return '—';
+    if (v === true) return 'Yes'; if (v === false) return 'No';
+    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v)) return fmt(v);
+    return String(v).slice(0, 80);
+  };
+
+  /* ---------------- correcting (vehicle reports) ---------------- */
+
+  const EDITABLE = ['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime'];
+  /** The server decides whether this report may be edited (sub.editable)
+   * and keeps every change with who, when and why. Photos and signatures
+   * are not editable and are not shown here. */
+  function edit(host, sub, { onSaved, onCancel } = {}) {
+    const fields = sub.fields.filter((f) => EDITABLE.includes(f.type));
+    host.innerHTML = `
+      <div class="ff-stack">
+        <p class="dim" style="margin:0;font-size:12.5px">Editing <strong>${esc(sub.reference)}</strong> — ${esc(sub.definition_name)}, ${esc(sub.subject_label)}. The original answers are kept with the report.</p>
+        ${fields.map((f) => fieldHtml(f)).join('')}
+        <label>Why are you changing it? <span style="color:var(--priority)">*</span></label>
+        <input data-ff-reason placeholder="e.g. odometer mistyped">
+        <p class="err" data-ff-err style="min-height:16px;margin:0"></p>
+        <div class="btn-row"><button type="button" class="btn" data-ff-cancel>Cancel</button><button type="button" class="btn primary" data-ff-save>Save changes</button></div>
+      </div>`;
+    for (const f of fields) {
+      const input = host.querySelector(`[data-ff="${f.id}"]`), v = sub.values[f.id];
+      if (f.type === 'checkbox') input.checked = v === true;
+      else if (f.type === 'datetime') input.value = v ? toLocalInput(new Date(v)) : '';
+      else input.value = v ?? '';
+    }
+    host.querySelector('[data-ff-cancel]').onclick = () => onCancel && onCancel();
+    const errEl = host.querySelector('[data-ff-err]'), save = host.querySelector('[data-ff-save]');
+    save.onclick = async () => {
+      errEl.textContent = '';
+      const values = {};
+      for (const f of fields) {
+        const input = host.querySelector(`[data-ff="${f.id}"]`);
+        if (f.type === 'checkbox') values[f.id] = input.checked;
+        else if (f.type === 'number') values[f.id] = input.value === '' ? null : Number(input.value);
+        else if (f.type === 'datetime') values[f.id] = input.value ? new Date(input.value).toISOString() : null;
+        else values[f.id] = input.value.trim() === '' ? null : input.value.trim();
+      }
+      const reason = host.querySelector('[data-ff-reason]').value.trim();
+      if (!reason) { errEl.textContent = 'Say why you are changing it.'; return; }
+      save.disabled = true;
+      try { onSaved && onSaved(await api('PATCH', `/api/form-submissions/${sub.id}`, { values, reason })); }
+      catch (e) { errEl.textContent = e.message; save.disabled = false; }
+    };
   }
 
   /** A compact list of submission summaries; onOpen(id) when one is clicked. */
@@ -257,5 +318,5 @@ const CCCSForms = (() => {
     host.querySelectorAll('[data-ff-open]').forEach((r) => (r.onclick = () => onOpen(Number(r.dataset.ffOpen))));
   }
 
-  return { fill, view, list, SUBJECT_LABEL, OUTCOME_LABEL };
+  return { fill, view, edit, list, SUBJECT_LABEL, OUTCOME_LABEL };
 })();

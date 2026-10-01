@@ -447,5 +447,88 @@ const CCCS = (() => {
     },
   };
 
-  return { api, send, outbox, login, getSession, setSession, clearSession, applyTheme, bus, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth };
+  /* ---- Phone / tablet detection ----
+   * "Mobile" means the touch layout (officer.html's home screen, burger
+   * menu, no control room), not literally a phone: tablets get it too. The
+   * browser's own answer wins where it gives one (userAgentData.mobile);
+   * otherwise the user agent, iPadOS's desktop-pretending Safari (MacIntel
+   * with a touch screen), and finally a coarse pointer on a small screen.
+   * Anyone can override it in My settings → Layout, kept per device. */
+  const VIEW_KEY = 'cccs.view';
+  function viewPreference() { try { return localStorage.getItem(VIEW_KEY) || 'auto'; } catch { return 'auto'; } }
+  function setViewPreference(v) { try { if (v === 'auto') localStorage.removeItem(VIEW_KEY); else localStorage.setItem(VIEW_KEY, v); } catch {} }
+  function detectedDevice() {
+    const nav = typeof navigator !== 'undefined' ? navigator : {};
+    const ua = nav.userAgent || '';
+    const touchMac = nav.platform === 'MacIntel' && nav.maxTouchPoints > 1;
+    const tabletUa = /iPad|Tablet|Android(?!.*Mobile)|Silk|Kindle|PlayBook/i.test(ua) || touchMac;
+    const phoneUa = (nav.userAgentData && nav.userAgentData.mobile) || /iPhone|iPod|Android.*Mobile|Windows Phone|Mobi/i.test(ua);
+    if (phoneUa) return 'phone';
+    if (tabletUa) return 'tablet';
+    const mq = (q) => typeof matchMedia === 'function' && matchMedia(q).matches;
+    if (mq('(pointer: coarse)') && mq('(max-width: 1100px)')) return mq('(max-width: 640px)') ? 'phone' : 'tablet';
+    return 'desktop';
+  }
+  /** 'phone' | 'tablet' | 'desktop', after the user's own override. */
+  function deviceKind() {
+    const pref = viewPreference();
+    if (pref === 'desktop') return 'desktop';
+    const d = detectedDevice();
+    if (pref === 'mobile') return d === 'desktop' ? 'tablet' : d;
+    return d;
+  }
+  const isMobile = () => deviceKind() !== 'desktop';
+
+  /* ---- Calendar sync — one dialog for every page that offers it ----
+   * A calendar app subscribes to the feed URL and re-fetches it itself, so
+   * "Copy link" alone left people with a link and no idea where to put it,
+   * and on a plain-http address the clipboard API does not exist at all.
+   * This offers a one-tap subscribe for each common calendar, and a copy
+   * that falls back to selecting the text. */
+  async function calendarSync() {
+    const host = document.createElement('div');
+    const close = () => host.remove();
+    host.innerHTML = `<div class="modal-back"><div class="modal" role="dialog" aria-label="Calendar sync"><h2>Calendar sync</h2><div class="content"><p class="dim">Loading…</p></div>
+      <div class="foot"><button class="btn" data-cal="close">Close</button></div></div></div>`;
+    document.body.appendChild(host);
+    host.querySelector('[data-cal="close"]').onclick = close;
+    host.querySelector('.modal-back').onclick = (e) => { if (e.target.classList.contains('modal-back')) close(); };
+    const body = host.querySelector('.content');
+    const paint = (url) => {
+      const webcal = url.replace(/^https?:/, 'webcal:');
+      const name = encodeURIComponent('CCCS rota');
+      body.innerHTML = `
+        <p>Add your rota to your calendar. It updates by itself when shifts change.</p>
+        <div class="cal-links">
+          <a class="btn primary" href="${esc(webcal)}">iPhone, iPad or Mac calendar</a>
+          <a class="btn" target="_blank" rel="noopener" href="https://outlook.office.com/calendar/0/addfromweb?url=${encodeURIComponent(url)}&name=${name}">Outlook (work account)</a>
+          <a class="btn" target="_blank" rel="noopener" href="https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(url)}&name=${name}">Outlook.com</a>
+          <a class="btn" target="_blank" rel="noopener" href="https://calendar.google.com/calendar/r?cid=${encodeURIComponent(webcal)}">Google Calendar</a>
+        </div>
+        <label style="margin-top:12px">Or copy the link into any calendar app ("subscribe" / "add from URL")</label>
+        <input readonly data-cal="url" style="width:100%" value="${esc(url)}">
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn" data-cal="copy" type="button">Copy link</button>
+          <button class="btn danger" data-cal="regen" type="button">Regenerate link</button>
+        </div>
+        <p class="dim" data-cal="msg" style="margin-top:8px">Anyone with this link can see the rota, so don't share it. Google can take several hours to show changes.</p>`;
+      const input = body.querySelector('[data-cal="url"]'), msg = body.querySelector('[data-cal="msg"]');
+      input.onclick = () => input.select();
+      body.querySelector('[data-cal="copy"]').onclick = async () => {
+        try { await navigator.clipboard.writeText(input.value); msg.textContent = 'Copied.'; return; } catch {}
+        input.focus(); input.select();
+        let ok = false; try { ok = document.execCommand('copy'); } catch {}
+        msg.textContent = ok ? 'Copied.' : 'The link is selected — copy it with your device\'s copy command.';
+      };
+      body.querySelector('[data-cal="regen"]').onclick = async () => {
+        if (!confirm('The old link will stop working in any calendar already using it. Continue?')) return;
+        try { const r = await api('POST', '/api/me/ical-feed/regenerate', {}); paint(r.url); body.querySelector('[data-cal="msg"]').textContent = 'New link made — add it to your calendar again.'; }
+        catch (e) { msg.textContent = e.message; }
+      };
+    };
+    try { paint((await api('GET', '/api/me/ical-feed')).url); }
+    catch (e) { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  }
+
+  return { api, send, outbox, login, getSession, setSession, clearSession, applyTheme, bus, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth, deviceKind, detectedDevice, isMobile, viewPreference, setViewPreference, calendarSync };
 })();

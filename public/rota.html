@@ -541,26 +541,7 @@ el('#btnDuplicateWeek').onclick = async () => {
   await load();
 };
 
-el('#btnCalSync').onclick = async () => {
-  const { url } = await api('GET', '/api/me/ical-feed');
-  modal('Calendar sync', `
-    <p>Subscribe to see every published shift across the operation. Anyone with this link can see the whole rota, so don't share it.</p>
-    <input id="calUrl" readonly style="width:100%" value="${esc(url)}">
-    <div class="btn-row" style="margin-top:10px">
-      <button class="btn" id="calCopy" type="button">Copy link</button>
-      <button class="btn danger" id="calRegen" type="button">Regenerate link</button>
-    </div>
-    <p class="dim" id="calMsg" style="margin-top:8px"></p>
-    <div class="btn-row" style="margin-top:12px"><button class="btn" id="calClose">Close</button></div>`, () => {
-    el('#calClose').onclick = closeModal;
-    el('#calCopy').onclick = async () => { await navigator.clipboard.writeText(el('#calUrl').value); el('#calMsg').textContent = 'Copied.'; };
-    el('#calRegen').onclick = async () => {
-      if (!confirm('The old link will stop working. Continue?')) return;
-      const r = await api('POST', '/api/me/ical-feed/regenerate', {});
-      el('#calUrl').value = r.url; el('#calMsg').textContent = 'Link regenerated.';
-    };
-  });
-};
+el('#btnCalSync').onclick = () => CCCS.calendarSync();
 
 CCCS.bus((up) => {
   const n = el('#net');
