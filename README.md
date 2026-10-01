@@ -426,6 +426,48 @@ shift" section next to the existing assignments list, so approving an
 application and directly assigning someone are two doors into the same
 room rather than two disconnected screens.
 
+## Vehicle/asset allocation and the stock ledger
+
+`routes-fleet-stock.js` adds per-shift allocation for two different kinds
+of thing, deliberately handled differently. A **vehicle**, and a
+**non-stock-tracked asset** (a specific physical item — one named radio,
+not "radios" as a quantity), can only ever be on one shift at a time:
+allocating one checks every other allocation of the same vehicle/asset
+for a time-overlapping, non-cancelled shift and refuses the conflict —
+cancelling a shift frees whatever it was holding. A **stock-tracked
+asset** has no such rule; allocating a quantity just withdraws that much
+from its own ledger, and the only limit is how much is on hand.
+
+That ledger — `stock_movements` — is this codebase's "derive, never
+cache" convention applied to a running count: `stockLevel()` is always
+the most recent movement's `resulting_balance`, never a field on the
+asset itself that something could overwrite directly. Allocating to a
+shift writes an `ALLOCATED` movement (negative); returning writes a
+`RETURNED` one for whatever quantity actually comes back — which can be
+less than what went out, and the difference (used, lost, damaged) is
+simply never credited back, rather than requiring a separate
+reconciliation step. A manual `RESTOCK`/`DAMAGED`/`AUDIT_CORRECTION`
+entry works the same way and is refused if it would take stock below
+zero. `GET /api/stock-dashboard` (control-only) flags anything at or
+below its own `low_stock_threshold` or expiring within 30 days.
+
+`admin.html`'s asset form gained `is_stock_tracked`, an initial quantity,
+a threshold, an expiry date, and a "lives inside" parent-asset link (a
+consumable kept inside a kit) — ticking the box reveals the stock fields
+inline. A new Stock tab lists every stock-tracked asset with a one-click
+restock. `rota.html`'s shift modal gained a "Resources" section —
+vehicles and equipment, each with their own allocate/return controls —
+alongside the existing personnel and applications sections.
+
+Deliberately out of scope for this pass: the brief's "fleet board" (a
+day/week view of every vehicle's allocations across the fleet) and
+nested kit-contents browsing (seeing a first-aid kit's line items as a
+group rather than as individually-listed stock rows). Both are real,
+server-already-supports-it additions — `parent_asset_id` and
+`GET /api/vehicles/:id/allocations` exist precisely so a future pass can
+build them without another data-model change — just not built out as UI
+yet.
+
 ### SIA licence / DBS compliance tracking
 
 There is no integration with either service, because none exists to build:

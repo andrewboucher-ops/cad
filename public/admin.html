@@ -129,6 +129,7 @@
       <button id="tabApplicants">Applicants</button>
       <button id="tabLeave">Leave</button>
       <button id="tabShiftTypes">Shift types</button>
+      <button id="tabStock">Stock</button>
     </div>
 
     <div id="viewAccounts">
@@ -268,6 +269,11 @@
       <p class="dim" style="margin:0 0 10px;font-size:13px">What a shift's type is, for rota colour-coding and the type-specific detail a shift carries (console/radio channel, patrol route, etc.). Retiring a type hides it from new shifts without touching ones that already use it.</p>
       <div id="stTableWrap"></div>
     </div>
+
+    <div id="viewStock" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">Every stock-tracked asset's current level, derived from its own ledger (Assets tab → open the asset → Stock movements) — never a number anyone sets directly.</p>
+      <div id="stockTableWrap"></div>
+    </div>
   </div>
 </main>
 
@@ -368,6 +374,9 @@ function showTab(name) {
   el('#tabShiftTypes').classList.toggle('active', name === 'shiftTypes');
   el('#viewShiftTypes').classList.toggle('hide', name !== 'shiftTypes');
   el('#btnNewShiftType').hidden = name !== 'shiftTypes';
+  el('#tabStock').classList.toggle('active', name === 'stock');
+  el('#viewStock').classList.toggle('hide', name !== 'stock');
+  if (name === 'stock') paintStock();
   el('#viewAccounts').classList.toggle('hide', name !== 'accounts');
   el('#viewPersonnel').classList.toggle('hide', name !== 'personnel');
   el('#viewMdts').classList.toggle('hide', name !== 'mdts');
@@ -400,6 +409,7 @@ el('#tabTraining').onclick = () => showTab('training');
 el('#tabApplicants').onclick = () => showTab('applicants');
 el('#tabLeave').onclick = () => showTab('leave');
 el('#tabShiftTypes').onclick = () => showTab('shiftTypes');
+el('#tabStock').onclick = () => showTab('stock');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -985,10 +995,30 @@ function assetForm(a) {
       <select id="naSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${!isNew && a.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       <label>Purchase date</label>
       <input id="naPurchase" type="date" value="${!isNew && a.purchase_date ? a.purchase_date.slice(0, 10) : ''}">
+      <label>Lives inside (optional — for a consumable kept inside a parent kit)</label>
+      <select id="naParent"><option value="">— none —</option>${allAssets.filter((x) => isNew || x.id !== a.id).map((x) => `<option value="${x.id}" ${!isNew && a.parent_asset_id === x.id ? 'selected' : ''}>${esc(x.tag ? x.tag + ' — ' : '')}${esc(x.description)}</option>`).join('')}</select>
+      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="naStockTracked" ${!isNew && a.is_stock_tracked ? 'checked' : ''}> Stock-tracked — a consumable counted by quantity, not checked out to one person</label>
+      <div id="naStockFields" style="${!isNew && a.is_stock_tracked ? '' : 'display:none'}">
+        ${isNew ? `<label>Initial quantity</label><input id="naInitialQty" type="number" min="0" value="0">` : `<p class="dim" style="margin:0">Current stock: <strong>${a.stock_level ?? 0}</strong></p>`}
+        <label>Low-stock threshold (optional)</label>
+        <input id="naThreshold" type="number" min="0" value="${!isNew && a.low_stock_threshold != null ? a.low_stock_threshold : ''}">
+        <label>Expiry date (optional)</label>
+        <input id="naExpiry" type="date" value="${!isNew && a.expiry_date ? a.expiry_date.slice(0, 10) : ''}">
+      </div>
       <label>Branch (optional — leave shared if you don't use branches)</label>
       <select id="naBranch">${branchOptions(isNew ? null : a.branch_id)}</select>
       <label>Notes</label>
       <textarea id="naNotes" rows="2">${isNew ? '' : esc(a.notes || '')}</textarea>
+      ${a && a.is_stock_tracked ? `
+      <label>Stock movements</label>
+      <div id="asStockLog" class="dim">Loading…</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="asMoveDelta" type="number" placeholder="+/- quantity" style="width:110px">
+        <select id="asMoveReason" style="width:150px">${['RESTOCK', 'USED_ON_SHIFT', 'DAMAGED', 'AUDIT_CORRECTION'].map((r) => `<option value="${r}">${r.replace('_', ' ')}</option>`).join('')}</select>
+        <input id="asMoveNote" placeholder="Note (optional)" style="flex:1;min-width:140px">
+        <button type="button" class="btn" id="asMoveAdd">Record</button>
+      </div>
+      <p class="dim" id="asMoveError" style="min-height:16px;margin:0"></p>` : ''}
       ${a ? `
       <label>Checkout history</label>
       <div id="asCheckoutLog" class="dim">Loading…</div>
@@ -1021,6 +1051,26 @@ function assetModal(a) {
       };
       refreshCheckouts();
     }
+    if (el('#naStockTracked')) el('#naStockTracked').onchange = () => { el('#naStockFields').style.display = el('#naStockTracked').checked ? '' : 'none'; };
+    if (a && a.is_stock_tracked && el('#asStockLog')) {
+      const refreshStock = async () => {
+        const moves = await api('GET', `/api/assets/${a.id}/stock-movements`).catch(() => []);
+        el('#asStockLog').innerHTML = moves.length
+          ? `<div class="log" style="max-height:140px;overflow:auto">${moves.map((m) => `<div><span class="t">${esc(new Date(m.recorded_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${m.delta > 0 ? '+' : ''}${m.delta} (${esc(m.reason.replace('_', ' '))}) → ${m.resulting_balance}${m.note ? ` — ${esc(m.note)}` : ''} · ${esc(m.recorded_by)}</div>`).join('')}</div>`
+          : '<p class="dim">No movements yet.</p>';
+      };
+      refreshStock();
+      el('#asMoveAdd').onclick = async () => {
+        const delta = Number(el('#asMoveDelta').value);
+        if (!delta) { el('#asMoveError').textContent = 'enter a non-zero quantity'; return; }
+        try {
+          await api('POST', `/api/assets/${a.id}/stock-movements`, { delta, reason: el('#asMoveReason').value, note: el('#asMoveNote').value.trim() });
+          el('#asMoveError').textContent = ''; el('#asMoveDelta').value = ''; el('#asMoveNote').value = '';
+          await refreshStock();
+          closeModal(); await load(); assetModal(allAssets.find((x) => x.id === a.id));
+        } catch (e) { el('#asMoveError').textContent = e.message; }
+      };
+    }
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
@@ -1035,12 +1085,18 @@ function assetModal(a) {
     el('#asSave').onclick = async () => {
       const description = el('#naDesc').value.trim();
       if (!description) { el('#asError').textContent = 'description is required'; return; }
+      const isStockTracked = el('#naStockTracked').checked;
       const body = {
         description, category: el('#naCategory').value, tag: el('#naTag').value.trim() || null, serial_no: el('#naSerial').value.trim(),
         status: el('#naStatus').value, assigned_to: el('#naAssigned').value ? Number(el('#naAssigned').value) : null,
         site_id: el('#naSite').value ? Number(el('#naSite').value) : null, purchase_date: el('#naPurchase').value || null,
         notes: el('#naNotes').value.trim(), branch_id: el('#naBranch').value ? Number(el('#naBranch').value) : null,
+        parent_asset_id: el('#naParent').value ? Number(el('#naParent').value) : null,
+        is_stock_tracked: isStockTracked,
+        low_stock_threshold: isStockTracked && el('#naThreshold').value ? Number(el('#naThreshold').value) : null,
+        expiry_date: isStockTracked ? (el('#naExpiry').value || null) : null,
       };
+      if (!a && isStockTracked && el('#naInitialQty').value) body.initial_quantity = Number(el('#naInitialQty').value);
       try {
         if (a) await api('PATCH', `/api/assets/${a.id}`, body);
         else await api('POST', '/api/assets', body);
@@ -1050,6 +1106,30 @@ function assetModal(a) {
   });
 }
 el('#btnNewAsset').onclick = () => assetModal(null);
+
+/* ---------- stock dashboard ---------- */
+async function paintStock() {
+  el('#stockTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  const rows = (await api('GET', '/api/stock-dashboard').catch(() => [])).sort((a, b) => a.description.localeCompare(b.description));
+  el('#stockTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Item</th><th style="width:90px">Level</th><th style="width:100px">Threshold</th><th style="width:110px">Expiry</th><th style="width:90px"></th></tr></thead>
+      <tbody>${rows.map((a) => `<tr data-stockasset="${a.id}">
+        <td>${esc(a.description)}${a.parent_asset_description ? `<div class="dim" style="font-size:11px">in ${esc(a.parent_asset_description)}</div>` : ''}</td>
+        <td class="${a.below_threshold ? 'err' : ''}">${a.stock_level}${a.below_threshold ? ' ⚠' : ''}</td>
+        <td class="dim">${a.low_stock_threshold != null ? a.low_stock_threshold : '—'}</td>
+        <td class="${a.expired ? 'err' : a.expiring_soon ? '' : 'dim'}" style="${a.expiring_soon && !a.expired ? 'color:var(--priority)' : ''}">${a.expiry_date ? esc(new Date(a.expiry_date).toLocaleDateString('en-GB')) : '—'}${a.expired ? ' (expired)' : a.expiring_soon ? ' (soon)' : ''}</td>
+        <td><button type="button" class="btn" data-restock="${a.id}" style="padding:4px 10px;font-size:11px">Restock</button></td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No stock-tracked assets yet — tick "Stock-tracked" on an asset in the Assets tab.</p>';
+  els('#stockTableWrap [data-restock]').forEach((b) => (b.onclick = async () => {
+    const qty = prompt('How many are you adding?');
+    const delta = Number(qty);
+    if (!qty || !Number.isFinite(delta) || delta <= 0) return;
+    try { await api('POST', `/api/assets/${b.dataset.restock}/stock-movements`, { delta, reason: 'RESTOCK', note: 'Restocked from Stock dashboard' }); await paintStock(); }
+    catch (e) { alert(e.message); }
+  }));
+}
 
 /* ---------- sites ---------- */
 function paintSites() {

@@ -143,7 +143,7 @@ function startOfWeek(d) {
   return x;
 }
 let weekStart = startOfWeek(new Date());
-let allPersonnel = [], allSites = [], allShifts = [], allShiftTypes = [];
+let allPersonnel = [], allSites = [], allShifts = [], allShiftTypes = [], allVehicles = [], allAssets = [];
 /** A shift chip shows one person's own involvement — their assignment
  * carries the clock/attendance state now, the shift itself only carries
  * DRAFT/PUBLISHED/IN_PROGRESS/COMPLETED/CANCELLED. */
@@ -170,10 +170,10 @@ async function load() {
   const from = new Date(days[0]); from.setHours(0, 0, 0, 0);
   const to = new Date(days[6]); to.setHours(23, 59, 59, 999);
   el('#weekRange').textContent = `${days[0].toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${days[6].toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
-  [allPersonnel, allSites, allShifts, allShiftTypes] = await Promise.all([
+  [allPersonnel, allSites, allShifts, allShiftTypes, allVehicles, allAssets] = await Promise.all([
     api('GET', '/api/personnel'), api('GET', '/api/sites'),
     api('GET', `/api/shifts?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`),
-    api('GET', '/api/shift-types'),
+    api('GET', '/api/shift-types'), api('GET', '/api/vehicles'), api('GET', '/api/assets'),
   ]);
   const currentFilter = el('#typeFilter').value;
   el('#typeFilter').innerHTML = '<option value="">All shift types</option>' + allShiftTypes.map((t) => `<option value="${t.id}" ${String(t.id) === currentFilter ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
@@ -298,9 +298,49 @@ function assignmentsSection(s) {
       <div id="shApplications" class="dim" style="font-size:13px">Loading…</div>
     </div>`;
 }
+/** A vehicle or a non-stock-tracked asset is a physical thing — allocated
+ * exclusively, conflict-checked server-side against any overlapping
+ * shift. A stock-tracked asset is just a quantity withdrawn from its own
+ * ledger, so every asset (not just ones "free right now") can be offered;
+ * the server is the one source of truth for whether there's enough left. */
+function resourcesSection(s) {
+  const allocatedVehicleIds = s.vehicle_allocations.map((v) => v.vehicle_id);
+  const availableVehicles = allVehicles.filter((v) => v.status !== 'OFF_ROAD' && !allocatedVehicleIds.includes(v.id));
+  const openAssetAllocs = s.asset_allocations.filter((a) => !a.returned_at);
+  return `
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+      <label>Vehicles</label>
+      <div id="shVehicles" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+        ${s.vehicle_allocations.map((v) => `
+          <div style="display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px">
+            <span style="flex:1">${esc(v.vehicle_registration)}${v.driver_name ? ' · driver ' + esc(v.driver_name) : ''}</span>
+            <button type="button" class="btn danger" data-unallocvehicle="${v.id}" style="padding:4px 8px;font-size:11px">Remove</button>
+          </div>`).join('') || '<p class="dim" style="font-size:13px">No vehicle allocated.</p>'}
+      </div>
+      ${availableVehicles.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <select id="shAddVehicle" style="flex:1;min-width:120px">${availableVehicles.map((v) => `<option value="${v.id}">${esc(v.registration)}</option>`).join('')}</select>
+        <select id="shVehicleDriver" style="min-width:140px"><option value="">— no driver —</option>${allPersonnel.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+        <button type="button" class="btn" id="shAddVehicleBtn" style="padding:6px 12px;font-size:12px">Allocate</button>
+      </div>` : ''}
+
+      <label style="margin-top:14px">Equipment</label>
+      <div id="shAssets" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+        ${openAssetAllocs.map((a) => `
+          <div style="display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px">
+            <span style="flex:1">${a.quantity_out} × ${esc(a.asset_description)}</span>
+            <button type="button" class="btn ok" data-returnasset="${a.id}" style="padding:4px 8px;font-size:11px">Return</button>
+          </div>`).join('') || '<p class="dim" style="font-size:13px">No equipment allocated.</p>'}
+      </div>
+      ${allAssets.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <select id="shAddAsset" style="flex:1;min-width:140px">${allAssets.map((a) => `<option value="${a.id}">${esc(a.description)}${a.is_stock_tracked ? ` (${a.stock_level} in stock)` : ''}</option>`).join('')}</select>
+        <input id="shAssetQty" type="number" min="1" value="1" style="width:70px">
+        <button type="button" class="btn" id="shAddAssetBtn" style="padding:6px 12px;font-size:12px">Allocate</button>
+      </div>` : ''}
+    </div>`;
+}
 function shiftModal(s, defaults) {
   const isNew = !s;
-  modal(isNew ? 'New shift' : `Shift — ${s.site_name || s.shift_type_name}`, shiftForm(s, defaults) + (isNew ? '' : assignmentsSection(s)), () => {
+  modal(isNew ? 'New shift' : `Shift — ${s.site_name || s.shift_type_name}`, shiftForm(s, defaults) + (isNew ? '' : assignmentsSection(s) + resourcesSection(s)), () => {
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
@@ -366,6 +406,29 @@ function shiftModal(s, defaults) {
         }));
       }).catch(() => { if (el('#shApplications')) el('#shApplications').textContent = 'Failed to load.'; });
     }
+    if (el('#shAddVehicleBtn')) el('#shAddVehicleBtn').onclick = async () => {
+      try {
+        await api('POST', `/api/shifts/${s.id}/vehicles`, {
+          vehicle_id: Number(el('#shAddVehicle').value),
+          driver_personnel_id: el('#shVehicleDriver').value ? Number(el('#shVehicleDriver').value) : null,
+        });
+        await reopen();
+      } catch (e) { el('#shError').textContent = e.message; }
+    };
+    els('[data-unallocvehicle]').forEach((b) => (b.onclick = async () => {
+      try { await api('DELETE', `/api/shift-vehicle-allocations/${b.dataset.unallocvehicle}`); await reopen(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    }));
+    if (el('#shAddAssetBtn')) el('#shAddAssetBtn').onclick = async () => {
+      try {
+        await api('POST', `/api/shifts/${s.id}/assets`, { asset_id: Number(el('#shAddAsset').value), quantity: Number(el('#shAssetQty').value) || 1 });
+        await reopen();
+      } catch (e) { el('#shError').textContent = e.message; }
+    };
+    els('[data-returnasset]').forEach((b) => (b.onclick = async () => {
+      try { await api('PATCH', `/api/shift-asset-allocations/${b.dataset.returnasset}`, {}); await reopen(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    }));
     el('#shSave').onclick = async () => {
       const body = {
         shift_type_id: Number(el('#shType').value),

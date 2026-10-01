@@ -85,6 +85,7 @@ const db = {
   jobs: [], job_assignments: [], messages: [], call_requests: [],
   locations: [], emergency_events: [], audit_logs: [],
   push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], shift_assignments: [], shift_types: [], shift_applications: [], assets: [],
+  shift_vehicle_allocations: [], shift_asset_allocations: [], stock_movements: [],
   passdown_logs: [], fuel_logs: [], asset_checkouts: [], maintenance_logs: [], beats: [],
   dial_log: [],
   form_definitions: [], form_submissions: [], form_grants: [],
@@ -720,6 +721,15 @@ function publicAssignment(a, shift) {
     on_leave_conflict: onApprovedLeave(a.personnel_id, shift.starts_at),
   };
 }
+function publicVehicleAllocation(a) {
+  const v = db.vehicles.find((x) => x.id === a.vehicle_id);
+  const driver = a.driver_personnel_id ? db.personnel.find((x) => x.id === a.driver_personnel_id) : null;
+  return { ...a, vehicle_registration: v ? v.registration : null, driver_name: driver ? driver.name : null };
+}
+function publicAssetAllocation(a) {
+  const asset = db.assets.find((x) => x.id === a.asset_id);
+  return { ...a, asset_description: asset ? asset.description : null, asset_tag: asset ? asset.tag : null };
+}
 function publicShift(s) {
   const site = s.site_id ? db.sites.find((x) => x.id === s.site_id) : null;
   const type = s.shift_type_id ? db.shift_types.find((x) => x.id === s.shift_type_id) : null;
@@ -732,6 +742,8 @@ function publicShift(s) {
     assigned_count: activeCount,
     coverage_gap: Math.max(0, s.required_headcount - activeCount),
     over_staffed: activeCount > s.required_headcount,
+    vehicle_allocations: db.shift_vehicle_allocations.filter((x) => x.shift_id === s.id).map(publicVehicleAllocation),
+    asset_allocations: db.shift_asset_allocations.filter((x) => x.shift_id === s.id).map(publicAssetAllocation),
   };
 }
 function publicVehicle(v) {
@@ -739,10 +751,32 @@ function publicVehicle(v) {
   const site = v.site_id ? db.sites.find((x) => x.id === v.site_id) : null;
   return { ...v, assigned_personnel_name: p ? p.name : null, site_name: site ? site.name : null };
 }
+/** A stock-tracked asset's current level is never stored on the asset
+ * itself — it's the resulting_balance of its most recent stock_movements
+ * row, the same "derive, don't cache" shape as leave_balance/compliance.
+ * An asset with no movements yet reads as zero, not unset. */
+function stockLevel(assetId) {
+  const movements = db.stock_movements.filter((m) => m.asset_id === assetId);
+  return movements.length ? movements[movements.length - 1].resulting_balance : 0;
+}
+function recordStockMovement(assetId, delta, reason, note, shiftId, user) {
+  const m = {
+    id: nextId('stock_movements'), asset_id: assetId, delta, reason, note: note || '',
+    shift_id: shiftId || null, resulting_balance: stockLevel(assetId) + delta,
+    recorded_by: user.display_name, recorded_at: new Date().toISOString(),
+  };
+  db.stock_movements.push(m);
+  return m;
+}
 function publicAsset(a) {
   const p = a.assigned_to ? db.personnel.find((x) => x.id === a.assigned_to) : null;
   const site = a.site_id ? db.sites.find((x) => x.id === a.site_id) : null;
-  return { ...a, assigned_to_name: p ? p.name : null, site_name: site ? site.name : null };
+  const parent = a.parent_asset_id ? db.assets.find((x) => x.id === a.parent_asset_id) : null;
+  return {
+    ...a, assigned_to_name: p ? p.name : null, site_name: site ? site.name : null,
+    parent_asset_description: parent ? parent.description : null,
+    stock_level: a.is_stock_tracked ? stockLevel(a.id) : null,
+  };
 }
 function publicPassdownLog(l) {
   const site = db.sites.find((x) => x.id === l.site_id);
@@ -1405,7 +1439,7 @@ route('GET', '/api/assets', ALL, ({ query, user }) => {
   if (query.get('category')) rows = rows.filter((a) => a.category === query.get('category').toUpperCase());
   return rows;
 });
-route('POST', '/api/assets', ADMIN, ({ body }) => {
+route('POST', '/api/assets', ADMIN, ({ body, user }) => {
   const description = String(body.description || '').trim();
   if (!description) throw httpError(400, 'description required');
   if (!ASSET_CATEGORIES.includes(body.category)) throw httpError(400, 'invalid category');
@@ -1413,14 +1447,23 @@ route('POST', '/api/assets', ADMIN, ({ body }) => {
   if (tag && db.assets.some((x) => x.tag === tag)) throw httpError(409, 'an asset with that tag already exists');
   const p = body.assigned_to ? db.personnel.find((x) => x.id === Number(body.assigned_to)) : null;
   const site = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null;
+  const parent = body.parent_asset_id ? db.assets.find((x) => x.id === Number(body.parent_asset_id)) : null;
+  const isStockTracked = body.is_stock_tracked === true;
   const a = {
     id: nextId('assets'), tag, category: body.category, description, serial_no: body.serial_no || '',
     assigned_to: p ? p.id : null, site_id: site ? site.id : null,
     status: ASSET_STATUSES.includes(body.status) ? body.status : 'IN_STORE',
     purchase_date: body.purchase_date || null, last_checked_at: null, notes: body.notes || '',
     branch_id: normalizedBranchId(body.branch_id),
+    is_stock_tracked: isStockTracked,
+    low_stock_threshold: isStockTracked && body.low_stock_threshold != null && body.low_stock_threshold !== '' ? Number(body.low_stock_threshold) : null,
+    expiry_date: isStockTracked ? (body.expiry_date || null) : null,
+    parent_asset_id: parent ? parent.id : null,
   };
   db.assets.push(a);
+  if (isStockTracked && body.initial_quantity != null && body.initial_quantity !== '' && Number(body.initial_quantity) > 0) {
+    recordStockMovement(a.id, Number(body.initial_quantity), 'RESTOCK', 'Initial stock on creation', null, user);
+  }
   logEvent('asset.created', `ASSET ${tag || description} ADDED`, { asset_id: a.id });
   return { __status: 201, __body: publicAsset(a) };
 });
@@ -1440,6 +1483,23 @@ route('PATCH', '/api/assets/:id', ADMIN, ({ params, body }) => {
   if ('purchase_date' in body) a.purchase_date = body.purchase_date || null;
   if ('notes' in body) a.notes = body.notes || '';
   if ('branch_id' in body) a.branch_id = normalizedBranchId(body.branch_id);
+  if ('is_stock_tracked' in body) {
+    a.is_stock_tracked = Boolean(body.is_stock_tracked);
+    if (!a.is_stock_tracked) { a.low_stock_threshold = null; a.expiry_date = null; }
+  }
+  if ('low_stock_threshold' in body) {
+    if (!a.is_stock_tracked && body.low_stock_threshold != null) throw httpError(400, 'only a stock-tracked asset can have a threshold');
+    a.low_stock_threshold = body.low_stock_threshold != null && body.low_stock_threshold !== '' ? Number(body.low_stock_threshold) : null;
+  }
+  if ('expiry_date' in body) {
+    if (!a.is_stock_tracked && body.expiry_date != null) throw httpError(400, 'only a stock-tracked asset can have an expiry date');
+    a.expiry_date = body.expiry_date || null;
+  }
+  if ('parent_asset_id' in body) {
+    const parent = body.parent_asset_id ? db.assets.find((x) => x.id === Number(body.parent_asset_id)) : null;
+    if (parent && parent.id === a.id) throw httpError(400, 'an asset cannot be its own parent');
+    a.parent_asset_id = parent ? parent.id : null;
+  }
   if (body.check_now) a.last_checked_at = new Date().toISOString();
   logEvent('asset.updated', `ASSET ${a.tag || a.description} UPDATED`, { asset_id: a.id });
   return publicAsset(a);
@@ -3396,6 +3456,12 @@ require('./routes-leave.js')({
 const shiftApplications = require('./routes-shift-applications.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,
   findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole,
+});
+
+// Vehicle/asset allocation and the stock ledger — see routes-fleet-stock.js.
+require('./routes-fleet-stock.js')({
+  route, httpError, ALL, CONTROL, db, nextId, logEvent,
+  findShift, publicVehicleAllocation, publicAssetAllocation, publicAsset, stockLevel, recordStockMovement,
 });
 
 /* Client reporting — proving service to whoever pays for the contract:

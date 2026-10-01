@@ -403,11 +403,23 @@ self-contained slice at a time, tested and deployed before the next.
   needed for it. `officer.html` got an "Available shifts" + "My
   applications" panel; `rota.html`'s shift modal got a matching
   "Applications for this shift" section next to the assignments list.
-- **Increment 6 — vehicle/asset allocation + stock ledger.** Per-shift
-  vehicle/asset allocation with conflict checking, a stock-movements
-  ledger for consumables (never overwrite a balance without a ledger
-  entry, matching this codebase's audit-trail conventions elsewhere), and
-  a stock dashboard.
+- ~~**Increment 6 — vehicle/asset allocation + stock ledger.**~~ — done,
+  see README.md. A vehicle or a specific (non-stock-tracked) physical
+  asset can only ever be on one shift at a time — allocating checks every
+  other allocation for a time-overlapping, non-cancelled shift and
+  refuses the conflict; cancelling a shift frees what it held. A
+  stock-tracked asset instead just withdraws a quantity from its own
+  `stock_movements` ledger — `stockLevel()` is always the most recent
+  movement's `resulting_balance`, never a field anyone can overwrite
+  directly — and returning only ever credits back what actually comes
+  back, not the full amount allocated. `GET /api/stock-dashboard` flags
+  anything below its threshold or expiring within 30 days. `admin.html`
+  got stock fields on the asset form plus a Stock tab; `rota.html`'s
+  shift modal got a "Resources" section for vehicles and equipment. Left
+  deliberately out: the fleet board (a day/week view across the whole
+  fleet) and a nested kit-contents UI — both buildable later on the data
+  model already shipped (`parent_asset_id`,
+  `GET /api/vehicles/:id/allocations`) without another schema change.
 - **Increment 7 — notifications.** SMS via the existing `sms.js` (already
   built, currently only operator-triggered) wired to shift
   assigned/changed/cancelled events; email via the existing MS Graph

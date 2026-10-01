@@ -33,6 +33,7 @@ const TABLES = [
   'jobs', 'job_assignments', 'messages', 'call_requests',
   'locations', 'emergency_events', 'audit_logs',
   'push_subscriptions', 'patrol_schedules', 'site_visits', 'shifts', 'shift_assignments', 'shift_types', 'shift_applications', 'assets', 'passdown_logs', 'fuel_logs',
+  'shift_vehicle_allocations', 'shift_asset_allocations', 'stock_movements',
   'asset_checkouts', 'maintenance_logs', 'beats',
   // Contact attempts (click-to-dial / click-to-SMS). Persisted rather than
   // kept in memory because this is an audit surface: it records who contacted
