@@ -109,6 +109,8 @@ test('the honeypot drops bots silently, and one sender is limited to 5 an hour',
   assert.equal(app.db.applicants.length, before, 'but nothing was stored');
 
   const same = { 'x-forwarded-for': '198.51.100.7' };
+  // Mistakes don't count: five refused attempts, then still able to apply.
+  for (let i = 0; i < 6; i++) assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: { ...goodAnswers('Typo'), email: 'typo' } }, null, same)).status, 400);
   for (let i = 0; i < 5; i++) assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers(`Burst ${i}`) }, null, same)).status, 201);
   assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers('Burst 6') }, null, same)).status, 429);
   assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers('Someone else') }, null, asSender())).status, 201, 'a different sender is unaffected');

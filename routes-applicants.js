@@ -229,16 +229,21 @@ module.exports = function registerApplicantRoutes({
     const fwd = viaLocalProxy ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() : '';
     return fwd || remote || 'unknown';
   }
-  function allowApplication(req) {
+  /** Only ACCEPTED applications count: a real applicant who mistypes their
+   * email five times must not be locked out for an hour. A refused attempt
+   * stores nothing, so there is nothing for the limit to protect there. */
+  function canApply(req) {
     const now = Date.now();
     if (now - dayStart > 86400000) { dayStart = now; dayCount = 0; }
     if (dayCount >= MAX_PER_DAY) return false;
-    const who = senderOf(req);
+    const times = (recent.get(senderOf(req)) || []).filter((t) => now - t < 3600000);
+    return times.length < PER_SENDER_PER_HOUR;
+  }
+  function recordApplication(req) {
+    const now = Date.now(), who = senderOf(req);
     const times = (recent.get(who) || []).filter((t) => now - t < 3600000);
-    if (times.length >= PER_SENDER_PER_HOUR) { recent.set(who, times); return false; }
     times.push(now); recent.set(who, times); dayCount++;
     if (recent.size > 5000) recent.delete(recent.keys().next().value);
-    return true;
   }
 
   const answersDir = (applicantId) => path.join(cvDir(applicantId), 'application');
@@ -256,7 +261,7 @@ module.exports = function registerApplicantRoutes({
     const d = forms.activeApplicationForm();
     if (!d) throw httpError(404, 'applications are currently closed');
     if (Number(body.definition_id) !== d.id) throw httpError(409, 'the application form has changed — please reload the page');
-    if (!allowApplication(req)) throw httpError(429, 'too many applications from here — please try again later');
+    if (!canApply(req)) throw httpError(429, 'too many applications from here — please try again later');
 
     const { values, files } = forms.validateValues(d.fields, body.values);
     const email = String(values.email || '').trim();
@@ -273,6 +278,7 @@ module.exports = function registerApplicantRoutes({
     }
 
     const a = createApplicant({ name: values.full_name, email, phone: values.phone, role_applied_for: values.role_applied_for, source: 'Website' }, null);
+    recordApplication(req);
     if (files.length) {
       fs.mkdirSync(answersDir(a.id), { recursive: true });
       for (const f of files) fs.writeFileSync(path.join(answersDir(a.id), `${f.file_id}${forms.IMAGE_EXT[f.mimetype]}`), f.bytes);

@@ -40,6 +40,8 @@ module.exports = function registerFleetDashboardRoutes({ route, CONTROL, db, for
       .map((d) => ({ id: d.id, key: d.key, name: d.name }));
     const inspectionIds = new Set((db.form_definitions || []).filter((d) => d.key === 'vehicle-inspection' || /inspection|walk.?round/i.test(d.name)).map((d) => d.id));
     const vehicleSubs = (db.form_submissions || []).filter((s) => s.subject_type === 'VEHICLE' && forms.canRead(s, user));
+    const todaysShiftIds = new Set((db.shifts || []).filter((sh) => sh.status !== 'CANCELLED'
+      && Date.parse(sh.starts_at) < midnight.getTime() + 86400000 && Date.parse(sh.ends_at) > midnight.getTime()).map((sh) => sh.id));
 
     const vehicles = db.vehicles.filter((v) => visibleToUser(v, user)).map((v) => {
       const compliance = COMPLIANCE_FIELDS.map(([field, label]) => {
@@ -51,8 +53,6 @@ module.exports = function registerFleetDashboardRoutes({ route, CONTROL, db, for
       const inspection = mine.find((s) => inspectionIds.has(s.definition_id));
       const fuel = (db.fuel_logs || []).filter((f) => f.vehicle_id === v.id).sort((a, b) => (a.recorded_at < b.recorded_at ? 1 : -1))[0] || null;
       const maint = (db.maintenance_logs || []).filter((m) => m.vehicle_id === v.id).sort((a, b) => (a.performed_at < b.performed_at ? 1 : -1))[0] || null;
-      const todaysShiftIds = new Set((db.shifts || []).filter((sh) => sh.status !== 'CANCELLED'
-        && Date.parse(sh.starts_at) < midnight.getTime() + 86400000 && Date.parse(sh.ends_at) > midnight.getTime()).map((sh) => sh.id));
       const allocation = (db.shift_vehicle_allocations || []).find((a) => a.vehicle_id === v.id && todaysShiftIds.has(a.shift_id)) || null;
       const allocShift = allocation ? db.shifts.find((sh) => sh.id === allocation.shift_id) : null;
       const driver = allocation && allocation.driver_personnel_id ? db.personnel.find((p) => p.id === allocation.driver_personnel_id) : null;
