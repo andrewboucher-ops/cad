@@ -107,7 +107,7 @@
         <button class="btn" id="thisWeek" style="padding:6px 12px">This week</button>
         <button class="btn" id="nextWeek" style="padding:6px 12px">Next ›</button>
       </div>
-      <select id="typeFilter" style="padding:6px 10px"><option value="">All shift types</option></select>
+      <input id="typeFilter" type="search" placeholder="Search shift type…" style="padding:6px 10px;width:170px">
       <select id="groupBy" style="padding:6px 10px"><option value="staff">Group by staff</option><option value="site">Group by site</option></select>
       <button class="btn" id="btnPublishDrafts" style="padding:7px 14px;font-size:13px">Publish drafts</button>
       <button class="btn" id="btnDuplicateWeek" style="padding:7px 14px;font-size:13px">Duplicate week forward</button>
@@ -180,16 +180,17 @@ async function load() {
     api('GET', `/api/shifts?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`),
     api('GET', '/api/shift-types'), api('GET', '/api/vehicles'), api('GET', '/api/assets'),
   ]);
-  const currentFilter = el('#typeFilter').value;
-  el('#typeFilter').innerHTML = '<option value="">All shift types</option>' + allShiftTypes.map((t) => `<option value="${t.id}" ${String(t.id) === currentFilter ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   paintGrid();
 }
-el('#typeFilter').addEventListener('change', paintGrid);
+el('#typeFilter').addEventListener('input', paintGrid);
 el('#groupBy').addEventListener('change', paintGrid);
 
+// An empty search shows everything, every site, every type, in one grid —
+// typing narrows it by a substring match against the type's name, not an
+// exact pick from a fixed list, so "patrol" finds every patrol variant.
 function visibleShifts() {
-  const typeId = el('#typeFilter').value;
-  return typeId ? allShifts.filter((s) => s.shift_type_id === Number(typeId)) : allShifts;
+  const q = el('#typeFilter').value.trim().toLowerCase();
+  return q ? allShifts.filter((s) => (s.shift_type_name || '').toLowerCase().includes(q)) : allShifts;
 }
 function paintGrid() {
   if (el('#groupBy').value === 'site') paintGridBySite();
