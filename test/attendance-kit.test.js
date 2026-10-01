@@ -166,3 +166,52 @@ test('a first aid bag kept in a vehicle: the vehicle shows the bag and the plast
   assert.ok(after_.last_inspection.issues.some((i) => /FAB-01: missing/.test(i)), 'the dashboard flags it');
   assert.ok((await call('GET', `/api/assets/${bag.id}/history`, undefined, adminT)).body.some((h) => h.type === 'MISSING_ON_CHECK'));
 });
+
+test('app closed: a reminder push, and when it reopens off site they are clocked out at the last time seen on site, flagged for control', async () => {
+  const { a } = await shiftFor(-60);
+  await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+  await call('POST', `/api/shift-assignments/${a.id}/presence`, { lat: 53.5, lon: -0.1 }, danT);
+  // The phone goes quiet: last report 40 minutes ago, on site.
+  const seen = new Date(Date.now() - 40 * 60000).toISOString();
+  a.clocked_in_at = new Date(Date.now() - 50 * 60000).toISOString();
+  a.last_presence_at = seen; a.last_inside_at = seen;
+  app.attendance.tick();
+  assert.ok(a.presence_nudged_at, 'asked to open the app');
+  const nudged = a.presence_nudged_at;
+  app.attendance.tick(Date.now() + 60000);
+  assert.equal(a.presence_nudged_at, nudged, 'not again within 30 minutes');
+  assert.ok(!a.clocked_out_at, 'silence alone never clocks anyone out');
+
+  const r = await call('POST', `/api/shift-assignments/${a.id}/presence`, { lat: 53.53, lon: -0.1 }, danT);
+  assert.equal(r.body.clocked_out, true, JSON.stringify(r.body));
+  assert.equal(a.clocked_out_at, seen, 'clocked out at the last time seen on site');
+  assert.equal(a.clock_out_needs_review, true);
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'shift.auto_clocked_out' && /CHECK THE TIME/.test(e.summary || e.message || JSON.stringify(e))));
+  await new Promise((res) => setTimeout(res, 50));
+  assert.ok(app.db.dial_log.some((d) => d.personnel_id === dan.id && /last time your phone showed you on site/.test(d.body)));
+
+  // Back on screen after only a minute away: the normal 5 minutes apply.
+  const { a: b } = await shiftFor(-10);
+  await call('POST', `/api/shift-assignments/${b.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+  await call('POST', `/api/shift-assignments/${b.id}/presence`, { lat: 53.5, lon: -0.1 }, danT);
+  const r2 = await call('POST', `/api/shift-assignments/${b.id}/presence`, { lat: 53.53, lon: -0.1 }, danT);
+  assert.equal(r2.body.clocked_out, undefined);
+  assert.ok(!b.clocked_out_at);
+});
+
+test('control corrects clock times, with a reason, and the change is kept', async () => {
+  const { a } = await shiftFor(-120, 3);
+  await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+  a.clock_out_needs_review = true; a.clocked_in_at = new Date(Date.now() - 100 * 60000).toISOString();
+  const url = `/api/shift-assignments/${a.id}/times`;
+  const out = new Date(Date.now() - 10 * 60000).toISOString();
+  assert.equal((await call('PATCH', url, { clocked_out_at: out, reason: 'x' }, danT)).status, 403, 'officers cannot change their own times');
+  assert.equal((await call('PATCH', url, { clocked_out_at: out }, dispT)).status, 400, 'a reason is needed');
+  assert.equal((await call('PATCH', url, { clocked_out_at: '2000-01-01T00:00:00Z', reason: 'x' }, dispT)).status, 400, 'out before in');
+  const r = await call('PATCH', url, { clocked_out_at: out, reason: 'left at 10 to, confirmed by supervisor' }, dispT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(a.clocked_out_at, out);
+  assert.equal(a.clock_out_needs_review, false);
+  assert.equal(a.time_edits.length, 1);
+  assert.equal(a.time_edits[0].from.out, null);
+});

@@ -77,7 +77,7 @@ module.exports = function registerAgreements({
     const site = db.sites.find((s) => s.id === a.site_id);
     const out = { ...a, status: statusOf(a), site_name: site ? site.name : null, estimate: estimate(a), signature: undefined,
       pdf_url: forClient ? `/api/client/agreements/${a.id}/pdf` : `/api/agreements/${a.id}/pdf` };
-    if (forClient) { delete out.internal_notes; delete out.created_by; }
+    if (forClient) { delete out.internal_notes; delete out.created_by; delete out.emails; }
     return out;
   }
 
@@ -89,6 +89,7 @@ module.exports = function registerAgreements({
       const description = String(l.description || '').trim().slice(0, 200);
       if (!description) throw httpError(400, `line ${n + 1}: description required`);
       const kind = LINE_KINDS[l.kind] ? l.kind : 'HOURLY';
+      if (l.rate === '' || l.rate == null || Number.isNaN(Number(l.rate))) throw httpError(400, `line ${n + 1}: enter the rate`);
       const rate = Number(l.rate);
       if (!Number.isFinite(rate) || rate < 0) throw httpError(400, `line ${n + 1}: rate must be 0 or more`);
       const est = l.est_quantity === undefined || l.est_quantity === null || l.est_quantity === '' ? null : Number(l.est_quantity);
@@ -160,6 +161,35 @@ module.exports = function registerAgreements({
     }
     return doc.toBuffer();
   }
+  /* ---- emails to the client, each with the PDF attached ----
+   * SENT     — the quote/contract, with how to answer it in the portal
+   * ACCEPTED — confirmation of an accepted quote
+   * SIGNED   — their copy of the signed contract
+   * Kept on the agreement (a.emails) so admins can see what went out. */
+  function emailClient(a, kind) {
+    const client = db.clients.find((c) => c.id === a.client_id);
+    if (!a.emails) a.emails = [];
+    const log = (entry) => a.emails.push({ kind, at: new Date().toISOString(), ...entry });
+    if (!sendEmail) return;
+    if (!client || !client.contact_email) { log({ ok: false, error: 'the client has no contact email (Admin → Clients)' }); return; }
+    const c = company(), q = a.kind === 'QUOTE', what = q ? 'quotation' : 'contract';
+    const site = (db.sites.find((s) => s.id === a.site_id) || {}).name || 'your site';
+    const portal = `<a href="${publicBaseUrl}/client.html">${publicBaseUrl}/client.html</a>`;
+    const T = {
+      SENT: [`${q ? 'Quotation' : 'Contract'} ${a.reference} from ${c.company_name}`,
+        `<p>Hello,</p><p>Please find attached our ${what} <strong>${a.reference}</strong> for ${site}.</p>
+         <p>${q ? `You can accept or decline it in your client portal${a.valid_until ? ` — it is valid until ${new Date(a.valid_until).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}` : ''}` : 'Please read it and sign it in your client portal'}: ${portal}</p>`],
+      ACCEPTED: [`Quotation ${a.reference} accepted — thank you`,
+        `<p>Hello,</p><p>Thank you — quotation <strong>${a.reference}</strong> for ${site} was accepted by ${a.decided_by_name}. A copy is attached. We'll be in touch with the contract.</p>`],
+      SIGNED: [`Your signed contract ${a.reference}`,
+        `<p>Hello,</p><p>Thank you — contract <strong>${a.reference}</strong> for ${site} was signed by ${a.signed_name}. Your copy is attached, and it is always available in your client portal: ${portal}</p>`],
+    }[kind];
+    const file = a.pdf_file ? path.join(dir(a.id), a.pdf_file) : null;
+    const attachments = file && fs.existsSync(file) ? [{ name: `${a.reference}.pdf`, contentType: 'application/pdf', content: fs.readFileSync(file) }] : [];
+    Promise.resolve(sendEmail(client.contact_email, T[0], `${T[1]}<p>Kind regards,<br>${c.company_name}</p>`, { attachments }))
+      .then((r) => { log({ to: client.contact_email, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); flushNow(); })
+      .catch((e) => log({ to: client.contact_email, ok: false, error: e.message }));
+  }
   function writePdf(a, name, sig) { fs.mkdirSync(dir(a.id), { recursive: true }); fs.writeFileSync(path.join(dir(a.id), name), pdf(a, sig)); a.pdf_file = name; }
 
   /* ---- admin ---- */
@@ -219,14 +249,14 @@ module.exports = function registerAgreements({
     writePdf(a, 'sent.pdf');
     a.history.push({ at: a.sent_at, by: user.display_name, what: 'sent to the client' });
     logEvent('agreement.sent', `${a.kind} ${a.reference} SENT TO CLIENT`, { agreement_id: a.id });
-    const client = db.clients.find((c) => c.id === a.client_id);
-    if (sendEmail && client && client.contact_email) {
-      const c = company();
-      const html = `<p>Hello,</p><p>${c.company_name} has sent you a ${a.kind === 'QUOTE' ? 'quotation' : 'contract'}, <strong>${a.reference}</strong>, for ${(db.sites.find((s) => s.id === a.site_id) || {}).name || 'your site'}.</p>
-        <p>Please ${a.kind === 'QUOTE' ? 'review and accept or decline it' : 'review and sign it'} in your client portal: <a href="${publicBaseUrl}/client.html">${publicBaseUrl}/client.html</a></p><p>Kind regards,<br>${c.company_name}</p>`;
-      Promise.resolve(sendEmail(client.contact_email, `${a.kind === 'QUOTE' ? 'Quotation' : 'Contract'} ${a.reference} from ${c.company_name}`, html)).then((r) => { a.email = { to: client.contact_email, ok: Boolean(r && r.ok), at: new Date().toISOString() }; }).catch(() => {});
-    }
+    emailClient(a, 'SENT');
     flushNow();
+    return publicAgreement(a);
+  });
+  route('POST', '/api/agreements/:id/email', ADMIN, ({ params }) => {
+    const a = find(params.id);
+    if (!['SENT', 'ACCEPTED', 'SIGNED'].includes(a.status)) throw httpError(409, 'nothing to email yet — send it first');
+    emailClient(a, a.status);
     return publicAgreement(a);
   });
   route('POST', '/api/agreements/:id/withdraw', ADMIN, ({ params, body, user }) => {
@@ -292,7 +322,7 @@ module.exports = function registerAgreements({
     Object.assign(a, { status: 'ACCEPTED', decided_at: new Date().toISOString(), decided_by_name: name, decided_by_user_id: user.id });
     a.history.push({ at: a.decided_at, by: name, what: 'accepted by the client' });
     writePdf(a, 'accepted.pdf');
-    tellAdmins(a, 'ACCEPTED'); flushNow();
+    tellAdmins(a, 'ACCEPTED'); emailClient(a, 'ACCEPTED'); flushNow();
     return publicAgreement(a, { forClient: true });
   });
   route('POST', '/api/client/agreements/:id/decline', CLIENT, ({ params, body, user, query }) => {
@@ -316,7 +346,7 @@ module.exports = function registerAgreements({
     fs.writeFileSync(path.join(dir(a.id), 'signature.jpg'), jpeg);
     writePdf(a, 'signed.pdf', jpeg);
     a.history.push({ at: a.signed_at, by: name, what: 'signed by the client' });
-    tellAdmins(a, 'SIGNED'); flushNow();
+    tellAdmins(a, 'SIGNED'); emailClient(a, 'SIGNED'); flushNow();
     return publicAgreement(a, { forClient: true });
   });
 

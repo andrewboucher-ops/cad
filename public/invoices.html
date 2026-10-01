@@ -29,6 +29,7 @@
   <span class="dim" id="updated"></span>
   <button class="btn primary" id="bGen">Make invoices</button>
   <a class="btn admin-only" href="/contracts.html">Quotes &amp; contracts</a>
+  <button class="btn admin-only" id="bSettings">Invoice settings</button>
   <button class="btn" id="bExport">Export CSV</button>
 </div>
 <div class="k-body">
@@ -51,7 +52,9 @@ const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
 if (!isAdmin) els('.admin-only').forEach((x) => x.remove());
 const STATUS = { DRAFT: ['Draft — check it', 'warn'], APPROVED: ['Approved', 'info'], IN_XERO: ['In Xero', 'ok'], PAID: ['Paid', 'ok'], VOID: ['Void', 'off'] };
 const params = new URLSearchParams(location.search);
-let invoices = [], xs = null, filter = 'open';
+let invoices = [], xs = null, filter = 'open', ist = null;
+const token = () => encodeURIComponent(CCCS.getSession().token);
+const SEND_VIA = { CCCS: 'emailed to the client with the PDF straight away', XERO: 'emailed to the client by Xero when you send it to Xero', NONE: 'not emailed automatically' };
 
 if (params.get('xero')) {
   const m = params.get('xero');
@@ -60,7 +63,7 @@ if (params.get('xero')) {
 }
 
 async function load() {
-  try { [invoices, xs] = await Promise.all([api('GET', '/api/invoices'), api('GET', '/api/xero/status')]); }
+  try { [invoices, xs, ist] = await Promise.all([api('GET', '/api/invoices'), api('GET', '/api/xero/status'), api('GET', '/api/invoices/settings')]); }
   catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
   el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
   paintXero(); paint();
@@ -113,12 +116,12 @@ function paint() {
   el('#chips').innerHTML = Object.entries(F).map(([k, [l]]) => `<button class="chip ${k === filter ? 'on' : ''}" data-f="${k}">${l}</button>`).join(' ');
   els('[data-f]').forEach((b) => (b.onclick = () => { filter = b.dataset.f; paint(); }));
   const q = el('#q').value.trim().toLowerCase(), cid = Number(params.get('contract_id')) || null;
-  const list = invoices.filter(F[filter][1]).filter((i) => (!cid || i.contract_id === cid) && (!q || `${i.reference} ${i.client_name} ${i.site_name} ${i.xero && i.xero.number || ''}`.toLowerCase().includes(q)));
+  const list = invoices.filter(F[filter][1]).filter((i) => (!cid || i.contract_id === cid) && (!q || `${i.number || ""} ${i.reference} ${i.client_name} ${i.site_name} ${i.xero && i.xero.number || ''}`.toLowerCase().includes(q)));
   el('#main').innerHTML = (cid ? `<p class="dim" style="font-size:13px">Showing one contract only. <a href="/invoices.html">Show all</a></p>` : '') + (list.length ? `<div style="overflow-x:auto"><table class="k">
-    <thead><tr><th>Reference</th><th>Client / site</th><th>Period</th><th class="num">Net</th><th class="num">Total</th><th>Due</th><th>Status</th></tr></thead>
+    <thead><tr><th>Invoice</th><th>Client / site</th><th>Period</th><th class="num">Net</th><th class="num">Total</th><th>Due</th><th>Status</th></tr></thead>
     <tbody>${list.map((i) => {
       const [sl, sc] = STATUS[i.status] || [i.status, 'off'];
-      return `<tr data-open="${i.id}" style="cursor:pointer"><td class="mono" style="white-space:nowrap"><strong>${esc(i.reference)}</strong>${i.xero && i.xero.number ? `<div class="dim" style="font-size:11px">Xero ${esc(i.xero.number)}</div>` : ''}</td>
+      return `<tr data-open="${i.id}" style="cursor:pointer"><td class="mono" style="white-space:nowrap"><strong>${esc(i.number || 'Draft')}</strong><div class="dim" style="font-size:11px">${esc(i.contract_reference)}</div></td>
         <td>${esc(i.client_name)}<div class="dim" style="font-size:11.5px">${esc(i.site_name)}</div></td>
         <td class="dim" style="white-space:nowrap;font-size:12.5px">${esc(date(i.period_from))} – ${esc(date(i.period_to))}</td>
         <td class="num">${money(i.subtotal)}</td><td class="num"><strong>${money(i.total)}</strong></td>
@@ -164,12 +167,14 @@ async function view(id) {
   const draft = i.status === 'DRAFT';
   const act = (k, label, cls = '') => `<button class="btn ${cls}" data-a="${k}">${label}</button>`;
   const acts = [];
+  acts.push(`<a class="btn" target="_blank" href="/api/invoices/${i.id}/pdf?token=${token()}">${draft ? 'Preview PDF' : 'PDF'}</a>`);
   if (draft) acts.push(act('void', 'Void'), act('save', 'Save changes'), act('approve', 'Approve', 'primary'));
-  if (i.status === 'APPROVED') acts.push(act('void', 'Void'), act('xero', 'Send to Xero', 'primary'));
-  if (i.status === 'IN_XERO' || i.status === 'PAID') acts.push(act('sync', 'Check Xero'));
+  if (i.number && i.status !== 'VOID') acts.push(act('email', i.emails && i.emails.some((e) => e.ok) ? 'Email again' : 'Email to client'));
+  if (i.status === 'APPROVED') acts.push(act('void', 'Void'), act('paid', 'Mark paid'), act('xero', 'Send to Xero', 'primary'));
+  if (i.status === 'IN_XERO' || (i.status === 'PAID' && i.xero)) acts.push(act('sync', 'Check Xero'));
   const shiftTable = (l) => l.shifts && l.shifts.length ? `<details><summary class="dim" style="font-size:12px">${l.shifts.length} shift${l.shifts.length === 1 ? '' : 's'}</summary>
     <table class="k shifts"><tbody>${l.shifts.map((s) => `<tr><td>${esc(date(s.date))}</td><td>${esc(s.person)}</td><td class="num">${s.hours} h</td><td class="dim">${esc(s.source)}</td></tr>`).join('')}</tbody></table></details>` : '';
-  modal(`Invoice ${i.reference}`, `
+  modal(i.number ? `Invoice ${i.number}` : 'Draft invoice', `
     <p style="margin-top:0"><span class="pill ${sc}">${sl}</span> <strong>${esc(i.client_name)}</strong> — ${esc(i.site_name)}</p>
     <p class="dim" style="font-size:12.5px;margin:0 0 6px">Contract ${esc(i.contract_reference)} · ${esc(date(i.period_from))} to ${esc(date(i.period_to))} · hours ${i.billing_basis === 'ROSTERED' ? 'rostered' : 'worked'} · issued ${esc(date(i.issue_date))}${i.xero && i.xero.number ? ` · Xero ${esc(i.xero.number)} (${esc(i.xero.status)})` : ''}</p>
     ${i.checks && i.checks.length ? `<div class="checks"><strong>Check before approving:</strong><ul>${i.checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul><span class="dim">Fix the clock times on the rota, then void this draft and make it again — or change the hours below.</span></div>` : ''}
@@ -184,6 +189,8 @@ async function view(id) {
       <tr class="tot"><td colspan="3" class="num">Total</td><td class="num">${money(i.total)}</td>${draft ? '<td></td>' : ''}</tr></tbody></table></div>
     ${draft ? '<button type="button" class="btn" id="iAdd" style="margin-top:6px">Add a line</button>' : ''}
     ${draft ? `<div class="k-form" style="margin-top:10px"><div><label>Due</label><input id="iDue" type="date" value="${esc(i.due_date)}"></div><div class="full"><label>Notes</label><textarea id="iNotes" rows="2">${esc(i.notes || '')}</textarea></div></div>` : (i.notes ? `<p style="font-size:13px">${esc(i.notes)}</p>` : '')}
+    ${draft ? `<p class="dim" style="font-size:12.5px">When approved it gets the next invoice number (${esc(ist.prefix)}${String(ist.next_number).padStart(ist.digits, '0')}) and is ${SEND_VIA[ist.send_via]}.</p>` : ''}
+    ${(i.emails || []).length ? `<p style="font-size:12.5px;margin:6px 0">${i.emails.map((e) => e.ok ? `✓ Emailed to ${esc(e.to)} ${esc(when(e.at))}` : `<span class="err">✕ Not emailed${e.to ? ` to ${esc(e.to)}` : ''}: ${esc(e.error || 'failed')}</span>`).join('<br>')}</p>` : ''}
     <details style="margin-top:8px"><summary class="dim" style="font-size:12.5px">History</summary><ul class="tl">${i.history.slice().reverse().map((h) => `<li><span class="when">${esc(when(h.at))}</span> — ${esc(h.what)} <span class="dim">(${esc(h.by)})</span></li>`).join('')}</ul></details>
     <p class="err" id="iErr"></p>
     <div class="btn-row" style="justify-content:flex-end;flex-wrap:wrap">${acts.join('')}<button class="btn" data-a="close">Close</button></div>`, (root) => {
@@ -204,7 +211,9 @@ async function view(id) {
         const k = b.dataset.a;
         if (k === 'close') return close();
         if (k === 'save') await save();
-        if (k === 'approve') { await save(); if (!confirm('Approve this invoice? It can then be sent to Xero.')) return; await api('POST', `/api/invoices/${i.id}/approve`); }
+        if (k === 'approve') { await save(); if (!confirm(`Approve this invoice? It becomes ${ist.prefix}${String(ist.next_number).padStart(ist.digits, '0')} and is ${SEND_VIA[ist.send_via]}. It can't be edited after.`)) return; await api('POST', `/api/invoices/${i.id}/approve`); await new Promise((r) => setTimeout(r, 1200)); }
+        if (k === 'email') { if (!confirm('Email this invoice to the client now, with the PDF attached?')) return; await api('POST', `/api/invoices/${i.id}/email`); await new Promise((r) => setTimeout(r, 1200)); }
+        if (k === 'paid') { const note = prompt('Mark as paid — note (optional), e.g. "BACS 12 Oct"'); if (note === null) return; await api('POST', `/api/invoices/${i.id}/paid`, { note }); }
         if (k === 'void') { const reason = prompt('Why is it being voided? (optional)'); if (reason === null) return; await api('POST', `/api/invoices/${i.id}/void`, { reason }); }
         if (k === 'xero') { b.textContent = 'Sending…'; await api('POST', `/api/invoices/${i.id}/xero`); }
         if (k === 'sync') await api('POST', `/api/invoices/${i.id}/xero-sync`);
@@ -214,9 +223,42 @@ async function view(id) {
   }, { wide: true });
 }
 
+const bs = el('#bSettings');
+if (bs) bs.onclick = () => modal('Invoice settings', `<div class="k-form">
+    <div class="k-section">Numbering</div>
+    <div><label>Number prefix</label><input id="sPre" value="${esc(ist.prefix)}"></div>
+    <div><label>Next number</label><input id="sNext" type="number" min="1" value="${ist.next_number}"></div>
+    <p class="dim full" style="font-size:12.5px;margin:0">Next invoice: <strong id="sEg"></strong>. To carry on from your existing invoices (e.g. in Xero), set the next number to one more than your last.</p>
+    <div class="k-section">Sending</div>
+    <div class="full"><label>Who emails invoices to clients</label><select id="sVia">
+      <option value="CCCS" ${ist.send_via === 'CCCS' ? 'selected' : ''}>CCCS — emailed with the PDF as soon as it is approved</option>
+      <option value="XERO" ${ist.send_via === 'XERO' ? 'selected' : ''}>Xero — emailed by Xero when it is sent to Xero (goes in approved)</option>
+      <option value="NONE" ${ist.send_via === 'NONE' ? 'selected' : ''}>Nobody — I'll send them myself</option></select></div>
+    <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px"><input type="checkbox" id="sTs" ${ist.include_timesheet ? 'checked' : ''} style="width:auto"> Add the hours breakdown (date, officer, hours) to the PDF</label></div>
+    <div class="k-section">Bank details and company (printed on the invoice)</div>
+    <div><label>Bank</label><input id="sBank" value="${esc(ist.bank_name)}"></div>
+    <div><label>Account name</label><input id="sAccName" value="${esc(ist.account_name)}" placeholder="${esc(ist.company.company_name)}"></div>
+    <div><label>Sort code</label><input id="sSort" value="${esc(ist.sort_code)}" placeholder="12-34-56"></div>
+    <div><label>Account number</label><input id="sAcc" value="${esc(ist.account_number)}"></div>
+    <div><label>VAT number</label><input id="sVat" value="${esc(ist.vat_number)}"></div>
+    <div><label>Company number</label><input id="sCo" value="${esc(ist.company_number)}"></div>
+    <div class="full"><label>Footer</label><input id="sFoot" value="${esc(ist.footer)}"></div>
+  </div><p class="dim" style="font-size:12.5px">Company name, address, phone and email come from Rentals → Terms &amp; company details (${esc(ist.company.company_name)}).</p>${foot('Save')}`, (root) => {
+  const eg = () => { root.querySelector('#sEg').textContent = `${root.querySelector('#sPre').value.trim()}${String(root.querySelector('#sNext').value || 1).padStart(ist.digits, '0')}`; };
+  root.addEventListener('input', eg); eg();
+  wire(root, async () => {
+    ist = await api('PUT', '/api/invoices/settings', {
+      prefix: v(root, '#sPre'), next_number: Number(v(root, '#sNext')), send_via: v(root, '#sVia'), include_timesheet: root.querySelector('#sTs').checked,
+      bank_name: v(root, '#sBank'), account_name: v(root, '#sAccName'), sort_code: v(root, '#sSort'), account_number: v(root, '#sAcc'),
+      vat_number: v(root, '#sVat'), company_number: v(root, '#sCo'), footer: v(root, '#sFoot'),
+    });
+    close(); paint();
+  });
+}, { wide: true });
+
 el('#bExport').onclick = () => KIT.csv(`invoices-${new Date().toISOString().slice(0, 10)}.csv`,
-  ['Reference', 'Xero number', 'Client', 'Site', 'Contract', 'From', 'To', 'Issued', 'Due', 'Net', 'VAT', 'Total', 'Status'],
-  invoices.map((i) => [i.reference, i.xero && i.xero.number, i.client_name, i.site_name, i.contract_reference, i.period_from, i.period_to, i.issue_date, i.due_date, i.subtotal, i.vat, i.total, (STATUS[i.status] || [i.status])[0]]));
+  ['Invoice', 'Contract ref', 'Client', 'Site', 'Contract', 'From', 'To', 'Issued', 'Due', 'Net', 'VAT', 'Total', 'Status'],
+  invoices.map((i) => [i.number || 'Draft', i.contract_reference, i.client_name, i.site_name, i.contract_reference, i.period_from, i.period_to, i.issue_date, i.due_date, i.subtotal, i.vat, i.total, (STATUS[i.status] || [i.status])[0]]));
 
 load();
 </script>

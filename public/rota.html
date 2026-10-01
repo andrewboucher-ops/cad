@@ -168,6 +168,9 @@ function weekDays() {
 // calendar date directly instead.
 function fmtDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
 function sameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
+const hm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+/** ISO → the value a datetime-local input wants, in local time. */
+const localDT = (iso) => (iso ? new Date(Date.parse(iso) - new Date(iso).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '');
 
 async function load() {
   const days = weekDays();
@@ -382,12 +385,23 @@ function assignmentsSection(s) {
         ${active.map((a) => `
           <div style="display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px" data-assignment="${a.id}">
             <span style="flex:1">${esc(a.personnel_name)}${a.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}</span>
-            <span class="dim" style="font-size:11px">${esc(a.status)}${a.clocked_in_at ? (a.clocked_out_at ? ' · clocked out' : ' · clocked in') : ''}</span>
+            <span class="dim" style="font-size:11px">${esc(a.status)}${a.clocked_in_at ? ` · ${hm(a.clocked_in_at)}–${a.clocked_out_at ? hm(a.clocked_out_at) : 'now'}` : ''}${a.auto_clocked_out ? ' · auto' : ''}</span>
+            ${a.clock_out_needs_review ? '<span class="leave-flag" title="Clocked out automatically after the app had been closed — the time is the last time they were seen on site">⚠ check time</span>' : ''}
             <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:11px"><input type="checkbox" data-duty="${a.id}" ${a.is_duty_supervisor ? 'checked' : ''}> duty sup.</label>
             ${!a.clocked_in_at ? `<button type="button" class="btn" data-clockin="${a.id}" style="padding:4px 8px;font-size:11px">Clock in</button>` : ''}
             ${a.clocked_in_at && !a.clocked_out_at ? `<button type="button" class="btn" data-clockout="${a.id}" style="padding:4px 8px;font-size:11px">Clock out</button>` : ''}
+            ${a.clocked_in_at ? `<button type="button" class="btn" data-times="${a.id}" style="padding:4px 8px;font-size:11px">Times</button>` : ''}
             <button type="button" class="btn danger" data-remove="${a.id}" style="padding:4px 8px;font-size:11px">Remove</button>
-          </div>`).join('') || '<p class="dim" style="font-size:13px">Nobody assigned yet.</p>'}
+          </div>
+          ${a.clocked_in_at ? `<div class="hide" data-times-form="${a.id}" style="border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:-4px;font-size:12px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+              <div><label>Clocked in</label><input type="datetime-local" data-t-in value="${localDT(a.clocked_in_at)}"></div>
+              <div><label>Clocked out</label><input type="datetime-local" data-t-out value="${localDT(a.clocked_out_at)}"></div>
+              <div style="grid-column:1/-1"><label>Reason for the change</label><input data-t-why placeholder="e.g. phone was locked — officer left site at 22:00, confirmed by supervisor"></div>
+            </div>
+            ${(a.time_edits || []).length ? `<div class="dim" style="margin-top:6px">${a.time_edits.map((e) => `${esc(e.by)}: ${esc(e.reason)}`).join('<br>')}</div>` : ''}
+            <button type="button" class="btn primary" data-t-save="${a.id}" style="margin-top:6px;padding:4px 10px;font-size:12px">Save times</button>
+          </div>` : ''}`).join('') || '<p class="dim" style="font-size:13px">Nobody assigned yet.</p>'}
       </div>
       ${available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
         <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
@@ -458,6 +472,17 @@ function shiftModal(s, defaults) {
     // Reopens the same shift fresh from the server after a row action, so
     // several adds/removes/clock-ins in one sitting never act on stale data.
     const reopen = async () => { await load(); shiftModal(allShifts.find((x) => x.id === s.id)); };
+    els('[data-times]').forEach((b) => (b.onclick = () => el(`[data-times-form="${b.dataset.times}"]`).classList.toggle('hide')));
+    els('[data-t-save]').forEach((b) => (b.onclick = async () => {
+      const f = el(`[data-times-form="${b.dataset.tSave}"]`), val = (sel) => f.querySelector(sel).value;
+      try {
+        await api('PATCH', `/api/shift-assignments/${b.dataset.tSave}/times`, {
+          clocked_in_at: val('[data-t-in]') ? new Date(val('[data-t-in]')).toISOString() : null,
+          clocked_out_at: val('[data-t-out]') ? new Date(val('[data-t-out]')).toISOString() : null, reason: val('[data-t-why]'),
+        });
+        await reopen();
+      } catch (e) { el('#shError').textContent = e.message; }
+    }));
     els('[data-clockin]').forEach((b) => (b.onclick = async () => {
       try { await api('POST', `/api/shift-assignments/${b.dataset.clockin}/clock-in`, {}); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }

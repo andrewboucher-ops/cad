@@ -95,6 +95,11 @@
   </div>
 
   <div class="section-card">
+    <header>Invoices</header>
+    <div class="body" id="invoicesBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card">
     <header>Equipment on hire</header>
     <div class="body" id="rentalsBody"><p class="empty-note">Loading…</p></div>
   </div>
@@ -251,6 +256,18 @@ async function paintAgreements() {
   document.querySelectorAll('[data-ag-decline]').forEach((b) => (b.onclick = () => agDecline(agreements.find((a) => a.id === Number(b.dataset.agDecline)))));
   document.querySelectorAll('[data-ag-sign]').forEach((b) => (b.onclick = () => agSign(agreements.find((a) => a.id === Number(b.dataset.agSign)))));
 }
+async function paintInvoices() {
+  const rows = await api('GET', withAs('/api/client/invoices')).catch(() => []);
+  const t = encodeURIComponent(getSession().token);
+  el('#invoicesBody').innerHTML = rows.length ? rows.map((i) => `
+    <div class="list-row">
+      <span class="t mono">${esc(i.number)}</span>
+      <span style="flex:1">${esc(i.site_name)} <span class="dim" style="font-size:12px">· ${esc(fmtDate(i.period_from))} – ${esc(fmtDate(i.period_to))} · due ${esc(fmtDate(i.due_date))}</span></span>
+      <strong style="font-variant-numeric:tabular-nums">${gbp(i.total)}</strong>
+      <span class="pill ${i.paid ? 'completed' : i.overdue ? 'closed' : 'open'}">${i.paid ? 'Paid' : i.overdue ? 'Overdue' : 'Due'}</span>
+      <a target="_blank" href="${withAs(`${i.pdf_url}?token=${t}`)}" style="font-size:12.5px">PDF</a>
+    </div>`).join('') : '<p class="empty-note">No invoices yet.</p>';
+}
 function agModal(title, html, onMount) {
   const host = document.createElement('div');
   host.innerHTML = `<div class="modal-back"><div class="modal" style="width:min(720px,100%)"><h2>${esc(title)}</h2><div class="content" style="padding:16px 20px">${html}</div></div></div>`;
@@ -332,6 +349,7 @@ async function loadSite() {
   client = await api('GET', withAs('/api/client/me'));
   paintRentals();
   paintAgreements();
+  paintInvoices();
   if (isAdminView) el('#adminAsName').textContent = client.name;
   sites = client.sites;
   el('#clientName').textContent = client.name;

@@ -18,7 +18,7 @@ process.env.XERO_IDENTITY_BASE = XBASE;
 process.env.XERO_API_BASE = XBASE;
 
 /* ---- a fake Xero: just the endpoints xero.js uses ---- */
-const X = { tokens: [], contacts: [], invoices: [], calls: [] };
+const X = { tokens: [], contacts: [], invoices: [], calls: [], emailed: [] };
 const fake = http.createServer((req, res) => {
   let raw = '';
   req.on('data', (c) => (raw += c));
@@ -48,10 +48,12 @@ const fake = http.createServer((req, res) => {
       const inv = JSON.parse(raw).Invoices[0];
       if (!inv.LineItems.length) return send(400, { Elements: [{ ValidationErrors: [{ Message: 'no lines' }] }] });
       const total = inv.LineItems.reduce((n, l) => n + l.Quantity * l.UnitAmount * (l.TaxType === 'NONE' ? 1 : 1.2), 0);
-      const x = { ...inv, InvoiceID: `inv-${X.invoices.length + 1}`, InvoiceNumber: `INV-${String(X.invoices.length + 1).padStart(4, '0')}`, Total: Math.round(total * 100) / 100, AmountDue: Math.round(total * 100) / 100, AmountPaid: 0 };
+      const x = { ...inv, InvoiceID: `inv-${X.invoices.length + 1}`, InvoiceNumber: inv.InvoiceNumber || `X-${X.invoices.length + 1}`, Total: Math.round(total * 100) / 100, AmountDue: Math.round(total * 100) / 100, AmountPaid: 0 };
       X.invoices.push(x);
       return send(200, { Invoices: [x] });
     }
+    const em = u.pathname.match(/^\/api\.xro\/2\.0\/Invoices\/([^/]+)\/Email$/);
+    if (em && req.method === 'POST') { X.emailed.push(em[1]); res.writeHead(204); return res.end(); }
     const m = u.pathname.match(/^\/api\.xro\/2\.0\/Invoices\/(.+)$/);
     if (m && req.method === 'GET') { const x = X.invoices.find((i) => i.InvoiceID === m[1]); return x ? send(200, { Invoices: [x] }) : send(404, { Detail: 'not found' }); }
     send(404, { Detail: 'no such fake endpoint' });
@@ -71,8 +73,10 @@ const login = async (u, p) => (await call('POST', '/api/auth/login', { username:
 const JPEG = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=';
 
 let adminT, dispT, clientT, otherT, finT, siteA, siteB, client, other;
+const mails = [];
 before(async () => {
   await new Promise((r) => fake.listen(XPORT, '127.0.0.1', r));
+  app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, attachments: opts.attachments || [] }); return { ok: true }; };
   app.start();
   await new Promise((r) => setTimeout(r, 200));
   adminT = await login('admin', 'admin123'); dispT = await login('dispatcher', 'dispatch123');
@@ -248,7 +252,8 @@ test('a draft is checked and edited, approved, sent to Xero, and its payment rea
   assert.equal(sent.body.xero.number, 'INV-0001');
   const x = X.invoices[0];
   assert.equal(x.Type, 'ACCREC');
-  assert.equal(x.Reference, inv.reference);
+  assert.equal(x.Reference, inv.contract_reference);
+  assert.equal(x.InvoiceNumber, 'INV-0001', 'the same number in Xero as on our invoice');
   assert.equal(x.Status, 'DRAFT');
   assert.equal(x.LineItems.length, 4);
   assert.equal(x.LineItems[0].AccountCode, '200');
@@ -285,4 +290,78 @@ test('the menu offers quotes & contracts to admins and invoices to admins and fi
   assert.ok(!(await keys(dispT)).includes('invoices'));
   assert.equal((await call('GET', '/api/invoices', undefined, dispT)).status, 403);
   assert.equal((await call('GET', '/api/agreements', undefined, finT)).status, 403);
+});
+
+const settle = () => new Promise((r) => setTimeout(r, 60));
+const isPdf = (att) => att && att.contentType === 'application/pdf' && Buffer.from(att.content).subarray(0, 4).toString() === '%PDF';
+
+test('quotes and contracts are emailed to the client with the PDF — when sent, accepted and signed', async () => {
+  await settle();
+  const kinds = mails.filter((m) => m.to === 'fm@meridian.example').map((m) => m.subject);
+  assert.ok(kinds.some((k) => /^Quotation QUO-/.test(k)), 'quote sent');
+  assert.ok(kinds.some((k) => /accepted/.test(k)), 'acceptance confirmed');
+  assert.ok(kinds.some((k) => /^Contract CON-/.test(k)), 'contract sent');
+  assert.ok(kinds.some((k) => /signed contract/.test(k)), 'signed copy');
+  for (const m of mails.filter((x) => x.to === 'fm@meridian.example')) assert.ok(isPdf(m.attachments[0]), `${m.subject} has the PDF attached`);
+  const signed = mails.find((m) => /signed contract/.test(m.subject));
+  assert.ok(signed.attachments[0].content.length > 2000, 'the signed version, with the signature');
+  assert.ok(contract.emails.some((e) => e.kind === 'SIGNED' && e.ok));
+  assert.equal((await call('GET', '/api/client/agreements', undefined, clientT)).body[0].emails, undefined, 'the email log is not shown to the client');
+
+  const q = (await call('POST', '/api/agreements', { kind: 'QUOTE', site_id: siteA.id, lines: [{ description: 'No price', kind: 'ONE_OFF' }] }, adminT));
+  assert.equal(q.status, 400, 'a line with no rate is refused, not priced at £0');
+});
+
+test('approved invoices get the next number, are emailed to the billing address with the PDF, and appear in the portal', async () => {
+  await call('PATCH', `/api/clients/${client.id}`, { billing_email: 'accounts@meridian.example', billing_address: '1 High St\nLeeds' }, adminT);
+  const st = await call('PUT', '/api/invoices/settings', { prefix: 'ECH-', next_number: 120, sort_code: '12-34-56', account_number: '12345678', bank_name: 'Lloyds', vat_number: 'GB123456789' }, adminT);
+  assert.equal(st.status, 200, JSON.stringify(st.body));
+  assert.equal((await call('PUT', '/api/invoices/settings', { prefix: 'ECH-' }, finT)).status, 403, 'settings are for admins');
+  assert.equal((await call('PUT', '/api/invoices/settings', { sort_code: '12' }, adminT)).status, 400);
+
+  const g = (await call('POST', '/api/invoices/generate', { from: '2026-10-01', to: '2026-10-31', contract_id: contract.id }, adminT)).body;
+  const inv = g.made[0];
+  assert.equal(inv.number, undefined, 'a draft has no number');
+  assert.ok(!(await call('GET', '/api/client/invoices', undefined, clientT)).body.some((x) => x.id === inv.id), 'drafts are not in the portal');
+  const draftPdf = await call('GET', `/api/invoices/${inv.id}/pdf`, undefined, finT, true);
+  assert.equal(Buffer.from(await draftPdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+
+  const before = mails.length;
+  const a = (await call('POST', `/api/invoices/${inv.id}/approve`, {}, adminT)).body;
+  assert.equal(a.number, 'ECH-0120');
+  await settle();
+  const m = mails.slice(before).find((x) => /ECH-0120/.test(x.subject));
+  assert.ok(m, 'emailed on approval');
+  assert.equal(m.to, 'accounts@meridian.example', 'to the billing email');
+  assert.ok(isPdf(m.attachments[0]));
+  assert.match(m.html, /12345678/);
+  assert.ok(app.db.invoices.find((i) => i.id === inv.id).emails[0].ok);
+
+  const portal = (await call('GET', '/api/client/invoices', undefined, clientT)).body;
+  assert.equal(portal.length >= 1, true);
+  const row = portal.find((x) => x.number === 'ECH-0120');
+  assert.equal(row.paid, false);
+  assert.equal((await call('GET', `${row.pdf_url}`, undefined, clientT, true)).status, 200);
+  assert.equal((await call('GET', `${row.pdf_url}`, undefined, otherT, true)).status, 404, 'not another client\'s');
+
+  // Paid by bank transfer, no Xero involved.
+  assert.equal((await call('POST', `/api/invoices/${inv.id}/paid`, { note: 'BACS' }, finT)).body.status, 'PAID');
+  assert.equal((await call('GET', '/api/client/invoices', undefined, clientT)).body.find((x) => x.number === 'ECH-0120').paid, true);
+
+  // "Nobody" sends: approving does not email.
+  await call('PUT', '/api/invoices/settings', { send_via: 'NONE' }, adminT);
+  const g2 = (await call('POST', '/api/invoices/generate', { from: '2026-11-01', to: '2026-11-30', contract_id: contract.id }, adminT)).body.made[0];
+  const n = mails.length;
+  assert.equal((await call('POST', `/api/invoices/${g2.id}/approve`, {}, adminT)).body.number, 'ECH-0121');
+  await settle();
+  assert.equal(mails.length, n);
+  // Xero sends: it goes in approved and Xero is asked to email it.
+  await call('PUT', '/api/invoices/settings', { send_via: 'XERO' }, adminT);
+  await call('PUT', '/api/xero/settings', { invoice_status: 'DRAFT' }, adminT);
+  const r = await call('POST', `/api/invoices/${g2.id}/xero`, {}, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const x = X.invoices.at(-1);
+  assert.equal(x.Status, 'AUTHORISED');
+  assert.equal(x.InvoiceNumber, 'ECH-0121');
+  assert.deepEqual(X.emailed, [x.InvoiceID]);
 });

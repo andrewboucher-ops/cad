@@ -123,7 +123,7 @@ module.exports = function registerClientRoutes({
     const name = String(body.name || '').trim();
     if (!name) throw httpError(400, 'name required');
     const siteIds = Array.isArray(body.site_ids) ? body.site_ids.map(Number).filter((id) => db.sites.some((s) => s.id === id)) : [];
-    const c = { id: nextId('clients'), name, contact_email: body.contact_email || '', site_ids: siteIds, created_at: new Date().toISOString() };
+    const c = { id: nextId('clients'), name, contact_email: body.contact_email || '', billing_email: String(body.billing_email || '').trim(), billing_address: String(body.billing_address || '').trim().slice(0, 500), site_ids: siteIds, created_at: new Date().toISOString() };
     db.clients.push(c);
     logEvent('client.created', `CLIENT ${name} ADDED`);
     return { __status: 201, __body: c };
@@ -138,6 +138,9 @@ module.exports = function registerClientRoutes({
       c.name = name;
     }
     if ('contact_email' in body) c.contact_email = body.contact_email || '';
+    // Invoices go to the billing email if set, else the contact email.
+    if ('billing_email' in body) c.billing_email = String(body.billing_email || '').trim();
+    if ('billing_address' in body) c.billing_address = String(body.billing_address || '').trim().slice(0, 500);
     if ('site_ids' in body) {
       if (!Array.isArray(body.site_ids)) throw httpError(400, 'site_ids must be an array');
       c.site_ids = body.site_ids.map(Number).filter((id) => db.sites.some((s) => s.id === id));

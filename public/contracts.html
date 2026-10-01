@@ -134,7 +134,7 @@ function editor(a, siteId, kind) {
     <div><label>Payment terms (days)</label><input id="eTerms" type="number" min="0" max="180" value="${a.payment_terms_days}"></div>
     <div class="full"><label>Notes shown to the client</label><textarea id="eNotes" rows="2">${esc(a.notes || '')}</textarea></div>
     <div class="full"><label>Internal notes (never shown to the client)</label><textarea id="eInt" rows="2">${esc(a.internal_notes || '')}</textarea></div>
-  </div>${foot(a.id ? 'Save' : 'Create draft')}`, (root) => {
+  </div>${foot(a.id ? 'Save draft' : 'Save as draft', '<button type="button" class="btn primary" id="eSend">Save &amp; send to client</button>')}`, (root) => {
     const recalc = () => {
       let p = 0, o = 0;
       root.querySelectorAll('[data-line]').forEach((tr) => {
@@ -149,7 +149,7 @@ function editor(a, siteId, kind) {
     root.querySelector('#eAdd').onclick = () => { root.querySelector('#eLines').insertAdjacentHTML('beforeend', lineRow({ kind: 'HOURLY' })); bind(); };
     root.querySelector('#eSite').onchange = () => { const cl = clientOf(root.querySelector('#eSite').value); root.querySelector('#eClient').innerHTML = cl ? esc(cl.name) : '<span class="err">not linked to a client yet</span>'; };
     bind();
-    wire(root, async () => {
+    const save = async () => {
       const lines = [...root.querySelectorAll('[data-line]')].map((tr) => {
         const g = (k) => tr.querySelector(`[data-k="${k}"]`).value.trim();
         return { description: g('description'), kind: g('kind'), rate: g('rate') === '' ? NaN : Number(g('rate')), est_quantity: g('est_quantity'), shift_type_id: g('shift_type_id') || null };
@@ -164,9 +164,21 @@ function editor(a, siteId, kind) {
       else {
         if (!v(root, '#eSite')) throw new Error('choose the site');
         saved = await api('POST', '/api/agreements', { ...body, kind: a.kind, site_id: Number(v(root, '#eSite')) });
+        a = saved; // a second press edits this draft rather than making another
       }
-      close(); await load(); view(rows.find((x) => x.id === saved.id));
-    });
+      return saved;
+    };
+    wire(root, async () => { const saved = await save(); close(); await load(); view(rows.find((x) => x.id === saved.id)); });
+    root.querySelector('#eSend').onclick = async () => {
+      const err = root.querySelector('[data-k-err]'); err.textContent = '';
+      try {
+        const saved = await save();
+        const cl = clientOf(saved.site_id);
+        if (!confirm(`Send ${saved.reference} to ${cl ? cl.name : 'the client'}? It is emailed to them with the PDF and appears in their portal. It can't be edited after.`)) { close(); await load(); view(rows.find((x) => x.id === saved.id)); return; }
+        await api('POST', `/api/agreements/${saved.id}/send`);
+        close(); await new Promise((r) => setTimeout(r, 800)); await load(); view(rows.find((x) => x.id === saved.id));
+      } catch (e) { err.textContent = e.message; }
+    };
   }, { wide: true });
 }
 el('#bQuote').onclick = () => editor(null, Number(el('#fSite').value) || null, 'QUOTE');
@@ -181,6 +193,7 @@ function view(a) {
   const acts = [];
   if (a.status === 'DRAFT') acts.push(act('edit', 'Edit'), act('del', 'Delete'), act('send', `Send to client`, 'primary'));
   if (a.status === 'SENT') acts.push(act('withdraw', 'Withdraw'));
+  if (['SENT', 'ACCEPTED', 'SIGNED'].includes(a.status)) acts.push(act('email', 'Email again'));
   if (a.kind === 'QUOTE' && a.status === 'ACCEPTED' && !rows.some((x) => x.from_quote_id === a.id && x.status !== 'WITHDRAWN')) acts.push(act('convert', 'Make contract from this quote', 'primary'));
   if (a.status === 'SIGNED') acts.push(act('end', 'End contract'), `<a class="btn primary" href="/invoices.html?contract_id=${a.id}">Invoices</a>`);
   if (a.pdf_url && a.status !== 'DRAFT') acts.push(`<a class="btn" target="_blank" href="${a.pdf_url}?token=${token()}">PDF</a>`);
@@ -198,6 +211,7 @@ function view(a) {
     <p class="est">Estimated ${money(a.estimate.per_period)} per ${a.invoice_period === 'WEEKLY' ? 'week' : 'month'} + VAT${a.estimate.one_off ? `, one-off ${money(a.estimate.one_off)}` : ''}.</p>
     ${a.status === 'DECLINED' && a.decline_reason ? `<p class="note"><strong>Client's reason:</strong> ${esc(a.decline_reason)}</p>` : ''}
     ${a.status === 'SIGNED' ? `<p class="note">Signed by <strong>${esc(a.signed_name)}</strong>${a.signed_position ? `, ${esc(a.signed_position)}` : ''} on ${esc(when(a.signed_at))}.</p>` : ''}
+    ${(a.emails || []).length ? `<p class="note">${a.emails.map((e) => e.ok ? `✓ ${esc({ SENT: 'Sent', ACCEPTED: 'Acceptance confirmation', SIGNED: 'Signed copy' }[e.kind] || e.kind)} emailed to ${esc(e.to)} ${esc(when(e.at))}` : `<span class="err">✕ Not emailed${e.to ? ` to ${esc(e.to)}` : ''}: ${esc(e.error || 'failed')}</span>`).join('<br>')}</p>` : ''}
     ${made ? `<p class="note">Contract <a href="#" data-goto="${made.id}">${esc(made.reference)}</a> was made from this quote.</p>` : ''}
     ${a.internal_notes ? `<p class="note dim"><strong>Internal:</strong> ${esc(a.internal_notes)}</p>` : ''}
     <details style="margin-top:8px"><summary class="dim note">History</summary><ul class="tl">${(a.history || []).slice().reverse().map((h) => `<li><span class="when">${esc(when(h.at))}</span> — ${esc(h.what)} <span class="dim">(${esc(h.by)})</span></li>`).join('')}</ul></details>
@@ -214,6 +228,7 @@ function view(a) {
       if (k === 'del') { if (!confirm('Delete this draft?')) return; await api('DELETE', `/api/agreements/${a.id}`); close(); return load(); }
       if (k === 'send') { if (!confirm(`Send ${a.reference} to ${c ? c.name : 'the client'}? It appears in their portal and they are emailed. It can't be edited after.`)) return; out = await api('POST', `/api/agreements/${a.id}/send`); }
       if (k === 'withdraw') { const reason = prompt('Why is it being withdrawn? (optional)'); if (reason === null) return; out = await api('POST', `/api/agreements/${a.id}/withdraw`, { reason }); }
+      if (k === 'email') { if (!confirm('Email it to the client again, with the PDF?')) return; out = await api('POST', `/api/agreements/${a.id}/email`); await new Promise((r) => setTimeout(r, 800)); }
       if (k === 'convert') out = await api('POST', `/api/agreements/${a.id}/convert`);
       if (k === 'end') { const d = prompt('Last day of the contract (YYYY-MM-DD)', new Date().toISOString().slice(0, 10)); if (!d) return; out = await api('POST', `/api/agreements/${a.id}/end`, { end_date: d }); }
       await load(); view(rows.find((x) => x.id === out.id));

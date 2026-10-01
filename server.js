@@ -2202,14 +2202,16 @@ async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: m
 // email" rather than the resolution report's attachment/CC assembly above.
 // Never throws — a notification that can't be delivered shouldn't fail the
 // request that triggered it; callers get a result object to log/audit with.
-async function sendGraphEmail(to, subject, html) {
+// opts.attachments: [{ name, contentType, content: Buffer }] — e.g. a PDF.
+async function sendGraphEmail(to, subject, html, opts = {}) {
   if (!GRAPH_MAIL_ENABLED) return { ok: false, error: 'graph mail not configured' };
   if (!to) return { ok: false, error: 'no recipient' };
   try {
     const token = await getGraphAppToken();
+    const attachments = (opts.attachments || []).map((f) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: f.name, contentType: f.contentType || 'application/octet-stream', contentBytes: Buffer.from(f.content).toString('base64') }));
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }] } }),
+      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }], ...(attachments.length ? { attachments } : {}) } }),
     });
     if (!res.ok) return { ok: false, error: `${res.status} ${await res.text()}` };
     return { ok: true };
@@ -3854,7 +3856,7 @@ require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, f
 
 // Breaks, hours, geofenced clock-in, reminders — see routes-attendance.js.
 const attendance = require('./routes-attendance.js')({
-  route, httpError, ALL, CONTROL, db, logEvent, broadcast, pushToRoles, sms, notifyLog: writeNotifyLog, publicShift,
+  route, httpError, ALL, CONTROL, db, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
 
@@ -3871,13 +3873,16 @@ require('./routes-rentals.js')({ route, httpError, CONTROL, ADMIN, CLIENT, db, n
 // Quotes and contracts on sites, signed in the client portal — see
 // routes-agreements.js. Invoices built from signed contracts and hours
 // worked, sent to Xero — see routes-invoices.js and xero.js.
+// Emails to clients (quotes, contracts, invoices) go through `mailer`, so
+// the tests can catch what would have been sent.
+const mailer = { send: (to, subject, html, opts) => sendGraphEmail(to, subject, html, opts) };
 const agreements = require('./routes-agreements.js')({
-  route, httpError, ADMIN, CLIENT, db, nextId, logEvent, pushToRoles, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html),
+  route, httpError, ADMIN, CLIENT, db, nextId, logEvent, pushToRoles, sendEmail: (...a) => mailer.send(...a),
   UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
 const xero = require('./xero.js')({ db, flushNow: () => store.flushNow(), redirectUri: `${PUBLIC_BASE_URL}/api/xero/callback` });
 require('./routes-invoices.js')({
-  route, httpError, ADMIN, FINANCE, db, nextId, logEvent, attendance, agreements, xero, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+  route, httpError, ADMIN, FINANCE, CLIENT, db, nextId, logEvent, attendance, agreements, xero, sendEmail: (...a) => mailer.send(...a), UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
 
 // Which roles see which section of the menus — see ui-sections.js.
@@ -4332,4 +4337,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, attendance, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };

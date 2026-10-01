@@ -433,10 +433,22 @@ function lastFinishedToday() {
 }
 function paintShiftBar() {
   const bar = el('#shiftBar');
-  const c = person ? currentShift() : null;
+  bar.classList.remove('hide');
+  if (!person) {
+    bar.className = 'shiftbar';
+    bar.innerHTML = `<div class="sb-top"><span class="sb-state">Clock in</span></div><div class="sb-sub">This login isn't linked to a member of staff, so there's no rota or clock-in for it. An admin can link it in Admin → Users.</div>`;
+    return;
+  }
+  const c = currentShift();
   if (!c) {
-    const f = person && lastFinishedToday();
-    if (!f) { bar.classList.add('hide'); return; }
+    const f = lastFinishedToday();
+    if (!f) {
+      const next = shifts.filter((x) => x.status !== 'CANCELLED' && x.status !== 'DRAFT' && Date.parse(x.starts_at) > Date.now()).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at))[0];
+      bar.className = 'shiftbar';
+      bar.innerHTML = `<div class="sb-top"><span class="sb-state">Not on shift</span><span class="sb-where">${next ? `next: ${esc(fmtShiftTime(next.starts_at))}${next.site_name ? ' · ' + esc(next.site_name) : ''}` : 'no shifts booked'}</span></div>
+        <div class="sb-sub">${next ? 'Clock in opens here an hour before your shift starts.' : 'When you are rostered, your clock-in appears here.'}</div>`;
+      return;
+    }
     const h = hoursOf(f.my);
     bar.className = 'shiftbar';
     bar.innerHTML = `<div class="sb-top"><span class="sb-state">Shift finished</span><span class="sb-where">${esc(f.site_name || '')}</span></div>
@@ -459,7 +471,10 @@ function paintShiftBar() {
     <div class="sb-hours">${dur(h.worked)}</div>
     <div class="sb-sub">Clocked in ${hhmm(my.clocked_in_at)}${h.brk ? ` · ${h.brk} min break so far` : ''}${h.onBreak ? ` · break started ${hhmm(h.onBreak.start)}` : ''}</div>
     ${presence && presence.enforced && !presence.inside ? `<div class="sb-warn">You're outside ${esc(presence.site)} (${presence.distance_m} m away). Go back within 5 minutes or you'll be clocked out.</div>` : ''}
-    <div class="sb-acts">${h.onBreak ? '<button class="btn ok" id="sbBrk">End break</button>' : '<button class="btn" id="sbBrk">Start break</button>'}<button class="btn danger" id="sbOut">End shift</button></div>`;
+    <div class="sb-acts">${h.onBreak ? '<button class="btn ok" id="sbBrk">End break</button>' : '<button class="btn" id="sbBrk">Start break</button>'}<button class="btn danger" id="sbOut">End shift</button></div>
+    ${presence && presence.enforced ? `<div class="sb-sub" style="margin-top:8px">Keep this app open during your shift — your phone can only confirm you're on site while it's open.${pushState === 'available' ? ' <a href="#" id="sbPush">Turn on reminders</a>' : ''}</div>` : ''}`;
+  const pl = el('#sbPush');
+  if (pl) pl.onclick = async (e) => { e.preventDefault(); try { await CCCS.push.enable(); pushState = 'subscribed'; toast('Reminders on.'); paintShiftBar(); } catch (x) { alert(x.message); } };
   el('#sbBrk').onclick = async () => {
     try { await api('POST', `/api/shift-assignments/${my.id}/${h.onBreak ? 'break-end' : 'break-start'}`, {}); toast(h.onBreak ? 'Break ended.' : 'Break started.'); } catch (e) { alert(e.message); }
     await refreshShifts();
@@ -470,7 +485,8 @@ setInterval(() => { if (screenKey === 'home' && person) paintShiftBar(); }, 3000
 
 /* While clocked in at a geofenced site, report position once a minute.
  * The server keeps only "inside or not, and since when". */
-let presence = null, presenceTimer = null;
+let presence = null, presenceTimer = null, presencePing = null, pushState = null;
+if (CCCS.push) CCCS.push.status().then((st) => { pushState = st; }).catch(() => {});
 function getFix(timeout = 10000, maximumAge = 15000) {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
@@ -481,7 +497,7 @@ function getFix(timeout = 10000, maximumAge = 15000) {
 function managePresence() {
   const c = person && currentShift();
   const on = c && clockedIn(c);
-  if (!on) { clearInterval(presenceTimer); presenceTimer = null; presence = null; el('#fenceStrip').classList.add('hide'); return; }
+  if (!on) { clearInterval(presenceTimer); presenceTimer = null; presencePing = null; presence = null; el('#fenceStrip').classList.add('hide'); return; }
   if (presenceTimer) return;
   const ping = async () => {
     const cur = currentShift();
@@ -490,13 +506,28 @@ function managePresence() {
     if (!f) return;
     try {
       presence = await api('POST', `/api/shift-assignments/${cur.my.id}/presence`, f);
+      if (presence.clocked_out) {
+        stopFootTracking();
+        alert(presence.needs_review
+          ? `You've been clocked out at ${hhmm(presence.clocked_out_at)} — the last time your phone showed you at ${presence.site}. If you worked later, contact control to correct it.`
+          : `You've been clocked out at ${hhmm(presence.clocked_out_at)} because you left ${presence.site}.`);
+        presence = null; await refreshShifts(); return;
+      }
       if (!presence.enforced) { clearInterval(presenceTimer); el('#fenceStrip').classList.add('hide'); return; }
       el('#fenceStrip').classList.remove('hide');
       if (screenKey === 'home') paintShiftBar();
     } catch {}
   };
+  presencePing = ping;
   ping(); presenceTimer = setInterval(ping, 60000);
 }
+// Back from the lock screen or another app: the phone could not report
+// while it was away, so report (and refresh the shift) straight away.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !person) return;
+  if (presencePing) presencePing();
+  refreshShifts().catch(() => {});
+});
 const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 document.addEventListener('cccs:sections', () => { if (screenKey === 'home') paintHome(); });
 

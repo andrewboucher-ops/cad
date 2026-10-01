@@ -1838,6 +1838,10 @@ function clientForm(c) {
       <input id="nclName" autocomplete="off" value="${isNew ? '' : esc(c.name)}">
       <label>Contact email</label>
       <input id="nclEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(c.contact_email || '')}">
+      <label>Billing email — invoices go here (leave blank to use the contact email)</label>
+      <input id="nclBillEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(c.billing_email || '')}" placeholder="e.g. accounts@client.co.uk">
+      <label>Billing address (shown on invoices)</label>
+      <textarea id="nclBillAddr" rows="3">${isNew ? '' : esc(c.billing_address || '')}</textarea>
       <label>Sites this client can see</label>
       <div id="nclSites" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:10px">
         ${allSites.map((s) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;text-transform:none;letter-spacing:0;font-weight:400">
@@ -1864,7 +1868,7 @@ function clientModal(c) {
       const name = el('#nclName').value.trim();
       if (!name) { el('#clError').textContent = 'name is required'; return; }
       const site_ids = els('#nclSites [data-siteid]:checked').map((cb) => Number(cb.dataset.siteid));
-      const body = { name, contact_email: el('#nclEmail').value.trim(), site_ids };
+      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), site_ids };
       try {
         if (c) await api('PATCH', `/api/clients/${c.id}`, body);
         else await api('POST', '/api/clients', body);

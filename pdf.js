@@ -127,7 +127,7 @@ class Doc {
     const head = () => {
       this.room(size * 2.4);
       this.rect(this.margin, this.y - size * 1.8, this.width, size * 1.8, { fill: [0.93, 0.95, 0.95], stroke: null });
-      columns.forEach((c, i) => this.text(c.title, xs[i] + 4, this.y - size * 1.25, { size, bold: true }));
+      columns.forEach((c, i) => this.text(c.title, c.align === 'right' ? xs[i] + c.width * this.width - 4 - this.textWidth(c.title, size, true) : xs[i] + 4, this.y - size * 1.25, { size, bold: true }));
       this.y -= size * 1.8;
     };
     head();

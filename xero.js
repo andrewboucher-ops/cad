@@ -92,7 +92,7 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const found = await call('GET', `/Contacts?where=${where}`);
     let c = found.Contacts && found.Contacts[0];
     if (!c) {
-      const made = await call('POST', '/Contacts', { Contacts: [{ Name: client.name, EmailAddress: client.contact_email || undefined }] });
+      const made = await call('POST', '/Contacts', { Contacts: [{ Name: client.name, EmailAddress: client.billing_email || client.contact_email || undefined }] });
       c = made.Contacts && made.Contacts[0];
     }
     if (!c) throw new Error('Xero did not return a contact');
@@ -100,12 +100,14 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     return c.ContactID;
   }
   /** Creates the invoice in Xero. Draft or approved, as set in the settings. */
-  async function pushInvoice(inv, client) {
+  async function pushInvoice(inv, client, { status } = {}) {
     const s = row().settings;
     const contactId = await contactFor(client);
     const body = { Invoices: [{
       Type: 'ACCREC', Contact: { ContactID: contactId }, Date: inv.issue_date, DueDate: inv.due_date,
-      LineAmountTypes: 'Exclusive', Reference: inv.reference, Status: s.invoice_status === 'AUTHORISED' ? 'AUTHORISED' : 'DRAFT', CurrencyCode: 'GBP',
+      // Same invoice number in Xero as on our PDF and in the client portal.
+      InvoiceNumber: inv.number || undefined, Reference: inv.contract_reference || inv.reference,
+      LineAmountTypes: 'Exclusive', Status: status || (s.invoice_status === 'AUTHORISED' ? 'AUTHORISED' : 'DRAFT'), CurrencyCode: 'GBP',
       LineItems: inv.lines.map((l) => ({ Description: l.description, Quantity: l.quantity, UnitAmount: l.unit_amount, AccountCode: s.account_code, TaxType: inv.vat_rate > 0 ? s.tax_type : 'NONE' })),
     }] };
     const out = await call('POST', '/Invoices', body);
@@ -113,6 +115,8 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     if (!x || !x.InvoiceID) throw new Error('Xero did not return the invoice');
     return { invoice_id: x.InvoiceID, number: x.InvoiceNumber || null, status: x.Status, total: x.Total, amount_due: x.AmountDue };
   }
+  /** Xero emails an approved invoice to the contact itself. */
+  async function emailInvoice(xeroId) { await call('POST', `/Invoices/${encodeURIComponent(xeroId)}/Email`, {}); }
   async function invoiceStatus(xeroId) {
     const out = await call('GET', `/Invoices/${encodeURIComponent(xeroId)}`);
     const x = out.Invoices && out.Invoices[0];
@@ -122,5 +126,5 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const r = row();
     return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, settings: r.settings, redirect_uri: redirectUri };
   }
-  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, invoiceStatus, status, row };
+  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, emailInvoice, invoiceStatus, status, row };
 };
