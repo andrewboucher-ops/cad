@@ -89,6 +89,30 @@ async function open(id) {
   CCCSForms.view(el('#viewHost'), sub);
   history.replaceState(null, '', `?id=${id}`);
   if (isAdmin && sub.status === 'OPEN') paintAction(sub);
+  if (isAdmin && sub.status === 'ACTIONED') paintDelete(sub);
+}
+
+/** Permanent delete of a reviewed report. Two steps, with a reason the
+ * server keeps in the audit log. */
+function paintDelete(sub) {
+  el('#actionHost').innerHTML = `
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+      <label>Delete this report permanently</label>
+      <input id="dReason" placeholder="Reason (kept in the audit log)" style="width:100%;box-sizing:border-box;margin:6px 0">
+      <div class="btn-row"><button class="btn danger" id="dGo">Delete report</button></div>
+      <p class="dim" style="font-size:12px;margin:6px 0 0">This removes the report and its photos and signatures. The audit log keeps a record that ${esc(sub.reference)} existed and who deleted it. It cannot be undone.</p>
+      <p class="err" id="dErr"></p>
+    </div>`;
+  let armed = false;
+  el('#dGo').onclick = async () => {
+    if (!el('#dReason').value.trim()) { el('#dErr').textContent = 'give a reason first'; return; }
+    if (!armed) { armed = true; el('#dGo').textContent = 'Confirm — delete permanently'; setTimeout(() => { armed = false; const b = el('#dGo'); if (b) b.textContent = 'Delete report'; }, 5000); return; }
+    try {
+      await api('DELETE', `/api/form-submissions/${sub.id}`, { reason: el('#dReason').value.trim() });
+      el('#detail').innerHTML = `<p class="dim">${esc(sub.reference)} was deleted.</p>`;
+      history.replaceState(null, '', location.pathname); refresh();
+    } catch (e) { el('#dErr').textContent = e.message; }
+  };
 }
 
 /** The admin's review: an outcome and feedback. The server records it,

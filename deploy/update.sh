@@ -77,9 +77,13 @@ if [ -f "$DATA_FILE" ]; then
     const counts = {}; for (const u of users) counts[u.role] = (counts[u.role] || 0) + 1;
     console.log("   " + users.length + " accounts: " + JSON.stringify(counts));
     if (bad.length) { console.log("   UNKNOWN ROLES: " + bad.map((u) => u.username + "=" + u.role).join(", ")); process.exit(3); }
+    // Officer logins converted before the rename existed still carry a
+    // device name (radio101); the same migration renames them.
+    const stale = users.filter((u) => u.role === "FIELD_USER" && /^radio\d+$/i.test(u.username) && !u.previous_username);
+    if (stale.length) { console.log("   OLD RADIO LOGIN NAMES: " + stale.map((u) => u.username).join(", ")); process.exit(3); }
   ' "$DATA_FILE" 2>/dev/null || NEEDS_MIGRATION=1
   if [ -n "${NEEDS_MIGRATION:-}" ]; then
-    echo; echo "   These accounts are from before the radio removal. What the migration would change:"
+    echo; echo "   These accounts are from before the radio removal (or still named after a radio). What the migration would change:"
     node "$SRC_DIR/deploy/migrate-radio-users.js" --db "$DATA_FILE" --dry-run | sed 's/^/   /' \
       || die "the migration cannot run on this database (reason above) — resolve it by hand first"
     if [ -z "$MIGRATE" ] && [ -z "$DRY_RUN" ]; then

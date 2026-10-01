@@ -228,3 +228,60 @@ test('the fleet dashboard grades compliance, reads inspection issues and offers 
   assert.ok(d.body.summary.compliance_overdue >= 1 && d.body.summary.with_issues >= 1);
   assert.equal((await call('GET', '/api/fleet-dashboard', undefined, danT)).status, 403);
 });
+
+/* ---------------- permanent delete of a reviewed report ---------------- */
+test('an admin can permanently delete a report only once it has been reviewed, with a reason, leaving a tombstone', async () => {
+  const { sub } = await fileTrespass();
+  assert.equal((await call('DELETE', `/api/form-submissions/${sub.id}`, { reason: 'duplicate' }, adminT)).status, 409, 'not while it is still open');
+  await call('POST', `/api/form-submissions/${sub.id}/action`, { outcome: 'REJECTED', feedback: 'Duplicate of an earlier report' }, adminT);
+  assert.equal((await call('DELETE', `/api/form-submissions/${sub.id}`, {}, adminT)).status, 400, 'a reason is required');
+  assert.equal((await call('DELETE', `/api/form-submissions/${sub.id}`, { reason: 'duplicate' }, dispT)).status, 403, 'admin only');
+  const fs = require('node:fs'), path = require('node:path');
+  const dir = path.join(__dirname, '..', 'data', 'uploads', 'forms', String(sub.id));
+  assert.ok(fs.existsSync(dir), 'the signature file is there before the delete (so the check below means something)');
+  const r = await call('DELETE', `/api/form-submissions/${sub.id}`, { reason: 'Duplicate of FORM-2026-00001' }, adminT);
+  assert.equal(r.status, 200);
+  assert.equal((await call('GET', `/api/form-submissions/${sub.id}`, undefined, adminT)).status, 404, 'gone');
+  assert.ok(!app.db.form_submissions.some((s) => s.id === sub.id));
+  assert.ok(!fs.existsSync(dir), 'its signature file went with it');
+  const tomb = app.db.audit_logs.find((e) => e.type === 'form.deleted' && e.data.reference === sub.reference);
+  assert.match(tomb.summary, /DELETED BY System Admin — Duplicate of FORM-2026-00001/);
+});
+
+/* ---------------- applicant acknowledgement email ---------------- */
+test('an applicant is emailed their reference — fixed text, nothing they typed, at most once a day per address', async () => {
+  const sent = [];
+  const handlers = {};
+  const register = require('../routes-applicants.js');
+  const db = { applicants: [], personnel: [] };
+  let id = 0;
+  const form = { id: 1, version: 1, name: 'Job application', fields: [
+    { id: 'full_name', type: 'text', required: true }, { id: 'email', type: 'text', required: true },
+    { id: 'role_applied_for', type: 'select', options: ['Security officer', 'Other'] }, { id: 'experience', type: 'textarea' },
+  ] };
+  register({
+    route: (m, p, roles, h) => { handlers[`${m} ${p}`] = h; },
+    httpError: (s, m) => Object.assign(new Error(m), { status: s }), CONTROL: [], ADMIN: [], db, nextId: () => ++id,
+    logEvent: () => {}, UPLOADS_DIR: require('node:os').tmpdir(), MIME: {}, visibleToUser: () => true, normalizedBranchId: () => null, publicPersonnel: (p) => p,
+    forms: { activeApplicationForm: () => form, validateValues: (fields, v) => ({ values: v, files: [] }), IMAGE_EXT: {} },
+    sendEmail: async (to, subject, html) => { sent.push({ to, subject, html }); return { ok: true }; },
+  });
+  const apply = (values, ip) => handlers['POST /api/public/applications']({ body: { definition_id: 1, values }, req: { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': ip } } });
+  const r = apply({ full_name: '<a href="http://evil.example">Click me</a>', email: 'victim@example.com', role_applied_for: 'Security officer', experience: 'BUY CHEAP PILLS' }, '192.0.2.1');
+  await new Promise((res) => setTimeout(res, 20));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, 'victim@example.com');
+  assert.match(sent[0].subject, new RegExp(r.__body.reference));
+  assert.match(sent[0].html, /Security officer/, 'the role, because it is one of the form\'s own options');
+  assert.ok(!/evil|Click me|PILLS/.test(sent[0].html), 'nothing the visitor typed freely is in our email');
+  assert.equal(db.applicants[0].acknowledgement.sent, true);
+
+  apply({ full_name: 'Again', email: 'victim@example.com', role_applied_for: 'Other' }, '192.0.2.2');
+  await new Promise((res) => setTimeout(res, 20));
+  assert.equal(sent.length, 1, 'a second application to the same address the same day is stored but not emailed');
+  assert.match(db.applicants[1].acknowledgement.reason, /already acknowledged/);
+
+  apply({ full_name: 'Free text role', email: 'other@example.com', role_applied_for: 'Visit www.spam.example' }, '192.0.2.3');
+  await new Promise((res) => setTimeout(res, 20));
+  assert.ok(!/spam/.test(sent[1].html), 'a role that is not one of the options is left out entirely');
+});

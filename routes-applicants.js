@@ -37,6 +37,15 @@
  *   - nothing personal goes into logEvent() — the event log reaches every
  *     connected officer's screen — or into a push payload;
  *   - the reply carries a reference only, never the data back.
+ * ACKNOWLEDGEMENT EMAIL. An accepted application is acknowledged by email
+ * with its reference. That is our mailbox writing to an address a stranger
+ * typed in, so it is built to be useless for abuse: fixed text only (the
+ * reference and the role picked from the form's own options — not the
+ * name or anything else typed freely, which could carry spam), at most one
+ * per address per day on top of the limits above, off with
+ * APPLY_ACK_EMAIL=off, and inert until Graph mail is configured. Whether it
+ * went is recorded on the applicant (acknowledgement) so a failure shows.
+ *
  * The answers live on the applicant record, so they are read exactly like
  * every other applicant detail: control roles, branch-scoped.
  *
@@ -62,7 +71,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 module.exports = function registerApplicantRoutes({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
-  forms, pushToRoles = () => {}, flushNow = () => {},
+  forms, pushToRoles = () => {}, flushNow = () => {}, sendEmail = null,
 }) {
   for (const t of ['applicants']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -248,6 +257,37 @@ module.exports = function registerApplicantRoutes({
 
   const answersDir = (applicantId) => path.join(cvDir(applicantId), 'application');
 
+  const ACK_ENABLED = process.env.APPLY_ACK_EMAIL !== 'off';
+  const ackedAt = new Map(); // email -> last acknowledgement time
+  const escHtml = (t) => String(t ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  /** Fire-and-forget: the application is already stored, and an email that
+   * can't be delivered must never turn that into an error for the applicant. */
+  function acknowledge(a, d, reference) {
+    if (!ACK_ENABLED || !sendEmail || !a.email) { a.acknowledgement = { sent: false, reason: !ACK_ENABLED ? 'disabled' : !sendEmail ? 'email not configured' : 'no email' }; return; }
+    const last = ackedAt.get(a.email);
+    if (last && Date.now() - last < 86400000) { a.acknowledgement = { sent: false, reason: 'already acknowledged this address today' }; return; }
+    ackedAt.set(a.email, Date.now());
+    if (ackedAt.size > 10000) ackedAt.delete(ackedAt.keys().next().value);
+    // The role is only included when it is one of the form's own options, so
+    // nothing free-typed ever reaches the email.
+    const roleField = d.fields.find((f) => f.id === 'role_applied_for');
+    const role = roleField && roleField.options && roleField.options.includes(a.role_applied_for) ? a.role_applied_for : null;
+    const html = `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;color:#111827;max-width:560px;margin:0 auto;padding:20px">
+      <p>Hello,</p>
+      <p>Thank you for applying to work with Echelon${role ? ` as a <strong>${escHtml(role)}</strong>` : ''}. We have received your application.</p>
+      <p>Your reference is <strong style="font-family:monospace">${escHtml(reference)}</strong> — please quote it if you contact us.</p>
+      <p>We review every application and will be in touch about the next steps.</p>
+      <p style="color:#6b7280;font-size:12px;margin-top:28px">If you did not apply, you can ignore this email; nothing else will be sent to you.</p>
+    </body></html>`;
+    a.acknowledgement = { sent: false, pending: true };
+    Promise.resolve(sendEmail(a.email, `Application received — ${reference}`, html)).then((r) => {
+      a.acknowledgement = r && r.ok ? { sent: true, at: new Date().toISOString() } : { sent: false, reason: (r && r.error) || 'send failed', at: new Date().toISOString() };
+      if (!(r && r.ok)) console.warn(`[apply] acknowledgement for applicant #${a.id} not sent:`, a.acknowledgement.reason);
+      flushNow();
+    }).catch((e) => { a.acknowledgement = { sent: false, reason: e.message }; });
+  }
+
   route('GET', '/api/public/application-form', null, () => {
     const d = forms.activeApplicationForm();
     if (!d) throw httpError(404, 'applications are currently closed');
@@ -294,10 +334,13 @@ module.exports = function registerApplicantRoutes({
       fs.writeFileSync(path.join(cvDir(a.id), storedName), cv.bytes);
       a.cv = { id: crypto.randomUUID(), filename: cv.filename, stored_name: storedName, mimetype: cv.mimetype, uploaded_at: new Date().toISOString() };
     }
+    const reference = `APP-${String(a.id).padStart(5, '0')}`;
+    a.reference = reference;
     logEvent('applicant.applied_online', `NEW WEBSITE APPLICATION — APPLICANT #${a.id}`, { applicant_id: a.id });
     pushToRoles(['SYSTEM_ADMIN'], { title: 'New job application', body: 'A new application arrived from the website', url: '/admin.html', tag: 'cccs-application' });
+    acknowledge(a, d, reference);
     flushNow();
-    return { __status: 201, __body: { ok: true, reference: `APP-${String(a.id).padStart(5, '0')}` } };
+    return { __status: 201, __body: { ok: true, reference } };
   });
 
   // A signature (or other image) given on the website application.

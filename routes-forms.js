@@ -47,7 +47,11 @@
  * feedback): it leaves the open queue and every default list, and the
  * person who filed it is told. "Removed" means out of the queue, NOT deleted
  * — a filed report can be evidence, and it stays retrievable with
- * ?status=ACTIONED. Actioning is a read like any other: a RESTRICTED report
+ * ?status=ACTIONED. An admin can then DELETE an actioned report outright
+ * (never an open one — it must have been reviewed first); its files go with
+ * it and a content-free tombstone stays in the event log, so the audit
+ * trail still shows that a report existed and who removed it.
+ * Actioning is a read like any other: a RESTRICTED report
  * can only be actioned by an admin who is a named reader, so the review
  * workflow cannot become a back door round the rule above.
  *
@@ -680,6 +684,25 @@ module.exports = function registerFormRoutes({
       { submission_id: sub.id });
     flushNow();
     return publicSubmission(sub);
+  });
+
+  /** Permanent removal of a report that has already been reviewed. Goes
+   * through readableSubmission() like every other read, so a RESTRICTED one
+   * needs the admin to be a named reader. A reason is required and kept in
+   * the tombstone — "who deleted evidence, and why" is exactly what an audit
+   * will ask. */
+  route('DELETE', '/api/form-submissions/:id', ADMIN, ({ params, body, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if ((sub.status || 'OPEN') !== 'ACTIONED') throw httpError(409, 'review a report before deleting it');
+    const reason = String((body && body.reason) || '').trim().slice(0, 300);
+    if (!reason) throw httpError(400, 'a reason for deleting is required');
+    db.form_submissions = db.form_submissions.filter((x) => x.id !== sub.id);
+    try { fs.rmSync(formFilesDir(sub.id), { recursive: true, force: true }); } catch (e) { console.warn(`[forms] could not remove files for ${sub.reference}:`, e.message); }
+    const restricted = effectiveVisibility(sub) === 'RESTRICTED';
+    logEvent('form.deleted', `${restricted ? 'RESTRICTED REPORT' : sub.definition_name.toUpperCase()} ${sub.reference} DELETED BY ${user.display_name}${restricted ? '' : ` — ${reason}`}`,
+      { reference: sub.reference, definition_id: sub.definition_id, deleted_by: user.id, ...(restricted ? {} : { reason }) });
+    flushNow();
+    return { ok: true, reference: sub.reference };
   });
 
   return { installDefaults, ensureApplicationForm, activeApplicationForm, validateValues, IMAGE_EXT, canRead, effectiveVisibility };

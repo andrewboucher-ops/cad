@@ -3708,6 +3708,7 @@ require('./routes-finance.js')({
 require('./routes-applicants.js')({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
   forms, pushToRoles, flushNow: () => store.flushNow(),
+  sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html),
 });
 
 // Leave management — see routes-leave.js for the design.

@@ -2255,7 +2255,8 @@ function applicationAnswersHtml(a) {
     return `<span style="white-space:pre-wrap">${esc(v)}</span>`;
   };
   return `
-      <label>Website application — ${esc(new Date(app.submitted_at).toLocaleString('en-GB'))} <span class="dim">(${esc(app.definition_name)} v${app.definition_version})</span></label>
+      <label>Website application${a.reference ? ` ${esc(a.reference)}` : ''} — ${esc(new Date(app.submitted_at).toLocaleString('en-GB'))} <span class="dim">(${esc(app.definition_name)} v${app.definition_version})</span></label>
+      <p class="dim" style="margin:0 0 6px;font-size:12px">${!a.acknowledgement ? '' : a.acknowledgement.sent ? 'Acknowledgement email sent.' : a.acknowledgement.pending ? 'Acknowledgement email sending…' : `Acknowledgement email not sent — ${esc(a.acknowledgement.reason || 'unknown reason')}.`}</p>
       <div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:grid;grid-template-columns:minmax(120px,40%) 1fr;gap:6px 12px;font-size:13px">
         ${app.fields.map((f) => `<div class="dim">${esc(f.label)}</div><div>${val(f)}</div>`).join('')}
       </div>`;
