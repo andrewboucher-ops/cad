@@ -1628,6 +1628,11 @@ function applyAssetExtras(a, body) {
     if (body.condition && !ASSET_CONDITIONS.includes(body.condition)) throw httpError(400, `condition must be one of ${ASSET_CONDITIONS.join(', ')}`);
     a.condition = body.condition || null;
   }
+  if ('vehicle_id' in body) {
+    const v = body.vehicle_id ? db.vehicles.find((x) => x.id === Number(body.vehicle_id)) : null;
+    if (body.vehicle_id && !v) throw httpError(400, 'vehicle not found');
+    a.vehicle_id = v ? v.id : null;
+  }
   if ('location_id' in body) {
     const loc = body.location_id ? (db.stock_locations || []).find((l) => l.id === Number(body.location_id)) : null;
     if (body.location_id && !loc) throw httpError(400, 'store location not found');
@@ -3036,6 +3041,10 @@ route('PATCH', '/api/sites/:id', ADMIN, ({ params, body }) => {
     site.response_sla_minutes = body.response_sla_minutes === null ? null : Number(body.response_sla_minutes);
   }
   if ('code' in body) site.code = String(body.code || '').trim();
+  if ('geofence_m' in body) {
+    if (body.geofence_m !== null && body.geofence_m !== '' && (!Number.isFinite(Number(body.geofence_m)) || Number(body.geofence_m) < 0 || Number(body.geofence_m) > 5000)) throw httpError(400, 'geofence must be 0–5000 metres (0 = off)');
+    site.geofence_m = body.geofence_m === null || body.geofence_m === '' ? null : Number(body.geofence_m);
+  }
   if ('postcode' in body) site.postcode = String(body.postcode || '').trim();
   if ('timezone' in body) site.timezone = String(body.timezone || '').trim() || 'Europe/London';
   if ('risk_level' in body) {
@@ -3736,12 +3745,14 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   logEvent('shift_assignment.updated', `${p ? p.name : 'PERSON'} ON SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
 });
-route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, user }) => {
+route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user }) => {
   const a = findAssignment(params.id);
   assertAssignmentAccess(a, user);
   const s = findShift(a.shift_id);
   if (a.clocked_in_at) return publicShift(s);
   if (a.status === 'REMOVED') throw httpError(409, 'no longer on this shift');
+  // On-site check (routes-attendance.js): throws if they are not there.
+  attendance.checkClockIn(a, s, body || {}, user);
   a.clocked_in_at = new Date().toISOString(); a.updated_at = a.clocked_in_at;
   if (s.status === 'PUBLISHED') { s.status = 'IN_PROGRESS'; }
   const p = db.personnel.find((x) => x.id === a.personnel_id);
@@ -3757,6 +3768,7 @@ route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, user }) =>
   if (!a.clocked_in_at) throw httpError(409, 'not clocked in');
   if (a.clocked_out_at) throw httpError(409, 'already clocked out');
   a.clocked_out_at = new Date().toISOString(); a.updated_at = a.clocked_out_at;
+  attendance.closeBreaks(a, a.clocked_out_at);
   if (!a.attendance) a.attendance = 'ATTENDED';
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   const pub = publicShift(s);
@@ -3838,6 +3850,12 @@ route('GET', '/api/rota/ical/:token.ics', null, ({ params }) => {
 });
 require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow: () => store.flushNow() });
 
+// Breaks, hours, geofenced clock-in, reminders — see routes-attendance.js.
+const attendance = require('./routes-attendance.js')({
+  route, httpError, ALL, CONTROL, db, logEvent, broadcast, pushToRoles, sms, notifyLog: writeNotifyLog, publicShift,
+  findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+});
+
 
 // Stock and asset management — see routes-inventory.js.
 const inventory = require('./routes-inventory.js')({
@@ -3857,6 +3875,7 @@ const forms = require('./routes-forms.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
   applyVehicleReport, reapplyVehicleReport, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html), publicBaseUrl: PUBLIC_BASE_URL,
+  vehicleKit: (id) => inventory.vehicleKit(id), assetEvent: (e) => db.asset_events.push({ id: nextId('asset_events'), ...e }),
 });
 
 // Client portal — see routes-client.js for the trust-boundary invariants.
@@ -3900,7 +3919,7 @@ require('./routes-fleet-stock.js')({
 });
 
 // Fleet dashboard — see routes-fleet-dashboard.js.
-require('./routes-fleet-dashboard.js')({ route, CONTROL, db, forms, visibleToUser, publicVehicle });
+require('./routes-fleet-dashboard.js')({ route, CONTROL, db, forms, visibleToUser, publicVehicle, vehicleKit: (id) => inventory.vehicleKit(id) });
 
 /* Client reporting — proving service to whoever pays for the contract:
  * patrol visit counts, alarm response time against the site's own SLA (if
@@ -4299,4 +4318,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, attendance, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };

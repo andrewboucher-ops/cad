@@ -278,6 +278,7 @@ module.exports = function registerFormRoutes({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow = () => {},
   applyVehicleReport = () => {}, reapplyVehicleReport = () => {}, sendEmail = null, publicBaseUrl = '',
+  vehicleKit = null, assetEvent = () => {},
 }) {
   for (const t of ['form_definitions', 'form_submissions', 'form_grants']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -333,6 +334,7 @@ module.exports = function registerFormRoutes({
       status: sub.status || 'OPEN', outcome: sub.outcome || null, feedback: sub.feedback || null,
       actioned_by: sub.actioned_by || null, actioned_at: sub.actioned_at || null,
       amendments: sub.amendments || [],
+      kit_check: sub.kit_check || null,
     };
   }
 
@@ -706,6 +708,19 @@ module.exports = function registerFormRoutes({
     if (!d.subject_types.includes(subjectType)) throw httpError(400, `"${d.name}" cannot be filed against a ${subjectType || 'missing subject'}`);
     const subjectLabel = resolveSubject(subjectType, body.subject_id, user);
     const { values, files } = validateValues(d.fields, body.values);
+    // A vehicle report can also say, item by item, whether the kit kept on
+    // that vehicle is there (First aid bag 01: present / missing). Only the
+    // vehicle's own kit, checked on the server — not whatever was sent.
+    let kitCheck = null;
+    if (subjectType === 'VEHICLE' && Array.isArray(body.kit_check) && vehicleKit) {
+      const kit = vehicleKit(Number(body.subject_id));
+      kitCheck = body.kit_check.map((k) => {
+        const a = kit.assets.find((x) => x.id === Number(k.asset_id));
+        if (!a) throw httpError(400, `asset #${k.asset_id} is not kept on this vehicle`);
+        if (typeof k.present !== 'boolean') throw httpError(400, `${a.tag || a.description}: say whether it is present`);
+        return { asset_id: a.id, tag: a.tag || null, description: a.description, present: k.present, note: String(k.note || '').slice(0, 300) };
+      });
+    }
 
     const id = nextId('form_submissions');
     const now = new Date();
@@ -718,6 +733,7 @@ module.exports = function registerFormRoutes({
       submitted_by_user_id: user.id, submitted_by_name: user.display_name, submitted_by_personnel_id: user.personnel_id || null,
       submitted_at: now.toISOString(),
       status: 'OPEN', outcome: null, feedback: null, actioned_by: null, actioned_at: null,
+      kit_check: kitCheck,
     };
     if (files.length) {
       const dir = formFilesDir(id);
@@ -743,6 +759,11 @@ module.exports = function registerFormRoutes({
       try { applyVehicleReport(d.effect, sub.subject_id, values, user, sub); sub.effect_applied = d.effect; }
       catch (e) { console.warn(`[forms] ${d.effect} effect for ${sub.reference} failed:`, e.message); sub.effect_error = e.message; }
     }
+    for (const k of kitCheck || []) {
+      if (!k.present) assetEvent({ asset_id: k.asset_id, type: 'MISSING_ON_CHECK', at: sub.submitted_at, by: user.display_name, note: k.note, detail: `not found on ${subjectLabel} during ${sub.reference}` });
+    }
+    const missing = (kitCheck || []).filter((k) => !k.present);
+    if (missing.length) logEvent('vehicle.kit_missing', `${subjectLabel}: ${missing.map((k) => k.tag || k.description).join(', ')} NOT PRESENT (${sub.reference})`, { submission_id: sub.id });
     notifyByEmail(d, sub);
     // A filed report is evidence; don't wait for the next write-through.
     flushNow();

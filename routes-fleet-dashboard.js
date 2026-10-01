@@ -24,10 +24,11 @@ const COMPLIANCE_FIELDS = [['mot_due_at', 'MOT'], ['service_due_at', 'Service'],
 // else this default). Set by filing the "Vehicle deep clean" form.
 const DEEP_CLEAN_DAYS = Number(process.env.VEHICLE_DEEP_CLEAN_DAYS || 30);
 
-module.exports = function registerFleetDashboardRoutes({ route, CONTROL, db, forms, visibleToUser, publicVehicle }) {
+module.exports = function registerFleetDashboardRoutes({ route, CONTROL, db, forms, visibleToUser, publicVehicle, vehicleKit = null }) {
   /** Unticked check boxes and any written defects, from an inspection. */
   function issuesFrom(sub) {
     const out = [];
+    for (const k of sub.kit_check || []) if (!k.present) out.push(`${k.tag || k.description}: missing${k.note ? ` — ${k.note}` : ''}`);
     for (const f of sub.fields) {
       const v = sub.values[f.id];
       if (f.type === 'checkbox' && v === false) out.push(`${f.label}: not ticked`);
@@ -79,6 +80,7 @@ module.exports = function registerFleetDashboardRoutes({ route, CONTROL, db, for
         recent_reports: mine.slice(0, 5).map((s) => ({ id: s.id, reference: s.reference, definition_name: s.definition_name, submitted_at: s.submitted_at, status: s.status || 'OPEN' })),
         last_fuel: fuel ? { recorded_at: fuel.recorded_at, litres: fuel.litres, odometer: fuel.odometer, cost: fuel.cost } : null,
         last_maintenance: maint ? { performed_at: maint.performed_at, description: maint.description, next_due_at: maint.next_due_at } : null,
+        kit: vehicleKit ? (() => { const k = vehicleKit(v.id); return { assets: k.assets.map((a) => ({ id: a.id, tag: a.tag, description: a.description, status: a.status })), locations: k.locations.map((l) => ({ id: l.id, name: l.name, asset_id: l.asset_id, items: l.contents.length, expired: l.contents.filter((c) => c.expired).length, expiring: l.contents.filter((c) => c.expiring_soon).length })), expired: k.expired, expiring: k.expiring }; })() : null,
         today: allocShift ? { shift_id: allocShift.id, starts_at: allocShift.starts_at, ends_at: allocShift.ends_at, driver: driver ? driver.name : null } : null,
       };
     });

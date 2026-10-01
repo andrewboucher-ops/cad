@@ -43,7 +43,7 @@
  */
 'use strict';
 
-const LOCATION_KINDS = ['STORE', 'VEHICLE', 'SITE', 'OTHER'];
+const LOCATION_KINDS = ['STORE', 'CUPBOARD', 'BAG', 'VEHICLE', 'SITE', 'OTHER'];
 const ADJUST_REASONS = { DAMAGED: 'Damaged', EXPIRED: 'Expired', LOST: 'Lost', AUDIT_CORRECTION: 'Count correction', FOUND: 'Found' };
 const DUE_SOON_DAYS = 30;
 
@@ -165,14 +165,15 @@ module.exports = function registerInventoryRoutes({
    * Stock
    * ================================================================== */
 
-  route('GET', '/api/stock/locations', ALL, () => { mainStore(); return db.stock_locations; });
+  route('GET', '/api/stock/locations', ALL, () => { mainStore(); return db.stock_locations.map(describeLocation); });
   route('POST', '/api/stock/locations', ADMIN, ({ body, user }) => {
     const name = String(body.name || '').trim().slice(0, 80);
     if (!name) throw httpError(400, 'name required');
     if (db.stock_locations.some((l) => l.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'a location with that name already exists');
     const kind = LOCATION_KINDS.includes(body.kind) ? body.kind : 'STORE';
     mainStore();
-    const l = { id: nextId('stock_locations'), name, kind, vehicle_id: body.vehicle_id ? Number(body.vehicle_id) : null, site_id: body.site_id ? Number(body.site_id) : null, active: true, notes: String(body.notes || '').slice(0, 300), created_at: new Date().toISOString() };
+    const l = { id: nextId('stock_locations'), name, kind, vehicle_id: null, site_id: null, asset_id: null, active: true, notes: String(body.notes || '').slice(0, 300), created_at: new Date().toISOString() };
+    linkLocation(l, body);
     db.stock_locations.push(l);
     logEvent('stock.location_created', `STORE LOCATION "${name}" ADDED BY ${user.username}`, { location_id: l.id });
     return { __status: 201, __body: l };
@@ -181,6 +182,7 @@ module.exports = function registerInventoryRoutes({
     const l = findLocation(params.id);
     if ('name' in body) { const n = String(body.name || '').trim().slice(0, 80); if (!n) throw httpError(400, 'name required'); l.name = n; }
     if ('kind' in body && LOCATION_KINDS.includes(body.kind)) l.kind = body.kind;
+    linkLocation(l, body);
     if ('notes' in body) l.notes = String(body.notes || '').slice(0, 300);
     if ('active' in body) {
       if (!body.active && l.is_main) throw httpError(400, 'the main store cannot be closed');
@@ -188,6 +190,75 @@ module.exports = function registerInventoryRoutes({
       l.active = Boolean(body.active);
     }
     return l;
+  });
+
+  /** Where a location is. A bag or kit box can BE an asset (First aid bag
+   * 01, tag FAB-01) — then it is wherever that asset is, e.g. in a vehicle.
+   * Otherwise it can sit in a vehicle or at a site directly. */
+  function linkLocation(l, body) {
+    if ('asset_id' in body) {
+      const a = body.asset_id ? db.assets.find((x) => x.id === Number(body.asset_id) && !x.is_stock_tracked) : null;
+      if (body.asset_id && !a) throw httpError(400, 'asset not found');
+      if (a && db.stock_locations.some((x) => x.id !== l.id && x.asset_id === a.id)) throw httpError(409, `${a.tag || a.description} already holds another stock location`);
+      l.asset_id = a ? a.id : null;
+    }
+    if ('vehicle_id' in body) {
+      const v = body.vehicle_id ? db.vehicles.find((x) => x.id === Number(body.vehicle_id)) : null;
+      if (body.vehicle_id && !v) throw httpError(400, 'vehicle not found');
+      l.vehicle_id = v ? v.id : null;
+    }
+    if ('site_id' in body) {
+      const site = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null;
+      if (body.site_id && !site) throw httpError(400, 'site not found');
+      l.site_id = site ? site.id : null;
+    }
+  }
+  /** The vehicle a location is in: through its asset if it has one. */
+  const locationVehicle = (l) => {
+    if (l.asset_id) { const a = db.assets.find((x) => x.id === l.asset_id); return a ? a.vehicle_id || null : null; }
+    return l.vehicle_id || null;
+  };
+  function describeLocation(l) {
+    const a = l.asset_id ? db.assets.find((x) => x.id === l.asset_id) : null;
+    const vid = locationVehicle(l), v = vid ? db.vehicles.find((x) => x.id === vid) : null;
+    const site = l.site_id ? db.sites.find((x) => x.id === l.site_id) : null;
+    return { ...l, asset_label: a ? `${a.tag ? a.tag + ' — ' : ''}${a.description}` : null, in_vehicle_id: vid, in_vehicle: v ? v.registration : null, site_name: site ? site.name : null };
+  }
+
+  /** What is on a vehicle: assets kept in it, and the stock in any bag,
+   * box or locker that is on it — with expiry dates. Every staff role may
+   * read it: it is what the vehicle check asks about. */
+  function vehicleKit(vehicleId) {
+    const today = new Date().toISOString().slice(0, 10), soon = new Date(Date.now() + DUE_SOON_DAYS * 86400000).toISOString().slice(0, 10);
+    const assets = db.assets.filter((a) => !a.is_stock_tracked && a.vehicle_id === vehicleId && a.status !== 'RETIRED');
+    const locations = db.stock_locations.filter((l) => l.active !== false && locationVehicle(l) === vehicleId).map((l) => {
+      const contents = [];
+      for (const item of db.assets.filter((x) => x.is_stock_tracked)) {
+        const bs = batches(item.id).filter((b) => b.location_id === l.id);
+        const qtyHere = bs.reduce((n, b) => n + b.qty, 0);
+        if (!qtyHere) continue;
+        const next = bs.map((b) => b.expiry_date).filter(Boolean).sort()[0] || null;
+        contents.push({ item_id: item.id, item: label(item), unit: item.unit || '', qty: qtyHere, next_expiry: next, expired: Boolean(next && next < today), expiring_soon: Boolean(next && next >= today && next <= soon),
+          batches: bs.filter((b) => b.batch_no || b.expiry_date).map((b) => ({ batch_no: b.batch_no, expiry_date: b.expiry_date, qty: b.qty })) });
+      }
+      return { ...describeLocation(l), contents };
+    });
+    const due = (iso) => (iso ? (iso.slice(0, 10) < today ? 'OVERDUE' : iso.slice(0, 10) <= soon ? 'DUE_SOON' : 'OK') : 'NONE');
+    return {
+      assets: assets.map((a) => {
+        const loc = locations.find((l) => l.asset_id === a.id);
+        return { id: a.id, tag: a.tag, description: a.description, status: a.status, condition: a.condition || null,
+          inspection_state: due(a.next_check_due_at), pat_state: a.pat_required ? (a.pat_next_due_at ? due(a.pat_next_due_at) : 'OVERDUE') : 'NONE',
+          holds_location_id: loc ? loc.id : null };
+      }),
+      locations,
+      expired: locations.reduce((n, l) => n + l.contents.filter((c) => c.expired).length, 0),
+      expiring: locations.reduce((n, l) => n + l.contents.filter((c) => c.expiring_soon).length, 0),
+    };
+  }
+  route('GET', '/api/vehicles/:id/kit', ALL, ({ params }) => {
+    const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
+    return { vehicle: { id: v.id, registration: v.registration }, ...vehicleKit(v.id) };
   });
 
   /** Everything the stock page needs in one read. */
@@ -221,7 +292,7 @@ module.exports = function registerInventoryRoutes({
       };
     }).sort((x, y) => x.description.localeCompare(y.description) || String(x.size || '').localeCompare(String(y.size || '')));
     return {
-      locations: db.stock_locations,
+      locations: db.stock_locations.map(describeLocation),
       items,
       expiring_batches: expiringBatches.sort((x, y) => x.expiry_date.localeCompare(y.expiry_date)),
       summary: {
@@ -396,6 +467,8 @@ module.exports = function registerInventoryRoutes({
       const rental = a.rental_id ? (db.rentals || []).find((r) => r.id === a.rental_id) : null;
       return {
         ...publicAsset(a), location_name: loc ? loc.name : null,
+        vehicle_registration: a.vehicle_id ? ((db.vehicles.find((v) => v.id === a.vehicle_id) || {}).registration || null) : null,
+        holds_location: (db.stock_locations.find((l) => l.asset_id === a.id) || {}).name || null,
         checkout: co ? { id: co.id, personnel_id: co.personnel_id, personnel_name: holder ? holder.name : null, checked_out_at: co.checked_out_at, expected_return_at: co.expected_return_at || null, overdue: Boolean(co.expected_return_at && Date.parse(co.expected_return_at) < Date.now()) } : null,
         rental: rental ? { id: rental.id, reference: rental.reference, hirer_name: rental.hirer_name, expected_return_at: rental.expected_return_at } : null,
         check_state: a.check_interval_days || a.next_check_due_at ? dueState(a.next_check_due_at) : 'NONE',
@@ -495,5 +568,5 @@ module.exports = function registerInventoryRoutes({
     if (a.check_interval_days && !a.next_check_due_at) a.next_check_due_at = addDays(a.check_interval_days);
   }
 
-  return { mainStore, firstDueDates };
+  return { mainStore, firstDueDates, vehicleKit };
 };
