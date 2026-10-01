@@ -58,6 +58,8 @@ const SECTIONS = [
   { key: 'assets', label: 'Assets', group: 'Stock & assets', icon: 'asset', desktop: '/assets.html', mobile: '/assets.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'stock', label: 'Stock', group: 'Stock & assets', icon: 'stock', desktop: '/stock.html', mobile: '/stock.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   // Finance
+  { key: 'contracts', label: 'Quotes & contracts', group: 'Finance', icon: 'contract', desktop: '/contracts.html', mobile: '/contracts.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
+  { key: 'invoices', label: 'Invoices', group: 'Finance', icon: 'invoice', desktop: '/invoices.html', mobile: '/invoices.html', allowed: ['SYSTEM_ADMIN', 'FINANCE'], default: ['SYSTEM_ADMIN', 'FINANCE'] },
   { key: 'finance', label: 'Finance', group: 'Finance', icon: 'finance', desktop: '/finance.html', mobile: '/finance.html', allowed: [...CONTROL, 'FINANCE'], default: [...CONTROL, 'FINANCE'] },
   // System
   { key: 'admin', label: 'Admin', group: 'System', icon: 'admin', desktop: '/admin.html', mobile: '/admin.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'], locked: ['SYSTEM_ADMIN'] },

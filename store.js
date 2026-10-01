@@ -59,6 +59,8 @@ const TABLES = [
   'stock_locations', 'asset_events', 'stocktakes',
   // Asset hire to clients (routes-rentals.js) — signed agreements, keep.
   'rentals',
+  // Quotes/contracts (signed by clients) and the invoices made from them.
+  'agreements', 'invoices',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

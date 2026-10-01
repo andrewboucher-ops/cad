@@ -90,6 +90,11 @@
   </div>
 
   <div class="section-card">
+    <header>Quotes &amp; contracts</header>
+    <div class="body" id="agreementsBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card">
     <header>Equipment on hire</header>
     <div class="body" id="rentalsBody"><p class="empty-note">Loading…</p></div>
   </div>
@@ -114,6 +119,7 @@
 </div>
 
 <script src="/app.js"></script>
+<script src="/forms-ui.js"></script>
 <script>
 const { el, esc, api, requireAuth, getSession, bus } = CCCS;
 if (!requireAuth(['CLIENT', 'SYSTEM_ADMIN'])) throw new Error('auth');
@@ -216,6 +222,87 @@ async function paintRentals() {
     </div>`).join('') : '<p class="empty-note">Nothing on hire.</p>';
 }
 
+/* Quotes (accept or decline) and contracts (read and sign) for this client
+ * and all its sites. The server only lists what was sent to this client and
+ * only lets the client's own login answer — an admin viewing the portal can
+ * read but not accept or sign on the client's behalf. */
+const AG_STATUS = { SENT: ['Waiting for you', 'open'], ACCEPTED: ['Accepted', 'completed'], DECLINED: ['Declined', 'closed'], EXPIRED: ['Expired', 'closed'], WITHDRAWN: ['Withdrawn', 'closed'], SIGNED: ['Signed', 'completed'], ENDED: ['Ended', 'closed'] };
+const gbp = (n) => `£${Number(n || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+let agreements = [];
+async function paintAgreements() {
+  agreements = await api('GET', withAs('/api/client/agreements')).catch(() => []);
+  const t = encodeURIComponent(getSession().token);
+  el('#agreementsBody').innerHTML = agreements.length ? agreements.map((a) => {
+    const [sl, sc] = AG_STATUS[a.status] || [a.status, 'open'];
+    const quote = a.kind === 'QUOTE', waiting = a.status === 'SENT';
+    return `<div style="border-bottom:1px solid var(--line-soft);padding:10px 0">
+      <div class="list-row" style="border:none;padding:0">
+        <span class="t mono">${esc(a.reference)}</span>
+        <span style="flex:1">${quote ? 'Quotation' : 'Contract'}: ${esc(a.title)} <span class="dim" style="font-size:12px">· ${esc(a.site_name || '')} · about ${gbp(a.estimate.per_period)} a ${a.invoice_period === 'WEEKLY' ? 'week' : 'month'} + VAT${quote && waiting && a.valid_until ? ` · valid until ${esc(fmtDate(a.valid_until))}` : ''}${!quote && a.start_date ? ` · from ${esc(fmtDate(a.start_date))}` : ''}</span></span>
+        <span class="pill ${sc}">${esc(sl)}</span>
+      </div>
+      <div style="font-size:12.5px;margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <a target="_blank" href="${withAs(`/api/client/agreements/${a.id}/pdf?token=${t}`)}">${quote ? 'Quotation' : 'Contract'} (PDF)</a>
+        ${waiting && !isAdminView ? (quote ? `<button class="btn primary" data-ag-accept="${a.id}">Accept</button><button class="btn" data-ag-decline="${a.id}">Decline</button>` : `<button class="btn primary" data-ag-sign="${a.id}">Read &amp; sign</button>`) : ''}
+        ${waiting && isAdminView ? '<span class="dim">waiting for the client</span>' : ''}
+      </div></div>`;
+  }).join('') : '<p class="empty-note">No quotes or contracts.</p>';
+  document.querySelectorAll('[data-ag-accept]').forEach((b) => (b.onclick = () => agAccept(agreements.find((a) => a.id === Number(b.dataset.agAccept)))));
+  document.querySelectorAll('[data-ag-decline]').forEach((b) => (b.onclick = () => agDecline(agreements.find((a) => a.id === Number(b.dataset.agDecline)))));
+  document.querySelectorAll('[data-ag-sign]').forEach((b) => (b.onclick = () => agSign(agreements.find((a) => a.id === Number(b.dataset.agSign)))));
+}
+function agModal(title, html, onMount) {
+  const host = document.createElement('div');
+  host.innerHTML = `<div class="modal-back"><div class="modal" style="width:min(720px,100%)"><h2>${esc(title)}</h2><div class="content" style="padding:16px 20px">${html}</div></div></div>`;
+  document.body.appendChild(host);
+  const done = () => host.remove();
+  host.querySelector('[data-x]').onclick = done;
+  onMount(host.querySelector('.content'), done);
+}
+const agLines = (a) => `<table style="width:100%;font-size:13px;border-collapse:collapse;margin:6px 0">${a.lines.map((l) => `<tr><td style="padding:4px 0">${esc(l.description)}</td><td class="dim" style="text-align:right;white-space:nowrap">${gbp(l.rate)}${l.kind === 'HOURLY' ? ' / hour' : l.kind === 'FIXED_PERIOD' ? ` / ${a.invoice_period === 'WEEKLY' ? 'week' : 'month'}` : ' once'}</td></tr>`).join('')}</table>
+  <p style="font-size:13px">Estimated ${gbp(a.estimate.per_period)} a ${a.invoice_period === 'WEEKLY' ? 'week' : 'month'} plus VAT at ${a.vat_rate}%${a.estimate.one_off ? `; one-off charges ${gbp(a.estimate.one_off)}` : ''}. Hours are charged on the ${a.billing_basis === 'ROSTERED' ? 'hours rostered' : 'hours worked'}. ${a.notes ? esc(a.notes) : ''}</p>`;
+function agAccept(a) {
+  agModal(`Accept quotation ${a.reference}`, `${agLines(a)}
+    <label style="display:block;font-size:12px;margin-top:8px">Your name</label><input id="agName" style="width:100%" value="${esc(me.display_name && me.display_name !== me.username ? me.display_name : '')}">
+    <p class="err" id="agErr"></p><div class="btn-row" style="justify-content:flex-end"><button class="btn" data-x>Cancel</button><button class="btn primary" id="agGo">Accept quotation</button></div>`, (root, done) => {
+    root.querySelector('#agGo').onclick = async () => {
+      try { await api('POST', `/api/client/agreements/${a.id}/accept`, { name: root.querySelector('#agName').value.trim() }); done(); paintAgreements(); }
+      catch (e) { root.querySelector('#agErr').textContent = e.message; }
+    };
+  });
+}
+function agDecline(a) {
+  agModal(`Decline quotation ${a.reference}`, `<label style="display:block;font-size:12px">Reason (optional — it helps us)</label><textarea id="agWhy" rows="3" style="width:100%"></textarea>
+    <p class="err" id="agErr"></p><div class="btn-row" style="justify-content:flex-end"><button class="btn" data-x>Cancel</button><button class="btn danger" id="agGo">Decline</button></div>`, (root, done) => {
+    root.querySelector('#agGo').onclick = async () => {
+      try { await api('POST', `/api/client/agreements/${a.id}/decline`, { name: me.display_name, reason: root.querySelector('#agWhy').value.trim() }); done(); paintAgreements(); }
+      catch (e) { root.querySelector('#agErr').textContent = e.message; }
+    };
+  });
+}
+function agSign(a) {
+  const t = encodeURIComponent(getSession().token);
+  agModal(`Sign contract ${a.reference}`, `${agLines(a)}
+    <p style="font-size:13px">Please <a target="_blank" href="${withAs(`/api/client/agreements/${a.id}/pdf?token=${t}`)}">read the full contract and its terms (PDF)</a> before signing.</p>
+    <div style="max-height:220px;overflow-y:auto;white-space:pre-wrap;font-size:12px;border:1px solid var(--line);border-radius:8px;padding:8px 10px">${esc(a.terms_snapshot || '')}</div>
+    <label style="display:flex;gap:10px;align-items:center;margin:10px 0;font-size:14px;text-transform:none;letter-spacing:0;font-weight:500;color:var(--ink)"><input type="checkbox" id="agAgree" style="width:20px;height:20px"> I have read the contract and agree to it on behalf of ${esc(client ? client.name : 'the client')}</label>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><label style="display:block;font-size:12px">Full name</label><input id="agName" style="width:100%" value="${esc(me.display_name && me.display_name !== me.username ? me.display_name : '')}"></div>
+      <div><label style="display:block;font-size:12px">Position</label><input id="agPos" style="width:100%" placeholder="e.g. Facilities manager"></div></div>
+    <label style="display:block;font-size:12px;margin-top:8px">Signature</label><div id="agPad"></div>
+    <p class="err" id="agErr"></p><div class="btn-row" style="justify-content:flex-end"><button class="btn" data-x>Cancel</button><button class="btn primary" id="agGo">Sign contract</button></div>`, (root, done) => {
+    const pad = CCCSForms.signaturePad(root.querySelector('#agPad'));
+    root.querySelector('#agGo').onclick = async () => {
+      const err = root.querySelector('#agErr'); err.textContent = '';
+      if (!root.querySelector('#agAgree').checked) { err.textContent = 'Tick the box to agree to the contract.'; return; }
+      if (!pad.inked) { err.textContent = 'Please sign in the box.'; return; }
+      try {
+        await api('POST', `/api/client/agreements/${a.id}/sign`, { agreed: true, signed_name: root.querySelector('#agName').value.trim(), position: root.querySelector('#agPos').value.trim(), signature: { mimetype: 'image/jpeg', data: pad.jpeg() } });
+        done(); paintAgreements();
+      } catch (e) { err.textContent = e.message; }
+    };
+  });
+}
+
 async function loadSite() {
   const site = sites.find((s) => s.id === currentSiteId);
   el('#siteAddress').textContent = site ? site.address || '' : '';
@@ -244,6 +331,7 @@ async function loadSite() {
   }
   client = await api('GET', withAs('/api/client/me'));
   paintRentals();
+  paintAgreements();
   if (isAdminView) el('#adminAsName').textContent = client.name;
   sites = client.sites;
   el('#clientName').textContent = client.name;

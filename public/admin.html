@@ -1127,6 +1127,8 @@ function siteForm(s) {
       <input id="nsKeyholder" autocomplete="off" value="${isNew ? '' : esc(s.keyholder || '')}">
       <label>Contact email (resolution reports are sent here)</label>
       <input id="nsEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(s.contact_email || '')}">
+      ${isNew ? '' : `<label>Quotes &amp; contracts</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn" style="padding:4px 10px;font-size:12px" href="/contracts.html?site_id=${s.id}&new=QUOTE">New quote</a><a class="btn" style="padding:4px 10px;font-size:12px" href="/contracts.html?site_id=${s.id}&new=CONTRACT">New contract</a><a class="btn" style="padding:4px 10px;font-size:12px" href="/contracts.html?site_id=${s.id}">This site's quotes &amp; contracts</a></div>`}
       <label>Clock-in area (geofence)</label>
       <p class="dim" style="margin:-4px 0 0;font-size:12.5px">Staff can only clock in within this distance of the site, and are clocked out if they leave it for 5 minutes. With no location set, clock-in isn't checked.</p>
       <div style="display:grid;grid-template-columns:1fr 1fr 110px;gap:8px">

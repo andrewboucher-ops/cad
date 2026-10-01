@@ -95,6 +95,7 @@ const db = {
   leave_requests: [],
   ui_settings: [],
   stock_locations: [], asset_events: [], stocktakes: [], rentals: [],
+  agreements: [], invoices: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -3866,6 +3867,18 @@ const inventory = require('./routes-inventory.js')({
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
 require('./routes-rentals.js')({ route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, UPLOADS_DIR, publicAsset, flushNow: () => store.flushNow() });
+
+// Quotes and contracts on sites, signed in the client portal — see
+// routes-agreements.js. Invoices built from signed contracts and hours
+// worked, sent to Xero — see routes-invoices.js and xero.js.
+const agreements = require('./routes-agreements.js')({
+  route, httpError, ADMIN, CLIENT, db, nextId, logEvent, pushToRoles, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html),
+  UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+});
+const xero = require('./xero.js')({ db, flushNow: () => store.flushNow(), redirectUri: `${PUBLIC_BASE_URL}/api/xero/callback` });
+require('./routes-invoices.js')({
+  route, httpError, ADMIN, FINANCE, db, nextId, logEvent, attendance, agreements, xero, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+});
 
 // Which roles see which section of the menus — see ui-sections.js.
 const sections = require('./ui-sections.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });

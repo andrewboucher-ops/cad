@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — invoices</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .xbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px; }
+  .xbar .grow { flex: 1; min-width: 200px; }
+  .xbar .btn { padding: 5px 11px; font-size: 12.5px; }
+  .banner { padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; font-size: 13.5px; }
+  .banner.ok { background: rgba(34,197,94,.14); } .banner.bad { background: rgba(239,68,68,.14); }
+  .checks { background: rgba(234,179,8,.14); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin: 8px 0; }
+  .checks ul { margin: 4px 0 0 18px; padding: 0; }
+  .lines input { width: 100%; font-size: 13px; padding: 5px 7px; }
+  .tot td { font-weight: 700; }
+  .shifts td { font-size: 12px; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>Invoices</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary" id="bGen">Make invoices</button>
+  <a class="btn admin-only" href="/contracts.html">Quotes &amp; contracts</a>
+  <button class="btn" id="bExport">Export CSV</button>
+</div>
+<div class="k-body">
+  <div id="banner"></div>
+  <div class="xbar" id="xbar">Checking Xero…</div>
+  <div class="tiles" id="tiles"></div>
+  <div class="bar"><span id="chips"></span><input id="q" placeholder="Search reference, client or site"></div>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['SYSTEM_ADMIN', 'FINANCE'])) throw new Error('auth');
+const { modal, close, foot, wire, v, money, date, when } = KIT;
+const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
+if (!isAdmin) els('.admin-only').forEach((x) => x.remove());
+const STATUS = { DRAFT: ['Draft — check it', 'warn'], APPROVED: ['Approved', 'info'], IN_XERO: ['In Xero', 'ok'], PAID: ['Paid', 'ok'], VOID: ['Void', 'off'] };
+const params = new URLSearchParams(location.search);
+let invoices = [], xs = null, filter = 'open';
+
+if (params.get('xero')) {
+  const m = params.get('xero');
+  el('#banner').innerHTML = `<div class="banner ${m === 'connected' ? 'ok' : 'bad'}">${m === 'connected' ? 'Connected to Xero.' : esc(m)}</div>`;
+  history.replaceState(null, '', location.pathname);
+}
+
+async function load() {
+  try { [invoices, xs] = await Promise.all([api('GET', '/api/invoices'), api('GET', '/api/xero/status')]); }
+  catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  paintXero(); paint();
+}
+
+function paintXero() {
+  let html;
+  if (!xs.configured) {
+    html = `<span class="grow"><strong>Xero isn't set up on this server yet.</strong> <span class="dim">Invoices can still be made and approved here.</span></span>${isAdmin ? '<button class="btn" id="xHow">How to set it up</button>' : ''}`;
+  } else if (!xs.connected) {
+    html = `<span class="grow"><strong>Not connected to Xero.</strong>${xs.last_error ? ` <span class="err">${esc(xs.last_error)}</span>` : ''}</span>${isAdmin ? '<button class="btn primary" id="xConnect">Connect to Xero</button>' : '<span class="dim">An admin needs to connect it.</span>'}`;
+  } else {
+    html = `<span class="grow">Xero: <strong>${esc(xs.tenant_name)}</strong> <span class="dim">— connected by ${esc(xs.connected_by || '—')} ${esc(date(xs.connected_at))}. Invoices go in as ${xs.settings.invoice_status === 'AUTHORISED' ? '<strong>approved</strong>' : '<strong>drafts</strong>'}, account ${esc(xs.settings.account_code)}.</span>${xs.last_error ? ` <span class="err">Last error: ${esc(xs.last_error)}</span>` : ''}</span>
+      ${isAdmin ? '<button class="btn" id="xSettings">Settings</button><button class="btn" id="xOff">Disconnect</button>' : ''}`;
+  }
+  el('#xbar').innerHTML = html;
+  const b = (id, fn) => { const x = el(id); if (x) x.onclick = fn; };
+  b('#xConnect', async () => { try { const r = await api('GET', '/api/xero/connect'); location.href = r.url; } catch (e) { alert(e.message); } });
+  b('#xOff', async () => { if (!confirm('Disconnect from Xero? Invoices already sent stay in Xero.')) return; xs = await api('POST', '/api/xero/disconnect'); paintXero(); });
+  b('#xHow', () => modal('Setting up Xero', `<ol style="line-height:1.6;font-size:13.5px;padding-left:18px;margin-top:0">
+      <li>Sign in at <strong>developer.xero.com</strong> → <em>My Apps</em> → <em>New app</em>. Choose <strong>Web app</strong>.</li>
+      <li>Redirect URI: <code>${esc(xs.redirect_uri)}</code></li>
+      <li>Copy the <strong>Client id</strong> and generate a <strong>Client secret</strong>.</li>
+      <li>On the server, put them in <code>cccs.env</code> as <code>XERO_CLIENT_ID=…</code> and <code>XERO_CLIENT_SECRET=…</code> (edit the file with nano — don't paste secrets into chat or the shell history), then restart CCCS.</li>
+      <li>Come back here and press <strong>Connect to Xero</strong>, sign in to Xero and pick your organisation.</li></ol>
+      <div class="btn-row" style="justify-content:flex-end"><button class="btn" onclick="KIT.close()">Close</button></div>`));
+  b('#xSettings', () => modal('Xero settings', `<div class="k-form">
+      <div><label>Sales account code</label><input id="sAcc" value="${esc(xs.settings.account_code)}"></div>
+      <div><label>VAT tax type</label><input id="sTax" value="${esc(xs.settings.tax_type)}"></div>
+      <div class="full"><label>Invoices go into Xero as</label><select id="sSt"><option value="DRAFT" ${xs.settings.invoice_status !== 'AUTHORISED' ? 'selected' : ''}>Draft (check and approve in Xero)</option><option value="AUTHORISED" ${xs.settings.invoice_status === 'AUTHORISED' ? 'selected' : ''}>Approved (ready to send from Xero)</option></select></div>
+    </div><p class="dim" style="font-size:12.5px">200 is Xero's standard "Sales" account. OUTPUT2 is 20% VAT on income in UK Xero. Lines with 0% VAT go in as "No VAT".</p>${foot('Save')}`, (root) => wire(root, async () => {
+    xs = await api('PUT', '/api/xero/settings', { account_code: v(root, '#sAcc'), tax_type: v(root, '#sTax'), invoice_status: v(root, '#sSt') }); close(); paintXero();
+  })));
+}
+
+function paint() {
+  const t = (n, l, cls, f) => `<button class="tile ${cls}" data-f="${f}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
+  const sum = (f) => money(invoices.filter(f).reduce((n, i) => n + i.total, 0));
+  const drafts = invoices.filter((i) => i.status === 'DRAFT');
+  el('#tiles').innerHTML = [
+    t(drafts.length, 'Drafts to check', drafts.length ? 'warn' : '', 'draft'),
+    t(invoices.filter((i) => i.status === 'APPROVED').length, 'Approved, not in Xero', '', 'approved'),
+    t(sum((i) => i.status === 'IN_XERO'), 'In Xero, unpaid', '', 'xero'),
+    t(sum((i) => i.status === 'PAID'), 'Paid', 'good', 'paid'),
+  ].join('');
+  const F = {
+    open: ['Open', (i) => ['DRAFT', 'APPROVED', 'IN_XERO'].includes(i.status)], draft: ['Drafts', (i) => i.status === 'DRAFT'], approved: ['Approved', (i) => i.status === 'APPROVED'],
+    xero: ['In Xero', (i) => i.status === 'IN_XERO'], paid: ['Paid', (i) => i.status === 'PAID'], all: ['All', () => true],
+  };
+  el('#chips').innerHTML = Object.entries(F).map(([k, [l]]) => `<button class="chip ${k === filter ? 'on' : ''}" data-f="${k}">${l}</button>`).join(' ');
+  els('[data-f]').forEach((b) => (b.onclick = () => { filter = b.dataset.f; paint(); }));
+  const q = el('#q').value.trim().toLowerCase(), cid = Number(params.get('contract_id')) || null;
+  const list = invoices.filter(F[filter][1]).filter((i) => (!cid || i.contract_id === cid) && (!q || `${i.reference} ${i.client_name} ${i.site_name} ${i.xero && i.xero.number || ''}`.toLowerCase().includes(q)));
+  el('#main').innerHTML = (cid ? `<p class="dim" style="font-size:13px">Showing one contract only. <a href="/invoices.html">Show all</a></p>` : '') + (list.length ? `<div style="overflow-x:auto"><table class="k">
+    <thead><tr><th>Reference</th><th>Client / site</th><th>Period</th><th class="num">Net</th><th class="num">Total</th><th>Due</th><th>Status</th></tr></thead>
+    <tbody>${list.map((i) => {
+      const [sl, sc] = STATUS[i.status] || [i.status, 'off'];
+      return `<tr data-open="${i.id}" style="cursor:pointer"><td class="mono" style="white-space:nowrap"><strong>${esc(i.reference)}</strong>${i.xero && i.xero.number ? `<div class="dim" style="font-size:11px">Xero ${esc(i.xero.number)}</div>` : ''}</td>
+        <td>${esc(i.client_name)}<div class="dim" style="font-size:11.5px">${esc(i.site_name)}</div></td>
+        <td class="dim" style="white-space:nowrap;font-size:12.5px">${esc(date(i.period_from))} – ${esc(date(i.period_to))}</td>
+        <td class="num">${money(i.subtotal)}</td><td class="num"><strong>${money(i.total)}</strong></td>
+        <td class="dim" style="white-space:nowrap">${esc(date(i.due_date))}</td>
+        <td><span class="pill ${sc}">${sl}</span>${i.checks && i.checks.length && i.status === 'DRAFT' ? ` <span class="pill warn">${i.checks.length} to check</span>` : ''}</td></tr>`;
+    }).join('')}</tbody></table></div>`
+    : `<p class="dim">${invoices.length ? 'Nothing matches.' : 'No invoices yet. Press <strong>Make invoices</strong> to bill signed contracts for a period, from the hours worked.'}</p>`);
+  els('[data-open]').forEach((r) => (r.onclick = () => view(Number(r.dataset.open))));
+}
+el('#q').addEventListener('input', paint);
+
+/* ---------- generate ---------- */
+function lastMonth() {
+  const n = new Date(), a = new Date(Date.UTC(n.getFullYear(), n.getMonth() - 1, 1)), b = new Date(Date.UTC(n.getFullYear(), n.getMonth(), 0));
+  return [a.toISOString().slice(0, 10), b.toISOString().slice(0, 10)];
+}
+function lastWeek() {
+  const n = new Date(); const day = (n.getUTCDay() + 6) % 7; // Monday = 0
+  const mon = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate() - day - 7));
+  return [mon.toISOString().slice(0, 10), new Date(mon.getTime() + 6 * 864e5).toISOString().slice(0, 10)];
+}
+el('#bGen').onclick = () => {
+  const [f, t] = lastMonth();
+  modal('Make invoices', `<p style="margin-top:0;font-size:13.5px">One draft invoice per signed contract that ran in the period, from its rates and the hours at its site. Nothing is sent anywhere until you approve it and press <strong>Send to Xero</strong>.</p>
+    <div class="btn-row" style="margin-bottom:10px"><button type="button" class="btn" id="gM">Last month</button><button type="button" class="btn" id="gW">Last week</button></div>
+    <div class="k-form"><div><label>From</label><input id="gF" type="date" value="${f}"></div><div><label>To</label><input id="gT" type="date" value="${t}"></div></div>
+    <div id="gOut"></div>${foot('Make draft invoices')}`, (root) => {
+    root.querySelector('#gM').onclick = () => { const [a, b] = lastMonth(); root.querySelector('#gF').value = a; root.querySelector('#gT').value = b; };
+    root.querySelector('#gW').onclick = () => { const [a, b] = lastWeek(); root.querySelector('#gF').value = a; root.querySelector('#gT').value = b; };
+    wire(root, async () => {
+      const r = await api('POST', '/api/invoices/generate', { from: v(root, '#gF'), to: v(root, '#gT'), contract_id: params.get('contract_id') || undefined });
+      await load();
+      root.querySelector('#gOut').innerHTML = `<p style="font-size:13.5px"><strong>${r.made.length} draft invoice${r.made.length === 1 ? '' : 's'} made.</strong></p>${r.skipped.length ? `<ul class="dim" style="font-size:12.5px">${r.skipped.map((s) => `<li>${esc(s.contract)}: ${esc(s.reason)}</li>`).join('')}</ul>` : ''}`;
+      if (!r.skipped.length && r.made.length) close();
+    });
+  });
+};
+
+/* ---------- one invoice ---------- */
+async function view(id) {
+  const i = await api('GET', `/api/invoices/${id}`);
+  const [sl, sc] = STATUS[i.status] || [i.status, 'off'];
+  const draft = i.status === 'DRAFT';
+  const act = (k, label, cls = '') => `<button class="btn ${cls}" data-a="${k}">${label}</button>`;
+  const acts = [];
+  if (draft) acts.push(act('void', 'Void'), act('save', 'Save changes'), act('approve', 'Approve', 'primary'));
+  if (i.status === 'APPROVED') acts.push(act('void', 'Void'), act('xero', 'Send to Xero', 'primary'));
+  if (i.status === 'IN_XERO' || i.status === 'PAID') acts.push(act('sync', 'Check Xero'));
+  const shiftTable = (l) => l.shifts && l.shifts.length ? `<details><summary class="dim" style="font-size:12px">${l.shifts.length} shift${l.shifts.length === 1 ? '' : 's'}</summary>
+    <table class="k shifts"><tbody>${l.shifts.map((s) => `<tr><td>${esc(date(s.date))}</td><td>${esc(s.person)}</td><td class="num">${s.hours} h</td><td class="dim">${esc(s.source)}</td></tr>`).join('')}</tbody></table></details>` : '';
+  modal(`Invoice ${i.reference}`, `
+    <p style="margin-top:0"><span class="pill ${sc}">${sl}</span> <strong>${esc(i.client_name)}</strong> — ${esc(i.site_name)}</p>
+    <p class="dim" style="font-size:12.5px;margin:0 0 6px">Contract ${esc(i.contract_reference)} · ${esc(date(i.period_from))} to ${esc(date(i.period_to))} · hours ${i.billing_basis === 'ROSTERED' ? 'rostered' : 'worked'} · issued ${esc(date(i.issue_date))}${i.xero && i.xero.number ? ` · Xero ${esc(i.xero.number)} (${esc(i.xero.status)})` : ''}</p>
+    ${i.checks && i.checks.length ? `<div class="checks"><strong>Check before approving:</strong><ul>${i.checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul><span class="dim">Fix the clock times on the rota, then void this draft and make it again — or change the hours below.</span></div>` : ''}
+    <div style="overflow-x:auto"><table class="k lines"><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Amount</th>${draft ? '<th></th>' : ''}</tr></thead>
+    <tbody id="iLines">${i.lines.map((l) => `<tr data-line="${l.id}">
+      <td>${draft ? `<input data-k="description" value="${esc(l.description)}">` : esc(l.description)}${shiftTable(l)}</td>
+      <td class="num" style="width:90px">${draft ? `<input data-k="quantity" type="number" step="0.01" value="${l.quantity}">` : l.quantity}</td>
+      <td class="num" style="width:100px">${draft ? `<input data-k="unit_amount" type="number" step="0.01" value="${l.unit_amount}">` : money(l.unit_amount)}</td>
+      <td class="num">${money(l.amount)}</td>${draft ? '<td><button type="button" class="btn" data-del style="padding:3px 8px">✕</button></td>' : ''}</tr>`).join('')}</tbody>
+    <tbody><tr class="tot"><td colspan="3" class="num">Net</td><td class="num">${money(i.subtotal)}</td>${draft ? '<td></td>' : ''}</tr>
+      <tr><td colspan="3" class="num">VAT ${i.vat_rate}%</td><td class="num">${money(i.vat)}</td>${draft ? '<td></td>' : ''}</tr>
+      <tr class="tot"><td colspan="3" class="num">Total</td><td class="num">${money(i.total)}</td>${draft ? '<td></td>' : ''}</tr></tbody></table></div>
+    ${draft ? '<button type="button" class="btn" id="iAdd" style="margin-top:6px">Add a line</button>' : ''}
+    ${draft ? `<div class="k-form" style="margin-top:10px"><div><label>Due</label><input id="iDue" type="date" value="${esc(i.due_date)}"></div><div class="full"><label>Notes</label><textarea id="iNotes" rows="2">${esc(i.notes || '')}</textarea></div></div>` : (i.notes ? `<p style="font-size:13px">${esc(i.notes)}</p>` : '')}
+    <details style="margin-top:8px"><summary class="dim" style="font-size:12.5px">History</summary><ul class="tl">${i.history.slice().reverse().map((h) => `<li><span class="when">${esc(when(h.at))}</span> — ${esc(h.what)} <span class="dim">(${esc(h.by)})</span></li>`).join('')}</ul></details>
+    <p class="err" id="iErr"></p>
+    <div class="btn-row" style="justify-content:flex-end;flex-wrap:wrap">${acts.join('')}<button class="btn" data-a="close">Close</button></div>`, (root) => {
+    const err = root.querySelector('#iErr');
+    root.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => b.closest('tr').remove()));
+    const add = root.querySelector('#iAdd');
+    if (add) add.onclick = () => {
+      root.querySelector('#iLines').insertAdjacentHTML('beforeend', `<tr data-line=""><td><input data-k="description" placeholder="e.g. Extra cover requested 12 May"></td><td class="num"><input data-k="quantity" type="number" step="0.01" value="1"></td><td class="num"><input data-k="unit_amount" type="number" step="0.01"></td><td></td><td><button type="button" class="btn" data-del style="padding:3px 8px">✕</button></td></tr>`);
+      root.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => b.closest('tr').remove()));
+    };
+    const save = () => api('PATCH', `/api/invoices/${i.id}`, {
+      lines: [...root.querySelectorAll('[data-line]')].map((tr) => ({ id: tr.dataset.line || undefined, description: tr.querySelector('[data-k="description"]').value, quantity: tr.querySelector('[data-k="quantity"]').value, unit_amount: tr.querySelector('[data-k="unit_amount"]').value })),
+      due_date: v(root, '#iDue'), notes: root.querySelector('#iNotes').value,
+    });
+    root.querySelectorAll('[data-a]').forEach((b) => (b.onclick = async () => {
+      err.textContent = ''; b.disabled = true;
+      try {
+        const k = b.dataset.a;
+        if (k === 'close') return close();
+        if (k === 'save') await save();
+        if (k === 'approve') { await save(); if (!confirm('Approve this invoice? It can then be sent to Xero.')) return; await api('POST', `/api/invoices/${i.id}/approve`); }
+        if (k === 'void') { const reason = prompt('Why is it being voided? (optional)'); if (reason === null) return; await api('POST', `/api/invoices/${i.id}/void`, { reason }); }
+        if (k === 'xero') { b.textContent = 'Sending…'; await api('POST', `/api/invoices/${i.id}/xero`); }
+        if (k === 'sync') await api('POST', `/api/invoices/${i.id}/xero-sync`);
+        await load(); view(i.id);
+      } catch (e) { err.textContent = e.message; } finally { b.disabled = false; }
+    }));
+  }, { wide: true });
+}
+
+el('#bExport').onclick = () => KIT.csv(`invoices-${new Date().toISOString().slice(0, 10)}.csv`,
+  ['Reference', 'Xero number', 'Client', 'Site', 'Contract', 'From', 'To', 'Issued', 'Due', 'Net', 'VAT', 'Total', 'Status'],
+  invoices.map((i) => [i.reference, i.xero && i.xero.number, i.client_name, i.site_name, i.contract_reference, i.period_from, i.period_to, i.issue_date, i.due_date, i.subtotal, i.vat, i.total, (STATUS[i.status] || [i.status])[0]]));
+
+load();
+</script>
+</body>
+</html>
