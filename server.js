@@ -209,8 +209,11 @@ const PRIORITIES = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
 // (for user creation/validation) but deliberately NOT part of ALL below: ALL
 // gates most of the API, and a new role landing in it by default would hand
 // an outside party every site, every person, every form submission. CLIENT
-// only ever gets what routes-client.js explicitly grants.
-const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'FIELD_USER', 'MDT_USER', 'CLIENT'];
+// only ever gets what routes-client.js explicitly grants. FINANCE is
+// internal staff but just as deliberately excluded from ALL for the same
+// reason — it exists to read pay/bill/cost figures, not to touch dispatch,
+// and routes-finance.js is the only place that role ever appears.
+const ROLES = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'FIELD_USER', 'MDT_USER', 'CLIENT', 'FINANCE'];
 
 const { createStore } = require('./store.js');
 const store = createStore(db, seq);
@@ -509,20 +512,31 @@ const isControlRole = (role) => ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].inc
 /* Multi-branch — a staff-visibility split, not a tenancy wall. DISPATCHER
  * and SYSTEM_ADMIN always see everything, every branch, no exceptions:
  * company-wide oversight and cross-branch dispatch stay with them. A
- * SUPERVISOR, FIELD_USER or MDT_USER sees only their own branch's
- * personnel/vehicles/assets/sites (and the jobs/visits at those sites) —
- * for reporting and day-to-day work, not as a security boundary the way
- * CLIENT is. A record with no branch_id is shared/unassigned and visible
- * to everyone regardless of role: multi-branch is opt-in per record, so an
- * install that never sets branch_id anywhere sees no behaviour change. */
-const BRANCH_SCOPED_ROLES = ['SUPERVISOR', 'FIELD_USER', 'MDT_USER'];
+ * SUPERVISOR, FIELD_USER, MDT_USER or FINANCE sees only their own branch's
+ * personnel/vehicles/assets/sites (and the jobs/visits/shifts at those
+ * sites) — for reporting and day-to-day work, not as a security boundary
+ * the way CLIENT is. A record with no branch_id is shared/unassigned and
+ * visible to everyone regardless of role: multi-branch is opt-in per
+ * record, so an install that never sets branch_id anywhere sees no
+ * behaviour change. */
+const BRANCH_SCOPED_ROLES = ['SUPERVISOR', 'FIELD_USER', 'MDT_USER', 'FINANCE'];
 const branchFilterActive = (user) => BRANCH_SCOPED_ROLES.includes(user.role) && Boolean(user.branch_id);
 const visibleToUser = (record, user) => !branchFilterActive(user) || record.branch_id == null || record.branch_id === user.branch_id;
-/** Same rule, for a job/visit whose own "branch" is really its site's. No
- * site_id (an ad-hoc emergency job, say) reads as shared, same as a site
- * with no branch_id — there's nothing to scope it to. */
+/** A finer-grained option layered on top of branch scoping: a SUPERVISOR
+ * (or FINANCE user) restricted to an explicit list of sites rather than
+ * their whole branch — set via `users.site_ids`, independent of branch_id
+ * and checked first. An empty array is a real, deliberate "no sites yet",
+ * not the same as leaving site_ids unset (which falls back to the branch
+ * rule below, or to no restriction at all). */
+const siteFilterActive = (user) => BRANCH_SCOPED_ROLES.includes(user.role) && Array.isArray(user.site_ids);
+/** Same rule, for a job/visit/shift whose own "branch" is really its
+ * site's. No site_id (an ad-hoc emergency job, say) reads as shared, same
+ * as a site with no branch_id — there's nothing to scope it to, for either
+ * the site-list or the branch form of this check. */
 function siteVisibleTo(siteId, user) {
-  if (!branchFilterActive(user) || !siteId) return true;
+  if (!siteId) return true;
+  if (siteFilterActive(user)) return user.site_ids.includes(siteId);
+  if (!branchFilterActive(user)) return true;
   const site = db.sites.find((s) => s.id === siteId);
   return !site || site.branch_id == null || site.branch_id === user.branch_id;
 }
@@ -533,6 +547,15 @@ function normalizedBranchId(raw) {
   const id = Number(raw);
   if (!db.branches.some((b) => b.id === id)) throw httpError(400, 'branch_id must reference an existing branch');
   return id;
+}
+/** Normalizes a site_ids write: null/undefined clears it (falls back to
+ * branch-level scoping, or none); an array — even empty — sets it. */
+function normalizedSiteIds(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (!Array.isArray(raw)) throw httpError(400, 'site_ids must be an array or null');
+  const ids = raw.map((x) => Number(x));
+  for (const id of ids) if (!db.sites.some((s) => s.id === id)) throw httpError(400, 'site_ids must reference existing sites');
+  return ids;
 }
 
 /* ------------------------------------------------------------------ *
@@ -705,37 +728,68 @@ function publicSiteVisit(v) {
  * already arranged, an emergency needs whoever's actually available), so
  * this only ever surfaces as a flag on the shift for rota.html to show,
  * never a rejection from the create/update route itself. */
-function onApprovedLeave(personnelId, isoTimestamp) {
+function onApprovedLeave(personnelId, isoTimestamp, approvedLeave) {
   const day = isoTimestamp.slice(0, 10);
-  return db.leave_requests.some((r) => r.personnel_id === personnelId && r.status === 'APPROVED' && r.start_date <= day && day <= r.end_date);
+  const rows = approvedLeave || db.leave_requests.filter((r) => r.status === 'APPROVED');
+  return rows.some((r) => r.personnel_id === personnelId && r.start_date <= day && day <= r.end_date);
 }
 function publicShiftType(t) { return { ...t }; }
+/** Building a shift list ran publicShift() once per shift, and each call
+ * independently re-scanned every assignment/allocation/leave-request in the
+ * whole system looking for its own rows — O(shifts × collection sizes). A
+ * list route builds this once instead: every lookup publicShift() needs
+ * becomes a grouped Map, so N shifts cost one O(collection sizes) pass plus
+ * O(1) lookups per shift, not N full re-scans. Passing no index at all
+ * (every other call site — create/patch, which only ever handles the one
+ * shift it just touched) keeps today's behaviour exactly: same per-call
+ * cost as before, just without the complexity of grouping for a list of one. */
+function buildShiftIndex() {
+  const groupBy = (arr, key) => {
+    const m = new Map();
+    for (const x of arr) { if (!m.has(x[key])) m.set(x[key], []); m.get(x[key]).push(x); }
+    return m;
+  };
+  const byId = (arr) => new Map(arr.map((x) => [x.id, x]));
+  return {
+    assignmentsByShift: groupBy(db.shift_assignments, 'shift_id'),
+    vehicleAllocsByShift: groupBy(db.shift_vehicle_allocations, 'shift_id'),
+    assetAllocsByShift: groupBy(db.shift_asset_allocations, 'shift_id'),
+    approvedLeave: db.leave_requests.filter((r) => r.status === 'APPROVED'),
+    sitesById: byId(db.sites), typesById: byId(db.shift_types),
+    personnelById: byId(db.personnel), callsignsById: byId(db.callsigns),
+    vehiclesById: byId(db.vehicles), assetsById: byId(db.assets),
+  };
+}
 /** One person's involvement in a shift. on_leave_conflict is checked per
  * assignment, not per shift, since a shift can now carry several people and
  * only some of them might have approved leave over it — same "warn, don't
  * block" flag as before, just scoped to whoever it's actually about. */
-function publicAssignment(a, shift) {
-  const p = db.personnel.find((x) => x.id === a.personnel_id);
+function publicAssignment(a, shift, idx) {
+  const p = idx ? idx.personnelById.get(a.personnel_id) : db.personnel.find((x) => x.id === a.personnel_id);
+  const callsign = p ? (idx ? idx.callsignsById.get(p.callsign_id) : db.callsigns.find((c) => c.id === p.callsign_id)) : null;
   return {
     ...a, personnel_name: p ? p.name : null,
-    personnel_callsign: p ? (db.callsigns.find((c) => c.id === p.callsign_id) || {}).name || null : null,
-    on_leave_conflict: onApprovedLeave(a.personnel_id, shift.starts_at),
+    personnel_callsign: callsign ? callsign.name || null : null,
+    on_leave_conflict: onApprovedLeave(a.personnel_id, shift.starts_at, idx && idx.approvedLeave),
   };
 }
-function publicVehicleAllocation(a) {
-  const v = db.vehicles.find((x) => x.id === a.vehicle_id);
-  const driver = a.driver_personnel_id ? db.personnel.find((x) => x.id === a.driver_personnel_id) : null;
+function publicVehicleAllocation(a, idx) {
+  const v = idx ? idx.vehiclesById.get(a.vehicle_id) : db.vehicles.find((x) => x.id === a.vehicle_id);
+  const driver = a.driver_personnel_id ? (idx ? idx.personnelById.get(a.driver_personnel_id) : db.personnel.find((x) => x.id === a.driver_personnel_id)) : null;
   return { ...a, vehicle_registration: v ? v.registration : null, driver_name: driver ? driver.name : null };
 }
-function publicAssetAllocation(a) {
-  const asset = db.assets.find((x) => x.id === a.asset_id);
+function publicAssetAllocation(a, idx) {
+  const asset = idx ? idx.assetsById.get(a.asset_id) : db.assets.find((x) => x.id === a.asset_id);
   return { ...a, asset_description: asset ? asset.description : null, asset_tag: asset ? asset.tag : null };
 }
-function publicShift(s) {
-  const site = s.site_id ? db.sites.find((x) => x.id === s.site_id) : null;
-  const type = s.shift_type_id ? db.shift_types.find((x) => x.id === s.shift_type_id) : null;
-  const assignments = db.shift_assignments.filter((a) => a.shift_id === s.id && a.status !== 'REMOVED').map((a) => publicAssignment(a, s));
+function publicShift(s, idx) {
+  const site = s.site_id ? (idx ? idx.sitesById.get(s.site_id) : db.sites.find((x) => x.id === s.site_id)) : null;
+  const type = s.shift_type_id ? (idx ? idx.typesById.get(s.shift_type_id) : db.shift_types.find((x) => x.id === s.shift_type_id)) : null;
+  const rawAssignments = idx ? (idx.assignmentsByShift.get(s.id) || []) : db.shift_assignments.filter((a) => a.shift_id === s.id);
+  const assignments = rawAssignments.filter((a) => a.status !== 'REMOVED').map((a) => publicAssignment(a, s, idx));
   const activeCount = assignments.filter((a) => ['ASSIGNED', 'CONFIRMED'].includes(a.status)).length;
+  const rawVehicleAllocs = idx ? (idx.vehicleAllocsByShift.get(s.id) || []) : db.shift_vehicle_allocations.filter((x) => x.shift_id === s.id);
+  const rawAssetAllocs = idx ? (idx.assetAllocsByShift.get(s.id) || []) : db.shift_asset_allocations.filter((x) => x.shift_id === s.id);
   return {
     ...s, site_name: site ? site.name : null,
     shift_type_name: type ? type.name : null, shift_type_key: type ? type.key : null, shift_type_color: type ? type.color : null,
@@ -743,8 +797,8 @@ function publicShift(s) {
     assigned_count: activeCount,
     coverage_gap: Math.max(0, s.required_headcount - activeCount),
     over_staffed: activeCount > s.required_headcount,
-    vehicle_allocations: db.shift_vehicle_allocations.filter((x) => x.shift_id === s.id).map(publicVehicleAllocation),
-    asset_allocations: db.shift_asset_allocations.filter((x) => x.shift_id === s.id).map(publicAssetAllocation),
+    vehicle_allocations: rawVehicleAllocs.map((a) => publicVehicleAllocation(a, idx)),
+    asset_allocations: rawAssetAllocs.map((a) => publicAssetAllocation(a, idx)),
   };
 }
 function publicVehicle(v) {
@@ -756,8 +810,8 @@ function publicVehicle(v) {
  * itself — it's the resulting_balance of its most recent stock_movements
  * row, the same "derive, don't cache" shape as leave_balance/compliance.
  * An asset with no movements yet reads as zero, not unset. */
-function stockLevel(assetId) {
-  const movements = db.stock_movements.filter((m) => m.asset_id === assetId);
+function stockLevel(assetId, movementsByAsset) {
+  const movements = movementsByAsset ? (movementsByAsset.get(assetId) || []) : db.stock_movements.filter((m) => m.asset_id === assetId);
   return movements.length ? movements[movements.length - 1].resulting_balance : 0;
 }
 function recordStockMovement(assetId, delta, reason, note, shiftId, user) {
@@ -769,14 +823,14 @@ function recordStockMovement(assetId, delta, reason, note, shiftId, user) {
   db.stock_movements.push(m);
   return m;
 }
-function publicAsset(a) {
+function publicAsset(a, movementsByAsset) {
   const p = a.assigned_to ? db.personnel.find((x) => x.id === a.assigned_to) : null;
   const site = a.site_id ? db.sites.find((x) => x.id === a.site_id) : null;
   const parent = a.parent_asset_id ? db.assets.find((x) => x.id === a.parent_asset_id) : null;
   return {
     ...a, assigned_to_name: p ? p.name : null, site_name: site ? site.name : null,
     parent_asset_description: parent ? parent.description : null,
-    stock_level: a.is_stock_tracked ? stockLevel(a.id) : null,
+    stock_level: a.is_stock_tracked ? stockLevel(a.id, movementsByAsset) : null,
   };
 }
 function publicPassdownLog(l) {
@@ -1001,12 +1055,14 @@ httpsServer?.on('upgrade', handleUpgrade);
  * REST API
  * ------------------------------------------------------------------ */
 // The five internal/staff roles — everything gated ALL today predates CLIENT
-// and was written assuming "any authenticated user" meant "any employee". Not
-// ROLES, deliberately: see the comment on ROLES above.
+// and FINANCE and was written assuming "any authenticated user" meant "any
+// employee with dispatch access". Not ROLES, deliberately: see the comment
+// on ROLES above — CLIENT and FINANCE both stay out of ALL on purpose.
 const ALL = ['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'FIELD_USER', 'MDT_USER'];
 const CONTROL = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
 const ADMIN = ['SYSTEM_ADMIN'];
 const CLIENT = ['CLIENT'];
+const FINANCE = ['FINANCE'];
 
 /* Per-operator UI preferences (theme, mode, surface, sound) — stored on the
  * user row so they follow a login to any terminal, not per-browser
@@ -1036,7 +1092,7 @@ function normalizeUiPrefs(p) {
     reduce_motion: Boolean(p.reduce_motion),
   };
 }
-const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, branch_id: u.branch_id || null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs) });
+const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, branch_id: u.branch_id || null, site_ids: Array.isArray(u.site_ids) ? u.site_ids : null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs) });
 
 route('POST', '/api/auth/login', null, ({ body }) => {
   const user = db.users.find((u) => u.username === String(body.username || '').toLowerCase());
@@ -1435,7 +1491,7 @@ route('DELETE', '/api/maintenance-logs/:id', ADMIN, ({ params }) => {
 const ASSET_CATEGORIES = ['EQUIPMENT', 'UNIFORM', 'KEY', 'DEVICE', 'OTHER'];
 const ASSET_STATUSES = ['IN_USE', 'IN_STORE', 'LOST', 'RETIRED'];
 route('GET', '/api/assets', ALL, ({ query, user }) => {
-  let rows = db.assets.filter((a) => visibleToUser(a, user)).map(publicAsset);
+  let rows = db.assets.filter((a) => visibleToUser(a, user)).map((a) => publicAsset(a));
   if (query.get('assigned_to')) rows = rows.filter((a) => a.assigned_to === Number(query.get('assigned_to')));
   if (query.get('category')) rows = rows.filter((a) => a.category === query.get('category').toUpperCase());
   return rows;
@@ -2494,7 +2550,7 @@ route('GET', '/api/state', ALL, ({ user }) => ({
   mdts: db.mdts.map(publicMdt),
   jobs: db.jobs.filter((j) => siteVisibleTo(j.site_id, user)).map(publicJob),
   personnel: db.personnel.filter((p) => visibleToUser(p, user)).map(publicPersonnel),
-  sites: db.sites.filter((s) => visibleToUser(s, user)),
+  sites: db.sites.filter((s) => siteVisibleTo(s.id, user)),
   site_visits: db.site_visits.filter((v) => siteVisibleTo(v.site_id, user)).map(publicSiteVisit),
   emergencies: db.emergency_events.filter((e) => e.state !== 'RESOLVED'),
   events: db.audit_logs.slice(-80), server_time: new Date().toISOString(),
@@ -2782,7 +2838,7 @@ route('DELETE', '/api/personnel/:id/welfare', ALL, ({ params, user }) => {
 
 /* Sites under contract — what alarm response jobs are attached to. */
 const RISK_LEVELS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
-route('GET', '/api/sites', ALL, ({ user }) => db.sites.filter((s) => visibleToUser(s, user)));
+route('GET', '/api/sites', ALL, ({ user }) => db.sites.filter((s) => siteVisibleTo(s.id, user)));
 route('POST', '/api/sites', CONTROL, ({ body }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');
@@ -2872,7 +2928,14 @@ route('DELETE', '/api/sites/:id', ADMIN, ({ params }) => {
  * no separate roster is needed. Entries are an append-only log, like the
  * audit trail: no edit route, a DELETE for control to correct a mistake. */
 function assertPassdownAccess(siteId, user) {
-  if (isControlRole(user.role)) return;
+  if (isControlRole(user.role)) {
+    // DISPATCHER/SYSTEM_ADMIN are never branch/site-scoped (see
+    // BRANCH_SCOPED_ROLES), so this only actually constrains a scoped
+    // SUPERVISOR — the same "don't confirm it exists" 404 the rest of
+    // this file uses for an out-of-scope record.
+    if (!siteVisibleTo(siteId, user)) throw httpError(404, 'site not found');
+    return;
+  }
   if (user.role === 'FIELD_USER' && user.personnel_id) {
     const hasShift = db.shifts.some((s) => s.site_id === siteId
       && db.shift_assignments.some((a) => a.shift_id === s.id && a.personnel_id === user.personnel_id && a.status !== 'REMOVED'));
@@ -3322,14 +3385,20 @@ route('GET', '/api/shifts', ALL, ({ query, user }) => {
   // control role ever sees one, same as a RESTRICTED form submission only
   // being visible to those with a reason to see it.
   if (!isControlRole(user.role)) rows = rows.filter((s) => s.status !== 'DRAFT');
+  // Every other list in the system (jobs, site-visits, shift applications)
+  // already narrows to a branch/site-scoped caller's own patch; the rota
+  // itself had been missed — a scoped SUPERVISOR could otherwise see (and,
+  // via the write routes below, touch) every other branch's shifts too.
+  rows = rows.filter((s) => siteVisibleTo(s.site_id, user));
   if (query.get('site_id')) rows = rows.filter((s) => s.site_id === Number(query.get('site_id')));
   if (query.get('shift_type_id')) rows = rows.filter((s) => s.shift_type_id === Number(query.get('shift_type_id')));
   if (query.get('status')) rows = rows.filter((s) => s.status === query.get('status').toUpperCase());
   if (query.get('from')) rows = rows.filter((s) => s.ends_at >= query.get('from'));
   if (query.get('to')) rows = rows.filter((s) => s.starts_at <= query.get('to'));
+  const idx = buildShiftIndex();
   const personnelId = query.get('personnel_id') ? Number(query.get('personnel_id')) : null;
-  if (personnelId) rows = rows.filter((s) => assignedPersonnelIds(s.id).includes(personnelId));
-  const out = rows.sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)).map(publicShift);
+  if (personnelId) rows = rows.filter((s) => (idx.assignmentsByShift.get(s.id) || []).some((a) => a.status !== 'REMOVED' && a.personnel_id === personnelId));
+  const out = rows.sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)).map((s) => publicShift(s, idx));
   // Convenience for a single-person view (officer.html): that person's own
   // assignment on each shift, so the caller doesn't have to search
   // `assignments` itself for the one row it actually asked about.
@@ -3344,6 +3413,7 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
   const type = db.shift_types.find((x) => x.id === Number(body.shift_type_id));
   if (!type) throw httpError(400, 'shift_type_id required and must exist');
   const site = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null;
+  if (site && !siteVisibleTo(site.id, user)) throw httpError(404, 'site not found');
   const headcount = body.required_headcount != null && body.required_headcount !== '' ? Number(body.required_headcount) : 1;
   if (!Number.isFinite(headcount) || headcount < 1) throw httpError(400, 'required_headcount must be a positive number');
   // Defaults to visible immediately, matching this restructuring's original
@@ -3389,8 +3459,14 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
   logEvent('shift.created', `SHIFT CREATED (${type.name}) ${s.starts_at} — ${s.ends_at}${firstAssignment ? ` FOR ${findPersonnel(firstAssignment.personnel_id).name}` : ''}`, { shift_id: s.id });
   return { __status: 201, __body: pub };
 });
-route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body }) => {
+route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body, user }) => {
   const s = findShift(params.id);
+  // A scoped SUPERVISOR can't edit a shift outside their patch, and can't
+  // use this route to move one of their own shifts to a site outside it
+  // either — checked against both the shift's current site and, if it's
+  // changing, the one it's moving to.
+  if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
+  if ('site_id' in body && body.site_id && !siteVisibleTo(Number(body.site_id), user)) throw httpError(404, 'site not found');
   const wasDraft = s.status === 'DRAFT';
   let scheduleChanged = false;
   if ('starts_at' in body) { const d = new Date(body.starts_at); if (isNaN(d)) throw httpError(400, 'invalid starts_at'); if (d.toISOString() !== s.starts_at) scheduleChanged = true; s.starts_at = d.toISOString(); }
@@ -3455,6 +3531,7 @@ function assertAssignmentAccess(a, user) {
 }
 route('POST', '/api/shifts/:id/assignments', CONTROL, ({ params, body, user }) => {
   const s = findShift(params.id);
+  if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   const p = findPersonnel(body.personnel); if (!p) throw httpError(400, 'personnel required');
   if (db.shift_assignments.some((a) => a.shift_id === s.id && a.personnel_id === p.id && a.status !== 'REMOVED')) {
     throw httpError(409, `${p.name} is already on this shift`);
@@ -3479,6 +3556,7 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   const isOwn = user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id;
   const isControl = isControlRole(user.role);
   if (!isOwn && !isControl) throw httpError(403, 'not your shift');
+  if (!isOwn && isControl && !siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   let justRemoved = false;
   if ('status' in body) {
     const status = String(body.status || '').toUpperCase();
@@ -3621,6 +3699,11 @@ require('./routes-client.js')({
   isControlRole, assertPassdownAccess,
 });
 
+// Finance — a read-only view of cost/billing figures. See routes-finance.js.
+require('./routes-finance.js')({
+  route, httpError, CONTROL, FINANCE, db, siteVisibleTo, visibleToUser, publicFuelLog, publicMaintenanceLog,
+});
+
 // Applicant tracking — see routes-applicants.js for the design.
 require('./routes-applicants.js')({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
@@ -3634,7 +3717,7 @@ require('./routes-leave.js')({
 // Shift applications — see routes-shift-applications.js for the design.
 const shiftApplications = require('./routes-shift-applications.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,
-  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent,
+  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent, buildShiftIndex,
 });
 
 // Vehicle/asset allocation and the stock ledger — see routes-fleet-stock.js.
@@ -3730,7 +3813,7 @@ route('POST', '/api/users', ADMIN, ({ body }) => {
   if (personnelId && db.personnel.some((p) => p.id === personnelId && p.user_id)) throw httpError(409, 'that personnel record already has a login');
   const clientId = body.client_id || null;
   if (clientId && !db.clients.some((c) => c.id === clientId)) throw httpError(400, 'client_id must reference an existing client');
-  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: personnelId, mdt_id: body.mdt_id || null, client_id: clientId, branch_id: normalizedBranchId(body.branch_id), email, created_at: new Date().toISOString() };
+  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: personnelId, mdt_id: body.mdt_id || null, client_id: clientId, branch_id: normalizedBranchId(body.branch_id), site_ids: normalizedSiteIds(body.site_ids), email, created_at: new Date().toISOString() };
   db.users.push(u);
   if (personnelId) { const p = db.personnel.find((x) => x.id === personnelId); if (p) p.user_id = u.id; }
   logEvent('user.created', `USER ${username} CREATED (${u.role})`);
@@ -3764,6 +3847,7 @@ route('PATCH', '/api/users/:id', ADMIN, ({ params, body }) => {
     u.client_id = nextClientId;
   }
   if ('branch_id' in body) u.branch_id = normalizedBranchId(body.branch_id);
+  if ('site_ids' in body) u.site_ids = normalizedSiteIds(body.site_ids);
   if ('password' in body && body.password) {
     if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
     u.password_hash = hashPassword(String(body.password));

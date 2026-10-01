@@ -432,9 +432,22 @@ self-contained slice at a time, tested and deployed before the next.
   later, contradicting the synchronous-send decision already made, and a
   shift notification is inherently time-critical); per-user opt-out is in,
   though, as two checkboxes on the personnel record.
-- **Increment 8 — permissions hardening + performance pass.** Site-level
-  (not just branch-level) supervisor scoping; a Finance/read-only role;
-  index/eager-load audit on the rota queries.
+- ~~**Increment 8 — permissions hardening + performance pass.**~~ — done,
+  see README.md. `users.site_ids` layers a finer, explicit-site-list option
+  on top of the existing branch scoping — checked first, falling back to
+  branch when unset — and closes a real gap found while building it:
+  `GET /api/shifts` and every shift write route had no branch/site check
+  at all, unlike every other scoped list in the system. A new FINANCE role,
+  modelled directly on CLIENT's "own registrar module, excluded from ALL,
+  re-checked server-side" shape, gets a read-only `routes-finance.js` +
+  `finance.html` over the pay/bill/cost fields that already existed.
+  `publicShift()` and friends now take an optional pre-built index so a
+  shift list builds its lookups once instead of every shift re-scanning
+  every collection — the real O(shifts × collection sizes) cost `GET
+  /api/shifts`/`/api/shifts/available` had. Deliberately out of scope: a
+  computed margin/payroll rollup for FINANCE — `pay_rate`/`bill_rate`
+  carry no documented unit anywhere else in the codebase, so computing a
+  number from them would be guessing at semantics nothing else commits to.
 
 ## The extended roadmap (beyond Phase 3–5, roughly by what it extends)
 

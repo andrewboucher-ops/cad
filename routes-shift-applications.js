@@ -21,7 +21,7 @@ const OPEN_APPLICATION_STATUSES = ['APPLIED', 'SHORTLISTED'];
 
 module.exports = function registerShiftApplicationRoutes({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,
-  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent,
+  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent, buildShiftIndex,
 }) {
   for (const t of ['shift_applications']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -40,9 +40,15 @@ module.exports = function registerShiftApplicationRoutes({
 
   route('GET', '/api/shifts/available', ALL, ({ user }) => {
     const now = Date.now();
+    // Cheap filters (status/date/site, all plain shift fields) run before
+    // publicShift() so it only ever builds the full response — assignments,
+    // allocations, coverage — for shifts that already survived them, instead
+    // of paying that cost for every shift in the system up front.
+    const idx = buildShiftIndex();
     return db.shifts
-      .map(publicShift)
-      .filter((s) => s.status === 'PUBLISHED' && s.coverage_gap > 0 && Date.parse(s.starts_at) > now && siteVisibleTo(s.site_id, user))
+      .filter((s) => s.status === 'PUBLISHED' && Date.parse(s.starts_at) > now && siteVisibleTo(s.site_id, user))
+      .map((s) => publicShift(s, idx))
+      .filter((s) => s.coverage_gap > 0)
       .filter((s) => {
         if (!user.personnel_id) return true;
         const alreadyAssigned = s.assignments.some((a) => a.personnel_id === user.personnel_id && ['ASSIGNED', 'CONFIRMED'].includes(a.status));

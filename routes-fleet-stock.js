@@ -37,7 +37,7 @@ module.exports = function registerFleetStockRoutes({
   route('GET', '/api/vehicles/:id/allocations', ALL, ({ params }) => {
     const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
     return db.shift_vehicle_allocations.filter((a) => a.vehicle_id === v.id)
-      .map(publicVehicleAllocation)
+      .map((a) => publicVehicleAllocation(a))
       .sort((a, b) => { const sa = db.shifts.find((s) => s.id === a.shift_id), sb = db.shifts.find((s) => s.id === b.shift_id); return Date.parse((sa || {}).starts_at || 0) - Date.parse((sb || {}).starts_at || 0); });
   });
   route('POST', '/api/shifts/:id/vehicles', CONTROL, ({ params, body, user }) => {
@@ -124,11 +124,15 @@ module.exports = function registerFleetStockRoutes({
   route('GET', '/api/stock-dashboard', CONTROL, () => {
     const now = Date.now();
     const THIRTY_DAYS_MS = 30 * 86400000;
+    // One pass over stock_movements grouped by asset, instead of every
+    // stock-tracked asset re-scanning the whole collection for its own rows.
+    const movementsByAsset = new Map();
+    for (const m of db.stock_movements) { if (!movementsByAsset.has(m.asset_id)) movementsByAsset.set(m.asset_id, []); movementsByAsset.get(m.asset_id).push(m); }
     return db.assets.filter((a) => a.is_stock_tracked).map((a) => {
-      const level = stockLevel(a.id);
+      const level = stockLevel(a.id, movementsByAsset);
       const expiryMs = a.expiry_date ? Date.parse(a.expiry_date) : null;
       return {
-        ...publicAsset(a),
+        ...publicAsset(a, movementsByAsset),
         below_threshold: a.low_stock_threshold != null && level <= a.low_stock_threshold,
         expired: expiryMs != null && expiryMs < now,
         expiring_soon: expiryMs != null && expiryMs >= now && expiryMs - now < THIRTY_DAYS_MS,

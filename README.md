@@ -515,7 +515,66 @@ the queue the system doesn't have and this phase deliberately didn't
 build, and a shift notification is inherently the kind of thing someone
 needs to know about now, not at a more polite hour.
 
-### SIA licence / DBS compliance tracking
+## Site-level supervisor scoping, the FINANCE role, and a rota performance pass
+
+Branch scoping (`BRANCH_SCOPED_ROLES`, `visibleToUser`/`siteVisibleTo`)
+already existed for SUPERVISOR/FIELD_USER/MDT_USER; `users.site_ids` adds
+a finer option on top of it — an explicit list of sites rather than a
+whole branch — checked first, and falling back to branch-level (or no
+restriction at all) when left unset, so an install that never sets it
+sees no change. Building it surfaced a real, pre-existing gap: `GET
+/api/shifts` and every shift write route (`POST`/`PATCH`/`DELETE
+/api/shifts`, `POST /api/shifts/:id/assignments`, `PATCH
+/api/shift-assignments/:id`) had **no** branch/site check at all, unlike
+every other scoped list in the system (jobs, site-visits, shift
+applications) — a branch-scoped supervisor could see, and even staff,
+another branch's shifts. Both the read and write sides are fixed now,
+and `assertPassdownAccess` was tightened the same way: a scoped
+supervisor's control-role passdown access is no longer an unconditional
+"any site," matching the rest of the pattern.
+
+**FINANCE** is a new, deliberately narrow role for reading the pay/bill/
+cost figures that already existed (a shift's `pay_rate`/`bill_rate`, a
+vehicle's fuel and maintenance costs) without touching dispatch at all —
+modelled directly on CLIENT's shape in `routes-client.js`: its own
+registrar module (`routes-finance.js`), excluded from server.js's `ALL`
+on purpose, every route re-checked server-side rather than trusting
+anything the caller supplies. It reuses the existing branch-scoping
+machinery (a FINANCE user can have a `branch_id` or `site_ids` just like
+a SUPERVISOR) rather than inventing a parallel one. `finance.html` is a
+small read-only page — shift rates and vehicle costs, each with a date
+filter — the same shape as `client.html`. Deliberately out of scope: a
+computed margin or payroll rollup. `pay_rate`/`bill_rate` carry no
+documented unit anywhere else in the codebase (hourly? a flat shift
+rate?) — computing a number from them here would be guessing at
+semantics the rest of the system never commits to, not a real feature.
+
+The performance half: `publicShift()` was doing five-plus full-collection
+scans per shift (sites, shift types, assignments, vehicle allocations,
+asset allocations), each assignment/allocation row then doing two to
+three more (personnel, callsigns, vehicles, assets, leave requests) — so
+a list of N shifts cost O(N × total collection sizes), not O(N). It now
+takes an optional pre-built index of grouped-by-shift Maps; `GET
+/api/shifts` and `GET /api/shifts/available` (which used to run that
+full cost over *every* shift before even filtering by status/date) build
+one index per request and reuse it across every shift in the response.
+A single-shift call site (create/patch, which only ever touches the one
+shift it just changed) keeps calling `publicShift(s)` with no index at
+all — same cost as before, no regression, no added complexity for a case
+that was never the bottleneck. The stock dashboard got the identical
+treatment for `stockLevel()`/`publicAsset()`.
+
+One real bug came out of this refactor and is worth naming: `publicAsset`
+and `publicVehicleAllocation` gained an optional second parameter, and
+two existing call sites — `GET /api/assets` and `GET
+/api/vehicles/:id/allocations` — passed them straight to `Array.map()`
+as a bare function reference. `map` calls its callback with `(element,
+index, array)`, so every row past the first silently received its own
+array index as that new parameter instead of `undefined`, and crashed
+trying to call `.get()` on a number. Both call sites now wrap the call in
+an arrow function; `test/permissions-scoping.test.js` asserts against
+exactly this with three-plus rows, specifically so this class of mistake
+can't reappear silently in a future pass.
 
 There is no integration with either service, because none exists to build:
 the SIA's own Freedom of Information response (FOI 0622, 24 Aug 2026)

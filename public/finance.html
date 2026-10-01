@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — finance</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Finance">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { display: flex; justify-content: center; min-height: 100vh; padding-bottom: 40px; }
+  .wrap { width: min(980px, 100%); padding: 0 16px; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 14px 0; }
+  .topbar img { height: 22px; }
+  .topbar .spacer { flex: 1; }
+  .page-head h1 { margin: 18px 0 2px; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .page-head p { margin: 0 0 18px; color: var(--ink-dim); font-size: 13px; }
+  .section-card { background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur)); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 18px; }
+  .section-card > header { padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); font-weight: 700; }
+  .section-card .body { padding: 12px 16px 14px; overflow-x: auto; }
+  .range-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 14px; flex-wrap: wrap; }
+  .range-row label { display: block; font-size: 11px; color: var(--ink-dim); margin-bottom: 4px; }
+  table.fin { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.fin th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-dim); padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.fin td { padding: 7px 10px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+  table.fin td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+  .empty-note { color: var(--ink-dim); padding: 14px 0; text-align: center; font-size: 13px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; background: var(--panel-3); color: var(--ink-dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon">
+    <span class="spacer"></span>
+    <span class="link-net" id="net">link down</span>
+    <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
+  </div>
+
+  <div class="page-head">
+    <h1>Finance</h1>
+    <p>Read-only — shift pay/bill rates and vehicle running costs, scoped to your branch.</p>
+  </div>
+
+  <div class="section-card">
+    <header>Shift rates</header>
+    <div class="body">
+      <div class="range-row">
+        <div><label>From</label><input type="date" id="shFrom"></div>
+        <div><label>To</label><input type="date" id="shTo"></div>
+        <button type="button" class="btn" id="shRun">Run</button>
+      </div>
+      <div id="shiftsBody"><p class="empty-note">Loading…</p></div>
+    </div>
+  </div>
+
+  <div class="section-card">
+    <header>Vehicle costs</header>
+    <div class="body">
+      <div class="range-row">
+        <div><label>From</label><input type="date" id="vcFrom"></div>
+        <div><label>To</label><input type="date" id="vcTo"></div>
+        <button type="button" class="btn" id="vcRun">Run</button>
+      </div>
+      <div id="vehicleCostsBody"><p class="empty-note">Loading…</p></div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+const { el, esc, api, requireAuth, bus } = CCCS;
+if (!requireAuth(['FINANCE', 'SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR'])) throw new Error('auth');
+
+el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+
+function fmtDate(iso) { return iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'; }
+function money(n) { return n == null ? '—' : `£${Number(n).toFixed(2)}`; }
+
+async function runShifts() {
+  el('#shiftsBody').innerHTML = '<p class="empty-note">Loading…</p>';
+  const from = el('#shFrom').value, to = el('#shTo').value;
+  const qs = new URLSearchParams(); if (from) qs.set('from', from); if (to) qs.set('to', to);
+  const rows = await api('GET', `/api/finance/shifts?${qs}`);
+  el('#shiftsBody').innerHTML = rows.length ? `
+    <table class="fin"><thead><tr>
+      <th>Starts</th><th>Site</th><th>Type</th><th>Status</th><th>Cover</th><th>Pay rate</th><th>Bill rate</th>
+    </tr></thead><tbody>
+      ${rows.map((s) => `<tr>
+        <td>${esc(fmtDate(s.starts_at))}</td>
+        <td>${esc(s.site_name || '—')}</td>
+        <td>${esc(s.shift_type_name || '—')}</td>
+        <td><span class="pill">${esc(s.status)}</span></td>
+        <td class="num">${s.assigned_count}/${s.required_headcount}</td>
+        <td class="num">${money(s.pay_rate)}</td>
+        <td class="num">${money(s.bill_rate)}</td>
+      </tr>`).join('')}
+    </tbody></table>` : '<p class="empty-note">No shifts in range.</p>';
+}
+
+async function runVehicleCosts() {
+  el('#vehicleCostsBody').innerHTML = '<p class="empty-note">Loading…</p>';
+  const from = el('#vcFrom').value, to = el('#vcTo').value;
+  const qs = new URLSearchParams(); if (from) qs.set('from', from); if (to) qs.set('to', to);
+  const rows = await api('GET', `/api/finance/vehicle-costs?${qs}`);
+  el('#vehicleCostsBody').innerHTML = rows.length ? `
+    <table class="fin"><thead><tr>
+      <th>Date</th><th>Type</th><th>Vehicle</th><th>Detail</th><th>Cost</th>
+    </tr></thead><tbody>
+      ${rows.map((r) => `<tr>
+        <td>${esc(fmtDate(r.date))}</td>
+        <td><span class="pill">${esc(r.type)}</span></td>
+        <td>${esc(r.vehicle_registration || '—')}</td>
+        <td>${esc(r.type === 'FUEL' ? `${r.litres ?? '—'}L` : (r.description || ''))}</td>
+        <td class="num">${money(r.cost)}</td>
+      </tr>`).join('')}
+    </tbody></table>` : '<p class="empty-note">No vehicle costs in range.</p>';
+}
+
+el('#shRun').onclick = runShifts;
+el('#vcRun').onclick = runVehicleCosts;
+
+CCCS.bus((up) => {
+  const n = el('#net');
+  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
+});
+
+runShifts();
+runVehicleCosts();
+</script>
+</body>
+</html>

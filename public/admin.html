@@ -143,6 +143,7 @@
           <option value="FIELD_USER">Field user</option>
           <option value="MDT_USER">MDT user</option>
           <option value="CLIENT">Client</option>
+          <option value="FINANCE">Finance</option>
         </select>
       </div>
       <div id="uTableWrap"></div>
@@ -321,8 +322,8 @@ function openImageViewer(url, title) {
   window.addEventListener('mousemove', (e) => { if (!dragging) return; tx += (e.clientX - lastX) / scale; ty += (e.clientY - lastY) / scale; lastX = e.clientX; lastY = e.clientY; apply(); });
 }
 
-const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user', CLIENT: 'Client' };
-const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : '');
+const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user', CLIENT: 'Client', FINANCE: 'Finance' };
+const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : r === 'FINANCE' ? 'client' : '');
 
 let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [], allCourses = [], allApplicants = [], allLeaveRequests = [], allShiftTypes = [];
 async function load() {
@@ -474,8 +475,18 @@ function userForm(u) {
       <select id="fMdt">${mdtOptions(isNew ? null : u.mdt_id)}</select>
       <label>Linked client (for a client portal account)</label>
       <select id="fClient">${clientOptions(isNew ? null : u.client_id)}</select>
-      <label>Branch (scopes what a supervisor or field/MDT user sees — leave shared if you don't use branches)</label>
+      <label>Branch (scopes what a supervisor, field/MDT user or finance account sees — leave shared if you don't use branches)</label>
       <select id="fBranch">${branchOptions(isNew ? null : u.branch_id)}</select>
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-weight:400">
+        <input type="checkbox" id="fSiteScoped" style="width:auto" ${!isNew && Array.isArray(u.site_ids) ? 'checked' : ''}> Restrict to specific sites (narrower than branch, for a supervisor or finance account)
+      </label>
+      <div id="fSitesWrap" style="display:${!isNew && Array.isArray(u.site_ids) ? '' : 'none'}">
+        <div id="fSites" style="display:flex;flex-direction:column;gap:6px;max-height:160px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:10px">
+          ${allSites.map((s) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;text-transform:none;letter-spacing:0;font-weight:400">
+            <input type="checkbox" data-siteid="${s.id}" ${!isNew && Array.isArray(u.site_ids) && u.site_ids.includes(s.id) ? 'checked' : ''}> ${esc(s.name)}
+          </label>`).join('')}
+        </div>
+      </div>
       <label>${isNew ? 'Password' : 'New password (leave blank to keep current)'}</label>
       <input id="fPassword" type="password" autocomplete="new-password" placeholder="${isNew ? 'min. 8 characters' : ''}">
       <p class="dim" id="fError" style="min-height:16px;margin:0"></p>
@@ -495,6 +506,7 @@ function editModal(u) {
         </span>
       </div>`;
     el('#fCancel').onclick = closeModal;
+    el('#fSiteScoped').onchange = () => { el('#fSitesWrap').style.display = el('#fSiteScoped').checked ? '' : 'none'; };
     if (el('#fDelete')) el('#fDelete').onclick = async () => {
       if (!confirm(`Delete the account "${u.username}"? This cannot be undone.`)) return;
       try { await api('DELETE', `/api/users/${u.id}`); closeModal(); load(); }
@@ -509,6 +521,7 @@ function editModal(u) {
         mdt_id: el('#fMdt').value ? Number(el('#fMdt').value) : null,
         client_id: el('#fClient').value ? Number(el('#fClient').value) : null,
         branch_id: el('#fBranch').value ? Number(el('#fBranch').value) : null,
+        site_ids: el('#fSiteScoped').checked ? els('#fSites [data-siteid]:checked').map((cb) => Number(cb.dataset.siteid)) : null,
       };
       const password = el('#fPassword').value;
       try {
