@@ -107,8 +107,11 @@
   <a href="/control.html" id="railControl" title="Control room" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Control room</span></a>
   <a href="/log.html" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
 
-  <div class="rail-section">HR</div>
-  <a href="/rota.html" title="Rota"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="17" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 3v3M16 3v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Rota</span></a>
+  <div class="rail-section" id="railHRSection" hidden>HR</div>
+  <a href="/rota.html" id="railRota" title="Rota" hidden><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="17" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 3v3M16 3v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Rota</span></a>
+
+  <div class="rail-section" id="railFinanceSection" hidden>Finance</div>
+  <a href="/finance.html" id="railFinance" title="Finance" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M12 2v20M17 6.5c0-1.9-2.2-3.5-5-3.5s-5 1.6-5 3.5 2.2 3 5 3.5c2.8.5 5 1.6 5 3.5s-2.2 3.5-5 3.5-5-1.6-5-3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Finance</span></a>
 
   <div class="rail-section" id="railSystemSection" hidden>System</div>
   <a href="/admin.html" id="railAdmin" title="Admin" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 4.5l1 1.8 2 .4-1.4 1.5.3 2-1.9-.9-1.9.9.3-2-1.4-1.5 2-.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>Admin</span></a>
@@ -281,7 +284,7 @@ el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(
 el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
 setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
 
-if (['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role)) el('#railControl').hidden = false;
+if (['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role)) { el('#railControl').hidden = false; el('#railHRSection').hidden = false; el('#railRota').hidden = false; el('#railFinanceSection').hidden = false; el('#railFinance').hidden = false; }
 if (me.role === 'SYSTEM_ADMIN') { el('#railSystemSection').hidden = false; el('#railAdmin').hidden = false; }
 
 el('#pfUsername').textContent = me.username;
