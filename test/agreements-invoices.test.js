@@ -52,6 +52,10 @@ const fake = http.createServer((req, res) => {
       X.invoices.push(x);
       return send(200, { Invoices: [x] });
     }
+    if (u.pathname === '/api.xro/2.0/Invoices' && req.method === 'GET') {
+      const ids = (u.searchParams.get('IDs') || '').split(',');
+      return send(200, { Invoices: X.invoices.filter((i) => ids.includes(i.InvoiceID)) });
+    }
     const em = u.pathname.match(/^\/api\.xro\/2\.0\/Invoices\/([^/]+)\/Email$/);
     if (em && req.method === 'POST') { X.emailed.push(em[1]); res.writeHead(204); return res.end(); }
     const m = u.pathname.match(/^\/api\.xro\/2\.0\/Invoices\/(.+)$/);
@@ -364,4 +368,35 @@ test('approved invoices get the next number, are emailed to the billing address 
   assert.equal(x.Status, 'AUTHORISED');
   assert.equal(x.InvoiceNumber, 'ECH-0121');
   assert.deepEqual(X.emailed, [x.InvoiceID]);
+});
+
+test('a payment recorded in Xero shows here without anyone pressing anything', async () => {
+  const inv = app.db.invoices.find((i) => i.number === 'ECH-0121');
+  assert.equal(inv.status, 'IN_XERO');
+  const x = X.invoices.find((i) => i.InvoiceID === inv.xero.invoice_id);
+  x.Status = 'PAID'; x.AmountDue = 0; x.AmountPaid = x.Total;
+  const r = await call('POST', '/api/invoices/xero-sync-all', {}, finT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.paid, 1);
+  assert.equal(inv.status, 'PAID');
+  assert.ok(inv.history.some((h) => h.by === 'Xero' && /paid/.test(h.what)));
+  assert.ok(X.calls.some((c) => c === 'GET /api.xro/2.0/Invoices'), 'checked in one batch');
+  assert.equal((await call('GET', '/api/client/invoices', undefined, clientT)).body.find((i) => i.number === 'ECH-0121').paid, true, 'and the client sees it paid');
+});
+
+test('an admin can mark a quote accepted when the client said yes outside the portal', async () => {
+  const q = (await call('POST', '/api/agreements', { kind: 'QUOTE', site_id: siteA.id, lines: LINES }, adminT)).body;
+  const url = `/api/agreements/${q.id}/mark-accepted`;
+  assert.equal((await call('POST', url, { name: 'Sam' }, clientT)).status, 403);
+  assert.equal((await call('POST', url, {}, adminT)).status, 400, 'who accepted it is needed');
+  const before = mails.length;
+  const r = await call('POST', url, { name: 'Sam Patel', how: 'PHONE', note: 'call 3 Oct' }, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status, 'ACCEPTED');
+  assert.equal(r.body.accepted_via, 'PHONE');
+  assert.equal(r.body.accepted_recorded_by, 'System Admin');
+  await new Promise((res) => setTimeout(res, 60));
+  assert.ok(mails.slice(before).some((m) => /accepted/.test(m.subject)), 'the client is sent a confirmation');
+  assert.equal((await call('POST', url, { name: 'x' }, adminT)).status, 409, 'once only');
+  assert.equal((await call('POST', `/api/agreements/${q.id}/convert`, {}, adminT)).status, 201, 'and it can become a contract');
 });

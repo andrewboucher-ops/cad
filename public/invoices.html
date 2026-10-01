@@ -77,11 +77,13 @@ function paintXero() {
     html = `<span class="grow"><strong>Not connected to Xero.</strong>${xs.last_error ? ` <span class="err">${esc(xs.last_error)}</span>` : ''}</span>${isAdmin ? '<button class="btn primary" id="xConnect">Connect to Xero</button>' : '<span class="dim">An admin needs to connect it.</span>'}`;
   } else {
     html = `<span class="grow">Xero: <strong>${esc(xs.tenant_name)}</strong> <span class="dim">— connected by ${esc(xs.connected_by || '—')} ${esc(date(xs.connected_at))}. Invoices go in as ${xs.settings.invoice_status === 'AUTHORISED' ? '<strong>approved</strong>' : '<strong>drafts</strong>'}, account ${esc(xs.settings.account_code)}.</span>${xs.last_error ? ` <span class="err">Last error: ${esc(xs.last_error)}</span>` : ''}</span>
+      <button class="btn" id="xSync" title="Payments are also checked automatically every 30 minutes">Check payments now</button>
       ${isAdmin ? '<button class="btn" id="xSettings">Settings</button><button class="btn" id="xOff">Disconnect</button>' : ''}`;
   }
   el('#xbar').innerHTML = html;
   const b = (id, fn) => { const x = el(id); if (x) x.onclick = fn; };
   b('#xConnect', async () => { try { const r = await api('GET', '/api/xero/connect'); location.href = r.url; } catch (e) { alert(e.message); } });
+  b('#xSync', async () => { try { const r = await api('POST', '/api/invoices/xero-sync-all'); await load(); alert(r.checked ? `Checked ${r.checked} invoice${r.checked === 1 ? '' : 's'} in Xero — ${r.paid || 0} paid.` : 'No unpaid invoices in Xero to check.'); } catch (e) { alert(e.message); } });
   b('#xOff', async () => { if (!confirm('Disconnect from Xero? Invoices already sent stay in Xero.')) return; xs = await api('POST', '/api/xero/disconnect'); paintXero(); });
   b('#xHow', () => modal('Setting up Xero', `<ol style="line-height:1.6;font-size:13.5px;padding-left:18px;margin-top:0">
       <li>Sign in at <strong>developer.xero.com</strong> → <em>My Apps</em> → <em>New app</em>. Choose <strong>Web app</strong>.</li>

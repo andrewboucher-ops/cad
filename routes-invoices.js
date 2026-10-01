@@ -339,15 +339,36 @@ module.exports = function registerInvoices({
       return inv;
     } catch (e) { throw httpError(502, e.message); }
   });
+  /** Brings one invoice up to date with what Xero says (paid, voided…). */
+  function applyXero(inv, x) {
+    const was = inv.status;
+    Object.assign(inv.xero, { status: x.status, number: x.number || inv.xero.number, amount_due: x.amount_due, amount_paid: x.amount_paid, checked_at: new Date().toISOString() });
+    if (x.status === 'PAID' && was !== 'PAID') { inv.status = 'PAID'; inv.paid_at = new Date().toISOString(); inv.history.push({ at: inv.paid_at, by: 'Xero', what: 'paid in Xero' }); logEvent('invoice.paid', `INVOICE ${inv.number || inv.reference} PAID (XERO)`, { invoice_id: inv.id }); }
+    if ((x.status === 'VOIDED' || x.status === 'DELETED') && was !== 'VOID') { inv.status = 'VOID'; inv.history.push({ at: new Date().toISOString(), by: 'Xero', what: `${x.status.toLowerCase()} in Xero` }); }
+  }
+  /* Payments recorded in Xero show here on their own: every XERO_SYNC_MIN
+   * minutes (default 30) every invoice in Xero and not yet paid or void is
+   * checked, in batches. "Check Xero" on an invoice does it at once. */
+  async function syncAll() {
+    if (!xero.connected()) return { checked: 0 };
+    const open = db.invoices.filter((i) => i.xero && i.xero.invoice_id && i.status === 'IN_XERO');
+    if (!open.length) return { checked: 0 };
+    const got = await xero.invoiceStatuses(open.map((i) => i.xero.invoice_id));
+    let paid = 0;
+    for (const inv of open) { const x = got[inv.xero.invoice_id]; if (x) { applyXero(inv, x); if (inv.status === 'PAID') paid++; } }
+    flushNow();
+    return { checked: open.length, paid };
+  }
+  const syncTimer = setInterval(() => syncAll().catch((e) => console.warn('[xero] sync failed:', e.message)), Number(process.env.XERO_SYNC_MIN || 30) * 60000);
+  if (syncTimer.unref) syncTimer.unref();
+  route('POST', '/api/invoices/xero-sync-all', MONEY, async () => { try { return await syncAll(); } catch (e) { throw httpError(502, e.message); } });
   route('POST', '/api/invoices/:id/xero-sync', MONEY, async ({ params }) => {
     const inv = findInv(params.id);
     if (!inv.xero || !inv.xero.invoice_id) throw httpError(409, 'not in Xero yet');
     try {
       const x = await xero.invoiceStatus(inv.xero.invoice_id);
       if (!x) throw new Error('Xero no longer has this invoice');
-      Object.assign(inv.xero, { status: x.status, number: x.number || inv.xero.number, amount_due: x.amount_due, amount_paid: x.amount_paid, checked_at: new Date().toISOString() });
-      if (x.status === 'PAID') inv.status = 'PAID';
-      if (x.status === 'VOIDED' || x.status === 'DELETED') inv.status = 'VOID';
+      applyXero(inv, x);
       flushNow();
       return inv;
     } catch (e) { throw httpError(502, e.message); }
@@ -385,5 +406,5 @@ module.exports = function registerInvoices({
     return xero.status();
   });
 
-  return { hoursFor, invoicePdf };
+  return { hoursFor, invoicePdf, syncAll };
 };

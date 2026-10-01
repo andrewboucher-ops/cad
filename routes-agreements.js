@@ -157,7 +157,7 @@ module.exports = function registerAgreements({
       } else doc.para('This contract is signed in the client portal.', { size: 9.5 });
     } else if (a.status === 'ACCEPTED') {
       doc.heading('Accepted', 12);
-      doc.para(`Accepted by ${a.decided_by_name} for the client on ${new Date(a.decided_at).toLocaleString('en-GB', { timeZone: 'Europe/London' })}.`);
+      doc.para(`Accepted by ${a.decided_by_name} for the client on ${new Date(a.decided_at).toLocaleString('en-GB', { timeZone: 'Europe/London' })}${a.accepted_via ? `, ${({ PHONE: 'by phone', EMAIL: 'by email', IN_PERSON: 'in person', LETTER: 'by letter', OTHER: 'recorded' })[a.accepted_via]} — recorded by ${a.accepted_recorded_by}` : ' in the client portal'}.`);
     }
     return doc.toBuffer();
   }
@@ -257,6 +257,25 @@ module.exports = function registerAgreements({
     const a = find(params.id);
     if (!['SENT', 'ACCEPTED', 'SIGNED'].includes(a.status)) throw httpError(409, 'nothing to email yet — send it first');
     emailClient(a, a.status);
+    return publicAgreement(a);
+  });
+  /** The client said yes by phone, email, letter or in person: an admin
+   * records it. Who, how and who recorded it are kept and printed. */
+  route('POST', '/api/agreements/:id/mark-accepted', ADMIN, ({ params, body, user }) => {
+    const a = find(params.id);
+    if (a.kind !== 'QUOTE') throw httpError(400, 'only a quote is accepted — a contract is signed');
+    if (!['DRAFT', 'SENT'].includes(a.status)) throw httpError(409, `this quote is ${statusOf(a).toLowerCase()}`);
+    const name = String(body.name || '').trim().slice(0, 120); if (!name) throw httpError(400, 'who accepted it for the client?');
+    const HOW = { PHONE: 'by phone', EMAIL: 'by email', IN_PERSON: 'in person', LETTER: 'by letter', OTHER: 'other' };
+    const how = HOW[body.how] ? body.how : 'OTHER';
+    if (!a.client_id) { const c = clientForSite(a.site_id); if (c) a.client_id = c.id; }
+    Object.assign(a, { status: 'ACCEPTED', decided_at: new Date().toISOString(), decided_by_name: name, accepted_via: how, accepted_recorded_by: user.display_name, accepted_note: String(body.note || '').trim().slice(0, 1000) });
+    if (!a.sent_at) a.sent_at = a.decided_at;
+    a.history.push({ at: a.decided_at, by: user.display_name, what: `marked accepted — ${name} accepted ${HOW[how]}${a.accepted_note ? ` (${a.accepted_note})` : ''}` });
+    writePdf(a, 'accepted.pdf');
+    logEvent('agreement.accepted', `QUOTE ${a.reference} MARKED ACCEPTED BY ${user.display_name} (${name}, ${HOW[how].toUpperCase()})`, { agreement_id: a.id });
+    if (body.notify !== false) emailClient(a, 'ACCEPTED');
+    flushNow();
     return publicAgreement(a);
   });
   route('POST', '/api/agreements/:id/withdraw', ADMIN, ({ params, body, user }) => {

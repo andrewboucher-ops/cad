@@ -117,6 +117,15 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
   }
   /** Xero emails an approved invoice to the contact itself. */
   async function emailInvoice(xeroId) { await call('POST', `/Invoices/${encodeURIComponent(xeroId)}/Email`, {}); }
+  /** Several at once (Xero takes a list of IDs), keyed by Xero invoice ID. */
+  async function invoiceStatuses(ids) {
+    const out = {};
+    for (let i = 0; i < ids.length; i += 40) {
+      const r = await call('GET', `/Invoices?IDs=${ids.slice(i, i + 40).map(encodeURIComponent).join(',')}`);
+      for (const x of r.Invoices || []) out[x.InvoiceID] = { status: x.Status, number: x.InvoiceNumber, amount_due: x.AmountDue, amount_paid: x.AmountPaid, total: x.Total };
+    }
+    return out;
+  }
   async function invoiceStatus(xeroId) {
     const out = await call('GET', `/Invoices/${encodeURIComponent(xeroId)}`);
     const x = out.Invoices && out.Invoices[0];
@@ -126,5 +135,5 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const r = row();
     return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, settings: r.settings, redirect_uri: redirectUri };
   }
-  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, emailInvoice, invoiceStatus, status, row };
+  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, emailInvoice, invoiceStatus, invoiceStatuses, status, row };
 };

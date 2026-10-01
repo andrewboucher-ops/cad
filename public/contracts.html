@@ -193,6 +193,7 @@ function view(a) {
   const acts = [];
   if (a.status === 'DRAFT') acts.push(act('edit', 'Edit'), act('del', 'Delete'), act('send', `Send to client`, 'primary'));
   if (a.status === 'SENT') acts.push(act('withdraw', 'Withdraw'));
+  if (a.kind === 'QUOTE' && ['DRAFT', 'SENT'].includes(a.status)) acts.push(act('markacc', 'Mark accepted'));
   if (['SENT', 'ACCEPTED', 'SIGNED'].includes(a.status)) acts.push(act('email', 'Email again'));
   if (a.kind === 'QUOTE' && a.status === 'ACCEPTED' && !rows.some((x) => x.from_quote_id === a.id && x.status !== 'WITHDRAWN')) acts.push(act('convert', 'Make contract from this quote', 'primary'));
   if (a.status === 'SIGNED') acts.push(act('end', 'End contract'), `<a class="btn primary" href="/invoices.html?contract_id=${a.id}">Invoices</a>`);
@@ -228,12 +229,28 @@ function view(a) {
       if (k === 'del') { if (!confirm('Delete this draft?')) return; await api('DELETE', `/api/agreements/${a.id}`); close(); return load(); }
       if (k === 'send') { if (!confirm(`Send ${a.reference} to ${c ? c.name : 'the client'}? It appears in their portal and they are emailed. It can't be edited after.`)) return; out = await api('POST', `/api/agreements/${a.id}/send`); }
       if (k === 'withdraw') { const reason = prompt('Why is it being withdrawn? (optional)'); if (reason === null) return; out = await api('POST', `/api/agreements/${a.id}/withdraw`, { reason }); }
+      if (k === 'markacc') return markAccepted(a);
       if (k === 'email') { if (!confirm('Email it to the client again, with the PDF?')) return; out = await api('POST', `/api/agreements/${a.id}/email`); await new Promise((r) => setTimeout(r, 800)); }
       if (k === 'convert') out = await api('POST', `/api/agreements/${a.id}/convert`);
       if (k === 'end') { const d = prompt('Last day of the contract (YYYY-MM-DD)', new Date().toISOString().slice(0, 10)); if (!d) return; out = await api('POST', `/api/agreements/${a.id}/end`, { end_date: d }); }
       await load(); view(rows.find((x) => x.id === out.id));
     })));
   }, { wide: true });
+}
+
+/** The client accepted by phone, email, letter or in person. */
+function markAccepted(a) {
+  const c = clients.find((x) => x.id === a.client_id) || clientOf(a.site_id);
+  modal(`Mark ${a.reference} accepted`, `<p class="note" style="margin-top:0">Use this when ${c ? esc(c.name) : 'the client'} accepted outside the portal. Who accepted it, how, and that you recorded it are kept on the quote and printed on its PDF.</p>
+    <div class="k-form">
+      <div><label>Accepted by (client's name)</label><input id="mName" placeholder="e.g. Sam Patel"></div>
+      <div><label>How</label><select id="mHow">${options([['PHONE', 'By phone'], ['EMAIL', 'By email'], ['IN_PERSON', 'In person'], ['LETTER', 'By letter'], ['OTHER', 'Other']], 'EMAIL')}</select></div>
+      <div class="full"><label>Note (optional)</label><input id="mNote" placeholder="e.g. email from Sam, 3 Oct, 09:12"></div>
+      <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px"><input type="checkbox" id="mMail" checked style="width:auto"> Email the client a confirmation with the PDF${c && c.contact_email ? ` (${esc(c.contact_email)})` : ''}</label></div>
+    </div>${foot('Mark accepted')}`, (root) => wire(root, async () => {
+    const out = await api('POST', `/api/agreements/${a.id}/mark-accepted`, { name: v(root, '#mName'), how: v(root, '#mHow'), note: v(root, '#mNote'), notify: root.querySelector('#mMail').checked });
+    close(); await load(); view(rows.find((x) => x.id === out.id));
+  }));
 }
 
 el('#bTerms').onclick = async () => {
