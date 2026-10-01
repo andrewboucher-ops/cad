@@ -84,7 +84,7 @@ const db = {
   users: [], mdts: [], callsigns: [], vehicles: [], personnel: [], sites: [],
   jobs: [], job_assignments: [], messages: [], call_requests: [],
   locations: [], emergency_events: [], audit_logs: [],
-  push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], shift_assignments: [], shift_types: [], assets: [],
+  push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], shift_assignments: [], shift_types: [], shift_applications: [], assets: [],
   passdown_logs: [], fuel_logs: [], asset_checkouts: [], maintenance_logs: [], beats: [],
   dial_log: [],
   form_definitions: [], form_submissions: [], form_grants: [],
@@ -3268,6 +3268,7 @@ route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body }) => {
   if ('status' in body) {
     if (!SHIFT_STATES.includes(body.status)) throw httpError(400, 'invalid shift status');
     s.status = body.status;
+    if (body.status === 'CANCELLED') shiftApplications.expireApplicationsForShift(s.id);
   }
   const pub = publicShift(s);
   // Editing a still-draft shift (e.g. fixing its time before publishing)
@@ -3279,6 +3280,7 @@ route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body }) => {
 route('DELETE', '/api/shifts/:id', ADMIN, ({ params }) => {
   const s = findShift(params.id);
   const affected = assignedPersonnelIds(s.id);
+  shiftApplications.expireApplicationsForShift(s.id);
   db.shifts = db.shifts.filter((x) => x.id !== s.id);
   db.shift_assignments = db.shift_assignments.filter((a) => a.shift_id !== s.id);
   broadcast('shift.deleted', { id: s.id }, { personnelIds: affected });
@@ -3388,6 +3390,12 @@ require('./routes-applicants.js')({
 // Leave management — see routes-leave.js for the design.
 require('./routes-leave.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, visibleToUser, findPersonnel,
+});
+
+// Shift applications — see routes-shift-applications.js for the design.
+const shiftApplications = require('./routes-shift-applications.js')({
+  route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,
+  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole,
 });
 
 /* Client reporting — proving service to whoever pays for the contract:

@@ -399,6 +399,33 @@ landing as drafts: a bulk copy is exactly the moment a date needs nudging
 or someone's left, so it's reviewed and explicitly published rather than
 notifying everyone immediately.
 
+**Increment 5** adds the self-service half of staffing a shift —
+`routes-shift-applications.js`, mirroring `routes-leave.js`'s shape
+closely. "Open" needs no new flag: a shift is available the moment it's
+`PUBLISHED`, has `coverage_gap > 0` and hasn't started yet, so
+`GET /api/shifts/available` is a filter over data this codebase already
+computes, not a new concept layered on top. A `FIELD_USER` applies for
+themselves only — `POST /api/shift-applications` ignores any other
+personnel a request might name, the same self-service boundary leave
+requests already enforce — and control shortlists, approves or rejects
+(a reason is required to reject, exactly like leave). Approving is the
+one action with a real side effect: it creates the actual
+`shift_assignment` via the same path `POST /api/shifts/:id/assignments`
+already uses, and if that fills the shift, every other still-open
+application for it is marked `EXPIRED` rather than left to quietly become
+impossible — the applicant finds out, not just stops hearing back.
+Cancelling or deleting the shift does the same. "Invite or directly
+assign" — the brief's other staffing path — was already
+`POST /api/shifts/:id/assignments` from Increment 1; this file adds
+nothing to that path, only the self-service one control doesn't use.
+
+`officer.html` gets an "Available shifts" panel (apply in one click) and
+"My applications" (status, a reason if rejected, withdraw while still
+open). `rota.html`'s shift modal gets a matching "Applications for this
+shift" section next to the existing assignments list, so approving an
+application and directly assigning someone are two doors into the same
+room rather than two disconnected screens.
+
 ### SIA licence / DBS compliance tracking
 
 There is no integration with either service, because none exists to build:

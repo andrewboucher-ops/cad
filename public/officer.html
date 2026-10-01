@@ -95,6 +95,15 @@
   </section>
 
   <section class="panel">
+    <header>Available shifts</header>
+    <div class="body" style="padding:12px">
+      <div id="availableShiftsList"><p class="dim">Loading…</p></div>
+      <label style="margin-top:10px">My applications</label>
+      <div id="myApplicationsList"><p class="dim">Loading…</p></div>
+    </div>
+  </section>
+
+  <section class="panel">
     <header>Current job</header>
     <div class="body" id="jobBody" style="padding:12px">
       <p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>
@@ -761,6 +770,46 @@ function openCourse(c) {
   });
 }
 
+/* ---- Available shifts / my applications ------------------------------- */
+function fmtShiftRange(startIso, endIso) {
+  return `${fmtShiftTime(startIso)} – ${new Date(endIso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+}
+async function refreshAvailableShifts() {
+  try {
+    const open = await api('GET', '/api/shifts/available');
+    el('#availableShiftsList').innerHTML = open.length ? open.map((s) => `
+      <div class="field" style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line-soft);padding-bottom:8px;margin-bottom:8px">
+        <div style="flex:1">
+          <div>${esc(s.shift_type_name || '')}${s.site_name ? ' — ' + esc(s.site_name) : ''}</div>
+          <div class="dim" style="font-size:12px">${esc(fmtShiftRange(s.starts_at, s.ends_at))} · ${s.coverage_gap} seat${s.coverage_gap === 1 ? '' : 's'} open</div>
+        </div>
+        <button type="button" class="btn primary" data-apply="${s.id}" style="padding:6px 12px;font-size:12px">Apply</button>
+      </div>`).join('') : '<p class="dim">No open shifts to apply for right now.</p>';
+    els('#availableShiftsList [data-apply]').forEach((b) => (b.onclick = async () => {
+      try { await api('POST', '/api/shift-applications', { shift: Number(b.dataset.apply) }); await refreshAvailableShifts(); await refreshMyApplications(); }
+      catch (e) { alert(e.message); }
+    }));
+  } catch (e) { el('#availableShiftsList').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+const SHIFT_APP_STATUS_LABEL = { APPLIED: 'Applied', SHORTLISTED: 'Shortlisted', APPROVED: 'Approved', REJECTED: 'Rejected', WITHDRAWN: 'Withdrawn', EXPIRED: 'Expired' };
+async function refreshMyApplications() {
+  try {
+    const mine = await api('GET', '/api/shift-applications');
+    el('#myApplicationsList').innerHTML = mine.length ? mine.map((a) => `
+      <div class="field" style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line-soft);padding-bottom:8px;margin-bottom:8px">
+        <div style="flex:1">
+          <div>${esc(a.shift_type_name || '')}${a.site_name ? ' — ' + esc(a.site_name) : ''}</div>
+          <div class="dim" style="font-size:12px">${esc(fmtShiftRange(a.shift_starts_at, a.shift_ends_at))} · ${esc(SHIFT_APP_STATUS_LABEL[a.status] || a.status)}${a.status === 'REJECTED' && a.rejection_reason ? ` — ${esc(a.rejection_reason)}` : ''}</div>
+        </div>
+        ${['APPLIED', 'SHORTLISTED'].includes(a.status) ? `<button type="button" class="btn" data-withdraw="${a.id}" style="padding:6px 12px;font-size:12px">Withdraw</button>` : ''}
+      </div>`).join('') : '<p class="dim">No applications yet.</p>';
+    els('#myApplicationsList [data-withdraw]').forEach((b) => (b.onclick = async () => {
+      try { await api('PATCH', `/api/shift-applications/${b.dataset.withdraw}`, { status: 'WITHDRAWN' }); await refreshMyApplications(); await refreshAvailableShifts(); }
+      catch (e) { alert(e.message); }
+    }));
+  } catch (e) { el('#myApplicationsList').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
 /* ---- Leave (self-service requests against the running balance) -------- */
 const LEAVE_TYPE_LABEL = { ANNUAL: 'Annual', SICK: 'Sick', UNPAID: 'Unpaid', OTHER: 'Other' };
 const LEAVE_STATUS_LABEL = { PENDING: 'Pending', APPROVED: 'Approved', REJECTED: 'Rejected', CANCELLED: 'Cancelled' };
@@ -886,6 +935,8 @@ async function boot() {
   await refreshEquipment();
   await refreshReports();
   await refreshTraining();
+  await refreshAvailableShifts();
+  await refreshMyApplications();
   await refreshLeave();
   footTrackingEnabled = await api('GET', '/api/config').then((c) => c.foot_tracking).catch(() => false);
   if (currentShift() && clockedIn(currentShift())) startFootTracking();

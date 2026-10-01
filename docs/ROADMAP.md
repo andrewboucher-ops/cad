@@ -388,9 +388,21 @@ self-contained slice at a time, tested and deployed before the next.
   boundary; the two bulk actions are client-side orchestration of
   already-tested single-shift endpoints, verified live rather than by a
   new server test.
-- **Increment 5 — shift requests/applications.** Staff apply for a
-  published open shift; control approves/rejects — mirrors the leave
-  request pipeline's append-only, actor-and-timestamp-stamped shape.
+- ~~**Increment 5 — shift requests/applications.**~~ — done, see
+  README.md. `routes-shift-applications.js` mirrors `routes-leave.js`'s
+  shape closely: a `FIELD_USER` applies for themselves only, control
+  shortlists/approves/rejects (a reason required to reject), and
+  `GET /api/shifts/available` is a filter over fields this codebase
+  already computes (`PUBLISHED`, `coverage_gap > 0`, not yet started) —
+  no new "open" flag. Approving creates the real assignment through the
+  same `POST /api/shifts/:id/assignments` path Increment 1 already built,
+  and auto-expires every other open application for a shift that just
+  filled up (or got cancelled, or deleted) rather than leaving an
+  applicant to wonder. "Invite or directly assign" — the brief's other
+  staffing path — was already built in Increment 1; nothing new was
+  needed for it. `officer.html` got an "Available shifts" + "My
+  applications" panel; `rota.html`'s shift modal got a matching
+  "Applications for this shift" section next to the assignments list.
 - **Increment 6 — vehicle/asset allocation + stock ledger.** Per-shift
   vehicle/asset allocation with conflict checking, a stock-movements
   ledger for consumables (never overwrite a balance without a ledger

@@ -294,6 +294,8 @@ function assignmentsSection(s) {
         <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
         <button type="button" class="btn" id="shAddPerson" style="padding:6px 12px;font-size:12px">Add</button>
       </div>` : ''}
+      <label style="margin-top:14px">Applications for this shift</label>
+      <div id="shApplications" class="dim" style="font-size:13px">Loading…</div>
     </div>`;
 }
 function shiftModal(s, defaults) {
@@ -338,6 +340,32 @@ function shiftModal(s, defaults) {
       try { await api('POST', `/api/shifts/${s.id}/assignments`, { personnel: Number(el('#shAddPersonnel').value) }); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
+    if (el('#shApplications')) {
+      api('GET', `/api/shift-applications?shift_id=${s.id}`).then((apps) => {
+        const open = apps.filter((a) => ['APPLIED', 'SHORTLISTED'].includes(a.status));
+        el('#shApplications').innerHTML = open.length ? open.map((a) => `
+          <div style="display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:6px" data-application="${a.id}">
+            <span style="flex:1">${esc(a.personnel_name)}<span class="dim"> — ${esc(a.status === 'SHORTLISTED' ? 'shortlisted' : 'applied')}</span></span>
+            ${a.status === 'APPLIED' ? `<button type="button" class="btn" data-shortlist="${a.id}" style="padding:4px 8px;font-size:11px">Shortlist</button>` : ''}
+            <button type="button" class="btn ok" data-approve="${a.id}" style="padding:4px 8px;font-size:11px">Approve</button>
+            <button type="button" class="btn danger" data-reject="${a.id}" style="padding:4px 8px;font-size:11px">Reject</button>
+          </div>`).join('') : '<p class="dim" style="font-size:13px;margin:0">No open applications.</p>';
+        els('#shApplications [data-shortlist]').forEach((b) => (b.onclick = async () => {
+          try { await api('PATCH', `/api/shift-applications/${b.dataset.shortlist}`, { status: 'SHORTLISTED' }); await reopen(); }
+          catch (e) { el('#shError').textContent = e.message; }
+        }));
+        els('#shApplications [data-approve]').forEach((b) => (b.onclick = async () => {
+          try { await api('PATCH', `/api/shift-applications/${b.dataset.approve}`, { status: 'APPROVED' }); await reopen(); }
+          catch (e) { el('#shError').textContent = e.message; }
+        }));
+        els('#shApplications [data-reject]').forEach((b) => (b.onclick = async () => {
+          const reason = prompt('Reason for rejecting this application?');
+          if (!reason) return;
+          try { await api('PATCH', `/api/shift-applications/${b.dataset.reject}`, { status: 'REJECTED', rejection_reason: reason }); await reopen(); }
+          catch (e) { el('#shError').textContent = e.message; }
+        }));
+      }).catch(() => { if (el('#shApplications')) el('#shApplications').textContent = 'Failed to load.'; });
+    }
     el('#shSave').onclick = async () => {
       const body = {
         shift_type_id: Number(el('#shType').value),
