@@ -3170,8 +3170,12 @@ function findShift(id) { const s = db.shifts.find((x) => x.id === Number(id)); i
 function findAssignment(id) { const a = db.shift_assignments.find((x) => x.id === Number(id)); if (!a) throw httpError(404, 'assignment not found'); return a; }
 function assignedPersonnelIds(shiftId) { return db.shift_assignments.filter((a) => a.shift_id === shiftId && a.status !== 'REMOVED').map((a) => a.personnel_id); }
 
-route('GET', '/api/shifts', ALL, ({ query }) => {
+route('GET', '/api/shifts', ALL, ({ query, user }) => {
   let rows = db.shifts.slice();
+  // A draft is "not yet ready to show staff" by definition — only a
+  // control role ever sees one, same as a RESTRICTED form submission only
+  // being visible to those with a reason to see it.
+  if (!isControlRole(user.role)) rows = rows.filter((s) => s.status !== 'DRAFT');
   if (query.get('site_id')) rows = rows.filter((s) => s.site_id === Number(query.get('site_id')));
   if (query.get('shift_type_id')) rows = rows.filter((s) => s.shift_type_id === Number(query.get('shift_type_id')));
   if (query.get('status')) rows = rows.filter((s) => s.status === query.get('status').toUpperCase());
@@ -3196,15 +3200,17 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
   const site = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null;
   const headcount = body.required_headcount != null && body.required_headcount !== '' ? Number(body.required_headcount) : 1;
   if (!Number.isFinite(headcount) || headcount < 1) throw httpError(400, 'required_headcount must be a positive number');
+  // Defaults to visible immediately, matching this restructuring's original
+  // behaviour. A caller may ask for DRAFT explicitly (building out a week
+  // before announcing it); IN_PROGRESS/COMPLETED/CANCELLED make no sense on
+  // a shift that doesn't exist yet, so those are refused at creation.
+  if ('status' in body && !['DRAFT', 'PUBLISHED'].includes(body.status)) throw httpError(400, 'a new shift must be DRAFT or PUBLISHED');
   const s = {
     id: nextId('shifts'), site_id: site ? site.id : null, shift_type_id: type.id,
     starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(),
     break_minutes: body.break_minutes ? Number(body.break_minutes) : 0,
     required_headcount: headcount,
-    // Defaults to visible immediately, matching today's behaviour — a real
-    // draft-then-publish workflow (with DRAFT hidden from staff) is a
-    // deliberate later increment, not introduced by this restructuring.
-    status: 'PUBLISHED',
+    status: body.status === 'DRAFT' ? 'DRAFT' : 'PUBLISHED',
     pay_rate: body.pay_rate != null && body.pay_rate !== '' ? Number(body.pay_rate) : null,
     bill_rate: body.bill_rate != null && body.bill_rate !== '' ? Number(body.bill_rate) : null,
     uniform_ppe: body.uniform_ppe || '', briefing: body.briefing || '', notes: body.notes || '',
@@ -3229,7 +3235,10 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
     db.shift_assignments.push(firstAssignment);
   }
   const pub = publicShift(s);
-  broadcast('shift.created', pub, { personnelIds: firstAssignment ? [firstAssignment.personnel_id] : [] });
+  // A draft is "not ready to show staff" — the assigned officer doesn't
+  // find out over the socket either, the same boundary GET /api/shifts
+  // enforces on a fetch.
+  broadcast('shift.created', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: firstAssignment ? [firstAssignment.personnel_id] : [] });
   logEvent('shift.created', `SHIFT CREATED (${type.name}) ${s.starts_at} — ${s.ends_at}${firstAssignment ? ` FOR ${findPersonnel(firstAssignment.personnel_id).name}` : ''}`, { shift_id: s.id });
   return { __status: 201, __body: pub };
 });
@@ -3261,7 +3270,9 @@ route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body }) => {
     s.status = body.status;
   }
   const pub = publicShift(s);
-  broadcast('shift.updated', pub, { personnelIds: assignedPersonnelIds(s.id) });
+  // Editing a still-draft shift (e.g. fixing its time before publishing)
+  // must not tip off its assignee any sooner than publishing itself would.
+  broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: assignedPersonnelIds(s.id) });
   logEvent('shift.updated', `SHIFT ${s.id} UPDATED`, { shift_id: s.id });
   return pub;
 });
@@ -3295,7 +3306,7 @@ route('POST', '/api/shifts/:id/assignments', CONTROL, ({ params, body, user }) =
   };
   db.shift_assignments.push(a);
   const pub = publicShift(s);
-  broadcast('shift.updated', pub, { personnelIds: [p.id] });
+  broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [p.id] });
   logEvent('shift_assignment.created', `${p.name} ADDED TO SHIFT ${s.id}`, { shift_id: s.id, personnel_id: p.id });
   return { __status: 201, __body: pub };
 });
@@ -3321,7 +3332,7 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   }
   a.updated_at = new Date().toISOString();
   const pub = publicShift(s);
-  broadcast('shift.updated', pub, { personnelIds: [a.personnel_id] });
+  broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [a.personnel_id] });
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   logEvent('shift_assignment.updated', `${p ? p.name : 'PERSON'} ON SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;

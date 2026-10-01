@@ -694,6 +694,28 @@ test('a shift can be edited and deleted by control, and a second person can be a
   assert.equal((await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, adminT)).status, 200);
 });
 
+test('a shift created as DRAFT is invisible to its own assignee until published', async () => {
+  const start = new Date(Date.now() + 3600000).toISOString();
+  const end = new Date(Date.now() + 5 * 3600000).toISOString();
+  assert.equal((await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end, status: 'IN_PROGRESS' }, dispT)).status, 400, 'a new shift can only be DRAFT or PUBLISHED');
+
+  const draft = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end, status: 'DRAFT' }, dispT);
+  assert.equal(draft.status, 201);
+  assert.equal(draft.body.status, 'DRAFT');
+
+  const danSees = await call('GET', `/api/shifts?personnel_id=${danId}`, undefined, danT);
+  assert.ok(!danSees.body.some((s) => s.id === draft.body.id), 'a draft never reaches the officer it names, even by their own filtered fetch');
+  const controlSees = await call('GET', `/api/shifts?personnel_id=${danId}`, undefined, dispT);
+  assert.ok(controlSees.body.some((s) => s.id === draft.body.id), 'control sees it fine');
+
+  const published = await call('PATCH', `/api/shifts/${draft.body.id}`, { status: 'PUBLISHED' }, dispT);
+  assert.equal(published.body.status, 'PUBLISHED');
+  const danSeesNow = await call('GET', `/api/shifts?personnel_id=${danId}`, undefined, danT);
+  assert.ok(danSeesNow.body.some((s) => s.id === draft.body.id), 'visible the moment it is published');
+
+  await call('DELETE', `/api/shifts/${draft.body.id}`, undefined, adminT);
+});
+
 /* ---------------- asset tracking ---------------- */
 test('a vehicle can be created, updated and deleted, with a unique registration', async () => {
   const created = await call('POST', '/api/vehicles', { registration: 'test-500', type: 'Van' }, adminT);

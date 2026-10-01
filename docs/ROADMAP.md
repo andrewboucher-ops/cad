@@ -371,9 +371,23 @@ self-contained slice at a time, tested and deployed before the next.
   instead, which already does both. `officer.html` got the read-only
   side: a "Site documents" button on whatever job or visit an officer
   currently has.
-- **Increment 4 — rota grid rework.** Coverage-gap/over-staffing colour
-  coding, a by-shift-type filter view, bulk actions (publish, duplicate
-  week forward).
+- ~~**Increment 4 — rota grid rework.**~~ — done, see README.md. A real
+  draft-then-publish workflow: `POST /api/shifts` accepts an optional
+  `status` (`DRAFT` or `PUBLISHED` only — the others make no sense on a
+  shift that doesn't exist yet), `GET /api/shifts` hides a draft from
+  anyone who isn't a control role, and every broadcast touching a draft
+  shift goes `controlOnly` so its assignee can't learn about it a moment
+  early over the socket either. `rota.html` got a coverage badge
+  (red/amber `N/required`) on any chip whose shift isn't exactly staffed,
+  a one-line "N shifts need staff / N drafts unpublished" summary, a
+  shift-type filter, and two bulk actions: "Publish drafts" (every draft
+  in view, one pass) and "Duplicate week forward" (copies every shift and
+  its active assignees N weeks ahead, always as drafts — a bulk copy is
+  exactly the moment to review before announcing, not after). Covered by
+  a new test in `test/cccs.test.js` for the draft-creation/visibility
+  boundary; the two bulk actions are client-side orchestration of
+  already-tested single-shift endpoints, verified live rather than by a
+  new server test.
 - **Increment 5 — shift requests/applications.** Staff apply for a
   published open shift; control approves/rejects — mirrors the leave
   request pipeline's append-only, actor-and-timestamp-stamped shape.

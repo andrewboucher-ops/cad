@@ -42,6 +42,10 @@
   .shift-chip.status-CANCELLED { border-color: var(--ink-dim); opacity: .5; text-decoration: line-through; }
   .shift-chip.leave-conflict { border-color: var(--priority); }
   .shift-chip .leave-flag { color: var(--priority); font-weight: 700; }
+  .shift-chip.draft { opacity: .6; border-style: dashed; }
+  .coverage-badge { font-weight: 700; padding: 0 4px; border-radius: 3px; margin-left: 4px; }
+  .coverage-badge.gap { color: var(--emergency); background: rgba(239,68,68,.12); }
+  .coverage-badge.over { color: var(--priority); background: rgba(249,115,22,.12); }
   .add-hint { font-size: 10.5px; color: var(--ink-dim); opacity: 0; transition: opacity .1s; }
   .rota-cell:hover .add-hint { opacity: 1; }
   form.stack { display: flex; flex-direction: column; gap: 12px; }
@@ -100,8 +104,12 @@
         <button class="btn" id="thisWeek" style="padding:6px 12px">This week</button>
         <button class="btn" id="nextWeek" style="padding:6px 12px">Next ›</button>
       </div>
+      <select id="typeFilter" style="padding:6px 10px"><option value="">All shift types</option></select>
+      <button class="btn" id="btnPublishDrafts" style="padding:7px 14px;font-size:13px">Publish drafts</button>
+      <button class="btn" id="btnDuplicateWeek" style="padding:7px 14px;font-size:13px">Duplicate week forward</button>
       <button class="btn primary" id="btnNewShift" style="padding:7px 14px;font-size:13px">New shift</button>
     </div>
+    <p class="dim" id="coverageSummary" style="margin:0 0 10px;font-size:12.5px"></p>
     <div id="gridWrap"></div>
   </div>
 </main>
@@ -167,12 +175,20 @@ async function load() {
     api('GET', `/api/shifts?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`),
     api('GET', '/api/shift-types'),
   ]);
+  const currentFilter = el('#typeFilter').value;
+  el('#typeFilter').innerHTML = '<option value="">All shift types</option>' + allShiftTypes.map((t) => `<option value="${t.id}" ${String(t.id) === currentFilter ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   paintGrid();
 }
+el('#typeFilter').addEventListener('change', paintGrid);
 
+function visibleShifts() {
+  const typeId = el('#typeFilter').value;
+  return typeId ? allShifts.filter((s) => s.shift_type_id === Number(typeId)) : allShifts;
+}
 function paintGrid() {
   const days = weekDays();
   const today = new Date();
+  const shifts = visibleShifts();
   const rows = allPersonnel.filter((p) => p.employment_status !== 'TERMINATED').sort((a, b) => a.name.localeCompare(b.name));
   let html = `<div class="rota-grid">`;
   html += `<div class="hdr"></div>`;
@@ -180,13 +196,15 @@ function paintGrid() {
   for (const p of rows) {
     html += `<div class="person-name">${esc(p.name)}<span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
     for (const d of days) {
-      const dayShifts = allShifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.assignments.some((a) => a.personnel_id === p.id));
+      const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.assignments.some((a) => a.personnel_id === p.id));
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
         ${dayShifts.map((s) => {
           const a = s.assignments.find((x) => x.personnel_id === p.id);
-          return `<div class="shift-chip status-${chipStatusClass(s, a)}${a.on_leave_conflict ? ' leave-conflict' : ''}" data-shift="${s.id}" ${a.on_leave_conflict ? 'title="This person has approved leave covering this day"' : ''}>
-          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${a.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}</div>
-          <div>${esc(s.site_name || s.shift_type_name || '')}${a.is_duty_supervisor ? ' · <strong>duty sup.</strong>' : ''}</div>
+          const badge = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount}</span>`
+            : s.over_staffed ? `<span class="coverage-badge over">${s.assigned_count}/${s.required_headcount}</span>` : '';
+          return `<div class="shift-chip status-${chipStatusClass(s, a)}${a.on_leave_conflict ? ' leave-conflict' : ''}${s.status === 'DRAFT' ? ' draft' : ''}" data-shift="${s.id}" ${a.on_leave_conflict ? 'title="This person has approved leave covering this day"' : ''}>
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${a.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}${badge}</div>
+          <div>${esc(s.site_name || s.shift_type_name || '')}${a.is_duty_supervisor ? ' · <strong>duty sup.</strong>' : ''}${s.status === 'DRAFT' ? ' · <em>draft</em>' : ''}</div>
         </div>`;
         }).join('')}
         <span class="add-hint">+ add shift</span>
@@ -195,6 +213,14 @@ function paintGrid() {
   }
   html += `</div>`;
   el('#gridWrap').innerHTML = rows.length ? html : '<p class="dim">No active personnel to schedule.</p>';
+
+  const inWeek = shifts.filter((s) => days.some((d) => sameDay(new Date(s.starts_at), d)) && s.status !== 'CANCELLED');
+  const understaffed = inWeek.filter((s) => s.coverage_gap > 0).length;
+  const draftCount = inWeek.filter((s) => s.status === 'DRAFT').length;
+  const bits = [];
+  if (understaffed) bits.push(`${understaffed} shift${understaffed === 1 ? '' : 's'} need${understaffed === 1 ? 's' : ''} staff`);
+  if (draftCount) bits.push(`${draftCount} draft${draftCount === 1 ? '' : 's'} not yet published`);
+  el('#coverageSummary').textContent = bits.join(' · ');
 
   els('.shift-chip').forEach((chip) => chip.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -231,7 +257,9 @@ function shiftForm(s, defaults) {
       <input id="shHeadcount" type="number" min="1" value="${isNew ? 1 : s.required_headcount}">
       <label>Notes</label>
       <textarea id="shNotes" rows="2">${isNew ? '' : esc(s.notes || '')}</textarea>
-      ${isNew ? '' : `<label>Status</label>
+      ${isNew
+        ? `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDraft"> Create as draft — not shown to staff until published</label>`
+        : `<label>Status</label>
       <select id="shStatus">${['DRAFT', 'PUBLISHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((v) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
       <p class="dim" id="shError" style="min-height:16px;margin:0"></p>
     </form>`;
@@ -325,6 +353,7 @@ function shiftModal(s, defaults) {
           await api('PATCH', `/api/shifts/${s.id}`, body);
         } else {
           body.personnel = Number(el('#shPersonnel').value);
+          if (el('#shDraft') && el('#shDraft').checked) body.status = 'DRAFT';
           await api('POST', '/api/shifts', body);
         }
         closeModal(); await load();
@@ -333,6 +362,47 @@ function shiftModal(s, defaults) {
   });
 }
 el('#btnNewShift').onclick = () => shiftModal(null, { personnelId: allPersonnel[0] && allPersonnel[0].id, date: fmtDate(new Date()) });
+
+el('#btnPublishDrafts').onclick = async () => {
+  const days = weekDays();
+  const drafts = visibleShifts().filter((s) => s.status === 'DRAFT' && days.some((d) => sameDay(new Date(s.starts_at), d)));
+  if (!drafts.length) { alert('No drafts in the current view.'); return; }
+  if (!confirm(`Publish ${drafts.length} draft shift${drafts.length === 1 ? '' : 's'}?`)) return;
+  for (const s of drafts) await api('PATCH', `/api/shifts/${s.id}`, { status: 'PUBLISHED' });
+  await load();
+};
+
+/** Copies every (non-cancelled) shift in the current view N weeks ahead,
+ * including its active assignees — the same core team usually covers a
+ * recurring week, so re-staffing from scratch would be the common case to
+ * avoid, not the default to design for. Lands as DRAFT, not published: a
+ * bulk copy is exactly the moment someone's left, a date needs nudging, or
+ * a site has changed, so it is reviewed via "Publish drafts" rather than
+ * notifying everyone immediately. */
+el('#btnDuplicateWeek').onclick = async () => {
+  const weeksStr = prompt('Duplicate the shifts in view how many weeks forward?', '1');
+  const weeks = Number(weeksStr);
+  if (!weeksStr || !Number.isFinite(weeks) || weeks < 1) return;
+  const days = weekDays();
+  const source = visibleShifts().filter((s) => s.status !== 'CANCELLED' && days.some((d) => sameDay(new Date(s.starts_at), d)));
+  if (!source.length) { alert('No shifts in the current view to duplicate.'); return; }
+  if (!confirm(`Duplicate ${source.length} shift${source.length === 1 ? '' : 's'} ${weeks} week${weeks === 1 ? '' : 's'} forward, as drafts?`)) return;
+  const shiftMs = weeks * 7 * 86400000;
+  for (const s of source) {
+    const created = await api('POST', '/api/shifts', {
+      site_id: s.site_id, shift_type_id: s.shift_type_id,
+      starts_at: new Date(Date.parse(s.starts_at) + shiftMs).toISOString(),
+      ends_at: new Date(Date.parse(s.ends_at) + shiftMs).toISOString(),
+      break_minutes: s.break_minutes, required_headcount: s.required_headcount,
+      pay_rate: s.pay_rate, bill_rate: s.bill_rate, uniform_ppe: s.uniform_ppe, briefing: s.briefing,
+      detail: s.detail, notes: s.notes, status: 'DRAFT',
+    });
+    for (const a of s.assignments.filter((x) => ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
+      await api('POST', `/api/shifts/${created.id}/assignments`, { personnel: a.personnel_id, role_on_shift: a.role_on_shift, is_duty_supervisor: a.is_duty_supervisor });
+    }
+  }
+  await load();
+};
 
 CCCS.bus((up) => {
   const n = el('#net');

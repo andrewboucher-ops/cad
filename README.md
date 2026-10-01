@@ -376,6 +376,29 @@ headcount beyond one is something you now do from the edit view, not the
 create flow — keeping the "+ add shift" cell click exactly as simple as
 it always was.
 
+**Increment 4** adds a real draft-then-publish workflow and the first
+coverage-at-a-glance views, on top of the rota grid rather than replacing
+it. A shift can now be created as `DRAFT` — not SCHEDULED, not CLOCKED_IN,
+invisible to `GET /api/shifts` for anyone who isn't a control role, and
+every `broadcast()` touching a draft shift (creation, edits, adding or
+updating an assignment) goes `controlOnly` rather than to the assignee, so
+the officer it names finds out only once it's actually published, not a
+moment sooner over the socket. `rota.html` renders a draft chip dashed and
+dimmed, with a "Publish drafts" bulk action that PATCHes every draft shift
+in the current view to `PUBLISHED` in one pass. A shift whose
+`coverage_gap`/`over_staffed` (already computed server-side since
+Increment 1) is nonzero shows a small red/amber `N/required` badge right
+on its chip, and a one-line summary above the grid counts how many shifts
+in view need staff or are still unpublished — the "coverage strip" the
+brief asks for, built as a signal layered onto the existing per-person
+grid rather than a second, site-oriented grid view. A shift-type filter
+narrows the whole grid to one type at a time. "Duplicate week forward"
+copies every shift in the current view (and its active assignees — the
+same core team usually covers a recurring week) N weeks ahead, always
+landing as drafts: a bulk copy is exactly the moment a date needs nudging
+or someone's left, so it's reviewed and explicitly published rather than
+notifying everyone immediately.
+
 ### SIA licence / DBS compliance tracking
 
 There is no integration with either service, because none exists to build:
