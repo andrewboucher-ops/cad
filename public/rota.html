@@ -108,6 +108,7 @@
         <button class="btn" id="nextWeek" style="padding:6px 12px">Next ›</button>
       </div>
       <select id="typeFilter" style="padding:6px 10px"><option value="">All shift types</option></select>
+      <select id="groupBy" style="padding:6px 10px"><option value="staff">Group by staff</option><option value="site">Group by site</option></select>
       <button class="btn" id="btnPublishDrafts" style="padding:7px 14px;font-size:13px">Publish drafts</button>
       <button class="btn" id="btnDuplicateWeek" style="padding:7px 14px;font-size:13px">Duplicate week forward</button>
       <button class="btn" id="btnCalSync" style="padding:7px 14px;font-size:13px">Calendar sync</button>
@@ -184,12 +185,17 @@ async function load() {
   paintGrid();
 }
 el('#typeFilter').addEventListener('change', paintGrid);
+el('#groupBy').addEventListener('change', paintGrid);
 
 function visibleShifts() {
   const typeId = el('#typeFilter').value;
   return typeId ? allShifts.filter((s) => s.shift_type_id === Number(typeId)) : allShifts;
 }
 function paintGrid() {
+  if (el('#groupBy').value === 'site') paintGridBySite();
+  else paintGridByStaff();
+}
+function paintGridByStaff() {
   const days = weekDays();
   const today = new Date();
   const shifts = visibleShifts();
@@ -217,7 +223,54 @@ function paintGrid() {
   }
   html += `</div>`;
   el('#gridWrap').innerHTML = rows.length ? html : '<p class="dim">No active personnel to schedule.</p>';
-
+  finishGridPaint(shifts, days, (cell) => ({ personnelId: Number(cell.dataset.personnel), date: cell.dataset.date }));
+}
+/** The site is a property of the shift, not of a person — a person's
+ * rows can't be "grouped by site" (they work different sites on
+ * different days), so this is a genuinely different axis: one row per
+ * site, each cell listing that site's shift(s) that day and who's on
+ * them, rather than one row per person with their own shifts. A site
+ * with no shifts this week still gets a row — the whole point is seeing
+ * gaps, same reasoning the staff view already uses for an unrostered
+ * person. */
+function paintGridBySite() {
+  const days = weekDays();
+  const today = new Date();
+  const shifts = visibleShifts();
+  const siteRows = allSites.slice().sort((a, b) => a.name.localeCompare(b.name)).map((s) => ({ id: s.id, name: s.name }));
+  const hasUnsited = shifts.some((s) => !s.site_id && days.some((d) => sameDay(new Date(s.starts_at), d)));
+  const rows = hasUnsited ? [...siteRows, { id: null, name: 'No site' }] : siteRows;
+  let html = `<div class="rota-grid">`;
+  html += `<div class="hdr"></div>`;
+  for (const d of days) html += `<div class="hdr ${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()].slice(0, 3)} ${d.getDate()}</div>`;
+  for (const site of rows) {
+    html += `<div class="person-name">${esc(site.name)}</div>`;
+    for (const d of days) {
+      const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.site_id === site.id);
+      html += `<div class="rota-cell" data-site="${site.id ?? ''}" data-date="${fmtDate(d)}">
+        ${dayShifts.map((s) => {
+          const active = s.assignments.filter((a) => a.status !== 'REMOVED');
+          const names = active.map((a) => `${esc(a.personnel_name)}${a.is_duty_supervisor ? ' (duty sup.)' : ''}${a.on_leave_conflict ? ' ⚠' : ''}`).join(', ') || 'unstaffed';
+          const badge = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount}</span>`
+            : s.over_staffed ? `<span class="coverage-badge over">${s.assigned_count}/${s.required_headcount}</span>` : '';
+          const onLeave = active.some((a) => a.on_leave_conflict);
+          return `<div class="shift-chip${s.status === 'CANCELLED' ? ' status-CANCELLED' : ''}${onLeave ? ' leave-conflict' : ''}${s.status === 'DRAFT' ? ' draft' : ''}" data-shift="${s.id}" ${onLeave ? 'title="Someone on this shift has approved leave covering this day"' : ''}>
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${badge}</div>
+          <div>${esc(s.shift_type_name || '')} · ${esc(names)}${s.status === 'DRAFT' ? ' · <em>draft</em>' : ''}</div>
+        </div>`;
+        }).join('')}
+        <span class="add-hint">+ add shift</span>
+      </div>`;
+    }
+  }
+  html += `</div>`;
+  el('#gridWrap').innerHTML = rows.length ? html : '<p class="dim">No sites to schedule.</p>';
+  finishGridPaint(shifts, days, (cell) => ({ siteId: cell.dataset.site ? Number(cell.dataset.site) : null, personnelId: allPersonnel[0] && allPersonnel[0].id, date: cell.dataset.date }));
+}
+/** Shared tail for both grid views: the coverage/draft summary line and
+ * the click handlers, which only differ in what an empty cell's "add
+ * shift" default should pre-fill. */
+function finishGridPaint(shifts, days, defaultsForCell) {
   const inWeek = shifts.filter((s) => days.some((d) => sameDay(new Date(s.starts_at), d)) && s.status !== 'CANCELLED');
   const understaffed = inWeek.filter((s) => s.coverage_gap > 0).length;
   const draftCount = inWeek.filter((s) => s.status === 'DRAFT').length;
@@ -231,7 +284,7 @@ function paintGrid() {
     shiftModal(allShifts.find((s) => s.id === Number(chip.dataset.shift)));
   }));
   els('.rota-cell').forEach((cell) => cell.addEventListener('click', () => {
-    shiftModal(null, { personnelId: Number(cell.dataset.personnel), date: cell.dataset.date });
+    shiftModal(null, defaultsForCell(cell));
   }));
 }
 
@@ -252,7 +305,7 @@ function shiftForm(s, defaults) {
       <select id="shType">${allShiftTypes.map((t) => `<option value="${t.id}" ${!isNew && s.shift_type_id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
         ${!isNew && !allShiftTypes.some((t) => t.id === s.shift_type_id) ? `<option value="${s.shift_type_id}" selected>${esc(s.shift_type_name)} (retired)</option>` : ''}</select>
       <label>Site (optional)</label>
-      <select id="shSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${!isNew && s.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <select id="shSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${(!isNew && s.site_id === x.id) || (isNew && d.siteId === x.id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       <label>Starts</label>
       <input id="shStart" type="datetime-local" value="${startDefault}">
       <label>Ends</label>
