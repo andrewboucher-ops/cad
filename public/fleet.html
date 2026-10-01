@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — fleet</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { min-height: 100vh; }
+  .fl-top { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .fl-top h1 { font-size: 16px; margin: 0; flex: 1; }
+  .fl-body { padding: 16px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+  .tile .n { font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .tile .l { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); }
+  .tile.bad .n { color: var(--emergency); } .tile.warn .n { color: var(--busy); } .tile.good .n { color: var(--available); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chip { font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--line); background: transparent; color: var(--ink-dim); cursor: pointer; }
+  .chip.on { background: var(--accent-dim); color: #eafffb; border-color: var(--accent-dim); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+  .veh { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .veh.attn { border-color: var(--emergency); }
+  .veh-head { display: flex; align-items: center; gap: 8px; }
+  .reg { font-family: var(--mono); font-weight: 800; font-size: 16px; background: #facc15; color: #111; padding: 2px 8px; border-radius: 4px; letter-spacing: .04em; }
+  .pill { font-size: 10px; font-weight: 700; letter-spacing: .05em; padding: 2px 8px; border-radius: 20px; text-transform: uppercase; }
+  .pill.ok { background: rgba(34,197,94,.16); color: var(--available); }
+  .pill.warn { background: rgba(234,179,8,.18); color: var(--busy); }
+  .pill.bad { background: rgba(239,68,68,.18); color: var(--emergency); }
+  .pill.off { background: rgba(100,116,139,.18); color: var(--offline); }
+  .comp { display: flex; gap: 6px; flex-wrap: wrap; }
+  .kv2 { display: grid; grid-template-columns: 92px 1fr; gap: 2px 10px; font-size: 12.5px; }
+  .kv2 dt { color: var(--ink-dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; align-self: center; }
+  .kv2 dd { margin: 0; }
+  .issues { margin: 0; padding-left: 16px; color: var(--emergency); font-size: 12.5px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+  .actions .btn { padding: 4px 10px; font-size: 12px; }
+  .recent a { font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="fl-top">
+  <h1>Fleet</h1>
+  <span class="dim" id="updated"></span>
+  <a class="btn" href="/forms.html">Reports</a>
+  <a class="btn" href="/control.html">Control room</a>
+</div>
+<div class="fl-body">
+  <div class="tiles" id="tiles"></div>
+  <div class="chips" id="filters">
+    <button class="chip on" data-f="all">All vehicles</button>
+    <button class="chip" data-f="attention">Needs attention</button>
+    <button class="chip" data-f="uninspected">Not inspected today</button>
+    <button class="chip" data-f="out">Out today</button>
+    <button class="chip" data-f="offroad">Off road</button>
+  </div>
+  <div class="grid" id="grid"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+
+let data = null, filter = 'all';
+const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' }) : '—');
+const fmtWhen = (iso) => (iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
+const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+const STATE_CLS = { OVERDUE: 'bad', DUE_SOON: 'warn', OK: 'ok', UNKNOWN: 'off' };
+
+/** "Needs attention": a compliance date passed, the last inspection found
+ * something, or it is going out today with no inspection today. */
+const needsAttention = (v) => v.worst_compliance === 'OVERDUE' || (v.last_inspection && v.last_inspection.issues.length) || (v.today && !v.inspected_today);
+const FILTERS = {
+  all: () => true,
+  attention: needsAttention,
+  uninspected: (v) => !v.inspected_today && v.status !== 'OFF_ROAD',
+  out: (v) => Boolean(v.today),
+  offroad: (v) => v.status === 'OFF_ROAD',
+};
+const formLink = (f, v) => `/forms.html?new=${encodeURIComponent(f.key)}&subject_type=VEHICLE&subject_id=${v.id}`;
+
+function render() {
+  const s = data.summary;
+  const tile = (n, l, cls, f) => `<div class="tile ${cls}" data-f="${f}"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+  el('#tiles').innerHTML = [
+    tile(s.total, 'Vehicles', '', 'all'),
+    tile(s.out_today, 'Out today', '', 'out'),
+    tile(`${s.inspected_today}/${s.total - s.off_road}`, 'Inspected today', s.inspected_today >= s.total - s.off_road ? 'good' : 'warn', 'uninspected'),
+    tile(s.with_issues, 'Inspection issues', s.with_issues ? 'bad' : 'good', 'attention'),
+    tile(s.compliance_overdue, 'MOT/service/ins. overdue', s.compliance_overdue ? 'bad' : 'good', 'attention'),
+    tile(s.compliance_due_soon, 'Due within 30 days', s.compliance_due_soon ? 'warn' : 'good', 'all'),
+    tile(s.off_road, 'Off road', s.off_road ? 'warn' : '', 'offroad'),
+  ].join('');
+  els('#tiles .tile').forEach((t) => (t.onclick = () => { filter = t.dataset.f; render(); }));
+  els('#filters .chip').forEach((c) => c.classList.toggle('on', c.dataset.f === filter));
+
+  const rows = data.vehicles.filter(FILTERS[filter]).sort((a, b) => Number(needsAttention(b)) - Number(needsAttention(a)) || a.registration.localeCompare(b.registration));
+  el('#grid').innerHTML = rows.length ? rows.map((v) => {
+    const ins = v.last_inspection;
+    const statusCls = v.status === 'OFF_ROAD' ? 'bad' : v.status === 'IN_SERVICE' ? 'warn' : 'ok';
+    return `<div class="veh ${needsAttention(v) ? 'attn' : ''}">
+      <div class="veh-head">
+        <span class="reg">${esc(v.registration)}</span>
+        <span style="flex:1">${esc([v.make, v.model].filter(Boolean).join(' ') || v.type || '')}</span>
+        <span class="pill ${statusCls}">${esc((v.status || 'ACTIVE').replace('_', ' '))}</span>
+      </div>
+      <div class="comp">${v.compliance.map((c) => `<span class="pill ${STATE_CLS[c.state]}" title="${esc(c.label)} due ${esc(fmtDate(c.due_at))}">${esc(c.label)} ${c.due_at ? esc(fmtDate(c.due_at)) : '—'}</span>`).join('')}</div>
+      <dl class="kv2">
+        <dt>Today</dt><dd>${v.today ? `${hhmm(v.today.starts_at)}–${hhmm(v.today.ends_at)}${v.today.driver ? ' · ' + esc(v.today.driver) : ''}` : '<span class="dim">not allocated</span>'}</dd>
+        <dt>Assigned</dt><dd>${esc(v.assigned_personnel_name || '—')}${v.site_name ? ` · ${esc(v.site_name)}` : ''}</dd>
+        <dt>Inspection</dt><dd>${ins ? `${esc(fmtWhen(ins.submitted_at))} by ${esc(ins.submitted_by)} <a href="/forms.html?id=${ins.id}">${esc(ins.reference)}</a>` : '<span style="color:var(--emergency)">never inspected</span>'}
+          ${v.inspected_today ? '' : (v.status !== 'OFF_ROAD' ? ' <span class="pill warn">not today</span>' : '')}</dd>
+        <dt>Mileage</dt><dd>${v.mileage != null ? Number(v.mileage).toLocaleString('en-GB') : '—'}${v.last_fuel ? ` · last fuel ${esc(fmtDate(v.last_fuel.recorded_at))} (${v.last_fuel.litres}L)` : ''}</dd>
+        <dt>Maintenance</dt><dd>${v.last_maintenance ? `${esc(fmtDate(v.last_maintenance.performed_at))} — ${esc(v.last_maintenance.description)}` : '—'}</dd>
+      </dl>
+      ${ins && ins.issues.length ? `<ul class="issues">${ins.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}
+      <div class="actions">${data.vehicle_forms.map((f) => `<a class="btn ${/inspection/i.test(f.name) ? 'primary' : ''}" href="${formLink(f, v)}">${esc(f.name)}</a>`).join('') || '<span class="dim">No vehicle forms set up (Admin → Forms).</span>'}</div>
+      ${v.recent_reports.length > 1 ? `<div class="recent dim" style="font-size:12px">Recent: ${v.recent_reports.map((r) => `<a href="/forms.html?id=${r.id}">${esc(r.reference)}</a>`).join(' · ')}</div>` : ''}
+    </div>`;
+  }).join('') : '<p class="dim">No vehicles match.</p>';
+}
+els('#filters .chip').forEach((c) => (c.onclick = () => { filter = c.dataset.f; render(); }));
+
+async function load() {
+  try {
+    data = await api('GET', '/api/fleet-dashboard');
+    el('#updated').textContent = `updated ${new Date(data.generated_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+    render();
+  } catch (e) { el('#grid').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+load();
+setInterval(load, 60000);
+CCCS.bus(() => {}).on('form.submitted', (s) => { if (s.subject_type === 'VEHICLE') load(); });
+</script>
+</body>
+</html>

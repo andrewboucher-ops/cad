@@ -67,11 +67,22 @@ module.exports = function registerClientRoutes({
     if (!client || !client.site_ids.includes(Number(siteId))) throw httpError(404, 'site not found');
     return db.sites.find((s) => s.id === Number(siteId));
   }
-  function requireClient(user) {
+  /** The client whose portal this request is about. For a CLIENT login,
+   * always their own client. For a SYSTEM_ADMIN viewing a portal ("view as
+   * client"), the client named by ?as_client= — they then get exactly the
+   * client's own projection through the same routes, never more, and only
+   * on the read routes below (CLIENT_OR_ADMIN); nothing writes as a client. */
+  function requireClient(user, query) {
+    if (user.role === 'SYSTEM_ADMIN') {
+      const client = db.clients.find((c) => c.id === Number(query && query.get('as_client')));
+      if (!client) throw httpError(404, 'client not found — choose a client to view');
+      return client;
+    }
     const client = clientOf(user);
     if (!client) throw httpError(403, 'this login is not linked to a client account');
     return client;
   }
+  const CLIENT_OR_ADMIN = CLIENT.concat(ADMIN);
   function parseRange(query) {
     const to = query.get('to') ? new Date(query.get('to')) : new Date();
     const from = query.get('from') ? new Date(query.get('from')) : new Date(to.getTime() - 30 * 86400000);
@@ -280,26 +291,28 @@ module.exports = function registerClientRoutes({
    * client.site_ids and re-checked on every call, never trusted from
    * the request.
    * -------------------------------------------------------------- */
-  route('GET', '/api/client/me', CLIENT, ({ user }) => {
-    const client = requireClient(user);
+  route('GET', '/api/client/me', CLIENT_OR_ADMIN, ({ user, query }) => {
+    const client = requireClient(user, query);
+    // Opening a portal as an admin is logged; the portal page calls this once on load.
+    if (user.role === 'SYSTEM_ADMIN') logEvent('client.portal_viewed', `${user.username} VIEWED THE CLIENT PORTAL OF ${client.name}`, { client_id: client.id });
     return { id: client.id, name: client.name, sites: db.sites.filter((s) => client.site_ids.includes(s.id)).map(clientSite) };
   });
-  route('GET', '/api/client/jobs', CLIENT, ({ user, query }) => {
-    const client = requireClient(user);
+  route('GET', '/api/client/jobs', CLIENT_OR_ADMIN, ({ user, query }) => {
+    const client = requireClient(user, query);
     const siteId = query.get('site_id') ? Number(query.get('site_id')) : null;
     if (siteId) ownedSite(client, siteId);
     return db.jobs.filter((j) => client.site_ids.includes(j.site_id) && (!siteId || j.site_id === siteId))
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).slice(0, 100).map(clientJob);
   });
-  route('GET', '/api/client/site-visits', CLIENT, ({ user, query }) => {
-    const client = requireClient(user);
+  route('GET', '/api/client/site-visits', CLIENT_OR_ADMIN, ({ user, query }) => {
+    const client = requireClient(user, query);
     const siteId = query.get('site_id') ? Number(query.get('site_id')) : null;
     if (siteId) ownedSite(client, siteId);
     return db.site_visits.filter((v) => client.site_ids.includes(v.site_id) && (!siteId || v.site_id === siteId))
       .sort((a, b) => (a.scheduled_for < b.scheduled_for ? 1 : -1)).slice(0, 100).map(clientVisit);
   });
-  route('GET', '/api/client/sites/:id/report', CLIENT, ({ params, query, user }) => {
-    const client = requireClient(user);
+  route('GET', '/api/client/sites/:id/report', CLIENT_OR_ADMIN, ({ params, query, user }) => {
+    const client = requireClient(user, query);
     const site = ownedSite(client, params.id);
     const { from, to, inRange } = parseRange(query);
     const jobs = db.jobs.filter((j) => j.site_id === site.id && inRange(j.created_at));
@@ -319,8 +332,8 @@ module.exports = function registerClientRoutes({
       },
     };
   });
-  route('GET', '/api/client/documents', CLIENT, ({ user, query }) => {
-    const client = requireClient(user);
+  route('GET', '/api/client/documents', CLIENT_OR_ADMIN, ({ user, query }) => {
+    const client = requireClient(user, query);
     const siteId = query.get('site_id') ? Number(query.get('site_id')) : null;
     if (siteId) ownedSite(client, siteId);
     // Assignment instructions and site maps are internal operational
@@ -328,8 +341,8 @@ module.exports = function registerClientRoutes({
     // own site, never the patrol route or access details staff work from.
     return db.documents.filter((d) => client.site_ids.includes(d.site_id) && (!siteId || d.site_id === siteId) && !VERSIONED_DOC_TYPES.includes(d.type)).map(publicDocument);
   });
-  route('GET', '/api/client/documents/:id/file', CLIENT, ({ params, user }) => {
-    const client = requireClient(user);
+  route('GET', '/api/client/documents/:id/file', CLIENT_OR_ADMIN, ({ params, user, query }) => {
+    const client = requireClient(user, query);
     const d = db.documents.find((x) => x.id === Number(params.id));
     if (!d || !client.site_ids.includes(d.site_id) || VERSIONED_DOC_TYPES.includes(d.type)) throw httpError(404, 'document not found');
     const file = path.join(documentsDir(d.site_id), d.stored_name);

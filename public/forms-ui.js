@@ -32,6 +32,8 @@ const CCCSForms = (() => {
     document.head.appendChild(st);
   }
 
+  const OUTCOME_LABEL = { APPROVED: 'Approved', REJECTED: 'Rejected', NOTED: 'Noted' };
+  const OUTCOME_COLOUR = { APPROVED: 'var(--available)', REJECTED: 'var(--emergency)', NOTED: 'var(--ink-dim)' };
   const SUBJECT_LABEL = { JOB: 'Job', SITE_VISIT: 'Patrol visit', SITE: 'Site', PERSONNEL: 'Person', VEHICLE: 'Vehicle' };
 
   /* ---------------- signature pad ---------------- */
@@ -105,19 +107,23 @@ const CCCSForms = (() => {
    * Renders `def` into `host` for filling in against `subject`
    * ({ type, id, label }). Calls onDone(submission) once the server has
    * accepted it. `signerName` pre-fills each signature's name.
+   *
+   * `submit(values)` replaces the default POST — the public application page
+   * (apply.html) has no session and posts elsewhere — and `subject` may then
+   * be null. `submitLabel` names the button.
    */
-  function fill(host, def, subject, { signerName = '', onDone, onCancel } = {}) {
+  function fill(host, def, subject, { signerName = '', onDone, onCancel, submit, submitLabel = 'Submit report' } = {}) {
     const pads = {}, photos = {};
     host.innerHTML = `
       <div class="ff-stack">
         ${def.visibility === 'RESTRICTED' ? `<p style="margin:0;padding:8px 10px;border-radius:8px;border:1px solid var(--priority);font-size:12.5px">
           <strong>Restricted report.</strong> Only you and the named people responsible for these reports will be able to read it. It will not appear in the control-room log.</p>` : ''}
-        <p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[subject.type] || subject.type)}: <strong>${esc(subject.label)}</strong></p>
+        ${subject ? `<p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[subject.type] || subject.type)}: <strong>${esc(subject.label)}</strong></p>` : ''}
         ${def.fields.map((f) => fieldHtml(f)).join('')}
         <p class="err" data-ff-err style="min-height:16px;margin:0"></p>
         <div class="btn-row">
           ${onCancel ? '<button type="button" class="btn" data-ff-cancel>Cancel</button>' : ''}
-          <button type="button" class="btn primary" data-ff-submit>Submit report</button>
+          <button type="button" class="btn primary" data-ff-submit>${esc(submitLabel)}</button>
         </div>
       </div>`;
 
@@ -165,14 +171,15 @@ const CCCSForms = (() => {
       }
       submitBtn.disabled = true; submitBtn.textContent = 'Sending…';
       try {
-        const sub = await api('POST', '/api/form-submissions', { definition_id: def.id, subject_type: subject.type, subject_id: subject.id, values });
+        const sub = submit ? await submit(values)
+          : await api('POST', '/api/form-submissions', { definition_id: def.id, subject_type: subject.type, subject_id: subject.id, values });
         onDone && onDone(sub);
       } catch (e) {
         const offline = e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(e.message || '');
         errEl.textContent = offline
           ? 'NOT SENT — no connection. Your answers are still here; keep this screen open and press Submit again when you have signal.'
           : e.message;
-        submitBtn.disabled = false; submitBtn.textContent = 'Submit report';
+        submitBtn.disabled = false; submitBtn.textContent = submitLabel;
       }
     };
   }
@@ -229,6 +236,9 @@ const CCCSForms = (() => {
           ${sub.visibility === 'RESTRICTED' ? '<span class="pri pri-RED">RESTRICTED</span>' : ''}
         </div>
         <p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[sub.subject_type] || sub.subject_type)} ${esc(sub.subject_label)} · filed by ${esc(sub.submitted_by)} · ${esc(fmt(sub.submitted_at))} · form v${sub.definition_version}</p>
+        ${sub.status === 'ACTIONED' ? `<div style="border:1px solid var(--line);border-left:4px solid ${OUTCOME_COLOUR[sub.outcome] || 'var(--line)'};border-radius:8px;padding:8px 10px">
+          <div style="font-weight:700">${esc(OUTCOME_LABEL[sub.outcome] || sub.outcome)} <span class="dim" style="font-weight:400;font-size:12px">by ${esc(sub.actioned_by)} · ${esc(fmt(sub.actioned_at))}</span></div>
+          ${sub.feedback ? `<div style="white-space:pre-wrap;margin-top:4px">${esc(sub.feedback)}</div>` : ''}</div>` : ''}
         ${sub.fields.map((f) => `<div class="ff-field"><span>${esc(f.label)}</span><div>${valueHtml(f)}</div></div>`).join('')}
       </div>`;
     loadImages(host);
@@ -241,10 +251,11 @@ const CCCSForms = (() => {
         <span class="mono" style="font-size:12px">${esc(s.reference)}</span>
         <span style="flex:1">${esc(s.definition_name)} <span class="dim">— ${esc(s.subject_label)}</span></span>
         ${s.visibility === 'RESTRICTED' ? '<span class="pri pri-RED" style="font-size:10px">R</span>' : ''}
+        ${s.status === 'ACTIONED' ? `<span style="font-size:10px;font-weight:700;color:${OUTCOME_COLOUR[s.outcome] || 'inherit'}">${esc(OUTCOME_LABEL[s.outcome] || s.outcome)}</span>` : ''}
         <span class="dim" style="font-size:11px">${esc(fmt(s.submitted_at))}</span>
       </div>`).join('') : `<p class="dim">${esc(empty)}</p>`;
     host.querySelectorAll('[data-ff-open]').forEach((r) => (r.onclick = () => onOpen(Number(r.dataset.ffOpen))));
   }
 
-  return { fill, view, list, SUBJECT_LABEL };
+  return { fill, view, list, SUBJECT_LABEL, OUTCOME_LABEL };
 })();

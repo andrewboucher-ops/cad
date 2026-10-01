@@ -26,6 +26,20 @@
  * only added, the same "the record of what happened doesn't get
  * rewritten" instinct as everywhere else in this codebase.
  *
+ * THE PUBLIC APPLICATION ROUTES (/api/public/...) are the second and third
+ * routes in the system that take no login (Twilio's webhook was the first).
+ * Anyone on the internet can call them, so each is narrower than it looks:
+ *   - the form is the one active APPLICATION form from routes-forms.js, its
+ *     answers validated against that form's own fields (unknown keys
+ *     refused, types checked), never a free-form payload;
+ *   - a per-sender limit (5 an hour) and a daily cap bound what a script
+ *     can do to the disk; a hidden honeypot field drops naive bots silently;
+ *   - nothing personal goes into logEvent() — the event log reaches every
+ *     connected officer's screen — or into a push payload;
+ *   - the reply carries a reference only, never the data back.
+ * The answers live on the applicant record, so they are read exactly like
+ * every other applicant detail: control roles, branch-scoped.
+ *
  * Registrar pattern, like routes-forms.js and routes-client.js.
  */
 'use strict';
@@ -48,6 +62,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 module.exports = function registerApplicantRoutes({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
+  forms, pushToRoles = () => {}, flushNow = () => {},
 }) {
   for (const t of ['applicants']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -62,20 +77,27 @@ module.exports = function registerApplicantRoutes({
     return rows.sort((a, b) => (a.applied_at < b.applied_at ? 1 : -1)).map(publicApplicant);
   });
 
-  route('POST', '/api/applicants', CONTROL, ({ body, user }) => {
-    const name = String(body.name || '').trim();
+  /** One applicant shape for both ways in: added by control, or applied
+   * through the website. */
+  function createApplicant(body, createdBy) {
+    const name = String(body.name || '').trim().slice(0, 200);
     if (!name) throw httpError(400, 'name required');
     if (body.email && !EMAIL_RE.test(String(body.email).trim())) throw httpError(400, 'invalid email');
     const a = {
-      id: nextId('applicants'), name, email: body.email ? String(body.email).trim().toLowerCase() : '',
-      phone: String(body.phone || '').trim(), role_applied_for: String(body.role_applied_for || '').trim(),
-      source: String(body.source || '').trim(), status: 'APPLIED',
+      id: nextId('applicants'), name, email: body.email ? String(body.email).trim().toLowerCase().slice(0, 200) : '',
+      phone: String(body.phone || '').trim().slice(0, 50), role_applied_for: String(body.role_applied_for || '').trim().slice(0, 120),
+      source: String(body.source || '').trim().slice(0, 120), status: 'APPLIED',
       branch_id: normalizedBranchId(body.branch_id), interview_at: null,
-      rejected_reason: null, hired_personnel_id: null, cv: null, notes_log: [],
-      applied_at: new Date().toISOString(), updated_at: new Date().toISOString(), created_by: user.id,
+      rejected_reason: null, hired_personnel_id: null, cv: null, notes_log: [], application: null,
+      applied_at: new Date().toISOString(), updated_at: new Date().toISOString(), created_by: createdBy,
     };
     db.applicants.push(a);
-    logEvent('applicant.created', `APPLICANT ${name} ADDED${a.role_applied_for ? ` (${a.role_applied_for})` : ''}`, { applicant_id: a.id });
+    return a;
+  }
+
+  route('POST', '/api/applicants', CONTROL, ({ body, user }) => {
+    const a = createApplicant(body, user.id);
+    logEvent('applicant.created', `APPLICANT ${a.name} ADDED${a.role_applied_for ? ` (${a.role_applied_for})` : ''}`, { applicant_id: a.id });
     return { __status: 201, __body: publicApplicant(a) };
   });
 
@@ -187,4 +209,101 @@ module.exports = function registerApplicantRoutes({
     if (!fs.existsSync(file)) throw httpError(404, 'CV file missing');
     return { __body: fs.readFileSync(file), __headers: { 'content-type': a.cv.mimetype, 'content-disposition': `attachment; filename="${a.cv.filename.replace(/"/g, '')}"` } };
   });
+
+  /* ---------------------------------------------------------------- *
+   * Public application — see the header for what keeps these safe
+   * ---------------------------------------------------------------- */
+
+  const PER_SENDER_PER_HOUR = Number(process.env.APPLY_PER_IP_PER_HOUR || 5);
+  const MAX_PER_DAY = Number(process.env.APPLY_MAX_PER_DAY || 200);
+  const recent = new Map(); // sender -> [timestamps]
+  let dayStart = Date.now(), dayCount = 0;
+
+  /** Behind Caddy every request arrives from 127.0.0.1, so a per-IP limit on
+   * the socket address would be ONE shared limit for every applicant. The
+   * forwarded address is trusted only when the request came from the local
+   * proxy — from anywhere else it is just a header the sender wrote. */
+  function senderOf(req) {
+    const remote = String(req.socket.remoteAddress || '');
+    const viaLocalProxy = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+    const fwd = viaLocalProxy ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() : '';
+    return fwd || remote || 'unknown';
+  }
+  function allowApplication(req) {
+    const now = Date.now();
+    if (now - dayStart > 86400000) { dayStart = now; dayCount = 0; }
+    if (dayCount >= MAX_PER_DAY) return false;
+    const who = senderOf(req);
+    const times = (recent.get(who) || []).filter((t) => now - t < 3600000);
+    if (times.length >= PER_SENDER_PER_HOUR) { recent.set(who, times); return false; }
+    times.push(now); recent.set(who, times); dayCount++;
+    if (recent.size > 5000) recent.delete(recent.keys().next().value);
+    return true;
+  }
+
+  const answersDir = (applicantId) => path.join(cvDir(applicantId), 'application');
+
+  route('GET', '/api/public/application-form', null, () => {
+    const d = forms.activeApplicationForm();
+    if (!d) throw httpError(404, 'applications are currently closed');
+    return { id: d.id, version: d.version, name: d.name, description: d.description, fields: d.fields };
+  });
+
+  route('POST', '/api/public/applications', null, ({ body, req }) => {
+    // Honeypot: a field real visitors never see. A bot that fills every
+    // input gets the same reply as a person, and nothing is stored.
+    if (body.website) return { __status: 201, __body: { ok: true, reference: 'APP-RECEIVED' } };
+    const d = forms.activeApplicationForm();
+    if (!d) throw httpError(404, 'applications are currently closed');
+    if (Number(body.definition_id) !== d.id) throw httpError(409, 'the application form has changed — please reload the page');
+    if (!allowApplication(req)) throw httpError(429, 'too many applications from here — please try again later');
+
+    const { values, files } = forms.validateValues(d.fields, body.values);
+    const email = String(values.email || '').trim();
+    if (!EMAIL_RE.test(email)) throw httpError(400, 'please enter a valid email address');
+
+    let cv = null;
+    if (body.cv && body.cv.data) {
+      const ext = CV_EXT[body.cv.mimetype];
+      if (!ext) throw httpError(400, 'your CV must be a PDF, PNG or JPEG');
+      const bytes = Buffer.from(String(body.cv.data), 'base64');
+      if (bytes.length > CV_MAX_BYTES) throw httpError(413, 'your CV is too large (8MB maximum)');
+      if (!CV_SIGNATURES[body.cv.mimetype](bytes)) throw httpError(400, 'that file does not look like a PDF, PNG or JPEG');
+      cv = { bytes, ext, mimetype: body.cv.mimetype, filename: String(body.cv.filename || 'cv').slice(0, 200) };
+    }
+
+    const a = createApplicant({ name: values.full_name, email, phone: values.phone, role_applied_for: values.role_applied_for, source: 'Website' }, null);
+    if (files.length) {
+      fs.mkdirSync(answersDir(a.id), { recursive: true });
+      for (const f of files) fs.writeFileSync(path.join(answersDir(a.id), `${f.file_id}${forms.IMAGE_EXT[f.mimetype]}`), f.bytes);
+    }
+    a.application = {
+      definition_id: d.id, definition_name: d.name, definition_version: d.version, fields: d.fields, values,
+      files: files.map((f) => ({ file_id: f.file_id, field_id: f.field_id, mimetype: f.mimetype, filename: `${f.file_id}${forms.IMAGE_EXT[f.mimetype]}` })),
+      submitted_at: new Date().toISOString(),
+    };
+    if (cv) {
+      fs.mkdirSync(cvDir(a.id), { recursive: true });
+      const storedName = `${crypto.randomUUID()}${cv.ext}`;
+      fs.writeFileSync(path.join(cvDir(a.id), storedName), cv.bytes);
+      a.cv = { id: crypto.randomUUID(), filename: cv.filename, stored_name: storedName, mimetype: cv.mimetype, uploaded_at: new Date().toISOString() };
+    }
+    logEvent('applicant.applied_online', `NEW WEBSITE APPLICATION — APPLICANT #${a.id}`, { applicant_id: a.id });
+    pushToRoles(['SYSTEM_ADMIN'], { title: 'New job application', body: 'A new application arrived from the website', url: '/admin.html', tag: 'cccs-application' });
+    flushNow();
+    return { __status: 201, __body: { ok: true, reference: `APP-${String(a.id).padStart(5, '0')}` } };
+  });
+
+  // A signature (or other image) given on the website application.
+  route('GET', '/api/applicants/:id/application-files/:fileId', CONTROL, ({ params, user }) => {
+    const a = findApplicant(params.id);
+    if (!a || !visibleToUser(a, user) || !a.application) throw httpError(404, 'not found');
+    const f = a.application.files.find((x) => x.file_id === params.fileId);
+    if (!f) throw httpError(404, 'not found');
+    const file = path.join(answersDir(a.id), f.filename);
+    if (!fs.existsSync(file)) throw httpError(404, 'file missing');
+    return { __body: fs.readFileSync(file), __headers: { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'private, max-age=3600' } };
+  });
+
+  return { createApplicant };
 };

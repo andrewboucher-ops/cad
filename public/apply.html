@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apply to work with us — Echelon</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { min-height: 100vh; display: flex; justify-content: center; padding: 24px 16px 48px; box-sizing: border-box; }
+  .wrap { width: min(560px, 100%); }
+  .brand { height: 26px; margin-bottom: 18px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .lead { color: var(--ink-dim); margin: 0 0 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  .done { text-align: center; padding: 24px 8px; }
+  .done .ref { font-family: var(--mono); font-weight: 700; font-size: 18px; margin: 8px 0; }
+  .fine { font-size: 12px; color: var(--ink-dim); margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <img class="brand brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon">
+  <h1 id="title">Apply to work with us</h1>
+  <p class="lead" id="lead">Loading the application form…</p>
+  <div class="card" id="card">
+    <div id="formHost"></div>
+    <!-- Not shown to people; a bot that fills every input fills this too. -->
+    <div class="hp" aria-hidden="true"><label>Website <input id="website" tabindex="-1" autocomplete="off"></label></div>
+    <div id="cvWrap" class="hide" style="margin-top:4px">
+      <label style="display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim)">CV (optional — PDF, PNG or JPEG, up to 8MB)</label>
+      <input type="file" id="cv" accept="application/pdf,image/png,image/jpeg">
+    </div>
+  </div>
+  <p class="fine">Your details are used only to process your application. <a href="/index.html">Staff sign-in</a></p>
+</div>
+
+<script src="/app.js"></script>
+<script src="/forms-ui.js"></script>
+<script>
+'use strict';
+/* The public job application page. No login: what is asked comes from the
+ * application form an admin edits in Admin → Forms, and what is submitted
+ * goes to /api/public/applications, which validates every answer against
+ * that same form server-side. See routes-applicants.js for the limits. */
+const { el, esc } = CCCS;
+
+async function post(path, body) {
+  const res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
+  return data;
+}
+function readFile(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1]);
+    r.onerror = () => reject(new Error('could not read that file'));
+    r.readAsDataURL(file);
+  });
+}
+
+(async () => {
+  const res = await fetch('/api/public/application-form');
+  if (!res.ok) {
+    el('#lead').textContent = res.status === 404 ? 'We are not taking applications through this page at the moment.' : 'The application form could not be loaded. Please try again later.';
+    el('#card').classList.add('hide');
+    return;
+  }
+  const def = await res.json();
+  el('#title').textContent = def.name;
+  el('#lead').textContent = def.description || '';
+  document.title = `${def.name} — Echelon`;
+  el('#cvWrap').classList.remove('hide');
+  CCCSForms.fill(el('#formHost'), def, null, {
+    submitLabel: 'Send application',
+    submit: async (values) => {
+      const body = { definition_id: def.id, values, website: el('#website').value };
+      const file = el('#cv').files[0];
+      if (file) {
+        if (file.size > 8e6) throw new Error('your CV is too large (8MB maximum)');
+        body.cv = { mimetype: file.type, filename: file.name, data: await readFile(file) };
+      }
+      return post('/api/public/applications', body);
+    },
+    onDone: (r) => {
+      el('#card').innerHTML = `<div class="done"><div style="font-size:30px">✓</div><h2 style="margin:6px 0">Application received</h2>
+        <div class="ref">${esc(r.reference)}</div><p class="dim">Thank you. Keep this reference — we will be in touch about the next steps.</p></div>`;
+      window.scrollTo(0, 0);
+    },
+  });
+  // The CV picker sits inside the card, after the form's own fields.
+  el('#formHost').querySelector('.ff-stack').insertBefore(el('#cvWrap'), el('#formHost').querySelector('[data-ff-err]'));
+})().catch((e) => { el('#lead').textContent = `The application form could not be loaded: ${e.message}`; });
+</script>
+</body>
+</html>

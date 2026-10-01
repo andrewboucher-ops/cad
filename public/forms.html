@@ -28,12 +28,18 @@
 <div class="rp-top">
   <h1>Reports</h1>
   <span class="dim" id="who"></span>
+  <button class="btn primary" id="newReport">File a report</button>
   <a class="btn" id="back" href="/index.html">Back</a>
 </div>
 <div class="rp-wrap">
   <section class="panel">
-    <header>Filed reports</header>
+    <header id="listTitle">Filed reports</header>
     <div class="body">
+      <div class="rp-filters" id="statusChips">
+        <button class="btn" data-status="OPEN">Open</button>
+        <button class="btn" data-status="ACTIONED">Actioned</button>
+        <button class="btn" data-status="ALL">All</button>
+      </div>
       <div class="rp-filters">
         <select id="fDef"><option value="">All report types</option></select>
         <select id="fSubject">
@@ -47,10 +53,11 @@
       </div>
       <div id="list"><p class="dim">Loading…</p></div>
       <p class="rp-note">You see the reports you filed, and any others your role or a named grant entitles you to. Restricted reports you are not named on are not listed — not even as hidden rows.</p>
+      <p class="rp-note hide" id="adminNote">As an admin you can review every standard report here. Restricted reports (safeguarding, patient care) only appear once you are named as a reader of that form in Admin → Forms — that is a logged decision, not part of the admin role. Actioning a report takes it out of the open queue and tells whoever filed it; the report itself is kept.</p>
     </div>
   </section>
   <section class="panel">
-    <header>Report</header>
+    <header id="detailTitle">Report</header>
     <div class="body" id="detail"><p class="dim">Choose a report.</p></div>
   </section>
 </div>
@@ -59,32 +66,144 @@
 <script src="/forms-ui.js"></script>
 <script>
 const { api, el, esc } = CCCS;
-// Every role: a safeguarding lead may be an officer. What each person can
-// actually read is decided by the server, not by this page.
+// Every staff role: a safeguarding lead may be an officer. What each person
+// can actually read is decided by the server, not by this page.
 if (!CCCS.requireAuth(['FIELD_USER', 'MDT_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const me = CCCS.getSession().user;
+const isAdmin = me.role === 'SYSTEM_ADMIN';
+const isControl = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role);
 el('#who').textContent = me.display_name;
-el('#back').href = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role) ? '/control.html' : me.role === 'MDT_USER' ? '/mdt.html' : '/officer.html';
+el('#back').href = isControl ? '/control.html' : me.role === 'MDT_USER' ? '/mdt.html' : '/officer.html';
+if (isAdmin) { el('#adminNote').classList.remove('hide'); el('#listTitle').textContent = 'Review queue'; }
+let statusFilter = isAdmin ? 'OPEN' : 'ALL';
+let defs = [];
 
+/* ---------------- viewing and reviewing ---------------- */
 async function open(id) {
+  el('#detailTitle').textContent = 'Report';
   el('#detail').innerHTML = '<p class="dim">Loading…</p>';
-  try { CCCSForms.view(el('#detail'), await api('GET', `/api/form-submissions/${id}`)); history.replaceState(null, '', `?id=${id}`); }
-  catch (e) { el('#detail').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  let sub;
+  try { sub = await api('GET', `/api/form-submissions/${id}`); }
+  catch (e) { el('#detail').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#detail').innerHTML = '<div id="viewHost"></div><div id="actionHost"></div>';
+  CCCSForms.view(el('#viewHost'), sub);
+  history.replaceState(null, '', `?id=${id}`);
+  if (isAdmin && sub.status === 'OPEN') paintAction(sub);
 }
+
+/** The admin's review: an outcome and feedback. The server records it,
+ * takes the report out of the open queue and tells whoever filed it. */
+function paintAction(sub) {
+  el('#actionHost').innerHTML = `
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+      <label>Action this report</label>
+      <div style="display:flex;gap:8px;margin:6px 0">
+        <select id="aOutcome" style="flex:1"><option value="APPROVED">Approve</option><option value="REJECTED">Reject</option><option value="NOTED">Note — no further action</option></select>
+      </div>
+      <textarea id="aFeedback" rows="3" placeholder="Feedback for ${esc(sub.submitted_by)} (required to approve or reject)" style="width:100%;box-sizing:border-box"></textarea>
+      <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="aGo">Send feedback &amp; close</button></div>
+      <p class="dim" style="font-size:12px;margin:6px 0 0">${sub.visibility === 'RESTRICTED'
+        ? 'Restricted: the filer is told it was reviewed and reads your feedback on the report itself — it is not sent as a message.'
+        : 'The filer gets your feedback as a message and a notification.'}</p>
+      <p class="err" id="aErr"></p>
+    </div>`;
+  el('#aGo').onclick = async () => {
+    el('#aGo').disabled = true;
+    try {
+      await api('POST', `/api/form-submissions/${sub.id}/action`, { outcome: el('#aOutcome').value, feedback: el('#aFeedback').value });
+      await refresh(); open(sub.id);
+    } catch (e) { el('#aErr').textContent = e.message; el('#aGo').disabled = false; }
+  };
+}
+
 async function refresh() {
-  const q = new URLSearchParams({ limit: '200' });
+  CCCS.els('#statusChips [data-status]').forEach((b) => b.classList.toggle('primary', b.dataset.status === statusFilter));
+  const q = new URLSearchParams({ limit: '200', status: statusFilter });
   if (el('#fDef').value) q.set('definition_id', el('#fDef').value);
   if (el('#fSubject').value) q.set('subject_type', el('#fSubject').value);
-  try { CCCSForms.list(el('#list'), await api('GET', `/api/form-submissions?${q}`), open, 'No reports match.'); }
-  catch (e) { el('#list').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  try {
+    const rows = await api('GET', `/api/form-submissions?${q}`);
+    CCCSForms.list(el('#list'), rows, open, statusFilter === 'OPEN' ? 'Nothing waiting for review.' : 'No reports match.');
+  } catch (e) { el('#list').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
+CCCS.els('#statusChips [data-status]').forEach((b) => (b.onclick = () => { statusFilter = b.dataset.status; refresh(); }));
+
+/* ---------------- filing ---------------- */
+/** What this person can file against. The server re-checks every one
+ * (an officer can only file against a job or visit assigned to them); this
+ * only keeps the choices relevant. */
+async function subjectsFor(types) {
+  const want = (t) => types.includes(t);
+  const [jobs, visits, sites, people, vehicles] = await Promise.all([
+    want('JOB') ? api('GET', '/api/jobs').catch(() => []) : [],
+    want('SITE_VISIT') ? api('GET', '/api/site-visits').catch(() => []) : [],
+    want('SITE') ? api('GET', '/api/sites').catch(() => []) : [],
+    want('PERSONNEL') || !isControl ? api('GET', '/api/personnel').catch(() => []) : [],
+    want('VEHICLE') ? api('GET', '/api/vehicles').catch(() => []) : [],
+  ]);
+  const myName = (people.find((p) => p.id === me.personnel_id) || {}).name;
+  const mine = (resources, byId) => isControl || resources.some((r) => (byId ? r.personnel_id === me.personnel_id : r.personnel === myName));
+  return [
+    ...jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status) && mine(j.resources)).map((j) => ({ type: 'JOB', id: j.id, label: `${j.reference} — ${j.location}` })),
+    ...visits.filter((v) => !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status) && mine(v.resources, true)).map((v) => ({ type: 'SITE_VISIT', id: v.id, label: `${v.reference} — ${v.site_name || ''}` })),
+    ...sites.map((x) => ({ type: 'SITE', id: x.id, label: x.name })),
+    ...(want('PERSONNEL') ? people : []).map((p) => ({ type: 'PERSONNEL', id: p.id, label: p.name })),
+    ...vehicles.map((v) => ({ type: 'VEHICLE', id: v.id, label: `${v.registration}${v.make ? ' — ' + v.make + ' ' + (v.model || '') : ''}` })),
+  ];
+}
+
+async function startFiling(preKey, preType, preId) {
+  history.replaceState(null, '', location.pathname);
+  el('#detailTitle').textContent = 'File a report';
+  if (!defs.length) { el('#detail').innerHTML = '<p class="dim">No report forms are available.</p>'; return; }
+  const pre = preKey ? defs.find((d) => d.key === preKey) : null;
+  el('#detail').innerHTML = `
+    <label>Report</label>
+    <select id="nDef">${defs.map((d) => `<option value="${d.id}" ${pre && pre.id === d.id ? 'selected' : ''}>${esc(d.name)}${d.visibility === 'RESTRICTED' ? ' (restricted)' : ''}</option>`).join('')}</select>
+    <p class="dim" id="nDesc" style="font-size:12.5px"></p>
+    <label>About</label>
+    <select id="nSubject"><option>Loading…</option></select>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="nNext">Continue</button></div>
+    <div id="nFill"></div>`;
+  let subjects = [];
+  const paint = async () => {
+    const d = defs.find((x) => x.id === Number(el('#nDef').value));
+    el('#nDesc').textContent = d.description || '';
+    subjects = (await subjectsFor(d.subject_types)).filter((sj) => d.subject_types.includes(sj.type));
+    el('#nSubject').innerHTML = subjects.length
+      ? subjects.map((sj, i) => `<option value="${i}" ${preType === sj.type && Number(preId) === sj.id ? 'selected' : ''}>${esc(CCCSForms.SUBJECT_LABEL[sj.type])}: ${esc(sj.label)}</option>`).join('')
+      : '<option value="">Nothing you can file this against right now</option>';
+  };
+  const go = () => {
+    const d = defs.find((x) => x.id === Number(el('#nDef').value));
+    const subject = subjects[Number(el('#nSubject').value)];
+    if (!subject) return;
+    ['#nDef', '#nSubject', '#nNext'].forEach((q) => (el(q).disabled = true));
+    CCCSForms.fill(el('#nFill'), d, subject, {
+      signerName: me.display_name,
+      onCancel: () => startFiling(),
+      onDone: async (sub) => { await refresh(); open(sub.id); },
+    });
+  };
+  el('#nDef').onchange = paint;
+  el('#nNext').onclick = go;
+  await paint();
+  // A deep link that names both the form and its subject goes straight to the form.
+  if (pre && preType && preId && subjects.some((sj) => sj.type === preType && sj.id === Number(preId))) go();
+}
+el('#newReport').onclick = () => startFiling();
+
 (async () => {
-  const defs = await api('GET', '/api/form-definitions');
+  // The public application form is filled in on apply.html, not filed here.
+  defs = (await api('GET', '/api/form-definitions')).filter((d) => !d.subject_types.includes('APPLICATION'));
   el('#fDef').innerHTML += defs.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
   el('#fDef').onchange = refresh; el('#fSubject').onchange = refresh;
   await refresh();
-  const id = new URLSearchParams(location.search).get('id');
-  if (id) open(Number(id));
+  const qs = new URLSearchParams(location.search);
+  // /forms.html?new=vehicle-inspection&subject_type=VEHICLE&subject_id=3 — how
+  // the fleet dashboard (and any other page) links straight to a form.
+  if (qs.get('new')) startFiling(qs.get('new'), (qs.get('subject_type') || '').toUpperCase(), qs.get('subject_id'));
+  else if (qs.get('id')) open(Number(qs.get('id')));
 })();
 </script>
 </body>

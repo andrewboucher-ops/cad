@@ -54,6 +54,12 @@
     <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
   </div>
 
+  <div id="adminBanner" class="hide" style="border:1px solid var(--priority);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px">
+    <strong>Admin view</strong> — you are seeing exactly what <span id="adminAsName">this client</span> sees. Read only: requests can't be raised from here.
+    <a href="/client.html" style="margin-left:8px">Choose another client</a> · <a href="/admin.html">Back to admin</a>
+  </div>
+  <div id="adminPicker" class="hide"></div>
+
   <div class="page-head">
     <h1 id="clientName">Client portal</h1>
     <p>Your sites, what's happened at them, and your documents.</p>
@@ -105,8 +111,16 @@
 <script src="/app.js"></script>
 <script>
 const { el, esc, api, requireAuth, getSession, bus } = CCCS;
-if (!requireAuth(['CLIENT'])) throw new Error('auth');
+if (!requireAuth(['CLIENT', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const me = getSession().user;
+
+/* Admin "view as client": the same page and the same client-scoped API
+ * routes, with ?as_client= naming whose portal it is. The server returns the
+ * client's own projection and logs the visit; nothing here can write as the
+ * client. */
+const isAdminView = me.role === 'SYSTEM_ADMIN';
+const asClient = isAdminView ? Number(new URLSearchParams(location.search).get('client_id')) || null : null;
+const withAs = (path) => (asClient ? path + (path.includes('?') ? '&' : '?') + `as_client=${asClient}` : path);
 
 el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
 
@@ -121,8 +135,8 @@ function statusPill(s) {
 
 async function paintActivity() {
   const [jobs, visits] = await Promise.all([
-    api('GET', `/api/client/jobs?site_id=${currentSiteId}`),
-    api('GET', `/api/client/site-visits?site_id=${currentSiteId}`),
+    api('GET', withAs(`/api/client/jobs?site_id=${currentSiteId}`)),
+    api('GET', withAs(`/api/client/site-visits?site_id=${currentSiteId}`)),
   ]);
   const openJobs = jobs.filter((j) => !['COMPLETED', 'CANCELLED'].includes(j.status));
   const openVisits = visits.filter((v) => !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status));
@@ -147,7 +161,7 @@ async function runReport() {
   el('#reportBody').innerHTML = '<p class="empty-note">Loading…</p>';
   try {
     const from = el('#repFrom').value, to = el('#repTo').value;
-    const r = await api('GET', `/api/client/sites/${currentSiteId}/report?from=${from}T00:00:00.000Z&to=${to}T23:59:59.999Z`);
+    const r = await api('GET', withAs(`/api/client/sites/${currentSiteId}/report?from=${from}T00:00:00.000Z&to=${to}T23:59:59.999Z`));
     renderReport(r);
   } catch (e) { el('#reportBody').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
@@ -155,16 +169,16 @@ el('#repRun').onclick = runReport;
 
 const DOC_LABEL = { CONTRACT: 'Contract', SITE_DOCUMENT: 'Site document' };
 async function paintDocs() {
-  const docs = await api('GET', `/api/client/documents?site_id=${currentSiteId}`);
+  const docs = await api('GET', withAs(`/api/client/documents?site_id=${currentSiteId}`));
   el('#docsBody').innerHTML = docs.length
-    ? docs.map((d) => `<div class="list-row doc-row"><span class="t">${esc(DOC_LABEL[d.type] || d.type)}</span><a href="/api/client/documents/${d.id}/file?token=${encodeURIComponent(getSession().token)}" target="_blank" style="flex:1">${esc(d.filename)}</a><span class="dim" style="font-size:11px">${esc(fmtDate(d.uploaded_at))}</span></div>`).join('')
+    ? docs.map((d) => `<div class="list-row doc-row"><span class="t">${esc(DOC_LABEL[d.type] || d.type)}</span><a href="${withAs(`/api/client/documents/${d.id}/file?token=${encodeURIComponent(getSession().token)}`)}" target="_blank" style="flex:1">${esc(d.filename)}</a><span class="dim" style="font-size:11px">${esc(fmtDate(d.uploaded_at))}</span></div>`).join('')
     : '<p class="empty-note">No documents on file for this site yet.</p>';
 }
 
 const REQ_LABEL = { OPEN: 'Open', ACKNOWLEDGED: 'In hand', CLOSED: 'Closed' };
 async function paintRequests() {
   const all = await api('GET', '/api/client-requests');
-  const mine = all.filter((r) => r.site_id === currentSiteId);
+  const mine = all.filter((r) => r.site_id === currentSiteId && (!asClient || r.client_id === asClient));
   el('#reqList').innerHTML = mine.length
     ? mine.map((r) => `<div class="list-row"><span class="t">${esc(fmtDate(r.created_at))}</span><span style="flex:1">${esc(r.subject)}</span><span class="pill ${r.status === 'CLOSED' ? 'completed' : r.status === 'OPEN' ? 'open' : ''}">${esc(REQ_LABEL[r.status] || r.status)}</span></div>`).join('')
     : '<p class="empty-note">You haven\'t raised any requests yet.</p>';
@@ -189,7 +203,24 @@ async function loadSite() {
 }
 
 (async function init() {
-  client = await api('GET', '/api/client/me');
+  if (isAdminView && !asClient) {
+    // Admin with no client chosen yet: pick one.
+    const clients = await api('GET', '/api/clients');
+    document.querySelectorAll('.section-card, .site-picker, #siteAddress').forEach((n) => n.classList.add('hide'));
+    el('#clientName').textContent = 'View a client portal';
+    el('#adminPicker').classList.remove('hide');
+    el('#adminPicker').innerHTML = clients.length
+      ? clients.map((c) => `<div class="list-row"><a href="/client.html?client_id=${c.id}" style="flex:1">${esc(c.name)}</a><span class="dim" style="font-size:12px">${(c.site_ids || []).length} site${(c.site_ids || []).length === 1 ? '' : 's'}</span></div>`).join('')
+      : '<p class="empty-note">No clients set up yet (Admin → Clients).</p>';
+    return;
+  }
+  if (isAdminView) {
+    el('#adminBanner').classList.remove('hide');
+    el('#reqSubject').closest('.stack').classList.add('hide');
+    document.title = 'CCCS — client portal (admin view)';
+  }
+  client = await api('GET', withAs('/api/client/me'));
+  if (isAdminView) el('#adminAsName').textContent = client.name;
   sites = client.sites;
   el('#clientName').textContent = client.name;
   if (!sites.length) {

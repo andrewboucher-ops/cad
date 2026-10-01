@@ -3707,6 +3707,7 @@ require('./routes-finance.js')({
 // Applicant tracking — see routes-applicants.js for the design.
 require('./routes-applicants.js')({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
+  forms, pushToRoles, flushNow: () => store.flushNow(),
 });
 
 // Leave management — see routes-leave.js for the design.
@@ -3725,6 +3726,9 @@ require('./routes-fleet-stock.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent,
   findShift, publicVehicleAllocation, publicAssetAllocation, publicAsset, stockLevel, recordStockMovement,
 });
+
+// Fleet dashboard — see routes-fleet-dashboard.js.
+require('./routes-fleet-dashboard.js')({ route, CONTROL, db, forms, visibleToUser, publicVehicle });
 
 /* Client reporting — proving service to whoever pays for the contract:
  * patrol visit counts, alarm response time against the site's own SLA (if
@@ -4073,6 +4077,7 @@ function start() {
   // version and an admin's own edits are never overwritten.
   const installed = forms.installDefaults();
   if (installed) { logEvent('form.defaults_installed', `${installed} STANDARD FORMS INSTALLED`); store.flushNow(); }
+  if (forms.ensureApplicationForm()) { logEvent('form.defaults_installed', 'PUBLIC JOB APPLICATION FORM INSTALLED'); store.flushNow(); }
   // Same additive-and-idempotent shape as forms.installDefaults() — runs
   // once, only while the table is empty, so an admin's own edits (renaming
   // one, adding a sixth) are never overwritten on a later boot.

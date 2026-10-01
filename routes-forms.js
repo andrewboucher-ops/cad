@@ -42,6 +42,25 @@
  * SUBMISSIONS ARE IMMUTABLE. A filed report is a record; there is no edit
  * route. The field list is snapshotted onto the submission too, so a report
  * still renders exactly as it was filled in after its form is redesigned.
+ *
+ * REVIEW. An admin actions a submission (APPROVED / REJECTED / NOTED, with
+ * feedback): it leaves the open queue and every default list, and the
+ * person who filed it is told. "Removed" means out of the queue, NOT deleted
+ * — a filed report can be evidence, and it stays retrievable with
+ * ?status=ACTIONED. Actioning is a read like any other: a RESTRICTED report
+ * can only be actioned by an admin who is a named reader, so the review
+ * workflow cannot become a back door round the rule above.
+ *
+ * THE PUBLIC APPLICATION FORM. A definition whose subject is APPLICATION is
+ * the job application form on the public site (apply.html). It is filled in
+ * WITHOUT a login, so it is held to a narrower shape: it is the form's only
+ * subject, it must ask for full_name and email (an applicant record needs
+ * both), and it may not have photo fields (anonymous image uploads are
+ * storage abuse waiting to happen; a CV is handled separately). Its answers
+ * are stored on the applicant record (routes-applicants.js), never in
+ * form_submissions, so they inherit the applicant's control-only, branch-
+ * scoped access rather than this file's rules. It is never offered to
+ * officers as a report.
  */
 'use strict';
 
@@ -50,7 +69,8 @@ const path = require('path');
 const crypto = require('crypto');
 
 const VISIBILITIES = ['STANDARD', 'RESTRICTED'];
-const SUBJECT_TYPES = ['JOB', 'SITE_VISIT', 'SITE', 'PERSONNEL', 'VEHICLE'];
+const SUBJECT_TYPES = ['JOB', 'SITE_VISIT', 'SITE', 'PERSONNEL', 'VEHICLE', 'APPLICATION'];
+const REVIEW_OUTCOMES = ['APPROVED', 'REJECTED', 'NOTED'];
 const FIELD_TYPES = ['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime', 'signature', 'photo'];
 const MAX_FIELDS = 60;
 const MAX_FILES = 10;
@@ -152,6 +172,28 @@ const DEFAULT_FORMS = [
   },
 ];
 
+/** The public job application form, installed once if no APPLICATION form
+ * exists (also on a database that already has the other forms). Fully
+ * editable afterwards in Admin → Forms, except that it must keep asking for
+ * full_name and email. */
+const DEFAULT_APPLICATION_FORM = {
+  key: 'job-application', name: 'Job application', visibility: 'STANDARD', subject_types: ['APPLICATION'],
+  description: 'Apply to work with us. We will be in touch about the next steps.',
+  fields: [
+    { id: 'full_name', label: 'Full name', type: 'text', required: true },
+    { id: 'email', label: 'Email address', type: 'text', required: true },
+    { id: 'phone', label: 'Phone number', type: 'text', required: true },
+    { id: 'postcode', label: 'Home postcode', type: 'text', required: true },
+    { id: 'role_applied_for', label: 'Role you are applying for', type: 'select', required: true, options: ['Security officer', 'Mobile patrol officer', 'Response officer', 'Control room operator', 'Other'] },
+    { id: 'sia_licence', label: 'SIA licence number (if you have one)', type: 'text' },
+    { id: 'right_to_work', label: 'I have the right to work in the UK', type: 'checkbox', required: true },
+    { id: 'driving_licence', label: 'I hold a full UK driving licence', type: 'checkbox' },
+    { id: 'availability', label: 'When can you work?', type: 'textarea' },
+    { id: 'experience', label: 'Relevant experience', type: 'textarea' },
+    { id: 'consent', label: 'I agree to my details being used to process this application', type: 'checkbox', required: true },
+  ],
+};
+
 module.exports = function registerFormRoutes({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow = () => {},
@@ -207,6 +249,8 @@ module.exports = function registerFormRoutes({
       fields: sub.fields, values,
       submitted_by: sub.submitted_by_name, submitted_by_user_id: sub.submitted_by_user_id,
       submitted_at: sub.submitted_at,
+      status: sub.status || 'OPEN', outcome: sub.outcome || null, feedback: sub.feedback || null,
+      actioned_by: sub.actioned_by || null, actioned_at: sub.actioned_at || null,
     };
   }
 
@@ -216,6 +260,7 @@ module.exports = function registerFormRoutes({
     id: sub.id, reference: sub.reference, definition_id: sub.definition_id, definition_name: sub.definition_name,
     visibility: effectiveVisibility(sub), subject_type: sub.subject_type, subject_id: sub.subject_id,
     subject_label: sub.subject_label, submitted_by: sub.submitted_by_name, submitted_at: sub.submitted_at,
+    status: sub.status || 'OPEN', outcome: sub.outcome || null,
   });
 
   function publicDefinition(d, user) {
@@ -264,7 +309,18 @@ module.exports = function registerFormRoutes({
     const list = Array.isArray(raw) ? raw.map((s) => String(s).toUpperCase()) : [];
     if (!list.length) throw httpError(400, 'subject_types required');
     for (const s of list) if (!SUBJECT_TYPES.includes(s)) throw httpError(400, `subject type ${s} must be one of ${SUBJECT_TYPES.join(', ')}`);
+    if (list.includes('APPLICATION') && new Set(list).size > 1) throw httpError(400, 'the public application form cannot also be filed against anything else');
     return [...new Set(list)];
+  }
+  const isApplicationForm = (d) => d.subject_types.includes('APPLICATION');
+  /** See the header: the narrower shape a login-free form is held to. */
+  function checkApplicationShape(subjectTypes, fields) {
+    if (!subjectTypes.includes('APPLICATION')) return;
+    for (const id of ['full_name', 'email']) {
+      const f = fields.find((x) => x.id === id);
+      if (!f || f.type !== 'text' || !f.required) throw httpError(400, `the application form must keep a required text field with id "${id}"`);
+    }
+    if (fields.some((f) => f.type === 'photo')) throw httpError(400, 'the application form cannot have photo fields — it is filled in without a login');
   }
 
   function installDefaults() {
@@ -279,6 +335,22 @@ module.exports = function registerFormRoutes({
     }
     return DEFAULT_FORMS.length;
   }
+
+  /** Separate from installDefaults() because live databases already have
+   * forms: adds the application form once, if there is no APPLICATION form
+   * at all (an admin retiring it is respected — retired still counts). */
+  function ensureApplicationForm() {
+    if (db.form_definitions.some(isApplicationForm)) return false;
+    const f = DEFAULT_APPLICATION_FORM, now = new Date().toISOString();
+    db.form_definitions.push({
+      id: nextId('form_definitions'), key: db.form_definitions.some((d) => d.key === f.key) ? `${f.key}-${Date.now()}` : f.key,
+      name: f.name, description: f.description, version: 1, visibility: 'STANDARD', subject_types: f.subject_types,
+      fields: cleanFields(f.fields), active: true, created_by: null, created_at: now, updated_at: now,
+    });
+    return true;
+  }
+  /** What the public page renders; null when applications are closed. */
+  const activeApplicationForm = () => db.form_definitions.find((d) => d.active && isApplicationForm(d)) || null;
 
   /* ---------------------------------------------------------------- *
    * Subject resolution
@@ -402,7 +474,9 @@ module.exports = function registerFormRoutes({
   // sensitive. Grants are shown to admins only.
   route('GET', '/api/form-definitions', ALL, ({ user, query }) => {
     const all = user.role === 'SYSTEM_ADMIN' && query.get('all') === '1';
-    return db.form_definitions.filter((d) => all || d.active).map((d) => publicDefinition(d, user));
+    // The public application form is not a report anyone files from inside.
+    return db.form_definitions.filter((d) => (all || d.active) && (user.role === 'SYSTEM_ADMIN' || !isApplicationForm(d)))
+      .map((d) => publicDefinition(d, user));
   });
 
   route('POST', '/api/form-definitions', ADMIN, ({ body, user }) => {
@@ -419,6 +493,8 @@ module.exports = function registerFormRoutes({
       visibility, subject_types: cleanSubjectTypes(body.subject_types), fields: cleanFields(body.fields), active: true,
       created_by: user.id, created_at: now, updated_at: now,
     };
+    checkApplicationShape(d.subject_types, d.fields);
+    if (isApplicationForm(d) && db.form_definitions.some((x) => x.active && isApplicationForm(x))) throw httpError(409, 'there is already an active application form — edit it, or retire it first');
     db.form_definitions.push(d);
     logEvent('form.definition_created', `FORM "${name}" CREATED (${visibility}) BY ${user.username}`, { definition_id: d.id });
     return { __status: 201, __body: publicDefinition(d, user) };
@@ -426,6 +502,13 @@ module.exports = function registerFormRoutes({
 
   route('PATCH', '/api/form-definitions/:id', ADMIN, ({ params, body, user }) => {
     const d = findDefinition(params.id); if (!d) throw httpError(404, 'form not found');
+    // Validate the resulting shape before changing anything.
+    const nextSubjects = 'subject_types' in body ? cleanSubjectTypes(body.subject_types) : d.subject_types;
+    const nextFields = 'fields' in body ? cleanFields(body.fields) : d.fields;
+    checkApplicationShape(nextSubjects, nextFields);
+    if (body.active && !d.active && nextSubjects.includes('APPLICATION') && db.form_definitions.some((x) => x.id !== d.id && x.active && isApplicationForm(x))) {
+      throw httpError(409, 'another application form is already active — retire it first');
+    }
     const changes = [];
     if ('name' in body) { const n = String(body.name || '').trim().slice(0, 120); if (!n) throw httpError(400, 'name required'); d.name = n; changes.push('name'); }
     if ('description' in body) { d.description = String(body.description || '').slice(0, 500); changes.push('description'); }
@@ -480,6 +563,7 @@ module.exports = function registerFormRoutes({
     const d = findDefinition(body.definition_id);
     if (!d || !d.active) throw httpError(404, 'form not found');
     const subjectType = String(body.subject_type || '').toUpperCase();
+    if (isApplicationForm(d)) throw httpError(400, 'applications are made on the public application page');
     if (!d.subject_types.includes(subjectType)) throw httpError(400, `"${d.name}" cannot be filed against a ${subjectType || 'missing subject'}`);
     const subjectLabel = resolveSubject(subjectType, body.subject_id, user);
     const { values, files } = validateValues(d.fields, body.values);
@@ -494,6 +578,7 @@ module.exports = function registerFormRoutes({
       values, files: files.map(({ file_id, field_id, mimetype }) => ({ file_id, field_id, mimetype, filename: `${file_id}${IMAGE_EXT[mimetype]}` })),
       submitted_by_user_id: user.id, submitted_by_name: user.display_name, submitted_by_personnel_id: user.personnel_id || null,
       submitted_at: now.toISOString(),
+      status: 'OPEN', outcome: null, feedback: null, actioned_by: null, actioned_at: null,
     };
     if (files.length) {
       const dir = formFilesDir(id);
@@ -523,8 +608,13 @@ module.exports = function registerFormRoutes({
   route('GET', '/api/form-submissions', ALL, ({ user, query }) => {
     const subjectType = query.get('subject_type'), subjectId = query.get('subject_id'), defId = query.get('definition_id');
     const limit = Math.min(Number(query.get('limit') || 100), 500);
+    // ?status=OPEN|ACTIONED|ALL. Default ALL keeps every existing caller
+    // (job/visit detail, an officer's own list) unchanged; the review queue
+    // asks for OPEN.
+    const status = String(query.get('status') || 'ALL').toUpperCase();
     return db.form_submissions
       .filter((s) => canRead(s, user))
+      .filter((s) => status === 'ALL' || (s.status || 'OPEN') === status)
       .filter((s) => (!subjectType || s.subject_type === subjectType.toUpperCase())
         && (!subjectId || s.subject_id === Number(subjectId))
         && (!defId || s.definition_id === Number(defId)))
@@ -547,7 +637,52 @@ module.exports = function registerFormRoutes({
     return { __body: fs.readFileSync(file), __headers: { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': cache } };
   });
 
-  return { installDefaults, canRead, effectiveVisibility };
+  /**
+   * Admin review: records an outcome and feedback, takes the submission out
+   * of the open queue, and tells the person who filed it. Goes through
+   * readableSubmission() like every other read, so a RESTRICTED report can
+   * only be actioned by an admin who is a named reader of it.
+   *
+   * How the filer is told, and why it differs by visibility:
+   *   STANDARD   — an in-app message carrying the feedback (control can
+   *                already read the report, and the message log is theirs).
+   *   RESTRICTED — no message: messages are readable by every control role
+   *                and summarised into the event log. The feedback is stored
+   *                on the report, which only its readers can open.
+   *   both       — a push notification with no content, only "reviewed".
+   */
+  route('POST', '/api/form-submissions/:id/action', ADMIN, ({ params, body, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if ((sub.status || 'OPEN') !== 'OPEN') throw httpError(409, `already actioned (${sub.outcome}) by ${sub.actioned_by}`);
+    const outcome = String(body.outcome || '').toUpperCase();
+    if (!REVIEW_OUTCOMES.includes(outcome)) throw httpError(400, `outcome must be one of ${REVIEW_OUTCOMES.join(', ')}`);
+    const feedback = String(body.feedback || '').trim().slice(0, 2000);
+    if (!feedback && outcome !== 'NOTED') throw httpError(400, 'feedback is required when approving or rejecting');
+    Object.assign(sub, { status: 'ACTIONED', outcome, feedback: feedback || null, actioned_by: user.display_name, actioned_by_user_id: user.id, actioned_at: new Date().toISOString() });
+    const restricted = effectiveVisibility(sub) === 'RESTRICTED';
+
+    if (!restricted && sub.submitted_by_personnel_id) {
+      const msg = {
+        id: nextId('messages'),
+        body: `Your report ${sub.reference} (${sub.definition_name}) was ${outcome.toLowerCase()} by ${user.display_name}${feedback ? `: ${feedback}` : '.'}`.slice(0, 1000),
+        from_label: 'CONTROL', from_personnel_id: null, from_mdt_id: null,
+        to_personnel_id: sub.submitted_by_personnel_id, to_mdt_id: null, to_label: sub.submitted_by_name,
+        state: 'DELIVERED', sent_at: new Date().toISOString(), read_at: null,
+      };
+      if (Array.isArray(db.messages)) db.messages.push(msg);
+      broadcast('message.received', msg, { personnelIds: [sub.submitted_by_personnel_id] });
+    }
+    if (sub.submitted_by_user_id && sub.submitted_by_user_id !== user.id) {
+      pushToUsers([sub.submitted_by_user_id], { title: 'Report reviewed', body: `${sub.reference} has been reviewed — open it to see the outcome`, url: `/forms.html?id=${sub.id}`, tag: 'cccs-report-reviewed' });
+    }
+    logEvent(restricted ? 'form.reviewed_restricted' : 'form.actioned',
+      restricted ? `RESTRICTED REPORT ${sub.reference} REVIEWED` : `${sub.definition_name.toUpperCase()} ${sub.reference} ${outcome} BY ${user.display_name}`,
+      { submission_id: sub.id });
+    flushNow();
+    return publicSubmission(sub);
+  });
+
+  return { installDefaults, ensureApplicationForm, activeApplicationForm, validateValues, IMAGE_EXT, canRead, effectiveVisibility };
 };
 
 module.exports.DEFAULT_FORMS = DEFAULT_FORMS;
