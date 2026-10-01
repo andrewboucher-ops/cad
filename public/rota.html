@@ -107,6 +107,7 @@
       <select id="typeFilter" style="padding:6px 10px"><option value="">All shift types</option></select>
       <button class="btn" id="btnPublishDrafts" style="padding:7px 14px;font-size:13px">Publish drafts</button>
       <button class="btn" id="btnDuplicateWeek" style="padding:7px 14px;font-size:13px">Duplicate week forward</button>
+      <button class="btn" id="btnCalSync" style="padding:7px 14px;font-size:13px">Calendar sync</button>
       <button class="btn primary" id="btnNewShift" style="padding:7px 14px;font-size:13px">New shift</button>
     </div>
     <p class="dim" id="coverageSummary" style="margin:0 0 10px;font-size:12.5px"></p>
@@ -493,6 +494,27 @@ el('#btnDuplicateWeek').onclick = async () => {
     }
   }
   await load();
+};
+
+el('#btnCalSync').onclick = async () => {
+  const { url } = await api('GET', '/api/me/ical-feed');
+  modal('Calendar sync', `
+    <p>Subscribe to see every published shift across the operation. Anyone with this link can see the whole rota, so don't share it.</p>
+    <input id="calUrl" readonly style="width:100%" value="${esc(url)}">
+    <div class="btn-row" style="margin-top:10px">
+      <button class="btn" id="calCopy" type="button">Copy link</button>
+      <button class="btn danger" id="calRegen" type="button">Regenerate link</button>
+    </div>
+    <p class="dim" id="calMsg" style="margin-top:8px"></p>
+    <div class="btn-row" style="margin-top:12px"><button class="btn" id="calClose">Close</button></div>`, () => {
+    el('#calClose').onclick = closeModal;
+    el('#calCopy').onclick = async () => { await navigator.clipboard.writeText(el('#calUrl').value); el('#calMsg').textContent = 'Copied.'; };
+    el('#calRegen').onclick = async () => {
+      if (!confirm('The old link will stop working. Continue?')) return;
+      const r = await api('POST', '/api/me/ical-feed/regenerate', {});
+      el('#calUrl').value = r.url; el('#calMsg').textContent = 'Link regenerated.';
+    };
+  });
 };
 
 CCCS.bus((up) => {

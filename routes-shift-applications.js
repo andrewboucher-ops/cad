@@ -21,7 +21,7 @@ const OPEN_APPLICATION_STATUSES = ['APPLIED', 'SHORTLISTED'];
 
 module.exports = function registerShiftApplicationRoutes({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,
-  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole,
+  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent,
 }) {
   for (const t of ['shift_applications']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -116,6 +116,7 @@ module.exports = function registerShiftApplicationRoutes({
           created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
         });
         broadcast('shift.updated', publicShift(s), s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [a.personnel_id] });
+        if (s.status !== 'DRAFT') notifyShiftEvent('ASSIGNED', s, [a.personnel_id]);
         // Approving this one may fill the shift — anyone else still
         // waiting on a now-impossible outcome is told so, not left to
         // silently find out the shift they applied to has gone.
@@ -131,6 +132,10 @@ module.exports = function registerShiftApplicationRoutes({
       a.status = status;
       if (isControl && ['APPROVED', 'REJECTED'].includes(status)) { a.reviewed_by = user.display_name; a.reviewed_at = new Date().toISOString(); }
       if (status === 'REJECTED' && body.rejection_reason) a.rejection_reason = String(body.rejection_reason).trim().slice(0, 1000);
+      if (status === 'REJECTED') {
+        const s = db.shifts.find((x) => x.id === a.shift_id);
+        if (s) notifyShiftEvent('REJECTED', s, [a.personnel_id]);
+      }
     }
     a.updated_at = new Date().toISOString();
     broadcast('shift_application.updated', publicApplication(a), { controlOnly: true });

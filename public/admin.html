@@ -603,6 +603,12 @@ function personnelForm(p) {
       <input id="npnPhone" autocomplete="off" value="${isNew ? '' : esc(p.contact_phone || '')}">
       <label>Email</label>
       <input id="npnEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(p.contact_email || '')}">
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-weight:400">
+        <input type="checkbox" id="npnSmsOptOut" style="width:auto" ${!isNew && p.sms_opt_out ? 'checked' : ''}> Don't text this person shift notifications
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-weight:400">
+        <input type="checkbox" id="npnEmailOptOut" style="width:auto" ${!isNew && p.email_opt_out ? 'checked' : ''}> Don't email this person shift notifications
+      </label>
       <label>SIA licence — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">no API exists to verify this automatically; check it yourself against the SIA register and record what you found</span></label>
       <div style="display:flex;gap:8px">
         <input id="npnSiaNo" autocomplete="off" placeholder="Licence number" value="${isNew ? '' : esc(p.sia_licence_no || '')}" style="flex:1">
@@ -662,6 +668,7 @@ function personnelModal(p) {
         name, employee_no: el('#npnEmpNo').value.trim() || null, rank: el('#npnRank').value.trim(),
         employment_status: el('#npnStatus').value, callsign_id: el('#npnCallsign').value ? Number(el('#npnCallsign').value) : null,
         contact_phone: el('#npnPhone').value.trim(), contact_email: el('#npnEmail').value.trim(), notes: el('#npnNotes').value.trim(),
+        sms_opt_out: el('#npnSmsOptOut').checked, email_opt_out: el('#npnEmailOptOut').checked,
         sia_licence_no: el('#npnSiaNo').value.trim() || null, sia_licence_expiry: el('#npnSiaExpiry').value || null,
         dbs_certificate_no: el('#npnDbsNo').value.trim() || null, dbs_certificate_type: el('#npnDbsType').value || null,
         dbs_update_service_id: el('#npnDbsUpdateId').value.trim() || null,

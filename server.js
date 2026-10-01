@@ -638,6 +638,7 @@ function publicPersonnel(p) {
   return {
     id: p.id, employee_no: p.employee_no, name: p.name, rank: p.rank,
     contact_phone: p.contact_phone || '', contact_email: p.contact_email || '',
+    sms_opt_out: p.sms_opt_out === true, email_opt_out: p.email_opt_out === true,
     employment_status: p.employment_status || 'ACTIVE',
     callsign: cs ? cs.name : null, callsign_id: p.callsign_id,
     vehicle: veh ? veh.registration : null, vehicle_id: p.vehicle_id,
@@ -1566,6 +1567,7 @@ route('POST', '/api/personnel', ADMIN, ({ body }) => {
   const p = {
     id: nextId('personnel'), employee_no: employeeNo, name, rank: body.rank || '',
     contact_phone: body.contact_phone || '', contact_email: body.contact_email || '',
+    sms_opt_out: body.sms_opt_out === true, email_opt_out: body.email_opt_out === true,
     employment_status: ['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status) ? body.employment_status : 'ACTIVE',
     employment_type: employmentType,
     annual_leave_allowance_days: employmentType === 'EMPLOYED' && body.annual_leave_allowance_days ? Number(body.annual_leave_allowance_days) : null,
@@ -1589,6 +1591,8 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
   if ('rank' in body) p.rank = body.rank || '';
   if ('contact_phone' in body) p.contact_phone = body.contact_phone || '';
   if ('contact_email' in body) p.contact_email = body.contact_email || '';
+  if ('sms_opt_out' in body) p.sms_opt_out = body.sms_opt_out === true;
+  if ('email_opt_out' in body) p.email_opt_out = body.email_opt_out === true;
   if ('employment_status' in body) {
     if (!['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status)) throw httpError(400, 'invalid employment_status');
     p.employment_status = body.employment_status;
@@ -1978,6 +1982,88 @@ async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: m
     if (!res.ok) console.warn(`[cccs] resolution report email failed for ${reference}:`, res.status, await res.text());
     else logEvent(logType, `RESOLUTION REPORT EMAILED FOR ${reference}`, { [logIdKey]: logId, to: recipients });
   } catch (e) { console.warn(`[cccs] resolution report email failed for ${reference}:`, e.message); }
+}
+
+// Generic Graph sendMail, for anything that just needs "send this person an
+// email" rather than the resolution report's attachment/CC assembly above.
+// Never throws — a notification that can't be delivered shouldn't fail the
+// request that triggered it; callers get a result object to log/audit with.
+async function sendGraphEmail(to, subject, html) {
+  if (!GRAPH_MAIL_ENABLED) return { ok: false, error: 'graph mail not configured' };
+  if (!to) return { ok: false, error: 'no recipient' };
+  try {
+    const token = await getGraphAppToken();
+    const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }] } }),
+    });
+    if (!res.ok) return { ok: false, error: `${res.status} ${await res.text()}` };
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://comms.echeloncic.com').replace(/\/+$/, '');
+
+// Shift SMS/email notifications — one place for "tell this person what just
+// happened to their shift", reused by every broadcast() call site that
+// already decides who's allowed to know. Fully synchronous, matching the
+// rest of the system's click-to-SMS: no queue, no retry, just a best-effort
+// send plus an audit row so a failed send is visible, not silent.
+const SHIFT_NOTIFY_EVENTS = {
+  ASSIGNED: { label: 'ASSIGNED', subject: (s) => `New shift: ${shiftTitle(s)}` },
+  CHANGED: { label: 'UPDATED', subject: (s) => `Shift updated: ${shiftTitle(s)}` },
+  CANCELLED: { label: 'CANCELLED', subject: (s) => `Shift cancelled: ${shiftTitle(s)}` },
+  REMOVED: { label: 'REMOVED', subject: (s) => `Removed from shift: ${shiftTitle(s)}` },
+  REJECTED: { label: 'REJECTED', subject: (s) => `Shift application not successful: ${shiftTitle(s)}` },
+};
+function shiftTitle(s) {
+  const type = s.shift_type_id ? db.shift_types.find((t) => t.id === s.shift_type_id) : null;
+  const site = s.site_id ? db.sites.find((x) => x.id === s.site_id) : null;
+  return `${type ? type.name : 'Shift'}${site ? ` at ${site.name}` : ''}`;
+}
+function shiftWhen(s) {
+  const fmt = (iso) => new Date(iso).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/London' });
+  return `${fmt(s.starts_at)} – ${fmt(s.ends_at)}`;
+}
+function writeNotifyLog({ channel, personnel_id, to_number, to_email, body, outcome, error_code, provider, provider_ref, shift_id }) {
+  db.dial_log.push({
+    id: nextId('dial_log'), channel, personnel_id,
+    to_number: to_number || null, from_number: null, actor_user_id: null, actor_name: 'system',
+    job_id: null, site_visit_id: null, shift_id: shift_id || null,
+    body: to_email ? `${to_email}: ${body}` : body,
+    provider: provider || 'none', provider_ref: provider_ref || null,
+    outcome, error_code: error_code || null, duration_s: null,
+    attempted_at: new Date().toISOString(), settled_at: null,
+  });
+}
+async function notifyPersonnelAboutShift(personnelId, eventKey, s) {
+  const p = db.personnel.find((x) => x.id === personnelId);
+  if (!p) return;
+  const ev = SHIFT_NOTIFY_EVENTS[eventKey];
+  const link = `${PUBLIC_BASE_URL}/officer.html`;
+  const text = `${ev.subject(s)}\n${shiftWhen(s)}\nView: ${link}`;
+  if (!p.sms_opt_out) {
+    const to = sms.normalizeNumber(p.contact_phone);
+    if (to) {
+      const result = await sms.send({ to, body: text, label: p.name });
+      writeNotifyLog({
+        channel: 'SMS', personnel_id: p.id, to_number: to, body: text, shift_id: s.id,
+        provider: result.dryRun ? 'none' : 'twilio', provider_ref: result.sid || null,
+        outcome: result.ok ? (result.dryRun ? 'ATTEMPTED' : 'QUEUED') : 'FAILED', error_code: result.ok ? null : (result.error || 'send failed'),
+      });
+    }
+  }
+  if (!p.email_opt_out && p.contact_email) {
+    const html = `<p>${ev.subject(s)}</p><p>${shiftWhen(s)}</p><p><a href="${link}">View your shifts</a></p>`;
+    const result = await sendGraphEmail(p.contact_email, ev.subject(s), html);
+    writeNotifyLog({
+      channel: 'EMAIL', personnel_id: p.id, to_email: p.contact_email, body: ev.subject(s), shift_id: s.id,
+      provider: result.ok ? 'graph' : 'none', outcome: result.ok ? 'QUEUED' : 'FAILED', error_code: result.ok ? null : result.error,
+    });
+  }
+}
+function notifyShiftEvent(eventKey, s, personnelIds) {
+  for (const pid of personnelIds || []) notifyPersonnelAboutShift(pid, eventKey, s).catch((e) => console.warn('[cccs] shift notify failed:', e.message));
 }
 
 route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
@@ -3275,7 +3361,7 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
     bill_rate: body.bill_rate != null && body.bill_rate !== '' ? Number(body.bill_rate) : null,
     uniform_ppe: body.uniform_ppe || '', briefing: body.briefing || '', notes: body.notes || '',
     detail: body.detail && typeof body.detail === 'object' ? body.detail : {},
-    template_id: null,
+    template_id: null, revision: 0,
     created_by: user.id, created_at: new Date().toISOString(),
   };
   db.shifts.push(s);
@@ -3299,15 +3385,18 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
   // find out over the socket either, the same boundary GET /api/shifts
   // enforces on a fetch.
   broadcast('shift.created', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: firstAssignment ? [firstAssignment.personnel_id] : [] });
+  if (s.status !== 'DRAFT' && firstAssignment) notifyShiftEvent('ASSIGNED', s, [firstAssignment.personnel_id]);
   logEvent('shift.created', `SHIFT CREATED (${type.name}) ${s.starts_at} — ${s.ends_at}${firstAssignment ? ` FOR ${findPersonnel(firstAssignment.personnel_id).name}` : ''}`, { shift_id: s.id });
   return { __status: 201, __body: pub };
 });
 route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body }) => {
   const s = findShift(params.id);
-  if ('starts_at' in body) { const d = new Date(body.starts_at); if (isNaN(d)) throw httpError(400, 'invalid starts_at'); s.starts_at = d.toISOString(); }
-  if ('ends_at' in body) { const d = new Date(body.ends_at); if (isNaN(d)) throw httpError(400, 'invalid ends_at'); s.ends_at = d.toISOString(); }
+  const wasDraft = s.status === 'DRAFT';
+  let scheduleChanged = false;
+  if ('starts_at' in body) { const d = new Date(body.starts_at); if (isNaN(d)) throw httpError(400, 'invalid starts_at'); if (d.toISOString() !== s.starts_at) scheduleChanged = true; s.starts_at = d.toISOString(); }
+  if ('ends_at' in body) { const d = new Date(body.ends_at); if (isNaN(d)) throw httpError(400, 'invalid ends_at'); if (d.toISOString() !== s.ends_at) scheduleChanged = true; s.ends_at = d.toISOString(); }
   if (Date.parse(s.ends_at) <= Date.parse(s.starts_at)) throw httpError(400, 'ends_at must be after starts_at');
-  if ('site_id' in body) { const site = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null; s.site_id = site ? site.id : null; }
+  if ('site_id' in body) { const site = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null; const newId = site ? site.id : null; if (newId !== s.site_id) scheduleChanged = true; s.site_id = newId; }
   if ('shift_type_id' in body) {
     const type = db.shift_types.find((x) => x.id === Number(body.shift_type_id));
     if (!type) throw httpError(400, 'shift_type_id must exist');
@@ -3325,25 +3414,35 @@ route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body }) => {
   if ('briefing' in body) s.briefing = body.briefing || '';
   if ('notes' in body) s.notes = body.notes || '';
   if ('detail' in body) s.detail = body.detail && typeof body.detail === 'object' ? body.detail : {};
+  let justCancelled = false;
   if ('status' in body) {
     if (!SHIFT_STATES.includes(body.status)) throw httpError(400, 'invalid shift status');
+    justCancelled = body.status === 'CANCELLED' && s.status !== 'CANCELLED';
     s.status = body.status;
     if (body.status === 'CANCELLED') shiftApplications.expireApplicationsForShift(s.id);
   }
+  s.revision = (s.revision || 0) + 1;
   const pub = publicShift(s);
   // Editing a still-draft shift (e.g. fixing its time before publishing)
   // must not tip off its assignee any sooner than publishing itself would.
   broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: assignedPersonnelIds(s.id) });
+  if (!wasDraft && s.status !== 'DRAFT') {
+    const affected = assignedPersonnelIds(s.id);
+    if (justCancelled) notifyShiftEvent('CANCELLED', s, affected);
+    else if (scheduleChanged) notifyShiftEvent('CHANGED', s, affected);
+  }
   logEvent('shift.updated', `SHIFT ${s.id} UPDATED`, { shift_id: s.id });
   return pub;
 });
 route('DELETE', '/api/shifts/:id', ADMIN, ({ params }) => {
   const s = findShift(params.id);
   const affected = assignedPersonnelIds(s.id);
+  const wasDraft = s.status === 'DRAFT';
   shiftApplications.expireApplicationsForShift(s.id);
   db.shifts = db.shifts.filter((x) => x.id !== s.id);
   db.shift_assignments = db.shift_assignments.filter((a) => a.shift_id !== s.id);
   broadcast('shift.deleted', { id: s.id }, { personnelIds: affected });
+  if (!wasDraft) notifyShiftEvent('CANCELLED', s, affected);
   logEvent('shift.deleted', `SHIFT ${s.id} DELETED`, { shift_id: s.id });
   return { ok: true };
 });
@@ -3367,8 +3466,10 @@ route('POST', '/api/shifts/:id/assignments', CONTROL, ({ params, body, user }) =
     created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
   };
   db.shift_assignments.push(a);
+  s.revision = (s.revision || 0) + 1;
   const pub = publicShift(s);
   broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [p.id] });
+  if (s.status !== 'DRAFT') notifyShiftEvent('ASSIGNED', s, [p.id]);
   logEvent('shift_assignment.created', `${p.name} ADDED TO SHIFT ${s.id}`, { shift_id: s.id, personnel_id: p.id });
   return { __status: 201, __body: pub };
 });
@@ -3378,11 +3479,13 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   const isOwn = user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id;
   const isControl = isControlRole(user.role);
   if (!isOwn && !isControl) throw httpError(403, 'not your shift');
+  let justRemoved = false;
   if ('status' in body) {
     const status = String(body.status || '').toUpperCase();
     if (!SHIFT_ASSIGNMENT_STATES.includes(status)) throw httpError(400, 'invalid status');
     if (isOwn && !['CONFIRMED', 'DECLINED'].includes(status)) throw httpError(403, 'you can only confirm or decline your own assignment');
     if (status === 'REMOVED' && !isControl) throw httpError(403, 'insufficient role');
+    justRemoved = status === 'REMOVED' && a.status !== 'REMOVED';
     a.status = status;
     if (status === 'CONFIRMED') a.confirmed_at = new Date().toISOString();
   }
@@ -3393,8 +3496,12 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
     a.attendance = body.attendance;
   }
   a.updated_at = new Date().toISOString();
+  s.revision = (s.revision || 0) + 1;
   const pub = publicShift(s);
   broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [a.personnel_id] });
+  // A control-initiated removal is news to the officer; their own
+  // confirm/decline is something they just did, so it needs no echo back.
+  if (justRemoved && isControl && s.status !== 'DRAFT') notifyShiftEvent('REMOVED', s, [a.personnel_id]);
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   logEvent('shift_assignment.updated', `${p ? p.name : 'PERSON'} ON SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
@@ -3427,6 +3534,78 @@ route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, user }) =>
   logEvent('shift.clocked_out', `${p ? p.name : 'PERSON'} CLOCKED OUT`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
 });
+
+/* ---- Personal iCal feed — a long unguessable token stands in for a
+ * login, the same trust model as a webhook URL, since a calendar client
+ * can't carry a session header. See routes-contact.js's Twilio status
+ * callback for the only other route in this codebase registered with
+ * `null` roles (the one way to skip authFrom() entirely). ---- */
+function icsEscape(str) { return String(str || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+function icsDate(iso) { return new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z'); }
+function icsVevent({ uid, stamp, startsAt, endsAt, summary, location, description, status, sequence }) {
+  return [
+    'BEGIN:VEVENT', `UID:${uid}`, `DTSTAMP:${icsDate(stamp)}`,
+    `DTSTART:${icsDate(startsAt)}`, `DTEND:${icsDate(endsAt)}`,
+    `SUMMARY:${icsEscape(summary)}`,
+    location ? `LOCATION:${icsEscape(location)}` : null,
+    description ? `DESCRIPTION:${icsEscape(description)}` : null,
+    `STATUS:${status}`, `SEQUENCE:${sequence || 0}`,
+    'END:VEVENT',
+  ].filter(Boolean).join('\r\n');
+}
+function buildIcsFeed(name, vevents) {
+  return [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CCCS//Rota//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    `X-WR-CALNAME:${icsEscape(name)}`, 'X-PUBLISHED-TTL:PT1H',
+    ...vevents, 'END:VCALENDAR',
+  ].join('\r\n');
+}
+route('GET', '/api/me/ical-feed', ALL, ({ req, user }) => {
+  const u = db.users.find((x) => x.id === user.id);
+  if (!u.ical_token) { u.ical_token = crypto.randomBytes(24).toString('hex'); }
+  return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token}.ics` };
+});
+route('POST', '/api/me/ical-feed/regenerate', ALL, ({ user }) => {
+  const u = db.users.find((x) => x.id === user.id);
+  u.ical_token = crypto.randomBytes(24).toString('hex');
+  logEvent('ical_feed.regenerated', `${u.display_name} REGENERATED THEIR ROTA FEED LINK`, { user_id: u.id });
+  return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token}.ics` };
+});
+// Deliberately `null` roles — see the comment above. The token in the URL
+// IS the credential; validation happens here, not in the router.
+route('GET', '/api/rota/ical/:token.ics', null, ({ params }) => {
+  const u = db.users.find((x) => x.ical_token && x.ical_token === params.token);
+  if (!u) throw httpError(404, 'feed not found');
+  const now = new Date().toISOString();
+  let vevents = [];
+  if (isControlRole(u.role)) {
+    // A supervisor's/dispatcher's own feed: the whole operation, not just
+    // their own assignments — they don't have shift assignments of their own.
+    vevents = db.shifts
+      .filter((s) => s.status !== 'DRAFT')
+      .map((s) => icsVevent({
+        uid: `shift-${s.id}@cccs.local`, stamp: now, startsAt: s.starts_at, endsAt: s.ends_at,
+        summary: shiftTitle(s), location: s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).address : null,
+        description: s.briefing || s.notes || '', status: s.status === 'CANCELLED' ? 'CANCELLED' : 'CONFIRMED', sequence: s.revision || 0,
+      }));
+  } else if (u.personnel_id) {
+    vevents = db.shift_assignments
+      .filter((a) => a.personnel_id === u.personnel_id)
+      .map((a) => ({ a, s: db.shifts.find((x) => x.id === a.shift_id) }))
+      .filter((x) => x.s && x.s.status !== 'DRAFT')
+      .map(({ a, s }) => icsVevent({
+        uid: `shift-${s.id}-assignment-${a.id}@cccs.local`, stamp: now, startsAt: s.starts_at, endsAt: s.ends_at,
+        summary: shiftTitle(s), location: s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).address : null,
+        description: s.briefing || s.notes || '',
+        status: (s.status === 'CANCELLED' || ['DECLINED', 'REMOVED'].includes(a.status)) ? 'CANCELLED' : 'CONFIRMED',
+        sequence: s.revision || 0,
+      }));
+  }
+  return {
+    __body: buildIcsFeed(isControlRole(u.role) ? 'CCCS Rota — All sites' : 'My Rota', vevents),
+    __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
+  };
+});
 require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow: () => store.flushNow() });
 
 
@@ -3455,7 +3634,7 @@ require('./routes-leave.js')({
 // Shift applications — see routes-shift-applications.js for the design.
 const shiftApplications = require('./routes-shift-applications.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,
-  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole,
+  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent,
 });
 
 // Vehicle/asset allocation and the stock ledger — see routes-fleet-stock.js.

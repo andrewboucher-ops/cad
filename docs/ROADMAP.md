@@ -420,10 +420,18 @@ self-contained slice at a time, tested and deployed before the next.
   fleet) and a nested kit-contents UI — both buildable later on the data
   model already shipped (`parent_asset_id`,
   `GET /api/vehicles/:id/allocations`) without another schema change.
-- **Increment 7 — notifications.** SMS via the existing `sms.js` (already
-  built, currently only operator-triggered) wired to shift
-  assigned/changed/cancelled events; email via the existing MS Graph
-  `sendMail` path; a personal iCal feed per staff member.
+- ~~**Increment 7 — notifications.**~~ — done, see README.md. SMS via the
+  existing `sms.js` and email via a new generic `sendGraphEmail` helper
+  (extracted from the resolution-report sender), both wired to the same
+  places `broadcast()` already decides who's allowed to know: assigned,
+  time/site changed, cancelled, removed, and a rejected shift application.
+  A personal iCal feed per login, keyed by a long unguessable token rather
+  than a session — a field officer's feed is their own assignments, a
+  dispatcher/supervisor/admin's is the whole operation. Deliberately out of
+  scope: quiet hours (would need a queue to hold and release a message
+  later, contradicting the synchronous-send decision already made, and a
+  shift notification is inherently time-critical); per-user opt-out is in,
+  though, as two checkboxes on the personnel record.
 - **Increment 8 — permissions hardening + performance pass.** Site-level
   (not just branch-level) supervisor scoping; a Finance/read-only role;
   index/eager-load audit on the rota queries.

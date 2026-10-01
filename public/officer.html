@@ -88,7 +88,7 @@
   </section>
 
   <section class="panel">
-    <header>My shift</header>
+    <header>My shift <button class="btn" id="bCalSync" style="float:right;padding:2px 8px;font-size:11px">Calendar sync</button></header>
     <div class="body" id="shiftBody" style="padding:12px">
       <p class="dim">No shift scheduled.</p>
     </div>
@@ -940,8 +940,28 @@ async function boot() {
   await refreshLeave();
   footTrackingEnabled = await api('GET', '/api/config').then((c) => c.foot_tracking).catch(() => false);
   if (currentShift() && clockedIn(currentShift())) startFootTracking();
+  el('#bCalSync').onclick = openCalSyncModal;
 }
 boot();
+
+async function openCalSyncModal() {
+  const { url } = await api('GET', '/api/me/ical-feed');
+  modal('Calendar sync', `
+    <p>Subscribe to this link from your phone or desktop calendar app to see your shifts automatically. Anyone with this link can see your rota, so don't share it.</p>
+    <input id="calUrl" readonly style="width:100%" value="${esc(url)}">
+    <div class="btn-row" style="margin-top:10px">
+      <button class="btn" id="calCopy">Copy link</button>
+      <button class="btn danger" id="calRegen">Regenerate link</button>
+    </div>
+    <p class="dim" id="calMsg" style="margin-top:8px"></p>`, () => {
+    el('#calCopy').onclick = async () => { await navigator.clipboard.writeText(el('#calUrl').value); el('#calMsg').textContent = 'Copied.'; };
+    el('#calRegen').onclick = async () => {
+      if (!confirm('The old link will stop working. Continue?')) return;
+      const r = await api('POST', '/api/me/ical-feed/regenerate', {});
+      el('#calUrl').value = r.url; el('#calMsg').textContent = 'Link regenerated — update it in your calendar app.';
+    };
+  });
+}
 
 bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === person.id) { person = personnel; paintWho(); } })
    .on('welfare.checked_in', (p) => { if (person && p.id === person.id) { person = p; paintWho(); } })

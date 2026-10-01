@@ -468,6 +468,53 @@ server-already-supports-it additions — `parent_asset_id` and
 build them without another data-model change — just not built out as UI
 yet.
 
+## Shift notifications and the personal iCal feed
+
+Every place `broadcast()` already decides who's allowed to know about a
+shift event now also sends that person an SMS and an email: assigned,
+time/site changed, cancelled (whether by status change or hard delete),
+removed from a shift by control, and a rejected shift application. A
+draft shift never notifies, the same boundary that already keeps it off
+the socket and out of `GET /api/shifts` for anyone who isn't control.
+
+Sending is synchronous and fire-and-forget, matching the rest of the
+system's lack of a job queue — `notifyShiftEvent()` is called inline from
+the route handler but not awaited, so a slow or failing send can't add
+latency to the request that triggered it, and every attempt (success or
+failure) writes a `dial_log` row — the same audit shape
+`routes-contact.js`'s operator-triggered SMS already writes, so a missed
+notification is visible, not silent. SMS reuses `sms.js` exactly as built
+(dry-run unless `SMS_LIVE=on`); email is a new generic `sendGraphEmail(to,
+subject, html)`, pulled out of the resolution-report sender's Graph
+plumbing rather than duplicating it. Two checkboxes on the personnel
+record, `sms_opt_out`/`email_opt_out`, suppress a channel per person,
+independently of each other.
+
+A shift's `revision` counter (bumped on every `PATCH` and on any
+assignment status change) doubles as the iCal `SEQUENCE` for that shift's
+events, so a calendar client knows a later version of the same `UID`
+has arrived rather than treating it as a duplicate.
+
+The personal feed (`GET /api/me/ical-feed`, regenerable from `rota.html`'s
+and `officer.html`'s new "Calendar sync" button) is keyed by a long
+unguessable token on the `users` record rather than a session — a
+calendar app has no way to carry a bearer token, so the URL itself is the
+credential, the same trust model as a webhook. `GET /api/rota/ical/:token.ics`
+is registered with no role gate at all (the one other precedent for this
+in the codebase is Twilio's status-callback webhook); it looks the token
+up itself and serves a field officer their own assignments, or a
+dispatcher/supervisor/admin the whole operation's non-draft shifts. A
+cancelled shift, or an assignment someone was removed from, keeps its
+`UID` in the feed with `STATUS:CANCELLED` rather than disappearing, so a
+subscribed calendar actually updates instead of leaving a stale entry
+behind.
+
+Deliberately out of scope: quiet hours. The brief asks for them, but
+honouring one means holding a message and releasing it later — exactly
+the queue the system doesn't have and this phase deliberately didn't
+build, and a shift notification is inherently the kind of thing someone
+needs to know about now, not at a more polite hour.
+
 ### SIA licence / DBS compliance tracking
 
 There is no integration with either service, because none exists to build:
