@@ -945,14 +945,23 @@ function fmtShiftRange(startIso, endIso) {
 async function refreshAvailableShifts() {
   try {
     const open = await api('GET', '/api/shifts/available');
-    el('#availableShiftsList').innerHTML = open.length ? open.map((s) => `
+    // Grouped by site, soonest first within each, so an officer can see
+    // where the work is at a glance.
+    const bySite = new Map();
+    for (const s of open.slice().sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at))) {
+      const k = s.site_name || 'Other / no fixed site';
+      if (!bySite.has(k)) bySite.set(k, []);
+      bySite.get(k).push(s);
+    }
+    el('#availableShiftsList').innerHTML = open.length ? [...bySite].sort((a, b) => a[0].localeCompare(b[0])).map(([site, list]) => `
+      <h4 style="margin:12px 0 4px;font-size:14px">${esc(site)} <span class="dim" style="font-weight:400">· ${list.length}</span></h4>` + list.map((s) => `
       <div class="field" style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line-soft);padding-bottom:8px;margin-bottom:8px">
         <div style="flex:1">
-          <div>${esc(s.shift_type_name || '')}${s.site_name ? ' — ' + esc(s.site_name) : ''}</div>
-          <div class="dim" style="font-size:12px">${esc(fmtShiftRange(s.starts_at, s.ends_at))} · ${s.coverage_gap} seat${s.coverage_gap === 1 ? '' : 's'} open</div>
+          <div>${esc(fmtShiftRange(s.starts_at, s.ends_at))}</div>
+          <div class="dim" style="font-size:12px">${esc(s.shift_type_name || '')} · ${s.coverage_gap} seat${s.coverage_gap === 1 ? '' : 's'} open</div>
         </div>
-        <button type="button" class="btn primary" data-apply="${s.id}" style="padding:6px 12px;font-size:12px">Apply</button>
-      </div>`).join('') : '<p class="dim">No open shifts to apply for right now.</p>';
+        <button type="button" class="btn primary" data-apply="${s.id}" style="padding:8px 14px">Apply</button>
+      </div>`).join('')).join('') : '<p class="dim">No open shifts to apply for right now.</p>';
     els('#availableShiftsList [data-apply]').forEach((b) => (b.onclick = async () => {
       try { await api('POST', '/api/shift-applications', { shift: Number(b.dataset.apply) }); await refreshAvailableShifts(); await refreshMyApplications(); }
       catch (e) { alert(e.message); }

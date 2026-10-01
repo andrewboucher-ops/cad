@@ -71,14 +71,15 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 module.exports = function registerApplicantRoutes({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
-  forms, pushToRoles = () => {}, flushNow = () => {}, sendEmail = null,
+  forms, pushToRoles = () => {}, flushNow = () => {}, sendEmail = null, personnelFiles = null, publicBaseUrl = '',
 }) {
   for (const t of ['applicants']) if (!Array.isArray(db[t])) db[t] = [];
 
   const cvDir = (applicantId) => path.join(UPLOADS_DIR, 'applicants', String(applicantId));
   const findApplicant = (id) => db.applicants.find((a) => a.id === Number(id)) || null;
 
-  const publicApplicant = (a) => ({ ...a });
+  // The info-request token hash never leaves the server.
+  const publicApplicant = (a) => ({ ...a, info_requests: (a.info_requests || []).map(({ token_hash, ...r }) => r) });
 
   route('GET', '/api/applicants', CONTROL, ({ query, user }) => {
     let rows = db.applicants.filter((a) => visibleToUser(a, user));
@@ -119,6 +120,7 @@ module.exports = function registerApplicantRoutes({
   route('PATCH', '/api/applicants/:id', CONTROL, ({ params, body }) => {
     const a = findApplicant(params.id);
     if (!a) throw httpError(404, 'applicant not found');
+    const before = { status: a.status, interview_at: a.interview_at };
     if ('name' in body) { const name = String(body.name || '').trim(); if (!name) throw httpError(400, 'name required'); a.name = name; }
     if ('email' in body) {
       const email = String(body.email || '').trim();
@@ -140,6 +142,12 @@ module.exports = function registerApplicantRoutes({
       if (status === 'REJECTED' && !body.rejected_reason && !a.rejected_reason) throw httpError(400, 'rejected_reason required when rejecting');
       if (status === 'REJECTED' && body.rejected_reason) a.rejected_reason = String(body.rejected_reason).trim();
       a.status = status;
+    }
+    // The applicant is told when their status changes (or their interview
+    // is moved), unless whoever made the change chose not to.
+    if (body.notify !== false) {
+      if (a.status !== before.status) emailApplicant(a, a.status);
+      else if (a.status === 'INTERVIEW' && a.interview_at && a.interview_at !== before.interview_at) emailApplicant(a, 'INTERVIEW_MOVED');
     }
     a.updated_at = new Date().toISOString();
     logEvent('applicant.updated', `APPLICANT ${a.name} UPDATED`, { applicant_id: a.id });
@@ -177,8 +185,33 @@ module.exports = function registerApplicantRoutes({
       notes: `Hired via applicant tracking — applicant #${a.id}.`, branch_id: a.branch_id || null,
       lat: null, lon: null, location_at: null,
     };
+    // Everything from the application goes onto their personnel file.
+    const values = (a.application && a.application.values) || {};
+    if (values.sia_licence && !p.sia_licence_no) p.sia_licence_no = String(values.sia_licence).trim().slice(0, 40);
+    p.application = {
+      applicant_id: a.id, reference: a.reference || null, applied_at: a.applied_at, role_applied_for: a.role_applied_for, source: a.source,
+      email: a.email, phone: a.phone, form: a.application ? { definition_name: a.application.definition_name, definition_version: a.application.definition_version, fields: a.application.fields, values: a.application.values, submitted_at: a.application.submitted_at } : null,
+      sia_none: Boolean(a.sia && a.sia.none),
+      info_requests: (a.info_requests || []).filter((r) => r.status === 'COMPLETED').map((r) => ({ message: r.message, sent_at: r.created_at, answered_at: r.submitted_at, answers: r.answers.map((x) => ({ label: x.label, type: x.type, text: x.text || null })) })),
+      notes: a.notes_log.map((n) => ({ ...n })), interview_at: a.interview_at, hired_at: new Date().toISOString(),
+    };
+    if (personnelFiles) {
+      const copy = (from, meta) => { if (fs.existsSync(from)) personnelFiles.addFile(p, { ...meta, from, source: `Application ${a.reference || '#' + a.id}` }); };
+      if (a.sia && a.sia.front) copy(path.join(cvDir(a.id), 'sia', a.sia.front.stored_name), { kind: 'SIA_FRONT', mimetype: a.sia.front.mimetype, filename: a.sia.front.filename });
+      if (a.sia && a.sia.back) copy(path.join(cvDir(a.id), 'sia', a.sia.back.stored_name), { kind: 'SIA_BACK', mimetype: a.sia.back.mimetype, filename: a.sia.back.filename });
+      if (a.cv) copy(path.join(cvDir(a.id), a.cv.stored_name), { kind: 'CV', mimetype: a.cv.mimetype, filename: a.cv.filename });
+      for (const f of (a.application && a.application.files) || []) {
+        const field = a.application.fields.find((x) => x.id === f.field_id);
+        copy(path.join(answersDir(a.id), f.filename), { kind: 'APPLICATION', label: field ? field.label : 'Application file', mimetype: f.mimetype, filename: f.filename });
+      }
+      for (const r of a.info_requests || []) for (const x of r.answers || []) {
+        if (x.file) copy(path.join(infoDir(a.id, r.id), x.file.stored_name), { kind: 'INFO', label: x.label, mimetype: x.file.mimetype, filename: x.file.filename });
+      }
+    }
     db.personnel.push(p);
     a.status = 'HIRED'; a.hired_personnel_id = p.id; a.updated_at = new Date().toISOString();
+    if (body.notify !== false) emailApplicant(a, 'HIRED');
+    flushNow();
     logEvent('applicant.hired', `${a.name} HIRED AS ${p.name} (personnel #${p.id})`, { applicant_id: a.id, personnel_id: p.id });
     return { __status: 201, __body: { applicant: publicApplicant(a), personnel: publicPersonnel(p) } };
   });
@@ -256,6 +289,7 @@ module.exports = function registerApplicantRoutes({
   }
 
   const answersDir = (applicantId) => path.join(cvDir(applicantId), 'application');
+  const infoDir = (applicantId, reqId) => path.join(cvDir(applicantId), 'info', String(reqId));
 
   const ACK_ENABLED = process.env.APPLY_ACK_EMAIL !== 'off';
   const ackedAt = new Map(); // email -> last acknowledgement time
@@ -307,6 +341,20 @@ module.exports = function registerApplicantRoutes({
     const email = String(values.email || '').trim();
     if (!EMAIL_RE.test(email)) throw httpError(400, 'please enter a valid email address');
 
+    // SIA licence, front and back — or a tick to say they don't hold one yet.
+    const noSia = body.no_sia === true;
+    const siaFile = (raw, side) => {
+      if (!raw || !raw.data) return null;
+      const ext = CV_EXT[raw.mimetype];
+      if (!ext) throw httpError(400, `the ${side} of your SIA licence must be a photo (JPEG or PNG) or a PDF`);
+      const bytes = Buffer.from(String(raw.data), 'base64');
+      if (bytes.length > CV_MAX_BYTES) throw httpError(413, `the ${side} of your SIA licence is too large (8MB maximum)`);
+      if (!CV_SIGNATURES[raw.mimetype](bytes)) throw httpError(400, `the ${side} of your SIA licence does not look like a JPEG, PNG or PDF`);
+      return { bytes, ext, mimetype: raw.mimetype, filename: String(raw.filename || `sia-${side}`).slice(0, 200) };
+    };
+    const siaFront = noSia ? null : siaFile(body.sia_front, 'front'), siaBack = noSia ? null : siaFile(body.sia_back, 'back');
+    if (!noSia && (!siaFront || !siaBack)) throw httpError(400, 'please add photos of the front and back of your SIA licence — or tick that you don\'t hold one yet');
+
     let cv = null;
     if (body.cv && body.cv.data) {
       const ext = CV_EXT[body.cv.mimetype];
@@ -333,6 +381,14 @@ module.exports = function registerApplicantRoutes({
       const storedName = `${crypto.randomUUID()}${cv.ext}`;
       fs.writeFileSync(path.join(cvDir(a.id), storedName), cv.bytes);
       a.cv = { id: crypto.randomUUID(), filename: cv.filename, stored_name: storedName, mimetype: cv.mimetype, uploaded_at: new Date().toISOString() };
+    }
+    a.sia = { none: noSia, front: null, back: null };
+    for (const [side, f] of [['front', siaFront], ['back', siaBack]]) {
+      if (!f) continue;
+      fs.mkdirSync(path.join(cvDir(a.id), 'sia'), { recursive: true });
+      const stored = `${side}-${crypto.randomUUID()}${f.ext}`;
+      fs.writeFileSync(path.join(cvDir(a.id), 'sia', stored), f.bytes);
+      a.sia[side] = { stored_name: stored, mimetype: f.mimetype, filename: f.filename, uploaded_at: new Date().toISOString() };
     }
     const reference = `APP-${String(a.id).padStart(5, '0')}`;
     a.reference = reference;
@@ -361,6 +417,165 @@ module.exports = function registerApplicantRoutes({
     const file = path.join(answersDir(a.id), f.filename);
     if (!fs.existsSync(file)) throw httpError(404, 'file missing');
     return { __body: fs.readFileSync(file), __headers: { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'private, max-age=3600' } };
+  });
+
+  route('GET', '/api/applicants/:id/sia/:side', CONTROL, ({ params, user }) => {
+    const a = findApplicant(params.id);
+    if (!a || !visibleToUser(a, user) || !a.sia || !['front', 'back'].includes(params.side) || !a.sia[params.side]) throw httpError(404, 'not found');
+    const f = a.sia[params.side], file = path.join(cvDir(a.id), 'sia', f.stored_name);
+    if (!fs.existsSync(file)) throw httpError(404, 'file missing');
+    return { __body: fs.readFileSync(file), __headers: { 'content-type': f.mimetype, 'cache-control': 'private, no-store' } };
+  });
+
+  /* ---------------------------------------------------------------- *
+   * Emails to the applicant
+   *
+   * Fixed wording per event — nothing typed by the applicant goes into
+   * them (only the reference and, where it is one of the form's own
+   * options, the role). What staff type (a further-information request)
+   * does, because that is our own text. Each send is recorded on the
+   * applicant, so a failed one shows in Admin.
+   * ---------------------------------------------------------------- */
+  const company = () => ((db.ui_settings || []).find((r) => r.key === 'rental') || {}).company_name || 'Echelon';
+  function emailApplicant(a, kind, extra = {}) {
+    if (!Array.isArray(a.emails)) a.emails = [];
+    const log = { kind, to: a.email || null, at: new Date().toISOString(), ok: null };
+    a.emails.push(log);
+    if (!a.email) { Object.assign(log, { ok: false, error: 'no email address' }); return; }
+    if (!sendEmail) { Object.assign(log, { ok: false, error: 'email is not configured' }); return; }
+    const c = escHtml(company()), ref = a.reference ? ` (reference <strong style="font-family:monospace">${escHtml(a.reference)}</strong>)` : '';
+    const when = a.interview_at ? escHtml(new Date(a.interview_at).toLocaleString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })) : null;
+    const T = {
+      SCREENING: ['Your application is being reviewed', `<p>Your application to ${c}${ref} is now being reviewed. We will be in touch about the next step.</p>`],
+      INTERVIEW: ['Interview', `<p>We would like to invite you to an interview for your application to ${c}${ref}.</p>${when ? `<p><strong>${when}</strong></p>` : '<p>We will contact you shortly to arrange a time.</p>'}<p>Please reply to this email if you need to rearrange.</p>`],
+      INTERVIEW_MOVED: ['Interview time', `<p>Your interview with ${c}${ref} is now on <strong>${when}</strong>.</p><p>Please reply to this email if you can't make it.</p>`],
+      OFFER: ['Good news about your application', `<p>We are pleased to let you know that ${c} would like to offer you a position${ref}. We will be in touch shortly with the details.</p>`],
+      REJECTED: ['Your application', `<p>Thank you for your interest in working with ${c}${ref}. After careful consideration we will not be taking your application further on this occasion.</p><p>We wish you every success.</p>`],
+      WITHDRAWN: ['Your application has been withdrawn', `<p>Your application to ${c}${ref} has been withdrawn. If this is a mistake, please reply to this email.</p>`],
+      APPLIED: ['Your application', `<p>Your application to ${c}${ref} is back with our recruitment team.</p>`],
+      HIRED: ['Welcome to the team', `<p>Congratulations — you have been taken on by ${c}, and your details have been added to our system.</p><p>We will be in touch about your start date, your login for our staff app and anything else you need before your first shift.</p>`],
+      INFO_REQUEST: ['We need a little more information', `<p>Thank you for applying to ${c}${ref}. To carry on with your application we need some more information from you:</p>
+        <ul>${(extra.items || []).map((i) => `<li>${escHtml(i.label)}${i.type === 'FILE' ? ' <em>(upload)</em>' : ''}</li>`).join('')}</ul>${extra.message ? `<p>${escHtml(extra.message).replace(/\n/g, '<br>')}</p>` : ''}
+        <p><a href="${escHtml(extra.link)}" style="display:inline-block;background:#0f766e;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none">Send the information</a></p>
+        <p style="color:#6b7280;font-size:12px">This link is just for you and works until ${escHtml(new Date(extra.expires_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }))}.</p>`],
+    }[kind];
+    if (!T) { Object.assign(log, { ok: false, error: 'no template' }); return; }
+    const html = `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;color:#111827;max-width:560px;margin:0 auto;padding:20px"><p>Hello,</p>${T[1]}<p>Kind regards,<br>${c}</p></body></html>`;
+    Promise.resolve(sendEmail(a.email, `${T[0]}${a.reference ? ` — ${a.reference}` : ''}`, html)).then((r) => {
+      Object.assign(log, r && r.ok ? { ok: true } : { ok: false, error: (r && r.error) || 'send failed' });
+      flushNow();
+    }).catch((e) => Object.assign(log, { ok: false, error: e.message }));
+  }
+
+  /* ---------------------------------------------------------------- *
+   * Further information requests
+   *
+   * Staff list what they need (uploads and/or written answers); the
+   * applicant is emailed a private link to a page with no login. The link
+   * carries a random token; only its hash is stored. It works until it
+   * expires or is answered once — after that it shows "already sent".
+   * Uploads are checked by content (PDF/JPEG/PNG) like the CV.
+   * ---------------------------------------------------------------- */
+  const hashToken = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+  const findByToken = (token) => {
+    const h = hashToken(token);
+    for (const a of db.applicants) for (const r of a.info_requests || []) if (r.token_hash === h) return { a, r };
+    return null;
+  };
+  route('POST', '/api/applicants/:id/info-requests', CONTROL, ({ params, body, user }) => {
+    const a = findApplicant(params.id);
+    if (!a || !visibleToUser(a, user)) throw httpError(404, 'applicant not found');
+    if (!a.email) throw httpError(400, 'this applicant has no email address to send the request to');
+    if (['HIRED', 'REJECTED', 'WITHDRAWN'].includes(a.status)) throw httpError(409, `the application is ${a.status.toLowerCase()}`);
+    const items = (Array.isArray(body.items) ? body.items : []).map((i, n) => ({
+      id: `q${n + 1}`, label: String(i.label || '').trim().slice(0, 200), type: i.type === 'TEXT' ? 'TEXT' : 'FILE', required: i.required !== false,
+    })).filter((i) => i.label);
+    if (!items.length) throw httpError(400, 'say what information you need');
+    if (items.length > 15) throw httpError(400, 'at most 15 items in one request');
+    const days = Math.min(Math.max(Number(body.expires_in_days) || 14, 1), 60);
+    const token = crypto.randomBytes(24).toString('hex');
+    if (!Array.isArray(a.info_requests)) a.info_requests = [];
+    const r = {
+      id: (a.info_requests.reduce((n, x) => Math.max(n, x.id), 0) || 0) + 1, token_hash: hashToken(token), items,
+      message: String(body.message || '').trim().slice(0, 2000), status: 'OPEN', created_at: new Date().toISOString(), created_by: user.display_name,
+      expires_at: new Date(Date.now() + days * 86400000).toISOString(), submitted_at: null, answers: [],
+    };
+    a.info_requests.push(r);
+    const link = `${publicBaseUrl}/apply-info.html?t=${token}`;
+    emailApplicant(a, 'INFO_REQUEST', { items, message: r.message, link, expires_at: r.expires_at });
+    a.notes_log.push({ id: crypto.randomUUID(), body: `Asked for more information: ${items.map((i) => i.label).join('; ')}`, author: user.display_name, at: r.created_at });
+    a.updated_at = r.created_at;
+    logEvent('applicant.info_requested', `FURTHER INFORMATION REQUESTED FROM APPLICANT #${a.id}`, { applicant_id: a.id });
+    flushNow();
+    return { __status: 201, __body: { ...publicApplicant(a), link } };
+  });
+  route('DELETE', '/api/applicants/:id/info-requests/:rid', CONTROL, ({ params, user }) => {
+    const a = findApplicant(params.id);
+    const r = a && (a.info_requests || []).find((x) => x.id === Number(params.rid));
+    if (!r) throw httpError(404, 'request not found');
+    if (r.status !== 'OPEN') throw httpError(409, 'it has already been answered');
+    r.status = 'CANCELLED'; r.cancelled_by = user.display_name;
+    return publicApplicant(a);
+  });
+  route('GET', '/api/applicants/:id/info-files/:rid/:qid', CONTROL, ({ params, user }) => {
+    const a = findApplicant(params.id);
+    if (!a || !visibleToUser(a, user)) throw httpError(404, 'not found');
+    const r = (a.info_requests || []).find((x) => x.id === Number(params.rid));
+    const ans = r && r.answers.find((x) => x.item_id === params.qid && x.file);
+    if (!ans) throw httpError(404, 'not found');
+    const file = path.join(infoDir(a.id, r.id), ans.file.stored_name);
+    if (!fs.existsSync(file)) throw httpError(404, 'file missing');
+    return { __body: fs.readFileSync(file), __headers: { 'content-type': ans.file.mimetype, 'content-disposition': `inline; filename="${ans.file.filename.replace(/"/g, '')}"`, 'cache-control': 'private, no-store' } };
+  });
+
+  // Public: the page behind the emailed link.
+  const tries = new Map();
+  const tooMany = (req) => {
+    const who = senderOf(req), now = Date.now();
+    const t = (tries.get(who) || []).filter((x) => now - x < 3600000); t.push(now); tries.set(who, t);
+    if (tries.size > 5000) tries.delete(tries.keys().next().value);
+    return t.length > 30;
+  };
+  route('GET', '/api/public/info-request/:token', null, ({ params, req }) => {
+    if (tooMany(req)) throw httpError(429, 'too many attempts — try again later');
+    const hit = findByToken(params.token);
+    if (!hit || hit.r.status === 'CANCELLED') throw httpError(404, 'this link is not valid — please contact us');
+    const { a, r } = hit;
+    const expired = Date.parse(r.expires_at) < Date.now();
+    return { company: company(), reference: a.reference || null, message: r.message, items: r.items, status: expired && r.status === 'OPEN' ? 'EXPIRED' : r.status, expires_at: r.expires_at };
+  });
+  route('POST', '/api/public/info-request/:token', null, ({ params, body, req }) => {
+    if (tooMany(req)) throw httpError(429, 'too many attempts — try again later');
+    const hit = findByToken(params.token);
+    if (!hit || hit.r.status === 'CANCELLED') throw httpError(404, 'this link is not valid — please contact us');
+    const { a, r } = hit;
+    if (r.status === 'COMPLETED') throw httpError(409, 'this information has already been sent — thank you');
+    if (Date.parse(r.expires_at) < Date.now()) throw httpError(410, 'this link has expired — please contact us for a new one');
+    const answers = body && typeof body.answers === 'object' && body.answers ? body.answers : {};
+    const out = r.items.map((i) => {
+      const v = answers[i.id];
+      if (i.type === 'TEXT') {
+        const text = String(v || '').trim().slice(0, 5000);
+        if (!text && i.required) throw httpError(400, `please answer: ${i.label}`);
+        return { item_id: i.id, label: i.label, type: i.type, text: text || null };
+      }
+      if (!v || !v.data) { if (i.required) throw httpError(400, `please upload: ${i.label}`); return { item_id: i.id, label: i.label, type: i.type, file: null }; }
+      const ext = CV_EXT[v.mimetype];
+      if (!ext) throw httpError(400, `${i.label}: must be a photo (JPEG or PNG) or a PDF`);
+      const bytes = Buffer.from(String(v.data), 'base64');
+      if (bytes.length > CV_MAX_BYTES) throw httpError(413, `${i.label}: file too large (8MB maximum)`);
+      if (!CV_SIGNATURES[v.mimetype](bytes)) throw httpError(400, `${i.label}: that file does not look like a JPEG, PNG or PDF`);
+      return { item_id: i.id, label: i.label, type: i.type, bytes, file: { stored_name: `${i.id}-${crypto.randomUUID()}${ext}`, mimetype: v.mimetype, filename: String(v.filename || i.label).slice(0, 200) } };
+    });
+    fs.mkdirSync(infoDir(a.id, r.id), { recursive: true });
+    for (const x of out) if (x.bytes) { fs.writeFileSync(path.join(infoDir(a.id, r.id), x.file.stored_name), x.bytes); delete x.bytes; }
+    r.answers = out; r.status = 'COMPLETED'; r.submitted_at = new Date().toISOString();
+    a.notes_log.push({ id: crypto.randomUUID(), body: 'Further information received from the applicant.', author: 'Applicant', at: r.submitted_at });
+    a.updated_at = r.submitted_at;
+    logEvent('applicant.info_received', `FURTHER INFORMATION RECEIVED FROM APPLICANT #${a.id}`, { applicant_id: a.id });
+    pushToRoles(['SYSTEM_ADMIN'], { title: 'Applicant replied', body: 'Further information has arrived for an application', url: '/admin.html#applicants', tag: 'cccs-application' });
+    flushNow();
+    return { ok: true };
   });
 
   return { createApplicant };

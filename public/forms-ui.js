@@ -320,5 +320,5 @@ const CCCSForms = (() => {
     host.querySelectorAll('[data-ff-open]').forEach((r) => (r.onclick = () => onOpen(Number(r.dataset.ffOpen))));
   }
 
-  return { fill, view, edit, list, signaturePad, SUBJECT_LABEL, OUTCOME_LABEL };
+  return { fill, view, edit, list, signaturePad, downscale, SUBJECT_LABEL, OUTCOME_LABEL };
 })();

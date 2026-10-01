@@ -20,6 +20,10 @@
   .done { text-align: center; padding: 24px 8px; }
   .done .ref { font-family: var(--mono); font-weight: 700; font-size: 18px; margin: 8px 0; }
   .fine { font-size: 12px; color: var(--ink-dim); margin-top: 14px; }
+  .sia-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+  .sia-pick { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 150px; }
+  .sia-pick .btn { padding: 12px; }
+  .sia-pick img { max-width: 100%; max-height: 120px; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
 </style>
 </head>
 <body>
@@ -31,6 +35,14 @@
     <div id="formHost"></div>
     <!-- Not shown to people; a bot that fills every input fills this too. -->
     <div class="hp" aria-hidden="true"><label>Website <input id="website" tabindex="-1" autocomplete="off"></label></div>
+    <div id="siaWrap" class="hide" style="margin-top:4px">
+      <label style="display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim)">SIA licence — photos of the front and back <span style="color:var(--priority)">*</span></label>
+      <div class="sia-row">
+        <div class="sia-pick"><button type="button" class="btn" data-sia="front">Front of licence</button><span class="dim" data-sia-status="front"></span><input type="file" accept="image/*,application/pdf" capture="environment" class="hide" data-sia-in="front"></div>
+        <div class="sia-pick"><button type="button" class="btn" data-sia="back">Back of licence</button><span class="dim" data-sia-status="back"></span><input type="file" accept="image/*,application/pdf" capture="environment" class="hide" data-sia-in="back"></div>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px;margin-top:6px"><input type="checkbox" id="noSia" style="width:20px;height:20px"> I don't hold an SIA licence yet</label>
+    </div>
     <div id="cvWrap" class="hide" style="margin-top:4px">
       <label style="display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim)">CV (optional — PDF, PNG or JPEG, up to 8MB)</label>
       <input type="file" id="cv" accept="application/pdf,image/png,image/jpeg">
@@ -76,10 +88,39 @@ function readFile(file) {
   el('#lead').textContent = def.description || '';
   document.title = `${def.name} — Echelon`;
   el('#cvWrap').classList.remove('hide');
+  el('#siaWrap').classList.remove('hide');
+  // Licence photos are shrunk on the phone before sending (a phone photo can
+  // be 10MB); a PDF scan is sent as it is.
+  const sia = { front: null, back: null };
+  for (const side of ['front', 'back']) {
+    const input = document.querySelector(`[data-sia-in="${side}"]`), status = document.querySelector(`[data-sia-status="${side}"]`);
+    document.querySelector(`[data-sia="${side}"]`).onclick = () => input.click();
+    input.onchange = async () => {
+      const f = input.files[0]; if (!f) return;
+      status.textContent = 'Preparing…';
+      try {
+        if (f.type === 'application/pdf') {
+          if (f.size > 8e6) throw new Error('that file is too large (8MB maximum)');
+          sia[side] = { mimetype: 'application/pdf', filename: f.name, data: await readFile(f) };
+          status.textContent = `${f.name} ✓`;
+        } else {
+          const data = await CCCSForms.downscale(f, 1800, 0.85);
+          sia[side] = { mimetype: 'image/jpeg', filename: `sia-${side}.jpg`, data };
+          status.innerHTML = `<img src="data:image/jpeg;base64,${data}" alt="SIA licence ${side}">`;
+        }
+      } catch (e) { status.textContent = e.message; sia[side] = null; }
+      input.value = '';
+    };
+  }
+  el('#noSia').onchange = () => document.querySelector('.sia-row').style.opacity = el('#noSia').checked ? '.4' : '1';
   CCCSForms.fill(el('#formHost'), def, null, {
     submitLabel: 'Send application',
     submit: async (values) => {
-      const body = { definition_id: def.id, values, website: el('#website').value };
+      const body = { definition_id: def.id, values, website: el('#website').value, no_sia: el('#noSia').checked };
+      if (!body.no_sia) {
+        if (!sia.front || !sia.back) throw new Error('Please add photos of the front and back of your SIA licence, or tick that you don\'t hold one yet.');
+        body.sia_front = sia.front; body.sia_back = sia.back;
+      }
       const file = el('#cv').files[0];
       if (file) {
         if (file.size > 8e6) throw new Error('your CV is too large (8MB maximum)');
@@ -94,6 +135,7 @@ function readFile(file) {
     },
   });
   // The CV picker sits inside the card, after the form's own fields.
+  el('#formHost').querySelector('.ff-stack').insertBefore(el('#siaWrap'), el('#formHost').querySelector('[data-ff-err]'));
   el('#formHost').querySelector('.ff-stack').insertBefore(el('#cvWrap'), el('#formHost').querySelector('[data-ff-err]'));
 })().catch((e) => { el('#lead').textContent = `The application form could not be loaded: ${e.message}`; });
 </script>

@@ -4,7 +4,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 
-process.env.PORT = '4016';
+process.env.PORT = '4033';
 process.env.AUTH_SECRET = 'apply-test-secret';
 process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';
@@ -54,7 +54,7 @@ test('the application form is served without a login and is the default one', ()
 });
 
 test('an application with no login lands under Applicants with its answers — and nothing personal in the event log', async () => {
-  const r = await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers('Jamie Applicant') }, null, asSender());
+  const r = await call('POST', '/api/public/applications', { no_sia: true, definition_id: appForm.id, values: goodAnswers('Jamie Applicant') }, null, asSender());
   assert.equal(r.status, 201, JSON.stringify(r.body));
   assert.match(r.body.reference, /^APP-\d{5}$/);
   assert.deepEqual(Object.keys(r.body).sort(), ['ok', 'reference'], 'nothing is echoed back');
@@ -79,7 +79,7 @@ test('a signature on the application is stored and readable by control only', as
   const fields = [...d.fields, { id: 'applicant_signature', label: 'Signature', type: 'signature', required: true }];
   assert.equal((await call('PATCH', `/api/form-definitions/${d.id}`, { fields }, adminT)).status, 200);
   const form = (await call('GET', '/api/public/application-form')).body;
-  const r = await call('POST', '/api/public/applications', { definition_id: form.id, values: { ...goodAnswers('Sig Nature'), applicant_signature: sig('Sig Nature') } }, null, asSender());
+  const r = await call('POST', '/api/public/applications', { no_sia: true, definition_id: form.id, values: { ...goodAnswers('Sig Nature'), applicant_signature: sig('Sig Nature') } }, null, asSender());
   assert.equal(r.status, 201, JSON.stringify(r.body));
   const a = app.db.applicants.find((x) => x.name === 'Sig Nature');
   const fileId = a.application.values.applicant_signature.file_id;
@@ -91,29 +91,29 @@ test('a signature on the application is stored and readable by control only', as
 });
 
 test('the public route validates against the form and refuses anything else', async () => {
-  const post = (values, extra = {}) => call('POST', '/api/public/applications', { definition_id: appForm.id, values, ...extra }, null, asSender());
+  const post = (values, extra = {}) => call('POST', '/api/public/applications', { no_sia: true, definition_id: appForm.id, values, ...extra }, null, asSender());
   const form = (await call('GET', '/api/public/application-form')).body;
-  assert.equal((await call('POST', '/api/public/applications', { definition_id: form.id + 999, values: goodAnswers() }, null, asSender())).status, 409, 'stale form');
-  assert.equal((await call('POST', '/api/public/applications', { definition_id: form.id, values: { ...goodAnswers(), consent: false } }, null, asSender())).status, 400, 'consent is required');
-  assert.equal((await call('POST', '/api/public/applications', { definition_id: form.id, values: { ...goodAnswers(), email: 'not-an-email' } }, null, asSender())).status, 400);
-  assert.equal((await call('POST', '/api/public/applications', { definition_id: form.id, values: { ...goodAnswers(), is_admin: true } }, null, asSender())).status, 400, 'unknown fields refused');
-  const cvBad = await call('POST', '/api/public/applications', { definition_id: form.id, values: goodAnswers(), cv: { mimetype: 'application/pdf', data: Buffer.from('<script>').toString('base64') } }, null, asSender());
+  assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: form.id + 999, values: goodAnswers() }, null, asSender())).status, 409, 'stale form');
+  assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: form.id, values: { ...goodAnswers(), consent: false } }, null, asSender())).status, 400, 'consent is required');
+  assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: form.id, values: { ...goodAnswers(), email: 'not-an-email' } }, null, asSender())).status, 400);
+  assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: form.id, values: { ...goodAnswers(), is_admin: true } }, null, asSender())).status, 400, 'unknown fields refused');
+  const cvBad = await call('POST', '/api/public/applications', { no_sia: true, definition_id: form.id, values: goodAnswers(), cv: { mimetype: 'application/pdf', data: Buffer.from('<script>').toString('base64') } }, null, asSender());
   assert.equal(cvBad.status, 400, 'a "PDF" that is not a PDF is refused');
   void post;
 });
 
 test('the honeypot drops bots silently, and one sender is limited to 5 an hour', async () => {
   const before = app.db.applicants.length;
-  const bot = await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers('Bot'), website: 'http://spam' }, null, asSender());
+  const bot = await call('POST', '/api/public/applications', { no_sia: true, definition_id: appForm.id, values: goodAnswers('Bot'), website: 'http://spam' }, null, asSender());
   assert.equal(bot.status, 201, 'looks accepted to the bot');
   assert.equal(app.db.applicants.length, before, 'but nothing was stored');
 
   const same = { 'x-forwarded-for': '198.51.100.7' };
   // Mistakes don't count: five refused attempts, then still able to apply.
-  for (let i = 0; i < 6; i++) assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: { ...goodAnswers('Typo'), email: 'typo' } }, null, same)).status, 400);
-  for (let i = 0; i < 5; i++) assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers(`Burst ${i}`) }, null, same)).status, 201);
-  assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers('Burst 6') }, null, same)).status, 429);
-  assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers('Someone else') }, null, asSender())).status, 201, 'a different sender is unaffected');
+  for (let i = 0; i < 6; i++) assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: appForm.id, values: { ...goodAnswers('Typo'), email: 'typo' } }, null, same)).status, 400);
+  for (let i = 0; i < 5; i++) assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: appForm.id, values: goodAnswers(`Burst ${i}`) }, null, same)).status, 201);
+  assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: appForm.id, values: goodAnswers('Burst 6') }, null, same)).status, 429);
+  assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: appForm.id, values: goodAnswers('Someone else') }, null, asSender())).status, 201, 'a different sender is unaffected');
 });
 
 test('the application form keeps its required shape, and stays out of officers\' report menus', async () => {
@@ -129,7 +129,7 @@ test('the application form keeps its required shape, and stays out of officers\'
 test('retiring the application form closes applications', async () => {
   await call('PATCH', `/api/form-definitions/${appForm.id}`, { active: false }, adminT);
   assert.equal((await call('GET', '/api/public/application-form')).status, 404);
-  assert.equal((await call('POST', '/api/public/applications', { definition_id: appForm.id, values: goodAnswers() }, null, asSender())).status, 404);
+  assert.equal((await call('POST', '/api/public/applications', { no_sia: true, definition_id: appForm.id, values: goodAnswers() }, null, asSender())).status, 404);
   await call('PATCH', `/api/form-definitions/${appForm.id}`, { active: true }, adminT);
   assert.equal((await call('GET', '/api/public/application-form')).status, 200);
 });
@@ -266,7 +266,7 @@ test('an applicant is emailed their reference — fixed text, nothing they typed
     forms: { activeApplicationForm: () => form, validateValues: (fields, v) => ({ values: v, files: [] }), IMAGE_EXT: {} },
     sendEmail: async (to, subject, html) => { sent.push({ to, subject, html }); return { ok: true }; },
   });
-  const apply = (values, ip) => handlers['POST /api/public/applications']({ body: { definition_id: 1, values }, req: { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': ip } } });
+  const apply = (values, ip) => handlers['POST /api/public/applications']({ body: { no_sia: true, definition_id: 1, values }, req: { socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': ip } } });
   const r = apply({ full_name: '<a href="http://evil.example">Click me</a>', email: 'victim@example.com', role_applied_for: 'Security officer', experience: 'BUY CHEAP PILLS' }, '192.0.2.1');
   await new Promise((res) => setTimeout(res, 20));
   assert.equal(sent.length, 1);

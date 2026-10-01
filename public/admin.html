@@ -684,6 +684,58 @@ function personnelForm(p) {
       <p class="dim" id="pnError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
+/** Documents kept against this person, and — if they came through
+ * Applicants — their whole application as they gave it. Admin only. */
+async function personnelFileModal(p) {
+  const tok = encodeURIComponent(CCCS.getSession().token);
+  let rec;
+  try { rec = await api('GET', `/api/personnel/${p.id}/record`); } catch (e) { alert(e.message); return; }
+  const app = rec.application;
+  const val = (f, v) => (v === null || v === undefined || v === '' ? '—' : f.type === 'checkbox' ? (v ? 'Yes' : 'No') : f.type === 'signature' ? `Signed by ${esc(v.signer_name || '')}` : `<span style="white-space:pre-wrap">${esc(v)}</span>`);
+  modal(`Personnel file — ${p.name}`, `
+    <form class="stack" onsubmit="return false">
+      <label>Documents</label>
+      ${rec.files.length ? `<table class="log-table"><tbody>${rec.files.map((f) => `<tr>
+        <td>${f.mimetype.startsWith('image/') ? `<a href="${f.url}?token=${tok}" target="_blank"><img src="${f.url}?token=${tok}" alt="" style="height:54px;border-radius:4px;border:1px solid var(--line)"></a>` : `<a href="${f.url}?token=${tok}" target="_blank" class="btn" style="padding:3px 9px;font-size:12px">PDF</a>`}</td>
+        <td><strong>${esc(f.label)}</strong><div class="dim" style="font-size:11.5px">${esc(rec.kinds[f.kind] || f.kind)} · ${esc(f.source || '')} · ${esc(new Date(f.added_at).toLocaleDateString('en-GB'))}</div></td>
+        <td style="text-align:right"><button type="button" class="btn danger" data-pf-del="${f.id}" style="padding:3px 9px;font-size:11px">Remove</button></td></tr>`).join('')}</tbody></table>` : '<p class="dim" style="margin:0">No documents yet.</p>'}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <select id="pfKind" style="width:auto">${Object.entries(rec.kinds).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select>
+        <input id="pfLabel" placeholder="Description (optional)" style="flex:1;min-width:140px">
+        <input type="file" id="pfFile" accept="application/pdf,image/png,image/jpeg" style="max-width:220px">
+        <button type="button" class="btn" id="pfUpload">Upload</button>
+      </div>
+      ${app ? `
+      <label>Application${app.reference ? ` ${esc(app.reference)}` : ''} — applied ${esc(new Date(app.applied_at).toLocaleDateString('en-GB'))}, hired ${esc(new Date(app.hired_at).toLocaleDateString('en-GB'))}</label>
+      <div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:grid;grid-template-columns:minmax(120px,40%) 1fr;gap:6px 12px;font-size:13px">
+        <div class="dim">Role applied for</div><div>${esc(app.role_applied_for || '—')}</div>
+        <div class="dim">Source</div><div>${esc(app.source || '—')}</div>
+        ${app.sia_none ? '<div class="dim">SIA licence</div><div>None held when applying</div>' : ''}
+        ${app.form ? app.form.fields.map((f) => `<div class="dim">${esc(f.label)}</div><div>${val(f, app.form.values[f.id])}</div>`).join('') : ''}
+      </div>
+      ${app.info_requests.length ? `<label>Further information given</label>${app.info_requests.map((r) => `<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:6px">${r.answers.map((x) => `<div><span class="dim">${esc(x.label)}:</span> ${x.type === 'TEXT' ? esc(x.text || '—') : '<em>file — see Documents</em>'}</div>`).join('')}</div>`).join('')}` : ''}
+      ${app.notes.length ? `<label>Recruitment notes</label><div class="log" style="max-height:140px;overflow:auto">${app.notes.map((n) => `<div><span class="t">${esc(new Date(n.at).toLocaleDateString('en-GB'))}</span>${esc(n.author)}: ${esc(n.body)}</div>`).join('')}</div>` : ''}` : ''}
+      <p class="err" id="pfErr" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = '<div class="foot-split"><span></span><button class="btn" id="pfBack">Back</button></div>';
+    el('#pfBack').onclick = () => personnelModal(allPersonnel.find((x) => x.id === p.id) || p);
+    els('[data-pf-del]').forEach((b) => (b.onclick = async () => {
+      if (!confirm('Remove this document from their file? It cannot be undone.')) return;
+      try { await api('DELETE', `/api/personnel/${p.id}/files/${b.dataset.pfDel}`); personnelFileModal(p); } catch (e) { el('#pfErr').textContent = e.message; }
+    }));
+    el('#pfUpload').onclick = () => {
+      const f = el('#pfFile').files[0];
+      if (!f) { el('#pfErr').textContent = 'choose a file first'; return; }
+      const r = new FileReader();
+      r.onload = async () => {
+        try { await api('POST', `/api/personnel/${p.id}/files`, { kind: el('#pfKind').value, label: el('#pfLabel').value.trim() || undefined, mimetype: f.type, filename: f.name, data: String(r.result).split(',')[1] }); personnelFileModal(p); }
+        catch (e) { el('#pfErr').textContent = e.message; }
+      };
+      r.readAsDataURL(f);
+    };
+  });
+}
 function personnelModal(p) {
   modal(p ? `Edit — ${p.name}` : 'New personnel', personnelForm(p), () => {
     const foot = document.querySelector('#modalHost .foot');
@@ -691,11 +743,13 @@ function personnelModal(p) {
       <div class="foot-split">
         <span>${p ? '<button class="btn danger" id="pnDelete">Delete personnel</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
+          ${p ? '<button class="btn" id="pnFile">Personnel file</button>' : ''}
           <button class="btn" id="pnCancel">Cancel</button>
           <button class="btn primary" id="pnSave">${p ? 'Save changes' : 'Create personnel'}</button>
         </span>
       </div>`;
     el('#pnCancel').onclick = closeModal;
+    if (el('#pnFile')) el('#pnFile').onclick = () => personnelFileModal(p);
     if (el('#pnDelete')) el('#pnDelete').onclick = () => deletePersonnel(p.id);
     el('#npnEmpType').addEventListener('change', () => {
       el('#npnAllowanceRow').style.display = el('#npnEmpType').value === 'SUBCONTRACTOR' ? 'none' : '';
@@ -2058,15 +2112,17 @@ function applicantForm(a) {
       <label>Branch (optional — leave shared if you don't use branches)</label>
       <select id="napBranch">${branchOptions(isNew ? null : a.branch_id)}</select>
       ${!isNew && a.application ? applicationAnswersHtml(a) : ''}
+      ${!isNew ? applicantExtrasHtml(a) : ''}
       ${!isNew ? `
       <label>Stage</label>
       <select id="napStatus">${['APPLIED', 'SCREENING', 'INTERVIEW', 'OFFER', 'REJECTED', 'WITHDRAWN'].map((s) => `<option value="${s}" ${a.status === s ? 'selected' : ''}>${esc(APPLICANT_STATUS_LABEL[s])}</option>`).join('')}</select>
       <label>Interview date/time (optional)</label>
       <input id="napInterviewAt" type="datetime-local" value="${a.interview_at ? a.interview_at.slice(0, 16) : ''}">
       <div id="napRejectWrap" style="${a.status === 'REJECTED' ? '' : 'display:none'}">
-        <label>Rejection reason</label>
+        <label>Rejection reason <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">(internal — never sent to the applicant)</span></label>
         <input id="napRejectReason" autocomplete="off" value="${esc(a.rejected_reason || '')}">
       </div>
+      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400"><input type="checkbox" id="napNotify" checked style="width:16px;height:16px"> Email ${esc(a.email || 'the applicant')} if the stage or interview time changes</label>
       <label>CV</label>
       <div id="apCvWrap" class="dim">${a.cv ? `<a href="/api/applicants/${a.id}/cv?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(a.cv.filename)}</a>` : 'No CV uploaded yet.'}</div>
       <div style="display:flex;gap:8px">
@@ -2102,6 +2158,81 @@ function applicationAnswersHtml(a) {
         ${app.fields.map((f) => `<div class="dim">${esc(f.label)}</div><div>${val(f)}</div>`).join('')}
       </div>`;
 }
+/** SIA licence photos, further-information requests and the emails we
+ * have sent — everything about an application besides its form answers. */
+const EMAIL_LABEL = { SCREENING: 'Being reviewed', INTERVIEW: 'Interview invitation', INTERVIEW_MOVED: 'Interview moved', OFFER: 'Offer', REJECTED: 'Unsuccessful', WITHDRAWN: 'Withdrawn', APPLIED: 'Back to applied', HIRED: 'Welcome / hired', INFO_REQUEST: 'Request for more information' };
+function applicantExtrasHtml(a) {
+  const tok = encodeURIComponent(CCCS.getSession().token);
+  const when = (iso) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const sia = a.sia ? (a.sia.none ? '<p class="dim" style="margin:0">Applicant said they don\'t hold an SIA licence yet.</p>'
+    : `<div style="display:flex;gap:10px;flex-wrap:wrap">${['front', 'back'].filter((s) => a.sia[s]).map((s) => `<a href="/api/applicants/${a.id}/sia/${s}?token=${tok}" target="_blank" style="text-align:center;font-size:12px">${a.sia[s].mimetype === 'application/pdf' ? `<span class="btn">SIA ${s} (PDF)</span>` : `<img src="/api/applicants/${a.id}/sia/${s}?token=${tok}" alt="SIA licence ${s}" style="height:110px;border-radius:6px;border:1px solid var(--line);display:block">`}${s}</a>`).join('')}</div>`) : '<p class="dim" style="margin:0">None on file.</p>';
+  const reqs = (a.info_requests || []).slice().reverse().map((r) => `
+    <div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:13px">
+      <div style="display:flex;gap:8px;align-items:center"><strong style="flex:1">Asked ${esc(when(r.created_at))} by ${esc(r.created_by)}</strong>
+        <span class="role-pill ${r.status === 'COMPLETED' ? 'control' : ''}">${r.status === 'OPEN' && Date.parse(r.expires_at) < Date.now() ? 'EXPIRED' : esc(r.status)}</span>
+        ${r.status === 'OPEN' ? `<button type="button" class="btn" data-cancel-req="${r.id}" style="padding:2px 8px;font-size:11px">Cancel</button>` : ''}</div>
+      ${r.status === 'COMPLETED' ? `<div class="dim" style="font-size:12px;margin:2px 0 4px">Answered ${esc(when(r.submitted_at))}</div>
+        ${r.answers.map((x) => `<div style="margin-top:4px"><span class="dim">${esc(x.label)}:</span> ${x.type === 'TEXT' ? `<span style="white-space:pre-wrap">${esc(x.text || '—')}</span>` : x.file ? `<a target="_blank" href="/api/applicants/${a.id}/info-files/${r.id}/${esc(x.item_id)}?token=${tok}">${esc(x.file.filename)}</a>` : '—'}</div>`).join('')}`
+        : `<ul style="margin:4px 0 0 18px;padding:0">${r.items.map((i) => `<li>${esc(i.label)} <span class="dim">(${i.type === 'FILE' ? 'upload' : 'written'}${i.required ? '' : ', optional'})</span></li>`).join('')}</ul>`}
+    </div>`).join('');
+  const emails = (a.emails || []).slice().reverse().map((e) => `<div><span class="t">${esc(when(e.at))}</span>${esc(EMAIL_LABEL[e.kind] || e.kind)} — ${e.ok ? 'sent' : e.ok === null ? 'sending…' : `<span style="color:var(--emergency)">not sent (${esc(e.error || 'failed')})</span>`}</div>`).join('');
+  return `
+      <label>SIA licence</label>${sia}
+      <label>Further information</label>
+      <div>${reqs || '<p class="dim" style="margin:0 0 6px">Nothing requested yet.</p>'}
+        ${['HIRED', 'REJECTED', 'WITHDRAWN'].includes(a.status) ? '' : '<button type="button" class="btn" id="apInfoReq">Request more information</button>'}</div>
+      <label>Emails to the applicant</label>
+      <div class="log dim" style="max-height:120px;overflow:auto;font-size:12.5px">${emails || 'None sent yet.'}</div>`;
+}
+function infoRequestModal(a) {
+  let items = [{ label: '', type: 'FILE', required: true }];
+  const back = () => applicantModal(allApplicants.find((x) => x.id === a.id) || a);
+  const paintItems = () => {
+    el('#irItems').innerHTML = items.map((i, n) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+      <input data-ir-label="${n}" value="${esc(i.label)}" placeholder="e.g. Proof of address from the last 3 months" style="flex:1">
+      <select data-ir-type="${n}" style="width:auto"><option value="FILE" ${i.type === 'FILE' ? 'selected' : ''}>Upload</option><option value="TEXT" ${i.type === 'TEXT' ? 'selected' : ''}>Written answer</option></select>
+      <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:12px;margin:0"><input type="checkbox" data-ir-req="${n}" ${i.required ? 'checked' : ''}> required</label>
+      <button type="button" class="btn" data-ir-del="${n}" style="padding:2px 8px">✕</button></div>`).join('');
+    els('[data-ir-label]').forEach((x) => (x.oninput = () => (items[x.dataset.irLabel].label = x.value)));
+    els('[data-ir-type]').forEach((x) => (x.onchange = () => (items[x.dataset.irType].type = x.value)));
+    els('[data-ir-req]').forEach((x) => (x.onchange = () => (items[x.dataset.irReq].required = x.checked)));
+    els('[data-ir-del]').forEach((x) => (x.onclick = () => { items.splice(Number(x.dataset.irDel), 1); if (!items.length) items.push({ label: '', type: 'FILE', required: true }); paintItems(); }));
+  };
+  const quick = ['Proof of address (last 3 months)', 'Passport or photo ID', 'Proof of right to work', 'Two references (names, contact details)', 'Five-year employment history', 'Driving licence (front and back)', 'First aid certificate', 'National Insurance number'];
+  modal(`Request more information — ${a.name}`, `
+    <form class="stack" onsubmit="return false">
+      <p class="dim" style="margin:0;font-size:13px">${esc(a.email)} gets an email with a private link to a page where they upload or type what you ask for. It's added to this application when they send it.</p>
+      <label>What do you need?</label>
+      <div id="irItems"></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" class="btn" id="irAdd" style="padding:4px 10px;font-size:12px">+ Add another</button>
+        ${quick.map((q) => `<button type="button" class="btn" data-ir-quick="${esc(q)}" style="padding:4px 10px;font-size:12px">${esc(q)}</button>`).join('')}</div>
+      <label>Message (optional)</label>
+      <textarea id="irMsg" rows="3" placeholder="Anything you want to say to them"></textarea>
+      <label>Link works for</label>
+      <select id="irDays"><option value="7">7 days</option><option value="14" selected>14 days</option><option value="30">30 days</option></select>
+      <p class="err" id="irErr" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    paintItems();
+    el('#irAdd').onclick = () => { items.push({ label: '', type: 'FILE', required: true }); paintItems(); };
+    els('[data-ir-quick]').forEach((b) => (b.onclick = () => {
+      const label = b.dataset.irQuick, type = /references|history|National Insurance/.test(label) ? 'TEXT' : 'FILE';
+      if (items.length === 1 && !items[0].label) items = [];
+      items.push({ label, type, required: true }); paintItems();
+    }));
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = '<div class="foot-split"><span></span><span class="btn-row" style="margin:0"><button class="btn" id="irCancel">Back</button><button class="btn primary" id="irSend">Send request</button></span></div>';
+    el('#irCancel').onclick = back;
+    el('#irSend').onclick = async () => {
+      const list = items.map((i) => ({ ...i, label: i.label.trim() })).filter((i) => i.label);
+      if (!list.length) { el('#irErr').textContent = 'say what you need'; return; }
+      el('#irSend').disabled = true;
+      try {
+        await api('POST', `/api/applicants/${a.id}/info-requests`, { items: list, message: el('#irMsg').value.trim(), expires_in_days: Number(el('#irDays').value) });
+        await load(); showTab('applicants'); back();
+      } catch (e) { el('#irErr').textContent = e.message; el('#irSend').disabled = false; }
+    };
+  });
+}
 function renderApplicantNotes(a) {
   el('#apNotesList').innerHTML = a.notes_log.length
     ? `<div class="log" style="max-height:160px;overflow:auto">${a.notes_log.slice().reverse().map((n) => `<div><span class="t">${esc(new Date(n.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(n.author)}: ${esc(n.body)}</div>`).join('')}</div>`
@@ -2110,6 +2241,12 @@ function renderApplicantNotes(a) {
 function applicantModal(a) {
   modal(a ? `${a.name} — ${APPLICANT_STATUS_LABEL[a.status]}` : 'New applicant', applicantForm(a), () => {
     if (a) renderApplicantNotes(a);
+    if (a && el('#apInfoReq')) el('#apInfoReq').onclick = () => infoRequestModal(a);
+    if (a) els('[data-cancel-req]').forEach((b) => (b.onclick = async () => {
+      if (!confirm('Cancel this request? The link in their email will stop working.')) return;
+      try { await api('DELETE', `/api/applicants/${a.id}/info-requests/${b.dataset.cancelReq}`); await load(); showTab('applicants'); applicantModal(allApplicants.find((x) => x.id === a.id)); }
+      catch (e) { el('#apError').textContent = e.message; }
+    }));
     if (a && el('#napStatus')) el('#napStatus').addEventListener('change', () => {
       el('#napRejectWrap').style.display = el('#napStatus').value === 'REJECTED' ? '' : 'none';
     });
@@ -2163,6 +2300,7 @@ function applicantModal(a) {
         body.status = el('#napStatus').value;
         body.interview_at = el('#napInterviewAt').value || null;
         if (body.status === 'REJECTED') body.rejected_reason = el('#napRejectReason').value.trim();
+        body.notify = el('#napNotify').checked;
       }
       try {
         if (a) await api('PATCH', `/api/applicants/${a.id}`, body);
@@ -2183,7 +2321,8 @@ function hireModal(a) {
       <input id="hirePhone" autocomplete="off" value="${esc(a.phone || '')}">
       <label>Email</label>
       <input id="hireEmail" type="email" autocomplete="off" value="${esc(a.email || '')}">
-      <p class="dim" style="font-size:13px;margin:0">This creates a real personnel record from this applicant's details. It does not create a login — do that from the Accounts tab afterwards if they need one.</p>
+      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400"><input type="checkbox" id="hireNotify" checked style="width:16px;height:16px"> Send ${esc(a.email || 'them')} a welcome email</label>
+      <p class="dim" style="font-size:13px;margin:0">This creates their personnel record. Everything from the application — every answer, the SIA licence photos, the CV and anything sent in later — goes into their personnel file (Admin → Personnel → open them → Personnel file). It does not create a login — do that from Accounts afterwards.</p>
       <p class="dim" id="hireError" style="min-height:16px;margin:0"></p>
     </form>`, () => {
     const foot = document.querySelector('#modalHost .foot');
@@ -2193,7 +2332,7 @@ function hireModal(a) {
       try {
         await api('POST', `/api/applicants/${a.id}/hire`, {
           employee_no: el('#hireEmpNo').value.trim() || null, rank: el('#hireRank').value.trim(),
-          contact_phone: el('#hirePhone').value.trim(), contact_email: el('#hireEmail').value.trim(),
+          contact_phone: el('#hirePhone').value.trim(), contact_email: el('#hireEmail').value.trim(), notify: el('#hireNotify').checked,
         });
         closeModal(); await load(); showTab('applicants');
       } catch (e) { el('#hireError').textContent = e.message; }

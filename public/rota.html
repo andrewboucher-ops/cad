@@ -51,6 +51,27 @@
   form.stack { display: flex; flex-direction: column; gap: 12px; }
   form.stack label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: -6px; }
   .foot-split { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+  .page-head .btn, .rota-bar .btn { padding: 7px 14px; font-size: 13px; }
+  .rota-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: -6px 0 12px; }
+  .rota-bar .spacer { flex: 1; }
+  .rota-bar input { width: 260px; max-width: 100%; padding: 6px 10px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: none; background: var(--panel); padding: 7px 14px; font: inherit; font-size: 13px; color: var(--ink-dim); cursor: pointer; }
+  .seg button.on { background: var(--accent-dim); color: #fff; }
+  /* Days never shrink below a readable width; the grid scrolls sideways
+     instead, with the names column pinned. */
+  #gridWrap { overflow-x: auto; border-radius: 8px; }
+  .rota-grid { grid-template-columns: 170px repeat(7, minmax(158px, 1fr)) !important; min-width: max-content; }
+  .rota-grid .person-name, .rota-grid .hdr:first-child { position: sticky; left: 0; z-index: 2; }
+  .rota-grid .hdr { z-index: 3; }
+  .shift-chip { font-size: 12px; padding: 5px 7px; }
+  .shift-chip .times { white-space: nowrap; }
+  .day-list h3 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin: 18px 0 6px; }
+  .day-list h3.today { color: var(--accent); }
+  .day-list table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  .day-list td { padding: 9px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .day-list tr { cursor: pointer; } .day-list tr:hover td { background: var(--panel-2); }
+  .day-list .t { font-family: var(--mono); font-weight: 700; white-space: nowrap; width: 120px; }
 </style>
 </head>
 <body>
@@ -76,17 +97,21 @@
     <div class="page-head">
       <h1>Rota</h1>
       <div class="week-nav">
-        <button class="btn" id="prevWeek" style="padding:6px 12px">‹ Prev</button>
+        <button class="btn" id="prevWeek">‹ Prev</button>
         <span class="range" id="weekRange"></span>
-        <button class="btn" id="thisWeek" style="padding:6px 12px">This week</button>
-        <button class="btn" id="nextWeek" style="padding:6px 12px">Next ›</button>
+        <button class="btn" id="thisWeek">This week</button>
+        <button class="btn" id="nextWeek">Next ›</button>
       </div>
-      <input id="rotaSearch" type="search" placeholder="Search name, site, postcode, time…" style="padding:6px 10px;width:220px">
-      <select id="groupBy" style="padding:6px 10px"><option value="staff">Group by staff</option><option value="site">Group by site</option></select>
-      <button class="btn" id="btnPublishDrafts" style="padding:7px 14px;font-size:13px">Publish drafts</button>
-      <button class="btn" id="btnDuplicateWeek" style="padding:7px 14px;font-size:13px">Duplicate week forward</button>
-      <button class="btn" id="btnCalSync" style="padding:7px 14px;font-size:13px">Calendar sync</button>
-      <button class="btn primary" id="btnNewShift" style="padding:7px 14px;font-size:13px">New shift</button>
+      <button class="btn primary" id="btnNewShift">New shift</button>
+    </div>
+    <div class="rota-bar">
+      <div class="seg" id="viewSeg"><button data-v="staff" class="on">By staff</button><button data-v="site">By site</button><button data-v="list">List by day</button></div>
+      <select id="groupBy" class="hide"><option value="staff">Group by staff</option><option value="site">Group by site</option><option value="list">List by day</option></select>
+      <input id="rotaSearch" type="search" placeholder="Search name, site, postcode, time…">
+      <span class="spacer"></span>
+      <button class="btn" id="btnPublishDrafts">Publish drafts</button>
+      <button class="btn" id="btnDuplicateWeek">Duplicate week forward</button>
+      <button class="btn" id="btnCalSync">Calendar sync</button>
     </div>
     <p class="dim" id="coverageSummary" style="margin:0 0 10px;font-size:12.5px"></p>
     <div id="gridWrap"></div>
@@ -118,7 +143,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 function startOfWeek(d) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  x.setDate(x.getDate() - x.getDay()); // Sunday start
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); // Monday start, as UK rotas run
   return x;
 }
 let weekStart = startOfWeek(new Date());
@@ -181,8 +206,36 @@ function visibleShifts() {
   return q ? allShifts.filter((s) => shiftSearchText(s).includes(q)) : allShifts;
 }
 function paintGrid() {
-  if (el('#groupBy').value === 'site') paintGridBySite();
+  const v = el('#groupBy').value;
+  els('#viewSeg [data-v]').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+  if (v === 'site') paintGridBySite();
+  else if (v === 'list') paintList();
   else paintGridByStaff();
+}
+els('#viewSeg [data-v]').forEach((b) => (b.onclick = () => { el('#groupBy').value = b.dataset.v; try { localStorage.setItem('cccs.rotaView', b.dataset.v); } catch {} paintGrid(); }));
+try { const saved = localStorage.getItem('cccs.rotaView'); el('#groupBy').value = saved || (CCCS.isMobile() ? 'list' : 'staff'); } catch {}
+/** One table per day, one row per shift: time, site, type, who, cover —
+ * the easiest view to read, and the one that works on a small screen. */
+function paintList() {
+  const days = weekDays(), today = new Date(), shifts = visibleShifts();
+  const t = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  let html = '<div class="day-list">';
+  for (const d of days) {
+    const list = shifts.filter((s) => sameDay(new Date(s.starts_at), d)).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
+    html += `<h3 class="${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()]} ${d.getDate()} ${d.toLocaleDateString('en-GB', { month: 'short' })} <span style="text-transform:none;letter-spacing:0;font-weight:400">· ${list.length} shift${list.length === 1 ? '' : 's'}</span></h3>`;
+    html += list.length ? `<table><tbody>${list.map((s) => {
+      const active = s.assignments.filter((a) => a.status !== 'REMOVED');
+      const cover = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount} — needs ${s.coverage_gap}</span>` : s.over_staffed ? `<span class="coverage-badge over">${s.assigned_count}/${s.required_headcount}</span>` : `<span class="dim">${s.assigned_count}/${s.required_headcount}</span>`;
+      return `<tr data-shift-row="${s.id}" style="${s.status === 'CANCELLED' ? 'opacity:.5;text-decoration:line-through' : ''}">
+        <td class="t">${t(s.starts_at)}–${t(s.ends_at)}</td>
+        <td><strong>${esc(s.site_name || 'No site')}</strong><div class="dim" style="font-size:12px">${esc(s.shift_type_name || '')}${s.status === 'DRAFT' ? ' · draft' : ''}</div></td>
+        <td>${active.map((a) => `${esc(a.personnel_name)}${a.is_duty_supervisor ? ' <span class="dim">(duty sup.)</span>' : ''}${a.on_leave_conflict ? ' <span style="color:var(--priority)">⚠ on leave</span>' : ''}`).join('<br>') || '<span style="color:var(--emergency)">unstaffed</span>'}</td>
+        <td style="text-align:right;white-space:nowrap">${cover}</td></tr>`;
+    }).join('')}</tbody></table>` : '<p class="dim" style="margin:0 0 4px">Nothing rostered.</p>';
+  }
+  el('#gridWrap').innerHTML = html + '</div>';
+  finishGridPaint(shifts, days, () => ({}));
+  els('[data-shift-row]').forEach((r) => (r.onclick = () => shiftModal(allShifts.find((s) => s.id === Number(r.dataset.shiftRow)))));
 }
 function paintGridByStaff() {
   const days = weekDays();

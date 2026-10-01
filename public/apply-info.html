@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Send us the information we asked for</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { min-height: 100vh; }
+  .wrap { width: min(620px, 100%); margin: 0 auto; padding: 24px 16px 40px; }
+  .brand { width: 160px; margin-bottom: 18px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; margin-top: 14px; }
+  .item { padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+  .item:last-of-type { border-bottom: none; }
+  .item .q { font-weight: 600; margin-bottom: 8px; }
+  .item textarea { width: 100%; font-size: 16px; }
+  .item .btn { padding: 12px 14px; }
+  .item img { max-width: 100%; max-height: 160px; border-radius: 6px; border: 1px solid var(--line); margin-top: 6px; }
+  .done { text-align: center; padding: 20px 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <img class="brand brand-wordmark" src="/assets/echelon-wordmark.png" alt="">
+  <h1 id="title">Your application</h1>
+  <p class="dim" id="lead">Loading…</p>
+  <div class="card hide" id="card"></div>
+</div>
+<script src="/app.js"></script>
+<script src="/forms-ui.js"></script>
+<script>
+'use strict';
+/* The page behind the "we need more information" email. No login: the
+ * private link carries a one-time token. Photos are shrunk on the phone
+ * before sending; PDFs are sent as they are. */
+const { el, esc } = CCCS;
+const token = new URLSearchParams(location.search).get('t') || '';
+const api = async (method, body) => {
+  const res = await fetch(`/api/public/info-request/${encodeURIComponent(token)}`, { method, headers: { 'content-type': 'application/json' }, body: body && JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
+  return data;
+};
+const readFile = (f) => new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1]); r.onerror = () => bad(new Error('could not read that file')); r.readAsDataURL(f); });
+
+(async () => {
+  let r;
+  try { r = await api('GET'); } catch (e) { el('#lead').textContent = e.message; return; }
+  el('#title').textContent = `${r.company} — more information`;
+  if (r.status === 'COMPLETED') { el('#lead').textContent = 'Thank you — we have received this information already.'; return; }
+  if (r.status === 'EXPIRED') { el('#lead').textContent = 'This link has expired. Please contact us and we will send a new one.'; return; }
+  el('#lead').innerHTML = `To carry on with your application${r.reference ? ` <strong class="mono">${esc(r.reference)}</strong>` : ''}, please send us the following.`;
+  const files = {};
+  el('#card').classList.remove('hide');
+  el('#card').innerHTML = `${r.message ? `<p style="margin-top:0;white-space:pre-wrap">${esc(r.message)}</p>` : ''}
+    ${r.items.map((i) => `<div class="item"><div class="q">${esc(i.label)}${i.required ? ' <span style="color:var(--priority)">*</span>' : ' <span class="dim" style="font-weight:400">(optional)</span>'}</div>
+      ${i.type === 'TEXT' ? `<textarea rows="3" data-text="${i.id}"></textarea>`
+        : `<button type="button" class="btn" data-pick="${i.id}">Take a photo or choose a file</button> <span class="dim" data-status="${i.id}"></span>
+           <input type="file" class="hide" accept="image/*,application/pdf" data-file="${i.id}">`}</div>`).join('')}
+    <p class="err" id="err" style="min-height:18px"></p>
+    <button type="button" class="btn primary" id="send" style="width:100%;padding:14px;font-size:16px">Send</button>
+    <p class="dim" style="font-size:12px;margin-bottom:0">Photos (JPEG/PNG) or PDF files, up to 8MB each. Sent securely to our recruitment team only.</p>`;
+  document.querySelectorAll('[data-pick]').forEach((b) => (b.onclick = () => document.querySelector(`[data-file="${b.dataset.pick}"]`).click()));
+  document.querySelectorAll('[data-file]').forEach((input) => (input.onchange = async () => {
+    const f = input.files[0], id = input.dataset.file, status = document.querySelector(`[data-status="${id}"]`);
+    if (!f) return;
+    status.textContent = 'Preparing…';
+    try {
+      if (f.type === 'application/pdf') {
+        if (f.size > 8e6) throw new Error('too large (8MB maximum)');
+        files[id] = { mimetype: 'application/pdf', filename: f.name, data: await readFile(f) };
+        status.textContent = `${f.name} ✓`;
+      } else {
+        const data = await CCCSForms.downscale(f, 1800, 0.85);
+        files[id] = { mimetype: 'image/jpeg', filename: f.name.replace(/\.[^.]+$/, '') + '.jpg', data };
+        status.innerHTML = `<br><img src="data:image/jpeg;base64,${data}" alt="">`;
+      }
+    } catch (e) { status.textContent = e.message; delete files[id]; }
+    input.value = '';
+  }));
+  el('#send').onclick = async () => {
+    el('#err').textContent = '';
+    const answers = { ...files };
+    document.querySelectorAll('[data-text]').forEach((t) => { answers[t.dataset.text] = t.value.trim(); });
+    for (const i of r.items) if (i.required && !answers[i.id]) { el('#err').textContent = `Please ${i.type === 'TEXT' ? 'answer' : 'add'}: ${i.label}`; return; }
+    el('#send').disabled = true; el('#send').textContent = 'Sending…';
+    try {
+      await api('POST', { answers });
+      el('#card').innerHTML = '<div class="done"><div style="font-size:34px">✓</div><h2 style="margin:6px 0">Thank you</h2><p class="dim">We have received your information and added it to your application.</p></div>';
+      el('#lead').textContent = '';
+    } catch (e) { el('#err').textContent = e.message; el('#send').disabled = false; el('#send').textContent = 'Send'; }
+  };
+})();
+</script>
+</body>
+</html>

@@ -955,7 +955,10 @@ const requestHandler = async (req, res) => {
       // 1MB is plenty for every route except on-scene photo uploads (base64
       // JSON, ~33% larger than the source file) — raised to accommodate a
       // real phone photo rather than adding a second, route-specific limit.
-      for await (const c of req) { size += c.length; if (size > 9e6) { return send(413, { error: 'payload too large' }); } chunks.push(c); }
+      // The public application and further-information pages carry a CV and
+      // licence photos in one request, so they get a little more room.
+      const maxBody = url.pathname === '/api/public/applications' || url.pathname.startsWith('/api/public/info-request/') ? 2.5e7 : 9e6;
+      for await (const c of req) { size += c.length; if (size > maxBody) { return send(413, { error: 'payload too large' }); } chunks.push(c); }
       const raw = Buffer.concat(chunks).toString();
       const ctype = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
       if (raw && ctype === 'application/x-www-form-urlencoded' && FORM_BODY_PATHS.has(url.pathname)) {
@@ -1616,6 +1619,11 @@ function applyAssetExtras(a, body) {
   ['purchase_cost', 'unit_cost', 'reorder_qty', 'check_interval_days', 'pat_interval_days'].forEach(num);
   ['warranty_expires_at', 'next_check_due_at', 'pat_next_due_at', 'pat_last_at'].forEach(date);
   if ('pat_required' in body) a.pat_required = body.pat_required === true;
+  // PAT testing and inspections are for assets (one tagged item), never for
+  // counted stock.
+  if (a.is_stock_tracked && (a.pat_required || a.check_interval_days || a.next_check_due_at || a.pat_next_due_at)) {
+    throw httpError(400, 'PAT tests and inspections belong on assets, not stock items — add it as an asset instead');
+  }
   if ('condition' in body) {
     if (body.condition && !ASSET_CONDITIONS.includes(body.condition)) throw httpError(400, `condition must be one of ${ASSET_CONDITIONS.join(', ')}`);
     a.condition = body.condition || null;
@@ -3862,11 +3870,16 @@ require('./routes-finance.js')({
   route, httpError, CONTROL, FINANCE, db, siteVisibleTo, visibleToUser, publicFuelLog, publicMaintenanceLog,
 });
 
+// The personnel file (documents, and the application of anyone hired
+// through Applicants) — see routes-personnel-files.js.
+const personnelFiles = require('./routes-personnel-files.js')({ route, httpError, ADMIN, db, logEvent, UPLOADS_DIR, flushNow: () => store.flushNow() });
+
 // Applicant tracking — see routes-applicants.js for the design.
 require('./routes-applicants.js')({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
   forms, pushToRoles, flushNow: () => store.flushNow(),
   sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html),
+  personnelFiles, publicBaseUrl: PUBLIC_BASE_URL,
 });
 
 // Leave management — see routes-leave.js for the design.
