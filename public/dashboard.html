@@ -54,27 +54,7 @@
 </head>
 <body>
 
-<div class="icon-rail">
-  <div class="rail-brand">
-    <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon">
-  </div>
-
-  <div class="rail-section">Operations</div>
-  <a href="/dashboard.html" class="active" title="Dashboard"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="3" width="8" height="5" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="10" width="8" height="11" rx="1.5" stroke="currentColor" stroke-width="1.8"/><rect x="3" y="13" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.8"/></svg><span>Dashboard</span></a>
-  <a href="/control.html" id="railControl" title="Control room" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M12 4l9 16H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4M12 17.2h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Control room</span></a>
-  <a href="/log.html" title="Log"><svg viewBox="0 0 24 24" fill="none"><path d="M5 4h14v16l-3-2-3 2-3-2-3 2z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Log</span></a>
-
-  <div class="rail-section">HR</div>
-  <a href="/fleet.html" title="Fleet"><svg viewBox="0 0 24 24" fill="none"><path d="M3 15V9l2-4h11l3 4h2v6h-2" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="7.5" cy="16.5" r="2" stroke="currentColor" stroke-width="1.8"/><circle cx="16.5" cy="16.5" r="2" stroke="currentColor" stroke-width="1.8"/></svg><span>Fleet</span></a>
-  <a href="/rota.html" title="Rota"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="17" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M8 3v3M16 3v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Rota</span></a>
-
-  <div class="rail-section">Finance</div>
-  <a href="/finance.html" title="Finance"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2v20M17 6.5c0-1.9-2.2-3.5-5-3.5s-5 1.6-5 3.5 2.2 3 5 3.5c2.8.5 5 1.6 5 3.5s-2.2 3.5-5 3.5-5-1.6-5-3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>Finance</span></a>
-
-  <div class="rail-section" id="railSystemSection" hidden>System</div>
-  <a href="/admin.html" id="railAdmin" title="Admin" hidden><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 4.5l1 1.8 2 .4-1.4 1.5.3 2-1.9-.9-1.9.9.3-2-1.4-1.5 2-.4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span>Admin</span></a>
-  <a href="/settings.html" title="My settings"><svg viewBox="0 0 24 24" fill="none"><path d="M4 8a4 4 0 118 0 4 4 0 01-8 0z" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 19c0-3.3 2.7-5.5 5.5-5.5s5.5 2.2 5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>My settings</span></a>
-</div>
+<div class="icon-rail"></div>
 
 <main>
   <div class="topbar">
@@ -121,6 +101,7 @@
 </main>
 
 <script src="/app.js"></script>
+<script src="/nav.js"></script>
 <script>
 const { api, el, esc } = CCCS;
 if (!CCCS.requireAuth(['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR'])) throw new Error('auth');
@@ -133,8 +114,6 @@ el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(
 el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
 setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
 
-el('#railControl').hidden = false;
-if (isAdmin) { el('#railSystemSection').hidden = false; el('#railAdmin').hidden = false; }
 
 el('#pageSub').textContent = isAdmin
   ? `Welcome back, ${me.display_name} — here's how the whole system looks right now.`

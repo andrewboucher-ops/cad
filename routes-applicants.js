@@ -339,6 +339,15 @@ module.exports = function registerApplicantRoutes({
     logEvent('applicant.applied_online', `NEW WEBSITE APPLICATION — APPLICANT #${a.id}`, { applicant_id: a.id });
     pushToRoles(['SYSTEM_ADMIN'], { title: 'New job application', body: 'A new application arrived from the website', url: '/admin.html', tag: 'cccs-application' });
     acknowledge(a, d, reference);
+    // Staff alert, to the addresses set on the form in Admin → Forms. Our own
+    // people, so it can say which role — but still no name or contact
+    // details in an email body; they are one click away in admin.
+    if (sendEmail && Array.isArray(d.notify_emails) && d.notify_emails.length) {
+      const roleField = d.fields.find((f) => f.id === 'role_applied_for');
+      const role = roleField && roleField.options && roleField.options.includes(a.role_applied_for) ? a.role_applied_for : 'a role';
+      const html = `<p>A new job application, <strong>${escHtml(reference)}</strong>, was made on the website for <strong>${escHtml(role)}</strong>.</p><p>Open Admin → Applicants in CCCS to review it.</p>`;
+      for (const to of d.notify_emails) Promise.resolve(sendEmail(to, `New job application ${reference}`, html)).catch(() => {});
+    }
     flushNow();
     return { __status: 201, __body: { ok: true, reference } };
   });

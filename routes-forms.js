@@ -55,6 +55,21 @@
  * can only be actioned by an admin who is a named reader, so the review
  * workflow cannot become a back door round the rule above.
  *
+ * VEHICLE EFFECTS. A form filed against a vehicle can also change the
+ * vehicle (server.js applyVehicleReport): FUEL_UP adds a fuel log and moves
+ * the mileage on, DEEP_CLEAN sets the last deep-clean date, INSPECTION
+ * moves the mileage on from its odometer reading. The effect reads named
+ * fields, so a form with an effect must keep them (checkEffectShape) —
+ * otherwise renaming a field in Admin → Forms would silently stop the
+ * vehicle being updated.
+ *
+ * EMAIL ON SUBMISSION. An admin can list addresses to email whenever a form
+ * is filed. A STANDARD form's email carries its answers and a link. A
+ * RESTRICTED form's email carries a link and nothing else — not the form's
+ * name, not the subject, not the filer — for the same reason the push
+ * notification doesn't: the content stays where only its named readers can
+ * open it. Fire-and-forget; the outcome is kept on the submission.
+ *
  * THE PUBLIC APPLICATION FORM. A definition whose subject is APPLICATION is
  * the job application form on the public site (apply.html). It is filled in
  * WITHOUT a login, so it is held to a narrower shape: it is the form's only
@@ -75,6 +90,14 @@ const crypto = require('crypto');
 const VISIBILITIES = ['STANDARD', 'RESTRICTED'];
 const SUBJECT_TYPES = ['JOB', 'SITE_VISIT', 'SITE', 'PERSONNEL', 'VEHICLE', 'APPLICATION'];
 const REVIEW_OUTCOMES = ['APPROVED', 'REJECTED', 'NOTED'];
+const EFFECTS = ['FUEL_UP', 'DEEP_CLEAN', 'INSPECTION'];
+/** The fields each effect reads: [id, type, required]. */
+const EFFECT_FIELDS = {
+  FUEL_UP: [['litres', 'number', true], ['odometer', 'number', false]],
+  DEEP_CLEAN: [['cleaned_at', 'datetime', false]],
+  INSPECTION: [['odometer', 'number', false]],
+};
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const FIELD_TYPES = ['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime', 'signature', 'photo'];
 const MAX_FIELDS = 60;
 const MAX_FILES = 10;
@@ -176,6 +199,37 @@ const DEFAULT_FORMS = [
   },
 ];
 
+/** Vehicle forms added after the first release, installed once each on any
+ * database that lacks their key (a retired one still counts as present). */
+const DEFAULT_VEHICLE_FORMS = [
+  {
+    key: 'vehicle-fuel-up', name: 'Vehicle fuel-up', visibility: 'STANDARD', subject_types: ['VEHICLE'], effect: 'FUEL_UP',
+    description: 'Record a fill-up. Updates the vehicle\'s fuel log and mileage.',
+    fields: [
+      { id: 'odometer', label: 'Odometer (miles)', type: 'number', required: true },
+      { id: 'litres', label: 'Litres', type: 'number', required: true },
+      { id: 'cost', label: 'Cost (£)', type: 'number' },
+      { id: 'fuel_type', label: 'Fuel', type: 'select', options: ['Diesel', 'Unleaded petrol', 'Super unleaded', 'AdBlue', 'Electric charge'] },
+      { id: 'receipt', label: 'Receipt photo', type: 'photo' },
+      { id: 'notes', label: 'Notes', type: 'textarea' },
+      { id: 'driver_signature', label: 'Driver signature', type: 'signature', required: true },
+    ],
+  },
+  {
+    key: 'vehicle-deep-clean', name: 'Vehicle deep clean', visibility: 'STANDARD', subject_types: ['VEHICLE'], effect: 'DEEP_CLEAN',
+    description: 'Record a full interior and exterior clean. Updates the vehicle\'s deep-clean date.',
+    fields: [
+      { id: 'cleaned_at', label: 'Cleaned at', type: 'datetime', required: true },
+      { id: 'interior', label: 'Interior cleaned and sanitised (seats, controls, door handles)', type: 'checkbox', required: true },
+      { id: 'exterior', label: 'Exterior washed', type: 'checkbox' },
+      { id: 'kit_checked', label: 'Kit cleaned and restocked (first aid, PPE, torch)', type: 'checkbox' },
+      { id: 'issues', label: 'Damage or issues found', type: 'textarea' },
+      { id: 'photo', label: 'Photo', type: 'photo' },
+      { id: 'cleaner_signature', label: 'Signature', type: 'signature', required: true },
+    ],
+  },
+];
+
 /** The public job application form, installed once if no APPLICATION form
  * exists (also on a database that already has the other forms). Fully
  * editable afterwards in Admin → Forms, except that it must keep asking for
@@ -201,6 +255,7 @@ const DEFAULT_APPLICATION_FORM = {
 module.exports = function registerFormRoutes({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow = () => {},
+  applyVehicleReport = () => {}, sendEmail = null, publicBaseUrl = '',
 }) {
   for (const t of ['form_definitions', 'form_submissions', 'form_grants']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -271,8 +326,10 @@ module.exports = function registerFormRoutes({
     const out = {
       id: d.id, key: d.key, name: d.name, description: d.description, version: d.version,
       visibility: d.visibility, subject_types: d.subject_types, fields: d.fields, active: d.active,
+      effect: d.effect || null,
     };
     if (user.role === 'SYSTEM_ADMIN') {
+      out.notify_emails = d.notify_emails || [];
       out.grants = db.form_grants.filter((g) => g.definition_id === d.id).map((g) => {
         const u = db.users.find((x) => x.id === g.user_id);
         return { id: g.id, user_id: g.user_id, username: u ? u.username : null, display_name: u ? u.display_name : '(deleted user)', granted_by: g.granted_by, granted_at: g.granted_at };
@@ -326,6 +383,29 @@ module.exports = function registerFormRoutes({
     }
     if (fields.some((f) => f.type === 'photo')) throw httpError(400, 'the application form cannot have photo fields — it is filled in without a login');
   }
+  function cleanEffect(raw, subjectTypes) {
+    if (raw === undefined || raw === null || raw === '') return null;
+    const e = String(raw).toUpperCase();
+    if (!EFFECTS.includes(e)) throw httpError(400, `effect must be one of ${EFFECTS.join(', ')}`);
+    if (!subjectTypes.includes('VEHICLE')) throw httpError(400, 'a vehicle effect needs the form to be filed against vehicles');
+    return e;
+  }
+  /** See the header: an effect reads named fields, so the form must keep them. */
+  function checkEffectShape(effect, fields) {
+    if (!effect) return;
+    for (const [id, type, required] of EFFECT_FIELDS[effect]) {
+      const f = fields.find((x) => x.id === id);
+      if (!f || f.type !== type || (required && !f.required)) {
+        throw httpError(400, `a ${effect.replace('_', ' ').toLowerCase()} form must keep a${required ? ' required' : ''} ${type} field with id "${id}"`);
+      }
+    }
+  }
+  function cleanNotifyEmails(raw) {
+    const list = (Array.isArray(raw) ? raw : String(raw || '').split(/[,;\s]+/)).map((e) => String(e).trim().toLowerCase()).filter(Boolean);
+    for (const e of list) if (!EMAIL_RE.test(e)) throw httpError(400, `not a valid email address: ${e}`);
+    if (list.length > 10) throw httpError(400, 'at most 10 notification addresses');
+    return [...new Set(list)];
+  }
 
   function installDefaults() {
     if (db.form_definitions.length) return 0;
@@ -353,6 +433,26 @@ module.exports = function registerFormRoutes({
     });
     return true;
   }
+  /** Adds any vehicle form whose key is missing, and gives the original
+   * vehicle inspection its INSPECTION effect once (only if it was never
+   * set — an admin clearing it is respected). */
+  function ensureVehicleForms() {
+    let added = 0;
+    const now = new Date().toISOString();
+    for (const f of DEFAULT_VEHICLE_FORMS) {
+      if (db.form_definitions.some((d) => d.key === f.key)) continue;
+      db.form_definitions.push({
+        id: nextId('form_definitions'), key: f.key, name: f.name, description: f.description, version: 1,
+        visibility: f.visibility, subject_types: f.subject_types, fields: cleanFields(f.fields), active: true,
+        effect: f.effect, notify_emails: [], created_by: null, created_at: now, updated_at: now,
+      });
+      added++;
+    }
+    const inspection = db.form_definitions.find((d) => d.key === 'vehicle-inspection');
+    if (inspection && !('effect' in inspection) && inspection.fields.some((x) => x.id === 'odometer' && x.type === 'number')) inspection.effect = 'INSPECTION';
+    return added;
+  }
+
   /** What the public page renders; null when applications are closed. */
   const activeApplicationForm = () => db.form_definitions.find((d) => d.active && isApplicationForm(d)) || null;
 
@@ -498,6 +598,9 @@ module.exports = function registerFormRoutes({
       created_by: user.id, created_at: now, updated_at: now,
     };
     checkApplicationShape(d.subject_types, d.fields);
+    d.effect = cleanEffect(body.effect, d.subject_types);
+    checkEffectShape(d.effect, d.fields);
+    d.notify_emails = cleanNotifyEmails(body.notify_emails);
     if (isApplicationForm(d) && db.form_definitions.some((x) => x.active && isApplicationForm(x))) throw httpError(409, 'there is already an active application form — edit it, or retire it first');
     db.form_definitions.push(d);
     logEvent('form.definition_created', `FORM "${name}" CREATED (${visibility}) BY ${user.username}`, { definition_id: d.id });
@@ -510,6 +613,9 @@ module.exports = function registerFormRoutes({
     const nextSubjects = 'subject_types' in body ? cleanSubjectTypes(body.subject_types) : d.subject_types;
     const nextFields = 'fields' in body ? cleanFields(body.fields) : d.fields;
     checkApplicationShape(nextSubjects, nextFields);
+    const nextEffect = 'effect' in body ? cleanEffect(body.effect, nextSubjects) : (d.effect && nextSubjects.includes('VEHICLE') ? d.effect : null);
+    checkEffectShape(nextEffect, nextFields);
+    const nextNotify = 'notify_emails' in body ? cleanNotifyEmails(body.notify_emails) : null;
     if (body.active && !d.active && nextSubjects.includes('APPLICATION') && db.form_definitions.some((x) => x.id !== d.id && x.active && isApplicationForm(x))) {
       throw httpError(409, 'another application form is already active — retire it first');
     }
@@ -528,6 +634,12 @@ module.exports = function registerFormRoutes({
       if (!VISIBILITIES.includes(v)) throw httpError(400, 'visibility must be STANDARD or RESTRICTED');
       if (v !== d.visibility) changes.push(`visibility ${d.visibility} → ${v}${v === 'STANDARD' ? ' (reports already filed stay RESTRICTED)' : ''}`);
       d.visibility = v;
+    }
+    if ((d.effect || null) !== nextEffect) { changes.push(`effect ${d.effect || 'none'} → ${nextEffect || 'none'}`); d.effect = nextEffect; }
+    if (nextNotify) {
+      const before = JSON.stringify(d.notify_emails || []);
+      if (before !== JSON.stringify(nextNotify)) changes.push(`email on submission: ${nextNotify.length ? nextNotify.length + ' address(es)' : 'off'}`);
+      d.notify_emails = nextNotify;
     }
     d.updated_at = new Date().toISOString();
     logEvent('form.definition_updated', `FORM "${d.name}" UPDATED BY ${user.username}: ${changes.join(', ') || 'no changes'}`, { definition_id: d.id });
@@ -604,6 +716,11 @@ module.exports = function registerFormRoutes({
       // their own via the list route.
       broadcast('form.submitted', submissionSummary(sub), { personnelIds: [] });
     }
+    if (d.effect && subjectType === 'VEHICLE') {
+      try { applyVehicleReport(d.effect, sub.subject_id, values, user, sub); sub.effect_applied = d.effect; }
+      catch (e) { console.warn(`[forms] ${d.effect} effect for ${sub.reference} failed:`, e.message); sub.effect_error = e.message; }
+    }
+    notifyByEmail(d, sub);
     // A filed report is evidence; don't wait for the next write-through.
     flushNow();
     return { __status: 201, __body: publicSubmission(sub) };
@@ -640,6 +757,46 @@ module.exports = function registerFormRoutes({
     const cache = effectiveVisibility(sub) === 'RESTRICTED' ? 'no-store' : 'private, max-age=86400';
     return { __body: fs.readFileSync(file), __headers: { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': cache } };
   });
+
+  /** See the header. Restricted: a link and nothing else. */
+  function notifyByEmail(d, sub) {
+    const to = d.notify_emails || [];
+    if (!to.length || !sendEmail) return;
+    const esc = (t) => String(t ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const link = `${publicBaseUrl}/forms.html?id=${sub.id}`;
+    const restricted = sub.visibility === 'RESTRICTED';
+    let subject, html;
+    if (restricted) {
+      subject = `Restricted report filed — ${sub.reference}`;
+      html = `<p>A restricted report, <strong>${esc(sub.reference)}</strong>, has been filed in CCCS.</p>
+        <p><a href="${esc(link)}">Open it in CCCS</a> — only its named readers can see it.</p>`;
+    } else {
+      const fmt = (iso) => new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London' });
+      const val = (f) => {
+        const v = sub.values[f.id];
+        if (v === null || v === undefined || v === '') return '—';
+        if (f.type === 'checkbox') return v ? 'Yes' : 'No';
+        if (f.type === 'datetime') return fmt(v);
+        if (f.type === 'signature') return `Signed by ${v.signer_name}`;
+        if (f.type === 'photo') return 'Photo — view in CCCS';
+        return String(v);
+      };
+      subject = `${sub.definition_name} ${sub.reference} — ${sub.subject_label}`;
+      html = `<div style="font-family:Arial,Helvetica,sans-serif;color:#111827;max-width:640px">
+        <h2 style="font-size:17px;margin:0 0 4px">${esc(sub.definition_name)} — ${esc(sub.reference)}</h2>
+        <p style="color:#6b7280;margin:0 0 14px">${esc(sub.subject_type.replace('_', ' ').toLowerCase())} ${esc(sub.subject_label)} · filed by ${esc(sub.submitted_by_name)} · ${esc(fmt(sub.submitted_at))}</p>
+        <table style="border-collapse:collapse;width:100%;font-size:14px">${sub.fields.map((f) => `<tr><td style="padding:5px 10px 5px 0;color:#6b7280;vertical-align:top;width:40%">${esc(f.label)}</td><td style="padding:5px 0;white-space:pre-wrap">${esc(val(f))}</td></tr>`).join('')}</table>
+        <p style="margin-top:16px"><a href="${esc(link)}">Open the report in CCCS</a></p></div>`;
+    }
+    sub.notifications = to.map((addr) => ({ to: addr, ok: null }));
+    Promise.all(to.map((addr) => Promise.resolve(sendEmail(addr, subject, html)).catch((e) => ({ ok: false, error: e.message }))))
+      .then((results) => {
+        sub.notifications = to.map((addr, i) => ({ to: addr, ok: Boolean(results[i] && results[i].ok), error: results[i] && !results[i].ok ? results[i].error : null, at: new Date().toISOString() }));
+        const sent = sub.notifications.filter((n) => n.ok).length;
+        logEvent('form.notified', `${restricted ? 'RESTRICTED REPORT' : sub.definition_name.toUpperCase()} ${sub.reference} EMAILED TO ${sent}/${to.length} ADDRESS(ES)`, { submission_id: sub.id });
+        flushNow();
+      });
+  }
 
   /**
    * Admin review: records an outcome and feedback, takes the submission out
@@ -705,7 +862,7 @@ module.exports = function registerFormRoutes({
     return { ok: true, reference: sub.reference };
   });
 
-  return { installDefaults, ensureApplicationForm, activeApplicationForm, validateValues, IMAGE_EXT, canRead, effectiveVisibility };
+  return { installDefaults, ensureApplicationForm, ensureVehicleForms, activeApplicationForm, validateValues, IMAGE_EXT, canRead, effectiveVisibility };
 };
 
 module.exports.DEFAULT_FORMS = DEFAULT_FORMS;

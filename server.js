@@ -1367,6 +1367,12 @@ route('PATCH', '/api/vehicles/:id', ADMIN, ({ params, body }) => {
   if ('service_due_at' in body) v.service_due_at = body.service_due_at || null;
   if ('insurance_due_at' in body) v.insurance_due_at = body.insurance_due_at || null;
   if ('mot_due_at' in body) v.mot_due_at = body.mot_due_at || null;
+  if ('deep_clean_at' in body) v.deep_clean_at = body.deep_clean_at || null;
+  if ('deep_clean_interval_days' in body) {
+    const d = body.deep_clean_interval_days === null || body.deep_clean_interval_days === '' ? null : Number(body.deep_clean_interval_days);
+    if (d !== null && (!Number.isInteger(d) || d < 1 || d > 365)) throw httpError(400, 'deep_clean_interval_days must be 1-365');
+    v.deep_clean_interval_days = d;
+  }
   if ('tax_due_at' in body) v.tax_due_at = body.tax_due_at || null;
   if ('site_id' in body) { const homeSite = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null; v.site_id = homeSite ? homeSite.id : null; }
   if ('mileage' in body) v.mileage = body.mileage != null && body.mileage !== '' ? Number(body.mileage) : null;
@@ -1397,8 +1403,9 @@ route('GET', '/api/vehicles/:id/fuel-logs', ALL, ({ params }) => {
     .sort((a, b) => Date.parse(b.recorded_at) - Date.parse(a.recorded_at))
     .map(publicFuelLog);
 });
-route('POST', '/api/vehicles/:id/fuel-logs', ALL, ({ params, body, user }) => {
-  const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
+/** One fuel-log shape for both ways in: the fuel route below and the
+ * "Vehicle fuel-up" form (applyVehicleReport). */
+function createFuelLog(v, user, body, extra = {}) {
   const litres = Number(body.litres);
   if (!litres || litres <= 0) throw httpError(400, 'litres required');
   const odometer = body.odometer != null && body.odometer !== '' ? Number(body.odometer) : null;
@@ -1410,13 +1417,50 @@ route('POST', '/api/vehicles/:id/fuel-logs', ALL, ({ params, body, user }) => {
     id: nextId('fuel_logs'), vehicle_id: v.id, personnel_id: driver ? driver.id : null,
     odometer, litres, cost: cost != null && !isNaN(cost) ? cost : null,
     fuel_type: body.fuel_type || '', notes: body.notes || '', receipt: null,
-    recorded_at: new Date().toISOString(), created_by: user.id, created_at: new Date().toISOString(),
+    recorded_at: new Date().toISOString(), created_by: user.id, created_at: new Date().toISOString(), ...extra,
   };
   db.fuel_logs.push(log);
   if (odometer != null && !isNaN(odometer)) v.mileage = odometer;
   logEvent('fuel_log.created', `FUEL LOG ADDED FOR ${v.registration} — ${litres}L`, { vehicle_id: v.id, fuel_log_id: log.id });
-  return { __status: 201, __body: publicFuelLog(log) };
+  return log;
+}
+route('POST', '/api/vehicles/:id/fuel-logs', ALL, ({ params, body, user }) => {
+  const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
+  return { __status: 201, __body: publicFuelLog(createFuelLog(v, user, body)) };
 });
+
+/**
+ * What a vehicle form changes on the vehicle itself, by the form's `effect`
+ * (see routes-forms.js). Runs after the report is safely stored; the report
+ * is the record, this keeps the vehicle's own fields in step with it.
+ *
+ * Mileage from a form only ever moves FORWARD. An odometer reading lower
+ * than the one on file is far more likely a typo than a rolled-back clock,
+ * and silently rewinding the mileage would hide service intervals coming
+ * due — so it is kept on the report (and the fuel log) but not applied.
+ */
+function applyVehicleReport(effect, vehicleId, values, user, submission) {
+  const v = db.vehicles.find((x) => x.id === Number(vehicleId));
+  if (!v) return;
+  const forwardMileage = (reading) => {
+    const n = Number(reading);
+    if (reading == null || reading === '' || !Number.isFinite(n) || n < 0) return;
+    if (v.mileage == null || n >= Number(v.mileage)) v.mileage = n;
+    else logEvent('vehicle.mileage_not_rewound', `${v.registration}: ${submission.reference} gave ${n} miles, below the ${v.mileage} on file — kept on the report, mileage not changed`, { vehicle_id: v.id, submission_id: submission.id });
+  };
+  if (effect === 'FUEL_UP') {
+    const before = v.mileage;
+    createFuelLog(v, user, { litres: values.litres, odometer: null, cost: values.cost, fuel_type: values.fuel_type || '', notes: values.notes || '' },
+      { odometer: values.odometer != null ? Number(values.odometer) : null, form_submission_id: submission.id, form_reference: submission.reference });
+    v.mileage = before; forwardMileage(values.odometer);
+  } else if (effect === 'DEEP_CLEAN') {
+    const at = values.cleaned_at && !isNaN(Date.parse(values.cleaned_at)) ? new Date(values.cleaned_at).toISOString() : new Date().toISOString();
+    if (!v.deep_clean_at || at > v.deep_clean_at) v.deep_clean_at = at;
+    logEvent('vehicle.deep_cleaned', `${v.registration} DEEP CLEANED (${submission.reference})`, { vehicle_id: v.id, submission_id: submission.id });
+  } else if (effect === 'INSPECTION') {
+    forwardMileage(values.odometer);
+  }
+}
 route('POST', '/api/fuel-logs/:id/receipt', ALL, ({ params, body }) => {
   const f = db.fuel_logs.find((x) => x.id === Number(params.id)); if (!f) throw httpError(404, 'fuel log not found');
   const ext = MEDIA_MIME_EXT[body.mimetype];
@@ -3691,6 +3735,7 @@ require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, f
 const forms = require('./routes-forms.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
   assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
+  applyVehicleReport, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html), publicBaseUrl: PUBLIC_BASE_URL,
 });
 
 // Client portal — see routes-client.js for the trust-boundary invariants.
@@ -4079,6 +4124,8 @@ function start() {
   const installed = forms.installDefaults();
   if (installed) { logEvent('form.defaults_installed', `${installed} STANDARD FORMS INSTALLED`); store.flushNow(); }
   if (forms.ensureApplicationForm()) { logEvent('form.defaults_installed', 'PUBLIC JOB APPLICATION FORM INSTALLED'); store.flushNow(); }
+  const vehicleForms = forms.ensureVehicleForms();
+  if (vehicleForms) { logEvent('form.defaults_installed', `${vehicleForms} VEHICLE FORM(S) INSTALLED (FUEL-UP / DEEP CLEAN)`); store.flushNow(); }
   // Same additive-and-idempotent shape as forms.installDefaults() — runs
   // once, only while the table is empty, so an admin's own edits (renaming
   // one, adding a sixth) are never overwritten on a later boot.

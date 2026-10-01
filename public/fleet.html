@@ -63,6 +63,7 @@
 </div>
 
 <script src="/app.js"></script>
+<script src="/nav.js"></script>
 <script>
 'use strict';
 const { api, el, els, esc } = CCCS;
@@ -94,7 +95,7 @@ function render() {
     tile(s.out_today, 'Out today', '', 'out'),
     tile(`${s.inspected_today}/${s.total - s.off_road}`, 'Inspected today', s.inspected_today >= s.total - s.off_road ? 'good' : 'warn', 'uninspected'),
     tile(s.with_issues, 'Inspection issues', s.with_issues ? 'bad' : 'good', 'attention'),
-    tile(s.compliance_overdue, 'MOT/service/ins. overdue', s.compliance_overdue ? 'bad' : 'good', 'attention'),
+    tile(s.compliance_overdue, 'Overdue checks', s.compliance_overdue ? 'bad' : 'good', 'attention'),
     tile(s.compliance_due_soon, 'Due within 30 days', s.compliance_due_soon ? 'warn' : 'good', 'all'),
     tile(s.off_road, 'Off road', s.off_road ? 'warn' : '', 'offroad'),
   ].join('');
@@ -111,7 +112,9 @@ function render() {
         <span style="flex:1">${esc([v.make, v.model].filter(Boolean).join(' ') || v.type || '')}</span>
         <span class="pill ${statusCls}">${esc((v.status || 'ACTIVE').replace('_', ' '))}</span>
       </div>
-      <div class="comp">${v.compliance.map((c) => `<span class="pill ${STATE_CLS[c.state]}" title="${esc(c.label)} due ${esc(fmtDate(c.due_at))}">${esc(c.label)} ${c.due_at ? esc(fmtDate(c.due_at)) : '—'}</span>`).join('')}</div>
+      <div class="comp">${v.compliance.map((c) => c.field === 'deep_clean'
+        ? `<span class="pill ${STATE_CLS[c.state]}" title="Every ${c.interval_days} days${c.last_at ? ' — last ' + esc(fmtDate(c.last_at)) : ''}">Deep clean ${c.due_at ? 'due ' + esc(fmtDate(c.due_at)) : 'never done'}</span>`
+        : `<span class="pill ${STATE_CLS[c.state]}" title="${esc(c.label)} due ${esc(fmtDate(c.due_at))}">${esc(c.label)} ${c.due_at ? esc(fmtDate(c.due_at)) : '—'}</span>`).join('')}</div>
       <dl class="kv2">
         <dt>Today</dt><dd>${v.today ? `${hhmm(v.today.starts_at)}–${hhmm(v.today.ends_at)}${v.today.driver ? ' · ' + esc(v.today.driver) : ''}` : '<span class="dim">not allocated</span>'}</dd>
         <dt>Assigned</dt><dd>${esc(v.assigned_personnel_name || '—')}${v.site_name ? ` · ${esc(v.site_name)}` : ''}</dd>
@@ -121,7 +124,7 @@ function render() {
         <dt>Maintenance</dt><dd>${v.last_maintenance ? `${esc(fmtDate(v.last_maintenance.performed_at))} — ${esc(v.last_maintenance.description)}` : '—'}</dd>
       </dl>
       ${ins && ins.issues.length ? `<ul class="issues">${ins.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}
-      <div class="actions">${data.vehicle_forms.map((f) => `<a class="btn ${/inspection/i.test(f.name) ? 'primary' : ''}" href="${formLink(f, v)}">${esc(f.name)}</a>`).join('') || '<span class="dim">No vehicle forms set up (Admin → Forms).</span>'}</div>
+      <div class="actions">${data.vehicle_forms.map((f) => `<a class="btn ${/inspection/i.test(f.name) ? 'primary' : ''}" href="${formLink(f, v)}">${esc(f.name.replace(/^Vehicle /, '').replace(/^./, (c) => c.toUpperCase()))}</a>`).join('') || '<span class="dim">No vehicle forms set up (Admin → Forms).</span>'}</div>
       ${v.recent_reports.length > 1 ? `<div class="recent dim" style="font-size:12px">Recent: ${v.recent_reports.map((r) => `<a href="/forms.html?id=${r.id}">${esc(r.reference)}</a>`).join(' · ')}</div>` : ''}
     </div>`;
   }).join('') : '<p class="dim">No vehicles match.</p>';

@@ -285,3 +285,104 @@ test('an applicant is emailed their reference — fixed text, nothing they typed
   await new Promise((res) => setTimeout(res, 20));
   assert.ok(!/spam/.test(sent[1].html), 'a role that is not one of the options is left out entirely');
 });
+
+/* ---------------- vehicle fuel-up and deep clean ---------------- */
+test('a fuel-up report adds a fuel log and moves the mileage on — never back', async () => {
+  const v = app.db.vehicles[1];
+  v.mileage = 50000;
+  const fuel = app.db.form_definitions.find((d) => d.key === 'vehicle-fuel-up');
+  assert.ok(fuel && fuel.effect === 'FUEL_UP', 'installed with its effect');
+  const file = (odometer) => call('POST', '/api/form-submissions', { definition_id: fuel.id, subject_type: 'VEHICLE', subject_id: v.id, values: {
+    odometer, litres: 42.5, cost: 61.2, fuel_type: 'Diesel', driver_signature: sig('Dan Whitfield'),
+  } }, danT);
+  const r = await file(50210);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(v.mileage, 50210);
+  const log = app.db.fuel_logs.find((f) => f.form_submission_id === r.body.id);
+  assert.ok(log, 'a fuel log is created, linked to the report');
+  assert.deepEqual([log.litres, log.cost, log.odometer, log.form_reference], [42.5, 61.2, 50210, r.body.reference]);
+
+  const typo = await file(5021);
+  assert.equal(typo.status, 201, 'the report is still accepted');
+  assert.equal(v.mileage, 50210, 'a lower reading does not rewind the mileage');
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'vehicle.mileage_not_rewound' && e.data.submission_id === typo.body.id), 'and says so');
+});
+
+test('a deep clean report sets the date, and the fleet dashboard grades it', async () => {
+  const v = app.db.vehicles[2];
+  delete v.deep_clean_at;
+  let row = (await call('GET', '/api/fleet-dashboard', undefined, dispT)).body.vehicles.find((x) => x.id === v.id);
+  assert.equal(row.compliance.find((c) => c.field === 'deep_clean').state, 'OVERDUE', 'never cleaned is overdue');
+  const clean = app.db.form_definitions.find((d) => d.key === 'vehicle-deep-clean');
+  const when = new Date(Date.now() - 3600e3).toISOString();
+  const r = await call('POST', '/api/form-submissions', { definition_id: clean.id, subject_type: 'VEHICLE', subject_id: v.id, values: {
+    cleaned_at: when, interior: true, exterior: true, cleaner_signature: sig('Dan Whitfield'),
+  } }, danT);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(v.deep_clean_at, when);
+  row = (await call('GET', '/api/fleet-dashboard', undefined, dispT)).body.vehicles.find((x) => x.id === v.id);
+  const dc = row.compliance.find((c) => c.field === 'deep_clean');
+  assert.equal(dc.state, 'OK');
+  assert.equal(dc.last_at, when);
+  const f = (await call('GET', '/api/fleet-dashboard', undefined, dispT)).body.vehicle_forms.map((x) => x.key);
+  for (const k of ['vehicle-inspection', 'vehicle-fuel-up', 'vehicle-deep-clean']) assert.ok(f.includes(k), `${k} offered on the fleet page`);
+});
+
+test('a vehicle inspection moves the mileage on too', async () => {
+  const v = app.db.vehicles[3];
+  v.mileage = 1000;
+  const ins = app.db.form_definitions.find((d) => d.key === 'vehicle-inspection');
+  assert.equal(ins.effect, 'INSPECTION', 'the original inspection form gained its effect');
+  await call('POST', '/api/form-submissions', { definition_id: ins.id, subject_type: 'VEHICLE', subject_id: v.id, values: {
+    odometer: 1250, fuel_level: 'Full', driver_signature: sig('Dan Whitfield'),
+  } }, danT);
+  assert.equal(v.mileage, 1250);
+});
+
+test('a form with an effect must keep the fields it reads, and notification addresses are validated', async () => {
+  const fuel = app.db.form_definitions.find((d) => d.key === 'vehicle-fuel-up');
+  assert.equal((await call('PATCH', `/api/form-definitions/${fuel.id}`, { fields: fuel.fields.filter((f) => f.id !== 'litres') }, adminT)).status, 400);
+  const trespass = app.db.form_definitions.find((d) => d.key === 'trespass-advisal');
+  assert.equal((await call('PATCH', `/api/form-definitions/${trespass.id}`, { effect: 'FUEL_UP' }, adminT)).status, 400, 'not a vehicle form');
+  assert.equal((await call('PATCH', `/api/form-definitions/${trespass.id}`, { notify_emails: 'control@example.com, not-an-email' }, adminT)).status, 400);
+  const ok = await call('PATCH', `/api/form-definitions/${trespass.id}`, { notify_emails: 'control@example.com; ops@example.com' }, adminT);
+  assert.deepEqual(ok.body.notify_emails, ['control@example.com', 'ops@example.com']);
+  assert.ok(!(await call('GET', '/api/form-definitions', undefined, danT)).body.some((d) => d.notify_emails), 'officers are not shown the addresses');
+});
+
+test('submission emails: answers for a standard form, a bare link for a restricted one', async () => {
+  const sent = [];
+  const handlers = {};
+  const register = require('../routes-forms.js');
+  const db = { personnel: [], sites: [{ id: 1, name: 'Meridian Business Park' }], jobs: [], site_visits: [], vehicles: [], users: [] };
+  let id = 0;
+  const forms = register({
+    route: (m, p, roles, h) => { handlers[`${m} ${p}`] = h; }, httpError: (s, m) => Object.assign(new Error(m), { status: s }),
+    ALL: [], ADMIN: [], db, nextId: () => ++id, logEvent: () => {}, broadcast: () => {}, isControlRole: () => true,
+    assertJobAccess: () => {}, assertVisitAccess: () => {}, pushToUsers: () => {}, UPLOADS_DIR: require('node:os').tmpdir(), MIME: {},
+    sendEmail: async (to, subject, html) => { sent.push({ to, subject, html }); return { ok: true }; }, publicBaseUrl: 'https://cccs.example',
+  });
+  forms.installDefaults();
+  const def = (k) => db.form_definitions.find((d) => d.key === k);
+  def('trespass-advisal').notify_emails = ['control@example.com'];
+  def('safeguarding').notify_emails = ['dsl@example.com'];
+  const user = { id: 9, role: 'FIELD_USER', display_name: 'Dan Whitfield', personnel_id: 1 };
+  const file = (key, values) => handlers['POST /api/form-submissions']({ body: { definition_id: def(key).id, subject_type: 'SITE', subject_id: 1, values }, user });
+
+  const t = file('trespass-advisal', { person_description: 'Grey hoodie', advised_at: new Date().toISOString(), narrative: 'Left via gate', officer_signature: sig('Dan Whitfield') });
+  const s = file('safeguarding', { concern_about: 'CANARY-CHILD', at_risk_group: 'Child (under 18)', observed_at: new Date().toISOString(), what_happened: 'CANARY-DISCLOSURE', action_taken: 'x', officer_signature: sig('Dan Whitfield') });
+  await new Promise((r) => setTimeout(r, 30));
+
+  const std = sent.find((m) => m.to === 'control@example.com');
+  assert.match(std.subject, /Trespass advisal .* Meridian Business Park/);
+  assert.match(std.html, /Grey hoodie/);
+  assert.match(std.html, /Signed by Dan Whitfield/);
+  assert.ok(std.html.includes(`https://cccs.example/forms.html?id=${t.__body.id}`));
+
+  const res = sent.find((m) => m.to === 'dsl@example.com');
+  assert.equal(res.subject, `Restricted report filed — ${s.__body.reference}`);
+  assert.ok(!/CANARY|Safeguarding|safeguarding|Meridian|Dan Whitfield/.test(res.subject + res.html), 'no content, form name, subject or filer in the email');
+  assert.ok(res.html.includes(`/forms.html?id=${s.__body.id}`), 'just the link');
+  const stored = db.form_submissions.find((x) => x.id === s.__body.id);
+  assert.equal(stored.notifications[0].ok, true, 'the outcome is kept on the report');
+});

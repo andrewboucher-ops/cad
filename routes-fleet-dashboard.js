@@ -20,6 +20,9 @@
 
 const DUE_SOON_DAYS = 30;
 const COMPLIANCE_FIELDS = [['mot_due_at', 'MOT'], ['service_due_at', 'Service'], ['insurance_due_at', 'Insurance'], ['tax_due_at', 'Tax']];
+// Deep clean is due a set number of days after the last one (per vehicle,
+// else this default). Set by filing the "Vehicle deep clean" form.
+const DEEP_CLEAN_DAYS = Number(process.env.VEHICLE_DEEP_CLEAN_DAYS || 30);
 
 module.exports = function registerFleetDashboardRoutes({ route, CONTROL, db, forms, visibleToUser, publicVehicle }) {
   /** Unticked check boxes and any written defects, from an inspection. */
@@ -48,6 +51,14 @@ module.exports = function registerFleetDashboardRoutes({ route, CONTROL, db, for
         const at = v[field] ? Date.parse(v[field]) : NaN;
         const state = isNaN(at) ? 'UNKNOWN' : at < now ? 'OVERDUE' : at - now < DUE_SOON_DAYS * 86400000 ? 'DUE_SOON' : 'OK';
         return { field, label, due_at: v[field] || null, state };
+      });
+      // Never cleaned counts as overdue: there is no clean on record to be "OK" from.
+      const cleanDays = v.deep_clean_interval_days || DEEP_CLEAN_DAYS;
+      const cleanDue = v.deep_clean_at ? Date.parse(v.deep_clean_at) + cleanDays * 86400000 : NaN;
+      compliance.push({
+        field: 'deep_clean', label: 'Deep clean', due_at: isNaN(cleanDue) ? null : new Date(cleanDue).toISOString(),
+        last_at: v.deep_clean_at || null, interval_days: cleanDays,
+        state: isNaN(cleanDue) ? 'OVERDUE' : cleanDue < now ? 'OVERDUE' : cleanDue - now < 7 * 86400000 ? 'DUE_SOON' : 'OK',
       });
       const mine = vehicleSubs.filter((s) => s.subject_id === v.id).sort((a, b) => (a.submitted_at < b.submitted_at ? 1 : -1));
       const inspection = mine.find((s) => inspectionIds.has(s.definition_id));

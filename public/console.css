@@ -269,6 +269,13 @@ a { color: var(--accent); }
 .icon-rail a.active { background: var(--panel-2); color: var(--ink); box-shadow: inset 3px 0 0 var(--accent); }
 .icon-rail button svg, .icon-rail a svg { width: 18px; height: 18px; flex: none; }
 .icon-rail button span:not(.badge), .icon-rail a span:not(.badge) { flex: 1; }
+/* Pages laid out without a menu of their own get one from nav.js, which
+   adds this class; on a phone the menu steps aside rather than squeeze them. */
+body.with-nav { padding-left: 228px; }
+@media (max-width: 860px) {
+  body.with-nav { padding-left: 0; }
+  body.with-nav .icon-rail { display: none; }
+}
 .icon-rail .badge {
   background: var(--emergency); color: #fff; font-size: 9.5px;
   font-weight: 700; border-radius: 20px; padding: 1px 6px; min-width: 15px; line-height: 1.5; text-align: center;
