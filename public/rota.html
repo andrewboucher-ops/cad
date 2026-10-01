@@ -107,7 +107,7 @@
         <button class="btn" id="thisWeek" style="padding:6px 12px">This week</button>
         <button class="btn" id="nextWeek" style="padding:6px 12px">Next ›</button>
       </div>
-      <input id="typeFilter" type="search" placeholder="Search shift type…" style="padding:6px 10px;width:170px">
+      <input id="rotaSearch" type="search" placeholder="Search name, site, postcode, time…" style="padding:6px 10px;width:220px">
       <select id="groupBy" style="padding:6px 10px"><option value="staff">Group by staff</option><option value="site">Group by site</option></select>
       <button class="btn" id="btnPublishDrafts" style="padding:7px 14px;font-size:13px">Publish drafts</button>
       <button class="btn" id="btnDuplicateWeek" style="padding:7px 14px;font-size:13px">Duplicate week forward</button>
@@ -182,15 +182,29 @@ async function load() {
   ]);
   paintGrid();
 }
-el('#typeFilter').addEventListener('input', paintGrid);
+el('#rotaSearch').addEventListener('input', paintGrid);
 el('#groupBy').addEventListener('change', paintGrid);
 
+/** Everything about a shift worth finding it by, flattened into one
+ * lowercase string: who's on it, where, its type, its status, and when
+ * (day name, date, and both times) — so "dan", "meridian", "SW1A",
+ * "patrol" and "09:00" all work from the same box, not five different
+ * filters. A site with no postcode/address on record just contributes
+ * nothing for those fields rather than breaking the search. */
+function shiftSearchText(s) {
+  const site = s.site_id ? allSites.find((x) => x.id === s.site_id) : null;
+  const names = s.assignments.filter((a) => a.status !== 'REMOVED').map((a) => a.personnel_name).join(' ');
+  const start = new Date(s.starts_at), end = new Date(s.ends_at);
+  const when = `${start.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} ${start.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} ${end.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  return [s.shift_type_name, site && site.name, site && site.postcode, site && site.address, names, when, s.status]
+    .filter(Boolean).join(' ').toLowerCase();
+}
 // An empty search shows everything, every site, every type, in one grid —
-// typing narrows it by a substring match against the type's name, not an
-// exact pick from a fixed list, so "patrol" finds every patrol variant.
+// typing narrows it by a substring match across every field above, not an
+// exact pick from a fixed list, so "dan" or "SW1A" or "patrol" all work.
 function visibleShifts() {
-  const q = el('#typeFilter').value.trim().toLowerCase();
-  return q ? allShifts.filter((s) => (s.shift_type_name || '').toLowerCase().includes(q)) : allShifts;
+  const q = el('#rotaSearch').value.trim().toLowerCase();
+  return q ? allShifts.filter((s) => shiftSearchText(s).includes(q)) : allShifts;
 }
 function paintGrid() {
   if (el('#groupBy').value === 'site') paintGridBySite();
