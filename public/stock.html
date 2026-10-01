@@ -401,18 +401,35 @@ el('#bStocktake').onclick = () => {
 };
 
 /* ---------------- locations (admin) ---------------- */
-el('#bLocations').onclick = function locations() {
-  modal('Store locations', `<p class="dim" style="margin-top:0">Where stock is kept — the main store, a van, a cupboard on site.</p>
-    <table class="k"><tbody>${data.locations.map((l) => `<tr><td>${esc(l.name)}${l.is_main ? ' <span class="dim">(main)</span>' : ''}${l.active === false ? ' <span class="pill off">closed</span>' : ''}</td><td class="dim">${esc(words(l.kind))}</td>
-      <td class="num">${l.is_main ? '' : `<button class="btn" data-lt="${l.id}" style="padding:3px 9px;font-size:12px">${l.active === false ? 'Reopen' : 'Close'}</button>`}</td></tr>`).join('')}</tbody></table>
-    <div class="k-form" style="margin-top:12px"><div><label>New location</label><input id="lName" placeholder="e.g. VAN-101 kit store"></div>
-    <div><label>Kind</label><select id="lKind">${options(['STORE', 'VEHICLE', 'SITE', 'OTHER'].map((k) => [k, words(k)]), 'STORE')}</select></div></div>${foot('Add location')}`, (root) => {
+/* Store locations: the main store, cupboards, bags and boxes. A bag can BE
+ * an asset (First aid bag 01, tag FAB-01) — then it is wherever that asset
+ * is, e.g. in a vehicle, and the vehicle's page lists what is inside. */
+let assetList = null, vehicleList = null;
+el('#bLocations').onclick = async function locations() {
+  if (!assetList) [assetList, vehicleList, sites] = await Promise.all([api('GET', '/api/assets/register').then((r) => r.assets).catch(() => []), api('GET', '/api/vehicles').catch(() => []), sites.length ? sites : api('GET', '/api/sites')]);
+  const where = (l) => [l.asset_label ? `is ${l.asset_label}` : '', l.in_vehicle ? `in ${l.in_vehicle}` : '', l.site_name ? `at ${l.site_name}` : ''].filter(Boolean).join(' · ');
+  const form = (l = {}) => `<div class="k-form">
+      <div><label>Name</label><input id="lName" value="${esc(l.name || '')}" placeholder="e.g. First aid bag 01, Cupboard A"></div>
+      <div><label>Kind</label><select id="lKind">${options(['STORE', 'CUPBOARD', 'BAG', 'VEHICLE', 'SITE', 'OTHER'].map((k) => [k, words(k)]), l.kind || 'BAG')}</select></div>
+      <div class="full"><label>This bag / box is an asset (optional)</label><select id="lAsset">${options(assetList.filter((a) => a.status !== 'RETIRED').map((a) => [a.id, `${a.tag ? a.tag + ' — ' : ''}${a.description}${a.vehicle_registration ? ' (in ' + a.vehicle_registration + ')' : ''}`]), l.asset_id, '— not an asset —')}</select></div>
+      <div><label>Kept in vehicle</label><select id="lVeh">${options(vehicleList.map((x) => [x.id, x.registration]), l.vehicle_id, '—')}</select></div>
+      <div><label>At site</label><select id="lSite">${options(sites.map((x) => [x.id, x.name]), l.site_id, '—')}</select></div>
+      <p class="dim full" style="font-size:12px;margin:0">If it is an asset, it goes wherever the asset is kept (set that on the Assets page) — the vehicle here is ignored.</p></div>`;
+  const body = (root) => ({ name: v(root, '#lName'), kind: v(root, '#lKind'), asset_id: numOrNull(v(root, '#lAsset')), vehicle_id: numOrNull(v(root, '#lVeh')), site_id: numOrNull(v(root, '#lSite')) });
+  modal('Store locations', `<p class="dim" style="margin-top:0">Where stock is kept — the main store, cupboards, bags and kit boxes. Link a bag to its asset and it follows the asset into a vehicle.</p>
+    <table class="k"><tbody>${data.locations.map((l) => `<tr><td><strong>${esc(l.name)}</strong>${l.is_main ? ' <span class="dim">(main)</span>' : ''}${l.active === false ? ' <span class="pill off">closed</span>' : ''}<div class="dim" style="font-size:11.5px">${esc(words(l.kind))}${where(l) ? ' · ' + esc(where(l)) : ''}</div></td>
+      <td class="num">${l.is_main ? '' : `<button class="btn" data-le="${l.id}" style="padding:3px 9px;font-size:12px">Edit</button> <button class="btn" data-lt="${l.id}" style="padding:3px 9px;font-size:12px">${l.active === false ? 'Reopen' : 'Close'}</button>`}</td></tr>`).join('')}</tbody></table>
+    <h3 style="font-size:13px;margin:14px 0 6px">Add a location</h3>${form()}${foot('Add location')}`, (root) => {
     root.querySelectorAll('[data-lt]').forEach((b) => (b.onclick = async () => {
       const l = data.locations.find((x) => x.id === Number(b.dataset.lt));
       try { await api('PATCH', `/api/stock/locations/${l.id}`, { active: l.active === false }); await load(); locations(); } catch (e) { alert(e.message); }
     }));
-    wire(root, async () => { await api('POST', '/api/stock/locations', { name: v(root, '#lName'), kind: v(root, '#lKind') }); await load(); locations(); });
-  });
+    root.querySelectorAll('[data-le]').forEach((b) => (b.onclick = () => {
+      const l = data.locations.find((x) => x.id === Number(b.dataset.le));
+      modal(`Edit — ${l.name}`, form(l) + foot('Save'), (r2) => wire(r2, async () => { await api('PATCH', `/api/stock/locations/${l.id}`, body(r2)); await load(); assetList = null; locations(); }));
+    }));
+    wire(root, async () => { await api('POST', '/api/stock/locations', body(root)); await load(); assetList = null; locations(); });
+  }, { wide: true });
 };
 
 el('#bExport').onclick = () => KIT.csv(`stock-${new Date().toISOString().slice(0, 10)}.csv`,

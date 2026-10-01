@@ -3005,6 +3005,7 @@ route('POST', '/api/sites', CONTROL, ({ body }) => {
     id: nextId('sites'), name, address: body.address || '', lat: Number(body.lat) || null, lon: Number(body.lon) || null,
     keyholder: body.keyholder || '', contact_email: body.contact_email || '', contract: 'ACTIVE', checklist: [],
     response_sla_minutes: body.response_sla_minutes ? Number(body.response_sla_minutes) : null,
+    geofence_m: body.geofence_m === undefined || body.geofence_m === null || body.geofence_m === '' ? null : Math.min(Math.max(Number(body.geofence_m) || 0, 0), 5000),
     branch_id: normalizedBranchId(body.branch_id),
     code: String(body.code || '').trim(), postcode: String(body.postcode || '').trim(),
     // Not validated against the IANA database — a typo here shows up as a

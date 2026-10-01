@@ -1127,6 +1127,14 @@ function siteForm(s) {
       <input id="nsKeyholder" autocomplete="off" value="${isNew ? '' : esc(s.keyholder || '')}">
       <label>Contact email (resolution reports are sent here)</label>
       <input id="nsEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(s.contact_email || '')}">
+      <label>Clock-in area (geofence)</label>
+      <p class="dim" style="margin:-4px 0 0;font-size:12.5px">Staff can only clock in within this distance of the site, and are clocked out if they leave it for 5 minutes. With no location set, clock-in isn't checked.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr 110px;gap:8px">
+        <input id="nsLat" type="number" step="any" placeholder="Latitude" value="${isNew || s.lat == null ? '' : s.lat}">
+        <input id="nsLon" type="number" step="any" placeholder="Longitude" value="${isNew || s.lon == null ? '' : s.lon}">
+        <input id="nsFence" type="number" min="0" max="5000" placeholder="250 m" title="Radius in metres — 0 turns the check off" value="${isNew || s.geofence_m == null ? '' : s.geofence_m}">
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button type="button" class="btn" id="nsFindPc" style="padding:4px 10px;font-size:12px">Find from postcode</button><button type="button" class="btn" id="nsHere" style="padding:4px 10px;font-size:12px">Use my current location</button><span class="dim" id="nsGeoMsg" style="font-size:12px"></span></div>
       <label>Alarm response SLA (minutes, optional)</label>
       <input id="nsSla" type="number" min="1" autocomplete="off" value="${isNew || s.response_sla_minutes == null ? '' : s.response_sla_minutes}">
       <label>Branch (optional — leave shared if you don't use branches)</label>
@@ -1304,6 +1312,24 @@ function siteModal(s) {
         </span>
       </div>`;
     el('#sCancel').onclick = closeModal;
+    // UK postcode → coordinates via postcodes.io (free, no key).
+    el('#nsFindPc').onclick = async () => {
+      const pc = el('#nsPostcode').value.trim();
+      if (!pc) { el('#nsGeoMsg').textContent = 'enter the postcode first'; return; }
+      el('#nsGeoMsg').textContent = 'Looking up…';
+      try {
+        const r = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(pc)}`).then((x) => x.json());
+        if (r.status !== 200) throw new Error(r.error || 'postcode not found');
+        el('#nsLat').value = r.result.latitude.toFixed(6); el('#nsLon').value = r.result.longitude.toFixed(6);
+        el('#nsGeoMsg').textContent = 'Found — a postcode centre can be a few hundred metres out; "Use my current location" on site is more exact.';
+      } catch (e) { el('#nsGeoMsg').textContent = e.message; }
+    };
+    el('#nsHere').onclick = () => {
+      if (!navigator.geolocation) { el('#nsGeoMsg').textContent = 'location not available here'; return; }
+      el('#nsGeoMsg').textContent = 'Getting your location…';
+      navigator.geolocation.getCurrentPosition((p) => { el('#nsLat').value = p.coords.latitude.toFixed(6); el('#nsLon').value = p.coords.longitude.toFixed(6); el('#nsGeoMsg').textContent = `Set (accurate to about ${Math.round(p.coords.accuracy)} m).`; },
+        (e) => { el('#nsGeoMsg').textContent = e.message; }, { enableHighAccuracy: true, timeout: 15000 });
+    };
     if (el('#sDelete')) el('#sDelete').onclick = () => deleteSite(s.id);
     if (el('#sReport')) el('#sReport').onclick = () => siteReportModal(s);
     el('#sSave').onclick = async () => {
@@ -1317,6 +1343,8 @@ function siteModal(s) {
         code: el('#nsCode').value.trim(), postcode: el('#nsPostcode').value.trim(),
         timezone: el('#nsTimezone').value.trim(), risk_level: el('#nsRisk').value || null,
         access_instructions: el('#nsAccessInstructions').value.trim(), is_control_room: el('#nsControlRoom').checked,
+        lat: el('#nsLat').value === '' ? null : Number(el('#nsLat').value), lon: el('#nsLon').value === '' ? null : Number(el('#nsLon').value),
+        geofence_m: el('#nsFence').value === '' ? null : Number(el('#nsFence').value),
       };
       try {
         if (s) await api('PATCH', `/api/sites/${s.id}`, body);

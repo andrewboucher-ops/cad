@@ -199,13 +199,14 @@ async function startFiling(preKey, preType, preId) {
       ? subjects.map((sj, i) => `<option value="${i}" ${preType === sj.type && Number(preId) === sj.id ? 'selected' : ''}>${esc(CCCSForms.SUBJECT_LABEL[sj.type])}: ${esc(sj.label)}</option>`).join('')
       : '<option value="">Nothing you can file this against right now</option>';
   };
-  const go = () => {
+  const go = async () => {
     const d = defs.find((x) => x.id === Number(el('#nDef').value));
     const subject = subjects[Number(el('#nSubject').value)];
     if (!subject) return;
     ['#nDef', '#nSubject', '#nNext'].forEach((q) => (el(q).disabled = true));
+    const extra = d.key === 'vehicle-inspection' && subject.type === 'VEHICLE' ? await CCCSForms.vehicleKitExtra(subject.id) : null;
     CCCSForms.fill(el('#nFill'), d, subject, {
-      signerName: me.display_name,
+      extra, signerName: me.display_name,
       onCancel: () => startFiling(),
       onDone: async (sub) => { await refresh(); open(sub.id); },
     });

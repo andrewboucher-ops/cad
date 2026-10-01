@@ -114,7 +114,7 @@ const CCCSForms = (() => {
    * (apply.html) has no session and posts elsewhere — and `subject` may then
    * be null. `submitLabel` names the button.
    */
-  function fill(host, def, subject, { signerName = '', onDone, onCancel, submit, submitLabel = 'Submit report' } = {}) {
+  function fill(host, def, subject, { signerName = '', onDone, onCancel, submit, submitLabel = 'Submit report', extra = null } = {}) {
     const pads = {}, photos = {};
     host.innerHTML = `
       <div class="ff-stack">
@@ -122,6 +122,7 @@ const CCCSForms = (() => {
           <strong>Restricted report.</strong> Only you and the named people responsible for these reports will be able to read it. It will not appear in the control-room log.</p>` : ''}
         ${subject ? `<p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[subject.type] || subject.type)}: <strong>${esc(subject.label)}</strong></p>` : ''}
         ${def.fields.map((f) => fieldHtml(f)).join('')}
+        ${extra ? extra.html : ''}
         <p class="err" data-ff-err style="min-height:16px;margin:0"></p>
         <div class="btn-row">
           ${onCancel ? '<button type="button" class="btn" data-ff-cancel>Cancel</button>' : ''}
@@ -171,10 +172,12 @@ const CCCSForms = (() => {
           default: if (input.value.trim() !== '') values[f.id] = input.value.trim();
         }
       }
+      let more = {};
+      if (extra) { try { more = extra.collect(host) || {}; } catch (e) { errEl.textContent = e.message; return; } }
       submitBtn.disabled = true; submitBtn.textContent = 'Sending…';
       try {
         const sub = submit ? await submit(values)
-          : await api('POST', '/api/form-submissions', { definition_id: def.id, subject_type: subject.type, subject_id: subject.id, values });
+          : await api('POST', '/api/form-submissions', { definition_id: def.id, subject_type: subject.type, subject_id: subject.id, values, ...more });
         onDone && onDone(sub);
       } catch (e) {
         const offline = e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(e.message || '');
@@ -243,6 +246,7 @@ const CCCSForms = (() => {
           <div style="font-weight:700">${esc(OUTCOME_LABEL[sub.outcome] || sub.outcome)} <span class="dim" style="font-weight:400;font-size:12px">by ${esc(sub.actioned_by)} · ${esc(fmt(sub.actioned_at))}</span></div>
           ${sub.feedback ? `<div style="white-space:pre-wrap;margin-top:4px">${esc(sub.feedback)}</div>` : ''}</div>` : ''}
         ${sub.fields.map((f) => `<div class="ff-field"><span>${esc(f.label)}</span><div>${valueHtml(f)}</div></div>`).join('')}
+        ${(sub.kit_check || []).length ? `<div class="ff-field"><span>Kit on the vehicle</span><div>${sub.kit_check.map((k) => `${esc(k.tag ? k.tag + ' — ' : '')}${esc(k.description)}: ${k.present ? 'present' : '<strong style="color:var(--emergency)">MISSING</strong>'}${k.note ? ` <span class="dim">(${esc(k.note)})</span>` : ''}`).join('<br>')}</div></div>` : ''}
         ${(sub.amendments || []).length ? `<div style="border-top:1px solid var(--line);padding-top:8px;margin-top:4px">
           <div class="dim" style="font-size:11px;letter-spacing:.1em;text-transform:uppercase">Edits</div>
           ${sub.amendments.map((a) => `<div style="font-size:12.5px;margin-top:6px"><strong>${esc(a.by)}</strong> <span class="dim">${esc(fmt(a.at))}</span> — ${esc(a.reason)}
@@ -320,5 +324,43 @@ const CCCSForms = (() => {
     host.querySelectorAll('[data-ff-open]').forEach((r) => (r.onclick = () => onOpen(Number(r.dataset.ffOpen))));
   }
 
-  return { fill, view, edit, list, signaturePad, downscale, SUBJECT_LABEL, OUTCOME_LABEL };
+  /* ---------------- kit on a vehicle ---------------- */
+
+  /** For a vehicle check: the vehicle's kit as Present / Missing questions,
+   * with what is inside each bag and anything out of date. Returns an
+   * `extra` for fill(), or null if the vehicle carries no kit. */
+  async function vehicleKitExtra(vehicleId) {
+    let kit;
+    try { kit = await api('GET', `/api/vehicles/${vehicleId}/kit`); } catch { return null; }
+    if (!kit.assets.length && !kit.locations.length) return null;
+    const date = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    const contents = (l) => l.contents.map((c) => `${c.qty} × ${esc(c.item)}${c.next_expiry ? ` <span style="color:${c.expired ? 'var(--emergency)' : c.expiring_soon ? 'var(--busy)' : 'var(--ink-dim)'}">(${c.expired ? 'EXPIRED' : 'exp'} ${esc(date(c.next_expiry))})</span>` : ''}`).join(', ') || '<span class="dim">empty</span>';
+    const html = `<label>Kit on this vehicle</label>
+      <div style="border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+      ${kit.assets.map((a) => {
+        const loc = kit.locations.find((l) => l.asset_id === a.id);
+        return `<div style="padding:8px 0;border-bottom:1px solid var(--line-soft)">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><strong style="flex:1;min-width:160px">${esc(a.tag ? a.tag + ' — ' : '')}${esc(a.description)}</strong>
+            <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px;margin:0"><input type="radio" name="kit${a.id}" value="1" data-kit="${a.id}" style="width:20px;height:20px"> Present</label>
+            <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px;margin:0"><input type="radio" name="kit${a.id}" value="0" data-kit="${a.id}" style="width:20px;height:20px"> Missing</label></div>
+          ${loc ? `<div class="dim" style="font-size:12.5px;margin-top:4px">Contains: ${contents(loc)}</div>` : ''}
+          <input data-kit-note="${a.id}" placeholder="Note (optional)" style="margin-top:6px;font-size:14px">
+        </div>`;
+      }).join('')}
+      ${kit.locations.filter((l) => !l.asset_id).map((l) => `<div style="padding:8px 0;border-bottom:1px solid var(--line-soft);font-size:13px"><strong>${esc(l.name)}</strong> <span class="dim">— ${contents(l)}</span></div>`).join('')}
+      ${kit.expired ? `<p style="color:var(--emergency);font-size:13px;margin:8px 0 2px">${kit.expired} item${kit.expired === 1 ? ' is' : 's are'} out of date — tell control so it can be replaced.</p>` : ''}
+      </div>`;
+    return {
+      html,
+      collect(host) {
+        return { kit_check: kit.assets.map((a) => {
+          const pick = host.querySelector(`[data-kit="${a.id}"]:checked`);
+          if (!pick) throw new Error(`Kit: say whether ${a.tag || a.description} is present`);
+          return { asset_id: a.id, present: pick.value === '1', note: (host.querySelector(`[data-kit-note="${a.id}"]`) || {}).value || '' };
+        }) };
+      },
+    };
+  }
+
+  return { fill, view, edit, list, signaturePad, downscale, vehicleKitExtra, SUBJECT_LABEL, OUTCOME_LABEL };
 })();

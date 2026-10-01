@@ -382,6 +382,17 @@ function isAvailable(p) { return !emergencyFor(p) && !openJobFor(p) && !openVisi
 /* ------------------------------------------------------------------ *
  * Rendering
  * ------------------------------------------------------------------ */
+/* Someone rostered who still hasn't clocked in 15 minutes after their shift
+ * started (routes-attendance.js raises it). Read from the shifts, so it is
+ * there after a reload too; it goes when they clock in or the shift ends. */
+const lateLive = new Map(), lateDismissed = new Set();
+function lateAlerts() {
+  const now = Date.now(), out = new Map(lateLive);
+  for (const s of state.shifts || []) for (const a of s.assignments || []) {
+    if (a.late_alert_at) out.set(a.id, { assignment_id: a.id, personnel_id: a.personnel_id, name: a.personnel_name, site_name: s.site_name, starts_at: s.starts_at, ends_at: s.ends_at, clocked: Boolean(a.clocked_in_at) });
+  }
+  return [...out.values()].filter((x) => !x.clocked && !lateDismissed.has(x.assignment_id) && (!x.ends_at || Date.parse(x.ends_at) > now));
+}
 function renderAttention() {
   const emgs = state.emergencies.filter((e) => e.state !== 'RESOLVED');
   const reqs = state.requests.filter((r) => r.state === 'PENDING')
@@ -406,7 +417,16 @@ function renderAttention() {
       <span style="flex:1"></span>
       <button class="btn primary" data-reqp="${r.personnel_id}">Contact</button>
       <button class="btn" data-reqclear="${r.id}">Mark answered</button>
+    </div>`).join('') + lateAlerts().map((x) => `
+    <div class="banner req pri">
+      <strong>NOT CLOCKED IN</strong>
+      <span class="mono">${esc(x.name)}${x.site_name ? ' · ' + esc(x.site_name) : ''} · started ${new Date(x.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
+      <span class="dim">reminder text sent at 5 min</span>
+      <span style="flex:1"></span>
+      <button class="btn primary" data-reqp="${x.personnel_id}">Contact</button>
+      <button class="btn" data-latedismiss="${x.assignment_id}">Dismiss</button>
     </div>`).join('');
+  els('[data-latedismiss]').forEach((b) => (b.onclick = () => { lateDismissed.add(Number(b.dataset.latedismiss)); renderAttention(); }));
   els('[data-ack]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.ack}/ack`)));
   els('[data-emgres]').forEach((b) => armed(b, 'Confirm reset', () => api('POST', `/api/emergency/${b.dataset.emgres}/resolve`)));
   els('[data-emgjob]').forEach((b) => (b.onclick = () => select('j', Number(b.dataset.emgjob))));
@@ -1074,6 +1094,8 @@ bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderShift(); rend
    .on('emergency.resolved', (e) => { upsert(state.emergencies, e); renderAttention(); renderShift(); sound.refreshEmergencyAlarm(); })
    .on('call.request', (r) => { upsert(state.requests, r); renderAttention(); sound.callRequest(); })
    .on('call.request_cleared', (r) => { upsert(state.requests, r); renderAttention(); })
+   .on('shift.not_clocked_in', (x) => { lateLive.set(x.assignment_id, x); renderAttention(); })
+   .on('shift.updated', (sh) => { for (const a of sh.assignments || []) if (a.clocked_in_at) lateLive.delete(a.id); renderAttention(); })
    .on('welfare.started', ({ personnel }) => onPersonChange(personnel))
    .on('welfare.checked_in', onPersonChange)
    .on('welfare.stopped', onPersonChange)

@@ -41,6 +41,7 @@
   .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
   .actions .btn { padding: 4px 10px; font-size: 12px; }
   .recent a { font-size: 12px; }
+  .kitline { font-size: 12.5px; }
 </style>
 </head>
 <body>
@@ -78,7 +79,7 @@ const STATE_CLS = { OVERDUE: 'bad', DUE_SOON: 'warn', OK: 'ok', UNKNOWN: 'off' }
 
 /** "Needs attention": a compliance date passed, the last inspection found
  * something, or it is going out today with no inspection today. */
-const needsAttention = (v) => v.worst_compliance === 'OVERDUE' || (v.last_inspection && v.last_inspection.issues.length) || (v.today && !v.inspected_today);
+const needsAttention = (v) => v.worst_compliance === 'OVERDUE' || (v.last_inspection && v.last_inspection.issues.length) || (v.today && !v.inspected_today) || (v.kit && v.kit.expired > 0);
 const FILTERS = {
   all: () => true,
   attention: needsAttention,
@@ -131,6 +132,8 @@ function render() {
         <dt>Mileage</dt><dd>${v.mileage != null ? Number(v.mileage).toLocaleString('en-GB') : '—'}${v.last_fuel ? ` · last fuel ${esc(fmtDate(v.last_fuel.recorded_at))} (${v.last_fuel.litres}L)` : ''}</dd>
         <dt>Maintenance</dt><dd>${v.last_maintenance ? `${esc(fmtDate(v.last_maintenance.performed_at))} — ${esc(v.last_maintenance.description)}` : '—'}</dd>
       </dl>
+      ${v.kit && (v.kit.assets.length || v.kit.locations.length) ? `<div class="kitline">On board: ${v.kit.assets.map((a) => `<strong>${esc(a.tag || a.description)}</strong> ${esc(a.tag ? a.description : '')}`).join(', ')}${v.kit.locations.filter((l) => !l.asset_id).map((l) => `, ${esc(l.name)}`).join('')}
+        ${v.kit.expired ? ` <span class="pill bad">${v.kit.expired} expired</span>` : ''}${v.kit.expiring ? ` <span class="pill warn">${v.kit.expiring} expiring</span>` : ''} <a href="#" data-kit="${v.id}">contents</a></div>` : ''}
       ${ins && ins.issues.length ? `<ul class="issues">${ins.issues.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : ''}
       <div class="actions">${data.vehicle_forms.map((f) => `<a class="btn ${/inspection/i.test(f.name) ? 'primary' : ''}" href="${formLink(f, v)}">${esc(f.name.replace(/^Vehicle /, '').replace(/^./, (c) => c.toUpperCase()))}</a>`).join('') || '<span class="dim">No vehicle forms set up (Admin → Forms).</span>'}</div>
       ${v.recent_reports.length ? `<div class="recent dim" style="font-size:12px">Recent: ${v.recent_reports.map((r) => `<a href="/forms.html?id=${r.id}">${esc(r.reference)}</a>`).join(' · ')}</div>` : ''}
@@ -138,6 +141,21 @@ function render() {
   }).join('') : '<p class="dim">No vehicles match.</p>';
 }
 els('#filters .chip').forEach((c) => (c.onclick = () => { filter = c.dataset.f; render(); }));
+/** What is on the vehicle: kit assets and what is inside each bag, with
+ * expiry dates — from the same data the vehicle check uses. */
+document.addEventListener('click', async (e) => {
+  const a = e.target.closest('[data-kit]'); if (!a) return;
+  e.preventDefault();
+  const k = await api('GET', `/api/vehicles/${a.dataset.kit}/kit`);
+  const date = (d) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  const host = document.createElement('div');
+  host.innerHTML = `<div class="modal-back"><div class="modal"><h2>Kit on ${esc(k.vehicle.registration)}</h2><div class="content">
+    ${k.assets.map((x) => { const l = k.locations.find((y) => y.asset_id === x.id); return `<p style="margin:0 0 4px"><strong>${esc(x.tag ? x.tag + ' — ' : '')}${esc(x.description)}</strong>${x.pat_state === 'OVERDUE' ? ' <span class="pill bad">PAT due</span>' : ''}${x.inspection_state === 'OVERDUE' ? ' <span class="pill bad">inspection due</span>' : ''}</p>${l ? `<ul style="margin:0 0 10px 18px;padding:0;font-size:13px">${l.contents.map((c) => `<li>${c.qty} × ${esc(c.item)}${c.next_expiry ? ` — <span style="color:${c.expired ? 'var(--emergency)' : c.expiring_soon ? 'var(--busy)' : 'inherit'}">${c.expired ? 'expired' : 'expires'} ${esc(date(c.next_expiry))}</span>` : ''}</li>`).join('') || '<li class="dim">empty</li>'}</ul>` : ''}`; }).join('')}
+    ${k.locations.filter((l) => !l.asset_id).map((l) => `<p style="margin:0 0 4px"><strong>${esc(l.name)}</strong></p><ul style="margin:0 0 10px 18px;padding:0;font-size:13px">${l.contents.map((c) => `<li>${c.qty} × ${esc(c.item)}${c.next_expiry ? ` — exp ${esc(date(c.next_expiry))}` : ''}</li>`).join('') || '<li class="dim">empty</li>'}</ul>`).join('')}
+    </div><div class="foot"><button class="btn" data-close-kit>Close</button></div></div></div>`;
+  document.body.appendChild(host);
+  host.querySelector('[data-close-kit]').onclick = () => host.remove();
+});
 
 async function load() {
   try {

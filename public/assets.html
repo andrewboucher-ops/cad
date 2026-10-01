@@ -59,11 +59,12 @@ const FILTERS = {
   lost: ['Lost', (a) => a.status === 'LOST'],
   retired: ['Retired', (a) => a.status === 'RETIRED'],
 };
-let data = null, people = [], sites = [], locations = [], filter = 'all';
+let data = null, people = [], sites = [], locations = [], vehicles = [], filter = 'all';
 
 async function load() {
   try {
     [data, people, sites, locations] = await Promise.all([api('GET', '/api/assets/register'), people.length ? people : api('GET', '/api/personnel'), sites.length ? sites : api('GET', '/api/sites'), api('GET', '/api/stock/locations')]);
+    if (!vehicles.length) vehicles = await api('GET', '/api/vehicles').catch(() => []);
     people = people.filter((p) => (p.employment_status || 'ACTIVE') === 'ACTIVE').sort((a, b) => a.name.localeCompare(b.name));
   } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
   el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
@@ -98,7 +99,8 @@ function paint() {
       const co = a.checkout;
       const withWho = co ? `<strong>${esc(co.personnel_name || '—')}</strong><div class="dim" style="font-size:11.5px">since ${esc(date(co.checked_out_at))}${co.expected_return_at ? ` · due back ${esc(date(co.expected_return_at))}` : ''}</div>${co.overdue ? '<span class="pill bad">Overdue</span>' : ''}`
         : a.rental ? `On hire to <strong>${esc(a.rental.hirer_name)}</strong><div class="dim" style="font-size:11.5px">${esc(a.rental.reference)}</div>`
-        : a.assigned_to_name ? esc(a.assigned_to_name) : esc([a.location_name, a.site_name].filter(Boolean).join(' · ') || '—');
+        : a.assigned_to_name ? esc(a.assigned_to_name)
+        : a.vehicle_registration ? `In vehicle <strong>${esc(a.vehicle_registration)}</strong>${a.holds_location ? `<div class="dim" style="font-size:11.5px">holds stock: ${esc(a.holds_location)}</div>` : ''}` : esc([a.location_name, a.site_name].filter(Boolean).join(' · ') || '—');
       const pillFor = (state, d) => `<span class="pill ${state === 'OVERDUE' ? 'bad' : state === 'DUE_SOON' ? 'warn' : 'ok'}">${d ? esc(date(d)) : 'due'}</span>`;
       const chk = a.next_check_due_at ? `${pillFor(a.check_state, a.next_check_due_at)}${a.check_interval_days ? `<div class="dim" style="font-size:11.5px">every ${esc(freqText(a.check_interval_days))}</div>` : ''}` : '<span class="dim">—</span>';
       const pat = a.pat_required ? `${pillFor(a.pat_state, a.pat_next_due_at)}${a.pat_last_at ? `<div class="dim" style="font-size:11.5px">last ${esc(date(a.pat_last_at))}</div>` : '<div class="dim" style="font-size:11.5px">never tested</div>'}` : '<span class="dim">No</span>';
@@ -202,6 +204,7 @@ function editor(a) {
     <div><label>Serial number</label><input id="eSerial" value="${esc((a && a.serial_no) || '')}"></div>
     <div><label>Condition</label><select id="eCond">${condOpts(a ? a.condition : 'NEW')}</select></div>
     <div class="k-section">Where it lives</div>
+    <div><label>Kept in vehicle</label><select id="eVeh">${options(vehicles.map((x) => [x.id, x.registration]), a && a.vehicle_id, '— not in a vehicle —')}</select></div>
     <div><label>Store location</label><select id="eLoc">${options(locations.map((l) => [l.id, l.name]), a ? a.location_id : (locations.find((l) => l.is_main) || {}).id, '—')}</select></div>
     <div><label>Or kept at a site</label><select id="eSite">${options(sites.map((s) => [s.id, s.name]), a && a.site_id, '—')}</select></div>
     <div class="full"><label>Part of a kit (optional)</label><select id="eParent">${options(data.assets.filter((x) => !a || x.id !== a.id).map((x) => [x.id, name(x)]), a && a.parent_asset_id, '— not part of a kit —')}</select></div>
@@ -235,6 +238,7 @@ function editor(a) {
       const body = {
         tag: v(root, '#eTag') || null, category: v(root, '#eCat'), description: v(root, '#eDesc'), make: v(root, '#eMake'), model: v(root, '#eModel'),
         serial_no: v(root, '#eSerial'), condition: v(root, '#eCond') || null, location_id: numOrNull(v(root, '#eLoc')), site_id: numOrNull(v(root, '#eSite')),
+        vehicle_id: numOrNull(v(root, '#eVeh')),
         parent_asset_id: numOrNull(v(root, '#eParent')), purchase_date: v(root, '#ePDate') || null, purchase_cost: numOrNull(v(root, '#eCost')),
         supplier: v(root, '#eSup'), warranty_expires_at: v(root, '#eWar') || null, check_type: v(root, '#eCType'),
         check_interval_days: v(root, '#eFreq') === 'custom' ? numOrNull(v(root, '#eCInt')) : numOrNull(v(root, '#eFreq')),
