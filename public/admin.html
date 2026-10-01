@@ -135,6 +135,7 @@
     </nav>
     <select id="adminNavSelect" class="admin-nav-select" aria-label="Admin section"></select>
     <div class="admin-content">
+    <p class="err hide" id="loadErrors" style="border:1px solid var(--emergency);border-radius:8px;padding:10px 12px;font-size:13px"></p>
     <div class="admin-title"><h2 id="adminTitle">Accounts</h2><p class="dim" id="adminDesc"></p></div>
 
     <div id="viewAccounts">
@@ -341,18 +342,30 @@ const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUP
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : r === 'FINANCE' ? 'client' : '');
 
 let allUsers = [], allPersonnel = [], allMdts = [], allCallsigns = [], allSites = [], allSchedules = [], allVehicles = [], allAssets = [], allBeats = [], allForms = [], allClients = [], allClientRequests = [], allBranches = [], allCourses = [], allApplicants = [], allLeaveRequests = [], allShiftTypes = [];
+/* Each list is fetched and drawn on its own: one failing request, or one
+ * record a tab can't draw, used to stop everything after it (Forms comes
+ * late in the list, so it simply never appeared). Failures are shown at
+ * the top of the page instead of silently leaving tabs empty. */
 async function load() {
   el('#uTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
-  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches, allCourses, allApplicants, allLeaveRequests, allShiftTypes] = await Promise.all([
-    api('GET', '/api/users'), api('GET', '/api/personnel'), api('GET', '/api/mdts'),
-    api('GET', '/api/callsigns'), api('GET', '/api/sites'), api('GET', '/api/patrol-schedules'),
-    api('GET', '/api/vehicles'), api('GET', '/api/assets'), api('GET', '/api/beats'),
-    api('GET', '/api/clients'), api('GET', '/api/client-requests'), api('GET', '/api/branches'),
-    api('GET', '/api/training-courses?all=1'), api('GET', '/api/applicants'), api('GET', '/api/leave-requests'),
-    api('GET', '/api/shift-types?all=1'),
+  const failed = [];
+  const get = (path) => api('GET', path).catch((e) => { failed.push(`${path} — ${e.message}`); return []; });
+  [allUsers, allPersonnel, allMdts, allCallsigns, allSites, allSchedules, allVehicles, allAssets, allBeats, allClients, allClientRequests, allBranches, allCourses, allApplicants, allLeaveRequests, allShiftTypes, allForms] = await Promise.all([
+    get('/api/users'), get('/api/personnel'), get('/api/mdts'),
+    get('/api/callsigns'), get('/api/sites'), get('/api/patrol-schedules'),
+    get('/api/vehicles'), get('/api/assets'), get('/api/beats'),
+    get('/api/clients'), get('/api/client-requests'), get('/api/branches'),
+    get('/api/training-courses?all=1'), get('/api/applicants'), get('/api/leave-requests'),
+    get('/api/shift-types?all=1'), get('/api/form-definitions?all=1'),
   ]);
-  allForms = await api('GET', '/api/form-definitions?all=1');
-  paint(); paintPersonnel(); paintMdts(); paintVehicles(); paintAssets(); paintSites(); paintBeats(); paintSchedules(); paintForms(); paintClients(); paintClientRequests(); paintBranches(); paintCourses(); paintApplicants(); paintLeaveRequests(); paintShiftTypes();
+  const painters = { Accounts: paint, Personnel: paintPersonnel, MDTs: paintMdts, Vehicles: paintVehicles, Assets: paintAssets, Sites: paintSites, Beats: paintBeats,
+    'Patrol schedules': paintSchedules, Forms: paintForms, Clients: paintClients, 'Client requests': paintClientRequests, Branches: paintBranches,
+    Training: paintCourses, Applicants: paintApplicants, Leave: paintLeaveRequests, 'Shift types': paintShiftTypes };
+  for (const [name, fn] of Object.entries(painters)) {
+    try { fn(); } catch (e) { console.error(name, e); failed.push(`${name} tab — ${e.message}`); }
+  }
+  el('#loadErrors').classList.toggle('hide', !failed.length);
+  el('#loadErrors').innerHTML = failed.length ? `<strong>Some of Admin could not be shown.</strong> Everything else works. Please send this to support:<br>${failed.map(esc).join('<br>')}` : '';
 }
 function branchOptions(selected) {
   return '<option value="">— none / shared —</option>' + allBranches.map((b) =>
