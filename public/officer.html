@@ -375,6 +375,26 @@ el('#passdownSend').onclick = async () => {
   paintPassdownLogs();
 };
 
+/** Assignment instructions / site maps for wherever the officer is
+ * currently working — a read-only view; uploading stays an admin.html
+ * job. GET /api/sites/:id/documents already scopes a FIELD_USER to the
+ * current versions of these two types for a site they're actually posted
+ * to, so nothing extra needs checking here. */
+async function openSiteDocsModal(siteId) {
+  modal('Site documents', '<p class="dim">Loading…</p>', async () => {
+    try {
+      const docs = await api('GET', `/api/sites/${siteId}/documents`);
+      const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map' };
+      el('#modalHost .content').innerHTML = docs.length
+        ? docs.map((d) => `<div class="field"><span>${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</span>
+            <div><a href="/api/documents/${d.id}/file?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(d.filename)}</a></div></div>`).join('')
+        : '<p class="dim">Nothing on file for this site yet.</p>';
+    } catch (e) { el('#modalHost .content').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  });
+}
+function siteDocsButton(siteId) {
+  return siteId ? `<button type="button" class="btn" data-sitedocs="${siteId}" style="padding:4px 10px;font-size:11px">Site documents</button>` : '';
+}
 function paintJob() {
   if (!job) {
     el('#jobBody').innerHTML = '<p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>';
@@ -387,6 +407,7 @@ function paintJob() {
       <span class="mono" style="font-weight:700;font-size:16px">${esc(job.reference)}</span>
       <span class="pri pri-${job.priority}">${job.priority}</span>
       <span class="mono dim">${esc(job.status.replace('_', ' '))}</span>
+      ${siteDocsButton(job.site_id)}
     </div>
     <div class="field"><span>Incident</span><div>${esc(job.incident_type)}</div></div>
     <div class="field"><span>Location</span><div>${esc(job.location)}</div></div>
@@ -431,6 +452,7 @@ function paintJob() {
   el('#jEnr').onclick = () => setJobStatus('EN_ROUTE');
   el('#jScene').onclick = () => setJobStatus('ON_SCENE');
   el('#jDone').onclick = () => setJobStatus('COMPLETED');
+  if (el('#jobBody [data-sitedocs]')) el('#jobBody [data-sitedocs]').onclick = () => openSiteDocsModal(job.site_id);
 }
 async function setJobStatus(status) {
   const r = await CCCS.send('PATCH', `/api/jobs/${job.id}`, { status }, `${job.reference} → ${status}`);
@@ -449,6 +471,7 @@ function paintVisit() {
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
       <span class="mono" style="font-weight:700;font-size:16px">${esc(visit.reference)}</span>
       <span class="mono dim">${esc(visit.status.replace('_', ' '))}</span>
+      ${siteDocsButton(visit.site_id)}
     </div>
     <div class="field"><span>Site</span><div>${esc(visit.site_name || '—')}${visit.beat_name ? ` — ${esc(visit.beat_name)}` : ''}</div></div>
     <div class="field"><span>Address</span><div>${esc(visit.site_address || '—')}</div></div>
@@ -513,6 +536,7 @@ function paintVisit() {
   el('#vEnr').onclick = () => setVisitStatus('EN_ROUTE');
   el('#vScene').onclick = () => setVisitStatus('ON_SCENE');
   el('#vDone').onclick = () => setVisitStatus('COMPLETED');
+  if (el('#visitBody [data-sitedocs]')) el('#visitBody [data-sitedocs]').onclick = () => openSiteDocsModal(visit.site_id);
   refreshPassdown();
 }
 async function setVisitStatus(status) {

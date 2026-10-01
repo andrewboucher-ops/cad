@@ -800,6 +800,37 @@ test('a field officer gains passdown access to a site once they have a shift or 
   assert.equal((await call('DELETE', `/api/passdown-logs/${posted.body.id}`, undefined, adminT)).status, 200);
 });
 
+test('an officer posted to a site can see its current assignment instructions and maps, but nothing else there', async () => {
+  const PDF = Buffer.from('%PDF-1.4 not a real pdf, just needs the header').toString('base64');
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const carlton = sites.body.find((x) => x.name === 'Carlton Retail Centre');
+  assert.equal((await call('GET', `/api/sites/${carlton.id}/documents`, undefined, ellieT)).status, 403, 'not posted here yet');
+
+  await call('POST', `/api/sites/${carlton.id}/documents`, { type: 'CONTRACT', mimetype: 'application/pdf', data: PDF }, adminT);
+  const instr = await call('POST', `/api/sites/${carlton.id}/documents`, { type: 'ASSIGNMENT_INSTRUCTIONS', title: 'General', mimetype: 'application/pdf', data: PDF }, adminT);
+  await call('POST', `/api/sites/${carlton.id}/documents`, { type: 'ASSIGNMENT_INSTRUCTIONS', title: 'General', mimetype: 'application/pdf', data: PDF }, adminT); // v2, archives v1
+
+  const start = new Date(Date.now() + 3600000).toISOString();
+  const end = new Date(Date.now() + 9 * 3600000).toISOString();
+  await call('POST', '/api/shifts', { personnel: ellieId, site_id: carlton.id, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT);
+
+  const docs = await call('GET', `/api/sites/${carlton.id}/documents`, undefined, ellieT);
+  assert.equal(docs.status, 200);
+  assert.ok(!docs.body.some((d) => d.type === 'CONTRACT'), 'an officer never sees contracts');
+  assert.ok(!docs.body.some((d) => d.id === instr.body.id), 'the archived v1 is not shown, only the current version');
+  assert.equal(docs.body.filter((d) => d.type === 'ASSIGNMENT_INSTRUCTIONS').length, 1);
+
+  // Raw fetch, not the call() helper above — the response body is the PDF's
+  // actual bytes, not JSON, and this needs the response headers too.
+  const file = await fetch(`${BASE}/api/documents/${docs.body[0].id}/file`, { headers: { authorization: `Bearer ${ellieT}` } });
+  assert.equal(file.status, 200);
+  assert.match(file.headers.get('content-disposition'), /^inline;/, 'opens in-browser, not forced to download');
+  assert.equal((await call('GET', `/api/documents/${instr.body.id}/file`, undefined, ellieT)).status, 404, 'the archived version is not reachable directly either');
+
+  const otherSite = sites.body.find((x) => x.name !== 'Carlton Retail Centre');
+  assert.equal((await call('GET', `/api/sites/${otherSite.id}/documents`, undefined, ellieT)).status, 403, 'not posted at the other site');
+});
+
 /* ---------------- fuel logs ---------------- */
 test('a fuel log is created against a vehicle, updates its mileage, and can take a receipt photo', async () => {
   const vehicles = await call('GET', '/api/vehicles', undefined, dispT);

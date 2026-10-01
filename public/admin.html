@@ -292,6 +292,29 @@ function modal(title, html, onMount) {
 const closeModal = () => (el('#modalHost').innerHTML = '');
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
+/** A minimal, dependency-free full-size image viewer — wheel to zoom,
+ * drag to pan. A PDF never reaches this; it opens in the browser's own
+ * viewer instead, which already does both. */
+function openImageViewer(url, title) {
+  let scale = 1, tx = 0, ty = 0, dragging = false, lastX = 0, lastY = 0;
+  const host = document.createElement('div');
+  host.innerHTML = `<div style="position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:999;display:flex;align-items:center;justify-content:center;overflow:hidden">
+    <img id="dvImg" src="${url}" alt="${esc(title || '')}" style="max-width:none;max-height:none;cursor:grab;user-select:none">
+    <button class="btn" id="dvClose" style="position:absolute;top:16px;right:16px">Close</button>
+    ${title ? `<span class="dim" style="position:absolute;top:20px;left:20px;color:#fff">${esc(title)}</span>` : ''}
+  </div>`;
+  document.body.appendChild(host);
+  const img = host.querySelector('#dvImg');
+  const apply = () => { img.style.transform = `scale(${scale}) translate(${tx}px,${ty}px)`; };
+  const close = () => host.remove();
+  host.querySelector('#dvClose').onclick = close;
+  host.firstElementChild.addEventListener('click', (e) => { if (e.target === host.firstElementChild) close(); });
+  img.addEventListener('wheel', (e) => { e.preventDefault(); scale = Math.min(6, Math.max(0.5, scale - e.deltaY * 0.001)); apply(); });
+  img.addEventListener('mousedown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; img.style.cursor = 'grabbing'; });
+  window.addEventListener('mouseup', () => { dragging = false; img.style.cursor = 'grab'; });
+  window.addEventListener('mousemove', (e) => { if (!dragging) return; tx += (e.clientX - lastX) / scale; ty += (e.clientY - lastY) / scale; lastX = e.clientX; lastY = e.clientY; apply(); });
+}
+
 const ROLE_LABEL = { SYSTEM_ADMIN: 'System admin', DISPATCHER: 'Dispatcher', SUPERVISOR: 'Supervisor', FIELD_USER: 'Field user', MDT_USER: 'MDT user', CLIENT: 'Client' };
 const roleClass = (r) => (r === 'SYSTEM_ADMIN' ? 'admin' : ['DISPATCHER', 'SUPERVISOR'].includes(r) ? 'control' : r === 'CLIENT' ? 'client' : '');
 
@@ -1135,6 +1158,25 @@ function siteForm(s) {
         <button type="button" class="btn" id="sDocUpload">Upload</button>
       </div>
       <p class="dim" id="sDocError" style="min-height:16px;margin:0"></p>
+
+      <label>Assignment instructions — versioned; the current version is what staff see</label>
+      <div id="sInstructionsList" class="dim">Loading…</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="sInstrTitle" autocomplete="off" placeholder="Title, e.g. General assignment instructions" style="flex:1">
+        <input type="file" id="sInstrFile" accept="application/pdf,image/png,image/jpeg">
+        <button type="button" class="btn" id="sInstrUpload">Upload</button>
+      </div>
+      <p class="dim" id="sInstrError" style="min-height:16px;margin:0"></p>
+
+      <label>Site maps — versioned; uploading the same title again supersedes it</label>
+      <div id="sMapsGallery" class="dim">Loading…</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="sMapTitle" autocomplete="off" placeholder="Title, e.g. Perimeter, Building layout" style="flex:1">
+        <input type="file" id="sMapFile" accept="application/pdf,image/png,image/jpeg">
+        <button type="button" class="btn" id="sMapUpload">Upload</button>
+      </div>
+      <p class="dim" id="sMapError" style="min-height:16px;margin:0"></p>
+
       <label>Passdown — shift-handover notes</label>
       <div id="sPassdownLog" class="dim">Loading…</div>
       <div style="display:flex;gap:8px">
@@ -1150,20 +1192,69 @@ function siteModal(s) {
     el('#sAddTask').onclick = () => editor.add();
     if (s) {
       const DOC_TYPE_LABEL = { CONTRACT: 'Contract', SITE_DOCUMENT: 'Site document' };
+      const docUrl = (id) => `/api/documents/${id}/file?token=${encodeURIComponent(CCCS.getSession().token)}`;
       const paintDocs = (docs) => {
-        el('#sDocsList').innerHTML = docs.length
-          ? docs.map((d) => `<div class="dim" style="display:flex;align-items:center;gap:8px;padding:4px 0">
-              <span style="flex:1">${esc(DOC_TYPE_LABEL[d.type] || d.type)} — <a href="/api/documents/${d.id}/file?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(d.filename)}</a></span>
+        const rows = docs.filter((d) => d.type === 'CONTRACT' || d.type === 'SITE_DOCUMENT');
+        el('#sDocsList').innerHTML = rows.length
+          ? rows.map((d) => `<div class="dim" style="display:flex;align-items:center;gap:8px;padding:4px 0">
+              <span style="flex:1">${esc(DOC_TYPE_LABEL[d.type] || d.type)} — <a href="${docUrl(d.id)}" target="_blank">${esc(d.filename)}</a></span>
               <span style="font-size:11px">${esc(new Date(d.uploaded_at).toLocaleDateString('en-GB'))}</span>
               <button type="button" class="btn danger" data-deldoc="${d.id}" style="padding:3px 8px;font-size:11px">Delete</button>
             </div>`).join('')
           : '<p class="dim">No documents uploaded yet.</p>';
-        els('#sDocsList [data-deldoc]').forEach((b) => (b.onclick = async () => {
-          await api('DELETE', `/api/documents/${b.dataset.deldoc}`);
-          paintDocs(await api('GET', `/api/sites/${s.id}/documents`));
-        }));
+        els('#sDocsList [data-deldoc]').forEach((b) => (b.onclick = async () => { await api('DELETE', `/api/documents/${b.dataset.deldoc}`); refreshDocs(); }));
       };
-      api('GET', `/api/sites/${s.id}/documents`).then(paintDocs).catch(() => (el('#sDocsList').textContent = 'Failed to load.'));
+      /** A versioned doc list — current shown prominently, older versions of
+       * the same title collapsed under it, exactly the shape §7 of the brief
+       * asks for: "show the current version prominently... with an archive
+       * of previous versions." */
+      const paintVersionedList = (docs, type, hostId, viewerFn) => {
+        const groups = new Map();
+        for (const d of docs.filter((x) => x.type === type)) {
+          const key = d.title || '';
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(d);
+        }
+        const host = el(`#${hostId}`);
+        if (!groups.size) { host.innerHTML = '<p class="dim">None uploaded yet.</p>'; return; }
+        host.innerHTML = [...groups.entries()].map(([title, versions]) => {
+          versions.sort((a, b) => b.version - a.version);
+          const [current, ...older] = versions;
+          const row = (d, isCurrent) => `<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px">
+            <span style="flex:1">${isCurrent ? '<strong>' + esc(title) + '</strong>' : esc(title)} — v${d.version}
+              <a href="javascript:void(0)" data-view="${d.id}" data-mime="${d.mimetype}" data-title="${esc(title)}">${esc(d.filename)}</a></span>
+            <span class="dim" style="font-size:11px">${esc(new Date(d.uploaded_at).toLocaleDateString('en-GB'))} · ${esc(d.uploaded_by)}</span>
+            <button type="button" class="btn danger" data-deldoc="${d.id}" style="padding:3px 8px;font-size:11px">Delete</button>
+          </div>`;
+          return `<div style="border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:6px">
+            ${row(current, true)}
+            ${older.length ? `<details style="margin-left:8px"><summary class="dim" style="font-size:11px;cursor:pointer">${older.length} earlier version${older.length === 1 ? '' : 's'}</summary>${older.map((d) => row(d, false)).join('')}</details>` : ''}
+          </div>`;
+        }).join('');
+        els(`#${hostId} [data-deldoc]`).forEach((b) => (b.onclick = async () => { await api('DELETE', `/api/documents/${b.dataset.deldoc}`); refreshDocs(); }));
+        els(`#${hostId} [data-view]`).forEach((a) => (a.onclick = () => viewerFn(docUrl(a.dataset.view), a.dataset.mime, a.dataset.title)));
+      };
+      const openDoc = (url, mimetype, title) => { if (mimetype === 'application/pdf') window.open(url, '_blank'); else openImageViewer(url, title); };
+      const paintInstructions = (docs) => paintVersionedList(docs, 'ASSIGNMENT_INSTRUCTIONS', 'sInstructionsList', openDoc);
+      const paintMapsGallery = (docs) => {
+        const maps = docs.filter((d) => d.type === 'SITE_MAP');
+        const current = new Map();
+        for (const d of maps) { const k = d.title || ''; if (!current.has(k) || d.version > current.get(k).version) current.set(k, d); }
+        const host = el('#sMapsGallery');
+        host.innerHTML = current.size ? `<div style="display:flex;gap:10px;flex-wrap:wrap">${[...current.values()].map((d) => `
+          <div style="width:110px;text-align:center" data-view="${d.id}" data-mime="${d.mimetype}" data-title="${esc(d.title)}">
+            ${d.mimetype === 'application/pdf'
+              ? `<div style="width:100px;height:100px;border:1px solid var(--line);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;cursor:pointer" class="dim">PDF</div>`
+              : `<img src="${docUrl(d.id)}" style="width:100px;height:100px;object-fit:cover;border-radius:6px;cursor:pointer;border:1px solid var(--line)">`}
+            <div class="dim" style="font-size:11px;margin-top:4px">${esc(d.title)} (v${d.version})</div>
+          </div>`).join('')}</div>` : '<p class="dim">No maps uploaded yet.</p>';
+        els('#sMapsGallery [data-view]').forEach((el_) => (el_.onclick = () => openDoc(docUrl(el_.dataset.view), el_.dataset.mime, el_.dataset.title)));
+      };
+      function refreshDocs() {
+        api('GET', `/api/sites/${s.id}/documents`).then((docs) => { paintDocs(docs); paintInstructions(docs); paintMapsGallery(docs); })
+          .catch(() => { el('#sDocsList').textContent = 'Failed to load.'; });
+      }
+      refreshDocs();
       el('#sDocUpload').onclick = () => {
         const file = el('#sDocFile').files[0];
         if (!file) { el('#sDocError').textContent = 'choose a file first'; return; }
@@ -1174,11 +1265,32 @@ function siteModal(s) {
           try {
             await api('POST', `/api/sites/${s.id}/documents`, { type: el('#sDocType').value, mimetype: file.type, filename: file.name, data });
             el('#sDocError').textContent = ''; el('#sDocFile').value = '';
-            paintDocs(await api('GET', `/api/sites/${s.id}/documents`));
+            refreshDocs();
           } catch (e) { el('#sDocError').textContent = e.message; }
         };
         reader.readAsDataURL(file);
       };
+      function wireVersionedUpload(type, titleId, fileId, buttonId, errorId) {
+        el(buttonId).onclick = () => {
+          const title = el(titleId).value.trim();
+          const file = el(fileId).files[0];
+          if (!title) { el(errorId).textContent = 'title is required'; return; }
+          if (!file) { el(errorId).textContent = 'choose a file first'; return; }
+          if (!['application/pdf', 'image/png', 'image/jpeg'].includes(file.type)) { el(errorId).textContent = 'must be a PDF, PNG or JPEG'; return; }
+          const reader = new FileReader();
+          reader.onload = async () => {
+            const data = reader.result.split(',')[1];
+            try {
+              await api('POST', `/api/sites/${s.id}/documents`, { type, title, mimetype: file.type, filename: file.name, data });
+              el(errorId).textContent = ''; el(titleId).value = ''; el(fileId).value = '';
+              refreshDocs();
+            } catch (e) { el(errorId).textContent = e.message; }
+          };
+          reader.readAsDataURL(file);
+        };
+      }
+      wireVersionedUpload('ASSIGNMENT_INSTRUCTIONS', '#sInstrTitle', '#sInstrFile', '#sInstrUpload', '#sInstrError');
+      wireVersionedUpload('SITE_MAP', '#sMapTitle', '#sMapFile', '#sMapUpload', '#sMapError');
       const paintPassdown = (logs) => {
         el('#sPassdownLog').innerHTML = logs.length
           ? `<div class="log" style="max-height:160px;overflow:auto">${logs.map((l) => `<div><span class="t">${esc(new Date(l.created_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(l.author_name)}: ${esc(l.body)}</div>`).join('')}</div>`

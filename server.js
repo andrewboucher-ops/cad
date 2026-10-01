@@ -889,6 +889,16 @@ const requestHandler = async (req, res) => {
       }
       try {
         const out = await r.handler({ params, body, query: url.searchParams, user, req });
+        // A handler that returns __stream (a large file read off disk) is
+        // piped straight through rather than buffered into memory first —
+        // the one exception to this dispatcher's otherwise fully-buffered
+        // response model. Never cached by idempotency-key for the same
+        // reason nothing else about a GET is: there is no write to replay.
+        if (out && out.__stream) {
+          res.writeHead(out.__status || 200, { 'cache-control': 'no-store', ...(out.__headers || {}) });
+          out.__stream.on('error', () => { if (!res.writableEnded) res.end(); });
+          return out.__stream.pipe(res);
+        }
         const status = out && out.__status ? out.__status : 200;
         const payload = out && out.__body !== undefined ? out.__body : out;
         const extraHeaders = (out && out.__headers) || {};
@@ -3355,7 +3365,8 @@ const forms = require('./routes-forms.js')({
 
 // Client portal — see routes-client.js for the trust-boundary invariants.
 require('./routes-client.js')({
-  route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
+  route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
+  isControlRole, assertPassdownAccess,
 });
 
 // Applicant tracking — see routes-applicants.js for the design.

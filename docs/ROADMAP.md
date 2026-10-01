@@ -349,10 +349,28 @@ self-contained slice at a time, tested and deployed before the next.
   modal with fresh server data so several edits in one sitting never act
   on stale state. Asset-field extensions (stock/quantity concepts) were
   left for Increment 6, where the stock ledger actually needs them.
-- **Increment 3 — site document store.** Versioned assignment-instruction
-  PDFs and site maps, extending the existing `documents`
-  collection/upload pattern with a current/archived flag, a version
-  number, and streamed (not whole-file-in-memory) serving.
+- ~~**Increment 3 — site document store.**~~ — done, see README.md.
+  `documents` gained two versioned types (`ASSIGNMENT_INSTRUCTIONS`,
+  `SITE_MAP`, each keyed by a `title`) alongside the existing
+  `CONTRACT`/`SITE_DOCUMENT`; a new upload under the same site+type+title
+  archives the old one (kept, never deleted) rather than replacing it.
+  `GET /api/sites/:id/documents` opened up from `CONTROL`-only to every
+  staff role, scoped inside the handler to "control sees everything, staff
+  see only the current versions for a site they're actually posted to" —
+  reusing the passdown-access check already built for exactly that
+  question. The client portal's document routes got the mirror-image fix:
+  the two new types are explicitly excluded, so a client never sees the
+  operational detail staff work from. File serving moved from buffering
+  the whole file into memory to a real stream, the one addition to the
+  request dispatcher itself (a handler can return `__stream` instead of
+  `__body`), with an `inline`/`attachment` split by type and a long cache
+  lifetime since a version's file is immutable once uploaded.
+  `admin.html` got a versioned list (current prominent, archive
+  collapsed) for instructions and a thumbnail gallery with a built-in
+  zoom/pan viewer for maps — a PDF opens in the browser's own viewer
+  instead, which already does both. `officer.html` got the read-only
+  side: a "Site documents" button on whatever job or visit an officer
+  currently has.
 - **Increment 4 — rota grid rework.** Coverage-gap/over-staffing colour
   coding, a by-shift-type filter view, bulk actions (publish, duplicate
   week forward).

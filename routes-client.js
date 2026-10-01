@@ -34,7 +34,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const DOC_TYPES = ['CONTRACT', 'SITE_DOCUMENT'];
+// ASSIGNMENT_INSTRUCTIONS and SITE_MAP are versioned (see the upload route);
+// CONTRACT and SITE_DOCUMENT keep their original, independent-upload
+// behaviour unchanged.
+const DOC_TYPES = ['CONTRACT', 'SITE_DOCUMENT', 'ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP'];
+const VERSIONED_DOC_TYPES = ['ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP'];
 const DOC_MAX_BYTES = 15e6;
 
 // Magic bytes, not the declared mimetype — same reasoning as routes-forms.js:
@@ -49,7 +53,8 @@ const DOC_EXT = { 'application/pdf': '.pdf', 'image/png': '.png', 'image/jpeg': 
 const CLIENT_REQUEST_STATUSES = ['OPEN', 'ACKNOWLEDGED', 'CLOSED'];
 
 module.exports = function registerClientRoutes({
-  route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
+  route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
+  isControlRole, assertPassdownAccess,
 }) {
   for (const t of ['clients', 'documents', 'client_requests']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -94,7 +99,11 @@ module.exports = function registerClientRoutes({
       scheduled_for: v.scheduled_for, dispatched_at: v.dispatched_at, on_scene_at: v.on_scene_at, completed_at: v.completed_at,
     };
   };
-  const publicDocument = (d) => ({ id: d.id, site_id: d.site_id, type: d.type, filename: d.filename, uploaded_by: d.uploaded_by, uploaded_at: d.uploaded_at });
+  const publicDocument = (d) => ({
+    id: d.id, site_id: d.site_id, type: d.type, title: d.title || null,
+    version: d.version || 1, is_current: d.is_current !== false,
+    filename: d.filename, mimetype: d.mimetype, uploaded_by: d.uploaded_by, uploaded_at: d.uploaded_at,
+  });
 
   /* -------------------------------------------------------------- *
    * Client organisations — admin manages who a client account can see
@@ -142,33 +151,78 @@ module.exports = function registerClientRoutes({
     const site = db.sites.find((s) => s.id === Number(params.id));
     if (!site) throw httpError(404, 'site not found');
     if (!DOC_TYPES.includes(body.type)) throw httpError(400, `type must be one of ${DOC_TYPES.join(', ')}`);
+    const versioned = VERSIONED_DOC_TYPES.includes(body.type);
+    const title = String(body.title || '').trim();
+    if (versioned && !title) throw httpError(400, 'title required for assignment instructions and site maps');
     const ext = DOC_EXT[body.mimetype];
     if (!ext) throw httpError(400, 'mimetype must be application/pdf, image/png or image/jpeg');
     if (!body.data) throw httpError(400, 'data (base64) required');
     const bytes = Buffer.from(body.data, 'base64');
     if (bytes.length > DOC_MAX_BYTES) throw httpError(413, 'document too large');
     if (!DOC_SIGNATURES[body.mimetype](bytes)) throw httpError(400, 'file content does not match the declared mimetype');
+
+    // A new upload under the same site+type+title supersedes the last
+    // current one rather than sitting alongside it — the archive is kept
+    // (never deleted), just no longer the version that surfaces by default.
+    let version = 1;
+    if (versioned) {
+      const previous = db.documents.find((x) => x.site_id === site.id && x.type === body.type && x.is_current !== false
+        && (x.title || '').trim().toLowerCase() === title.toLowerCase());
+      if (previous) { previous.is_current = false; version = (previous.version || 1) + 1; }
+    }
+
     const dir = documentsDir(site.id);
     fs.mkdirSync(dir, { recursive: true });
     const storedName = `${crypto.randomUUID()}${ext}`;
     fs.writeFileSync(path.join(dir, storedName), bytes);
     const d = {
-      id: nextId('documents'), site_id: site.id, type: body.type,
+      id: nextId('documents'), site_id: site.id, type: body.type, title: versioned ? title : '',
+      version, is_current: true,
       filename: String(body.filename || 'document').trim().slice(0, 200) || 'document',
       stored_name: storedName, mimetype: body.mimetype,
       uploaded_by: user.display_name, uploaded_at: new Date().toISOString(),
     };
     db.documents.push(d);
-    logEvent('site.document_uploaded', `${body.type === 'CONTRACT' ? 'CONTRACT' : 'DOCUMENT'} UPLOADED FOR ${site.name}`, { site_id: site.id, document_id: d.id });
+    const label = versioned ? `${body.type === 'SITE_MAP' ? 'SITE MAP' : 'ASSIGNMENT INSTRUCTIONS'} "${title}" v${version}` : (body.type === 'CONTRACT' ? 'CONTRACT' : 'DOCUMENT');
+    logEvent('site.document_uploaded', `${label} UPLOADED FOR ${site.name}`, { site_id: site.id, document_id: d.id });
     return { __status: 201, __body: publicDocument(d) };
   });
-  route('GET', '/api/sites/:id/documents', CONTROL, ({ params }) => db.documents.filter((d) => d.site_id === Number(params.id)).map(publicDocument));
-  route('GET', '/api/documents/:id/file', CONTROL, ({ params }) => {
+  route('GET', '/api/sites/:id/documents', ALL, ({ params, query, user }) => {
+    const site = db.sites.find((s) => s.id === Number(params.id));
+    if (!site) throw httpError(404, 'site not found');
+    let rows = db.documents.filter((d) => d.site_id === site.id);
+    if (!isControlRole(user.role)) {
+      // Staff without a control role only ever see the current assignment
+      // instructions/maps for a site they're actually posted to — never a
+      // contract, never an archived version — the same "have you been
+      // posted here" check routes-client.js's passdown logs already use.
+      assertPassdownAccess(site.id, user);
+      rows = rows.filter((d) => VERSIONED_DOC_TYPES.includes(d.type) && d.is_current !== false);
+    } else {
+      if (query.get('type')) rows = rows.filter((d) => d.type === query.get('type'));
+      if (query.get('current') === '1') rows = rows.filter((d) => d.is_current !== false);
+    }
+    return rows.map(publicDocument);
+  });
+  route('GET', '/api/documents/:id/file', ALL, ({ params, user }) => {
     const d = db.documents.find((x) => x.id === Number(params.id));
     if (!d) throw httpError(404, 'document not found');
+    if (!isControlRole(user.role)) {
+      // 404, not 403 — same "don't confirm it exists" reasoning ownedSite()
+      // below already uses for a client probing a site id that isn't theirs.
+      if (!VERSIONED_DOC_TYPES.includes(d.type) || d.is_current === false) throw httpError(404, 'document not found');
+      assertPassdownAccess(d.site_id, user);
+    }
     const file = path.join(documentsDir(d.site_id), d.stored_name);
     if (!fs.existsSync(file)) throw httpError(404, 'document file missing');
-    return { __body: fs.readFileSync(file), __headers: { 'content-type': d.mimetype, 'content-disposition': `attachment; filename="${d.filename.replace(/"/g, '')}"` } };
+    const inline = VERSIONED_DOC_TYPES.includes(d.type);
+    return {
+      __stream: fs.createReadStream(file),
+      __headers: {
+        'content-type': d.mimetype, 'cache-control': 'private, max-age=604800',
+        'content-disposition': `${inline ? 'inline' : 'attachment'}; filename="${d.filename.replace(/"/g, '')}"`,
+      },
+    };
   });
   route('DELETE', '/api/documents/:id', ADMIN, ({ params }) => {
     const d = db.documents.find((x) => x.id === Number(params.id));
@@ -269,14 +323,17 @@ module.exports = function registerClientRoutes({
     const client = requireClient(user);
     const siteId = query.get('site_id') ? Number(query.get('site_id')) : null;
     if (siteId) ownedSite(client, siteId);
-    return db.documents.filter((d) => client.site_ids.includes(d.site_id) && (!siteId || d.site_id === siteId)).map(publicDocument);
+    // Assignment instructions and site maps are internal operational
+    // documents — a client sees contracts and site paperwork about their
+    // own site, never the patrol route or access details staff work from.
+    return db.documents.filter((d) => client.site_ids.includes(d.site_id) && (!siteId || d.site_id === siteId) && !VERSIONED_DOC_TYPES.includes(d.type)).map(publicDocument);
   });
   route('GET', '/api/client/documents/:id/file', CLIENT, ({ params, user }) => {
     const client = requireClient(user);
     const d = db.documents.find((x) => x.id === Number(params.id));
-    if (!d || !client.site_ids.includes(d.site_id)) throw httpError(404, 'document not found');
+    if (!d || !client.site_ids.includes(d.site_id) || VERSIONED_DOC_TYPES.includes(d.type)) throw httpError(404, 'document not found');
     const file = path.join(documentsDir(d.site_id), d.stored_name);
     if (!fs.existsSync(file)) throw httpError(404, 'document file missing');
-    return { __body: fs.readFileSync(file), __headers: { 'content-type': d.mimetype, 'content-disposition': `attachment; filename="${d.filename.replace(/"/g, '')}"` } };
+    return { __stream: fs.createReadStream(file), __headers: { 'content-type': d.mimetype, 'cache-control': 'private, max-age=604800', 'content-disposition': `attachment; filename="${d.filename.replace(/"/g, '')}"` } };
   });
 };

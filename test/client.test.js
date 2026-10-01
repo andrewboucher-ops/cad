@@ -135,6 +135,36 @@ test('document upload validates type, mimetype and magic bytes', async () => {
   assert.equal((await call('POST', `/api/sites/${site.id}/documents`, { type: 'CONTRACT', mimetype: 'application/pdf', data: PDF }, dispT)).status, 403, 'only admin uploads documents');
 });
 
+/* ---------------- versioned assignment instructions / site maps ---------------- */
+test('assignment instructions and site maps are versioned by title, and never reach the client portal', async () => {
+  const site = (await call('GET', '/api/sites', undefined, dispT)).body[0];
+
+  assert.equal((await call('POST', `/api/sites/${site.id}/documents`, { type: 'ASSIGNMENT_INSTRUCTIONS', mimetype: 'application/pdf', data: PDF }, adminT)).status, 400, 'title is required for a versioned type');
+  assert.equal((await call('POST', `/api/sites/${site.id}/documents`, { type: 'CONTRACT', mimetype: 'application/pdf', data: PDF }, adminT)).status, 201, 'title stays optional for the existing types');
+
+  const v1 = await call('POST', `/api/sites/${site.id}/documents`, { type: 'ASSIGNMENT_INSTRUCTIONS', title: 'General', mimetype: 'application/pdf', filename: 'v1.pdf', data: PDF }, adminT);
+  assert.equal(v1.status, 201);
+  assert.equal(v1.body.version, 1);
+  assert.equal(v1.body.is_current, true);
+
+  const v2 = await call('POST', `/api/sites/${site.id}/documents`, { type: 'ASSIGNMENT_INSTRUCTIONS', title: 'general', mimetype: 'application/pdf', filename: 'v2.pdf', data: PDF }, adminT);
+  assert.equal(v2.body.version, 2, 'a matching title (case-insensitive) supersedes, not a fresh lineage');
+  const docs = await call('GET', `/api/sites/${site.id}/documents`, undefined, dispT);
+  assert.equal(docs.body.find((d) => d.id === v1.body.id).is_current, false, 'the old version is archived, not deleted');
+  assert.ok(docs.body.some((d) => d.id === v1.body.id), 'and still listed for control');
+
+  const otherMap = await call('POST', `/api/sites/${site.id}/documents`, { type: 'SITE_MAP', title: 'Perimeter', mimetype: 'application/pdf', data: PDF }, adminT);
+  assert.equal(otherMap.body.version, 1, 'a different title starts its own lineage');
+
+  // Never reaches the client portal, even for a client who owns this site.
+  const client = (await call('POST', '/api/clients', { name: 'Doc Test Co', site_ids: [site.id] }, adminT)).body;
+  await call('POST', '/api/users', { username: 'docclient', password: 'realpassword1', role: 'CLIENT', client_id: client.id }, adminT);
+  const clientT = await login('docclient', 'realpassword1');
+  const clientDocs = await call('GET', '/api/client/documents', undefined, clientT);
+  assert.ok(!clientDocs.body.some((d) => ['ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP'].includes(d.type)), 'a client never sees internal operational documents');
+  assert.equal((await call('GET', `/api/client/documents/${v2.body.id}/file`, undefined, clientT)).status, 404, 'not reachable directly by id either');
+});
+
 /* ---------------- broadcast is opt-in only for CLIENT ---------------- */
 test('a CLIENT websocket receives nothing from an untargeted broadcast, and only a siteIds-scoped one for its own site', async () => {
   const sites = (await call('GET', '/api/sites', undefined, dispT)).body;

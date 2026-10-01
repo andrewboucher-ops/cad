@@ -510,6 +510,53 @@ deliberately omits the incident list: `routes-forms.js`'s `canRead()` is
 an owning client is a real change to that file's security invariant,
 worth its own careful pass rather than a bolt-on here.
 
+## Site documents — assignment instructions and maps
+
+`documents` (the same collection the client portal's contracts live in)
+gained two versioned types: `ASSIGNMENT_INSTRUCTIONS` and `SITE_MAP`, each
+keyed by a `title` so a site can carry several distinguishable maps
+("Perimeter", "Building layout") or just one set of instructions.
+Uploading a new file under the same site, type and title (case-insensitive)
+archives the one before it (`is_current: false`) rather than replacing it —
+the archive is kept, never deleted, with each row's own `version` number.
+`CONTRACT`/`SITE_DOCUMENT` keep their original, independent-upload
+behaviour; versioning only applies to the two new types.
+
+`GET /api/sites/:id/documents` moved from `CONTROL`-only to every staff
+role, with the access split made inside the handler: a control role sees
+everything (optionally filtered by `?type=`/`?current=1`), while anyone
+else only ever sees the *current* assignment instructions and maps for a
+site they're actually posted to right now — reusing
+`assertPassdownAccess()`, the same "have you been posted here" check
+passdown logs already use. A contract, an archived version, or another
+site's documents are never reachable this way, by role or by guessing an
+id directly (a type/currency mismatch on `GET /api/documents/:id/file` is a
+404, not a 403 — the same "don't confirm it exists" reasoning the client
+portal's `ownedSite()` already uses). The client portal's own document
+routes got the mirror-image fix: `ASSIGNMENT_INSTRUCTIONS`/`SITE_MAP` are
+explicitly excluded, so a client never sees the operational detail staff
+work from for their own site.
+
+A document's file is now served streamed (`fs.createReadStream` piped
+straight to the response) rather than read whole into memory first — the
+one addition to the request dispatcher itself, gated behind a handler
+returning `__stream` instead of `__body` so every other route's buffered
+response is unaffected. An assignment-instructions or site-map file opens
+`inline` (view in the browser) where a contract still forces `attachment`
+(download), and carries a week-long `Cache-Control` — each version's file
+is immutable once uploaded, a new version is always a new row and a new
+file, so there's nothing for a long cache lifetime to go stale against.
+
+`admin.html`'s site editor shows the current version of each title
+prominently with its earlier versions collapsed underneath, and site maps
+as a thumbnail gallery; opening a map image zooms and pans in a small
+built-in viewer (wheel to zoom, drag to pan), while a map or instructions
+PDF opens in the browser's own PDF viewer — already zoomable and
+pannable — rather than reimplementing one. `officer.html` gets the
+read-only side of this: a "Site documents" button on whatever job or
+patrol visit an officer currently has, open to whatever the API already
+scopes them to see.
+
 ## Multi-branch
 
 A staff-visibility split, not a tenancy wall like the client portal: a
