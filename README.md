@@ -350,6 +350,32 @@ SMS/email/iCal notifications, a versioned site-document store) — see
 builds on; it deliberately adds no new screen, only restructures shifts
 under the UI that already existed.
 
+**Increment 2** builds the admin surface the restructuring made possible.
+`admin.html`'s new Shift Types tab is real CRUD (name, a stable key, a
+colour used for the rota, active/retired) rather than the hardcoded five —
+retiring a type hides it from new shifts without touching ones that
+already use it, and `rota.html`'s type dropdown always keeps a retired
+type's current shift correctly selected (as a labelled "(retired)"
+option) rather than silently drifting it to whatever option happens to be
+first. Sites gained `code`/`postcode`/`timezone`/`risk_level`/
+`access_instructions`/`is_control_room`; vehicles gained a home-base site
+and MOT/tax due dates alongside the existing service/insurance ones, with
+the admin vehicle list flagging whichever of the four is overdue.
+
+The real capability this increment adds is multi-assignment editing in
+`rota.html`: a shift's modal now lists everyone on it (not just the one
+person whose row was clicked), with a duty-supervisor toggle, clock
+in/out and a Remove button per person, plus an "Add" control scoped to
+people not already on the shift. Each row action calls its own
+assignment-level endpoint and reopens the modal with fresh data from the
+server — several adds/removes/clock-ins in one sitting never act on
+stale state. `required_headcount` is now directly editable, with a live
+"N of M" count. Creating a shift still starts with one person via the
+same convenience `personnel` field as before; building toward a
+headcount beyond one is something you now do from the edit view, not the
+create flow — keeping the "+ add shift" cell click exactly as simple as
+it always was.
+
 ### SIA licence / DBS compliance tracking
 
 There is no integration with either service, because none exists to build:

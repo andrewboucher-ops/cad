@@ -736,7 +736,8 @@ function publicShift(s) {
 }
 function publicVehicle(v) {
   const p = v.assigned_personnel_id ? db.personnel.find((x) => x.id === v.assigned_personnel_id) : null;
-  return { ...v, assigned_personnel_name: p ? p.name : null };
+  const site = v.site_id ? db.sites.find((x) => x.id === v.site_id) : null;
+  return { ...v, assigned_personnel_name: p ? p.name : null, site_name: site ? site.name : null };
 }
 function publicAsset(a) {
   const p = a.assigned_to ? db.personnel.find((x) => x.id === a.assigned_to) : null;
@@ -1236,9 +1237,12 @@ route('POST', '/api/vehicles', ADMIN, ({ body }) => {
   if (!registration) throw httpError(400, 'registration required');
   if (db.vehicles.some((x) => x.registration === registration)) throw httpError(409, 'a vehicle with that registration already exists');
   const p = body.assigned_personnel_id ? db.personnel.find((x) => x.id === Number(body.assigned_personnel_id)) : null;
+  const homeSite = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null;
   const v = {
     id: nextId('vehicles'), registration, type: body.type || 'Vehicle', make: body.make || '', model: body.model || '',
     service_due_at: body.service_due_at || null, insurance_due_at: body.insurance_due_at || null,
+    mot_due_at: body.mot_due_at || null, tax_due_at: body.tax_due_at || null,
+    site_id: homeSite ? homeSite.id : null,
     mileage: body.mileage != null && body.mileage !== '' ? Number(body.mileage) : null, condition: body.condition || '',
     assigned_personnel_id: p ? p.id : null,
     status: VEHICLE_STATUSES.includes(body.status) ? body.status : 'ACTIVE', notes: body.notes || '',
@@ -1261,6 +1265,9 @@ route('PATCH', '/api/vehicles/:id', ADMIN, ({ params, body }) => {
   if ('model' in body) v.model = body.model || '';
   if ('service_due_at' in body) v.service_due_at = body.service_due_at || null;
   if ('insurance_due_at' in body) v.insurance_due_at = body.insurance_due_at || null;
+  if ('mot_due_at' in body) v.mot_due_at = body.mot_due_at || null;
+  if ('tax_due_at' in body) v.tax_due_at = body.tax_due_at || null;
+  if ('site_id' in body) { const homeSite = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null; v.site_id = homeSite ? homeSite.id : null; }
   if ('mileage' in body) v.mileage = body.mileage != null && body.mileage !== '' ? Number(body.mileage) : null;
   if ('condition' in body) v.condition = body.condition || '';
   if ('assigned_personnel_id' in body) { const p = body.assigned_personnel_id ? db.personnel.find((x) => x.id === Number(body.assigned_personnel_id)) : null; v.assigned_personnel_id = p ? p.id : null; }
@@ -2618,16 +2625,26 @@ route('DELETE', '/api/personnel/:id/welfare', ALL, ({ params, user }) => {
 });
 
 /* Sites under contract — what alarm response jobs are attached to. */
+const RISK_LEVELS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 route('GET', '/api/sites', ALL, ({ user }) => db.sites.filter((s) => visibleToUser(s, user)));
 route('POST', '/api/sites', CONTROL, ({ body }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');
   if (db.sites.some((x) => x.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'site already exists');
+  if (body.risk_level && !RISK_LEVELS.includes(body.risk_level)) throw httpError(400, `risk_level must be one of ${RISK_LEVELS.join(', ')}`);
   const site = {
     id: nextId('sites'), name, address: body.address || '', lat: Number(body.lat) || null, lon: Number(body.lon) || null,
     keyholder: body.keyholder || '', contact_email: body.contact_email || '', contract: 'ACTIVE', checklist: [],
     response_sla_minutes: body.response_sla_minutes ? Number(body.response_sla_minutes) : null,
     branch_id: normalizedBranchId(body.branch_id),
+    code: String(body.code || '').trim(), postcode: String(body.postcode || '').trim(),
+    // Not validated against the IANA database — a typo here shows up as a
+    // visibly wrong time on the rota rather than failing closed, which is
+    // the safer failure mode for a field with no live-consequence default.
+    timezone: String(body.timezone || '').trim() || 'Europe/London',
+    risk_level: body.risk_level || null, access_instructions: body.access_instructions || '',
+    // Informational, not enforced to exactly one — see README.md.
+    is_control_room: body.is_control_room === true,
   };
   db.sites.push(site);
   logEvent('site.created', `SITE ${name} ADDED`);
@@ -2654,6 +2671,15 @@ route('PATCH', '/api/sites/:id', ADMIN, ({ params, body }) => {
     }
     site.response_sla_minutes = body.response_sla_minutes === null ? null : Number(body.response_sla_minutes);
   }
+  if ('code' in body) site.code = String(body.code || '').trim();
+  if ('postcode' in body) site.postcode = String(body.postcode || '').trim();
+  if ('timezone' in body) site.timezone = String(body.timezone || '').trim() || 'Europe/London';
+  if ('risk_level' in body) {
+    if (body.risk_level && !RISK_LEVELS.includes(body.risk_level)) throw httpError(400, `risk_level must be one of ${RISK_LEVELS.join(', ')}`);
+    site.risk_level = body.risk_level || null;
+  }
+  if ('access_instructions' in body) site.access_instructions = body.access_instructions || '';
+  if ('is_control_room' in body) site.is_control_room = Boolean(body.is_control_room);
   if ('checklist' in body) {
     if (!Array.isArray(body.checklist)) throw httpError(400, 'checklist must be an array');
     site.checklist = body.checklist.map((item) => ({
@@ -3106,7 +3132,10 @@ function patrolScheduleTick() {
 /* ------------------------------------------------------------------ *
  * HR rota — shift types, shifts (slots) and assignments (who's on them)
  * ------------------------------------------------------------------ */
-route('GET', '/api/shift-types', ALL, () => db.shift_types.filter((t) => t.active).map(publicShiftType));
+route('GET', '/api/shift-types', ALL, ({ query, user }) => {
+  const showAll = query.get('all') === '1' && user.role === 'SYSTEM_ADMIN';
+  return (showAll ? db.shift_types : db.shift_types.filter((t) => t.active)).map(publicShiftType);
+});
 route('POST', '/api/shift-types', ADMIN, ({ body }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');

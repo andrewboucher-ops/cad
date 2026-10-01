@@ -198,8 +198,7 @@ function paintGrid() {
 
   els('.shift-chip').forEach((chip) => chip.addEventListener('click', (e) => {
     e.stopPropagation();
-    const cell = chip.closest('.rota-cell');
-    shiftModal(allShifts.find((s) => s.id === Number(chip.dataset.shift)), null, Number(cell.dataset.personnel));
+    shiftModal(allShifts.find((s) => s.id === Number(chip.dataset.shift)));
   }));
   els('.rota-cell').forEach((cell) => cell.addEventListener('click', () => {
     shiftModal(null, { personnelId: Number(cell.dataset.personnel), date: cell.dataset.date });
@@ -210,46 +209,73 @@ el('#prevWeek').onclick = () => { weekStart.setDate(weekStart.getDate() - 7); lo
 el('#nextWeek').onclick = () => { weekStart.setDate(weekStart.getDate() + 7); load(); };
 el('#thisWeek').onclick = () => { weekStart = startOfWeek(new Date()); load(); };
 
-function shiftForm(s, defaults, myAssignment) {
+function shiftForm(s, defaults) {
   const isNew = !s;
   const d = defaults || {};
   const startDefault = isNew ? `${d.date}T09:00` : new Date(s.starts_at).toISOString().slice(0, 16);
   const endDefault = isNew ? `${d.date}T17:00` : new Date(s.ends_at).toISOString().slice(0, 16);
   return `
     <form class="stack" id="shForm">
-      ${isNew
-        ? `<label>Personnel</label>
-      <select id="shPersonnel">${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>`
-        : `<label>Personnel</label><p class="dim" style="margin:0">${esc(myAssignment.personnel_name)}</p>`}
+      ${isNew ? `<label>Personnel</label>
+      <select id="shPersonnel">${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
       <label>Shift type</label>
-      <select id="shType">${allShiftTypes.map((t) => `<option value="${t.id}" ${!isNew && s.shift_type_id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+      <select id="shType">${allShiftTypes.map((t) => `<option value="${t.id}" ${!isNew && s.shift_type_id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+        ${!isNew && !allShiftTypes.some((t) => t.id === s.shift_type_id) ? `<option value="${s.shift_type_id}" selected>${esc(s.shift_type_name)} (retired)</option>` : ''}</select>
       <label>Site (optional)</label>
       <select id="shSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${!isNew && s.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       <label>Starts</label>
       <input id="shStart" type="datetime-local" value="${startDefault}">
       <label>Ends</label>
       <input id="shEnd" type="datetime-local" value="${endDefault}">
-      <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDuty" ${!isNew && myAssignment.is_duty_supervisor ? 'checked' : ''}> Duty supervisor for this shift — the console calls them first for any officer's "call supervisor"</label>
+      <label>Required headcount</label>
+      <input id="shHeadcount" type="number" min="1" value="${isNew ? 1 : s.required_headcount}">
       <label>Notes</label>
       <textarea id="shNotes" rows="2">${isNew ? '' : esc(s.notes || '')}</textarea>
       ${isNew ? '' : `<label>Status</label>
-      <select id="shStatus">${['DRAFT', 'PUBLISHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((v) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>
-      ${myAssignment.clocked_in_at ? `<p class="dim" style="margin:0">Clocked in ${new Date(myAssignment.clocked_in_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${myAssignment.clocked_out_at ? `, out ${new Date(myAssignment.clocked_out_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}` : ''}</p>` : ''}`}
+      <select id="shStatus">${['DRAFT', 'PUBLISHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((v) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
       <p class="dim" id="shError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
-function shiftModal(s, defaults, personnelId) {
-  const myAssignment = s ? s.assignments.find((a) => a.personnel_id === personnelId) : null;
-  modal(s ? `Shift — ${myAssignment.personnel_name}` : 'New shift', shiftForm(s, defaults, myAssignment), () => {
+/** Everyone on the shift — each row acts immediately (not a "Save" field),
+ * since adding/removing a person or toggling duty supervisor is its own
+ * API call (POST/PATCH a shift_assignment), separate from the shift-level
+ * fields shiftForm edits. Kept as its own section so a shift with several
+ * people doesn't need one row per person crammed into the main form. */
+function assignmentsSection(s) {
+  const active = s.assignments.filter((a) => a.status !== 'REMOVED');
+  const onShiftIds = active.map((a) => a.personnel_id);
+  const available = allPersonnel.filter((p) => !onShiftIds.includes(p.id));
+  return `
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+      <label style="display:flex;justify-content:space-between;align-items:center">
+        <span>Personnel on this shift</span>
+        <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">${active.length} of ${s.required_headcount}</span>
+      </label>
+      <div id="assignRows" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+        ${active.map((a) => `
+          <div style="display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px" data-assignment="${a.id}">
+            <span style="flex:1">${esc(a.personnel_name)}${a.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}</span>
+            <span class="dim" style="font-size:11px">${esc(a.status)}${a.clocked_in_at ? (a.clocked_out_at ? ' · clocked out' : ' · clocked in') : ''}</span>
+            <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:11px"><input type="checkbox" data-duty="${a.id}" ${a.is_duty_supervisor ? 'checked' : ''}> duty sup.</label>
+            ${!a.clocked_in_at ? `<button type="button" class="btn" data-clockin="${a.id}" style="padding:4px 8px;font-size:11px">Clock in</button>` : ''}
+            ${a.clocked_in_at && !a.clocked_out_at ? `<button type="button" class="btn" data-clockout="${a.id}" style="padding:4px 8px;font-size:11px">Clock out</button>` : ''}
+            <button type="button" class="btn danger" data-remove="${a.id}" style="padding:4px 8px;font-size:11px">Remove</button>
+          </div>`).join('') || '<p class="dim" style="font-size:13px">Nobody assigned yet.</p>'}
+      </div>
+      ${available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
+        <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+        <button type="button" class="btn" id="shAddPerson" style="padding:6px 12px;font-size:12px">Add</button>
+      </div>` : ''}
+    </div>`;
+}
+function shiftModal(s, defaults) {
+  const isNew = !s;
+  modal(isNew ? 'New shift' : `Shift — ${s.site_name || s.shift_type_name}`, shiftForm(s, defaults) + (isNew ? '' : assignmentsSection(s)), () => {
     const foot = document.querySelector('#modalHost .foot');
-    const canClockIn = myAssignment && !myAssignment.clocked_in_at;
-    const canClockOut = myAssignment && myAssignment.clocked_in_at && !myAssignment.clocked_out_at;
     foot.innerHTML = `
       <div class="foot-split">
         <span>${s ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
-          ${canClockIn ? '<button class="btn" id="shClockIn">Clock in</button>' : ''}
-          ${canClockOut ? '<button class="btn" id="shClockOut">Clock out</button>' : ''}
           <button class="btn" id="shCancel">Cancel</button>
           <button class="btn primary" id="shSave">${s ? 'Save changes' : 'Create shift'}</button>
         </span>
@@ -260,12 +286,28 @@ function shiftModal(s, defaults, personnelId) {
       try { await api('DELETE', `/api/shifts/${s.id}`); closeModal(); await load(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
-    if (el('#shClockIn')) el('#shClockIn').onclick = async () => {
-      try { await api('POST', `/api/shift-assignments/${myAssignment.id}/clock-in`, {}); closeModal(); await load(); }
+    // Reopens the same shift fresh from the server after a row action, so
+    // several adds/removes/clock-ins in one sitting never act on stale data.
+    const reopen = async () => { await load(); shiftModal(allShifts.find((x) => x.id === s.id)); };
+    els('[data-clockin]').forEach((b) => (b.onclick = async () => {
+      try { await api('POST', `/api/shift-assignments/${b.dataset.clockin}/clock-in`, {}); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
-    };
-    if (el('#shClockOut')) el('#shClockOut').onclick = async () => {
-      try { await api('POST', `/api/shift-assignments/${myAssignment.id}/clock-out`, {}); closeModal(); await load(); }
+    }));
+    els('[data-clockout]').forEach((b) => (b.onclick = async () => {
+      try { await api('POST', `/api/shift-assignments/${b.dataset.clockout}/clock-out`, {}); await reopen(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    }));
+    els('[data-duty]').forEach((cb) => (cb.onchange = async () => {
+      try { await api('PATCH', `/api/shift-assignments/${cb.dataset.duty}`, { is_duty_supervisor: cb.checked }); await reopen(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    }));
+    els('[data-remove]').forEach((b) => (b.onclick = async () => {
+      if (!confirm('Remove this person from the shift?')) return;
+      try { await api('PATCH', `/api/shift-assignments/${b.dataset.remove}`, { status: 'REMOVED' }); await reopen(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    }));
+    if (el('#shAddPerson')) el('#shAddPerson').onclick = async () => {
+      try { await api('POST', `/api/shifts/${s.id}/assignments`, { personnel: Number(el('#shAddPersonnel').value) }); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
     el('#shSave').onclick = async () => {
@@ -274,16 +316,15 @@ function shiftModal(s, defaults, personnelId) {
         site_id: el('#shSite').value ? Number(el('#shSite').value) : null,
         starts_at: new Date(el('#shStart').value).toISOString(),
         ends_at: new Date(el('#shEnd').value).toISOString(),
+        required_headcount: Number(el('#shHeadcount').value) || 1,
         notes: el('#shNotes').value.trim(),
       };
       try {
         if (s) {
           if (el('#shStatus')) body.status = el('#shStatus').value;
           await api('PATCH', `/api/shifts/${s.id}`, body);
-          await api('PATCH', `/api/shift-assignments/${myAssignment.id}`, { is_duty_supervisor: el('#shDuty').checked });
         } else {
           body.personnel = Number(el('#shPersonnel').value);
-          body.is_duty_supervisor = el('#shDuty').checked;
           await api('POST', '/api/shifts', body);
         }
         closeModal(); await load();

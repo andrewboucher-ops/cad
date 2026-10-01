@@ -332,11 +332,23 @@ self-contained slice at a time, tested and deployed before the next.
   `test/cccs.test.js`) but not yet reachable from `rota.html` — that's
   Increment 2. Covered by `test/cccs.test.js`, `test/contact.test.js`,
   `test/leave.test.js` and the new `test/migrate-shifts.test.js`.
-- **Increment 2 — shift types + extended site/vehicle/asset fields.**
-  Admin CRUD for shift types; `sites` gains code/postcode/timezone/
-  risk_level/access_instructions/`is_control_room`; `vehicles` gains a
-  home-base site and MOT/tax dates; the real multi-assignment editing UI
-  (add/remove a second person on a shift) lands in `rota.html`.
+- ~~**Increment 2 — shift types + extended site/vehicle fields.**~~ — done,
+  see README.md. `admin.html` gets a real Shift Types tab (name, key,
+  colour, active/retired) instead of the fixed five; retiring a type
+  hides it from new shifts without touching shifts already using it, and
+  `rota.html`'s type dropdown keeps a retired type correctly selected
+  (labelled "(retired)") rather than silently drifting the shift to a
+  different type on save. `sites` gained code/postcode/timezone/
+  risk_level/access_instructions/`is_control_room`; `vehicles` gained a
+  home-base site and MOT/tax due dates, with the admin vehicle list
+  flagging whichever of service/insurance/MOT/tax is overdue. The real
+  multi-assignment editing UI landed in `rota.html`: a shift's modal
+  lists everyone on it with duty-supervisor/clock-in-out/remove per
+  person and an add-person control, `required_headcount` is directly
+  editable with a live "N of M" count, and every row action reopens the
+  modal with fresh server data so several edits in one sitting never act
+  on stale state. Asset-field extensions (stock/quantity concepts) were
+  left for Increment 6, where the stock ledger actually needs them.
 - **Increment 3 — site document store.** Versioned assignment-instruction
   PDFs and site maps, extending the existing `documents`
   collection/upload pattern with a current/archived flag, a version

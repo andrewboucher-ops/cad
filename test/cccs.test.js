@@ -426,6 +426,27 @@ test('jobs can be raised against a contracted site and inherit its details', asy
   assert.equal((await call('POST', '/api/sites', { name: 'Meridian Business Park' }, dispT)).status, 409);
 });
 
+test('a site carries code/postcode/timezone/risk level/access instructions, and the control-room flag', async () => {
+  const bad = await call('POST', '/api/sites', { name: 'Bad Risk Site', risk_level: 'EXTREME' }, dispT);
+  assert.equal(bad.status, 400, 'risk_level must be one of the known values');
+
+  const created = await call('POST', '/api/sites', {
+    name: 'Northgate HQ', code: 'NHQ', postcode: 'NG1 1AA', timezone: 'Europe/London',
+    risk_level: 'HIGH', access_instructions: 'Ring bell twice, ask for duty manager', is_control_room: true,
+  }, dispT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.code, 'NHQ');
+  assert.equal(created.body.postcode, 'NG1 1AA');
+  assert.equal(created.body.risk_level, 'HIGH');
+  assert.equal(created.body.is_control_room, true);
+
+  const updated = await call('PATCH', `/api/sites/${created.body.id}`, { risk_level: null, timezone: 'Europe/Dublin' }, adminT);
+  assert.equal(updated.body.risk_level, null, 'can be cleared back to unset');
+  assert.equal(updated.body.timezone, 'Europe/Dublin');
+  assert.equal((await call('PATCH', `/api/sites/${created.body.id}`, { risk_level: 'EXTREME' }, adminT)).status, 400);
+  await call('DELETE', `/api/sites/${created.body.id}`, undefined, adminT);
+});
+
 /* ---------------- patrol schedules and site visits ---------------- */
 test('a patrol schedule is created and the tick turns a due occurrence into a scheduled visit', async () => {
   const sites = await call('GET', '/api/sites', undefined, dispT);
@@ -591,6 +612,32 @@ test('linking a user to a personnel record updates has_login both ways, and unli
   await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT);
 });
 
+/* ---------------- HR rota: shift types ---------------- */
+test('shift types are admin-extensible, and retiring one hides it from the default list without touching shifts already using it', async () => {
+  const listed = await call('GET', '/api/shift-types', undefined, dispT);
+  assert.ok(listed.body.some((t) => t.key === 'CONTROL_ROOM'), 'the seeded defaults are present');
+  assert.equal((await call('GET', '/api/shift-types?all=1', undefined, adminT)).status, 200);
+  assert.equal((await call('GET', '/api/shift-types?all=1', undefined, dispT)).body.length, listed.body.length, 'all=1 is ignored for a non-admin');
+
+  assert.equal((await call('POST', '/api/shift-types', { name: 'Night Patrol' }, dispT)).status, 403, 'only admin creates shift types');
+  const created = await call('POST', '/api/shift-types', { name: 'Night Patrol' }, adminT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.key, 'NIGHT_PATROL', 'a key is derived from the name when none is given');
+  assert.equal((await call('POST', '/api/shift-types', { name: 'Another', key: 'NIGHT_PATROL' }, adminT)).status, 409, 'key must be unique');
+
+  const start = new Date(Date.now() + 3600000).toISOString();
+  const end = new Date(Date.now() + 9 * 3600000).toISOString();
+  const shift = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: created.body.id, starts_at: start, ends_at: end }, dispT);
+  assert.equal(shift.body.shift_type_name, 'Night Patrol');
+
+  const retired = await call('PATCH', `/api/shift-types/${created.body.id}`, { active: false }, adminT);
+  assert.equal(retired.body.active, false);
+  assert.ok(!(await call('GET', '/api/shift-types', undefined, dispT)).body.some((t) => t.id === created.body.id), 'retired type is hidden from the default list');
+  const stillThere = await call('GET', `/api/shifts?personnel_id=${danId}`, undefined, dispT);
+  assert.equal(stillThere.body.find((s) => s.id === shift.body.id).shift_type_name, 'Night Patrol', 'the shift already using it is unaffected');
+  await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, adminT);
+});
+
 /* ---------------- HR rota: shifts ---------------- */
 const patrolTypeId = () => app.db.shift_types.find((t) => t.key === 'MOBILE_PATROL').id;
 
@@ -661,6 +708,23 @@ test('a vehicle can be created, updated and deleted, with a unique registration'
   assert.equal((await call('PATCH', `/api/vehicles/${created.body.id}`, { status: 'NONSENSE' }, adminT)).status, 400);
 
   assert.equal((await call('DELETE', `/api/vehicles/${created.body.id}`, undefined, adminT)).status, 200);
+});
+
+test('a vehicle carries a home-base site and MOT/tax due dates', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const meridian = sites.body.find((x) => x.name === 'Meridian Business Park');
+  const created = await call('POST', '/api/vehicles', {
+    registration: 'test-502', site_id: meridian.id, mot_due_at: '2026-12-01', tax_due_at: '2026-11-01',
+  }, adminT);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.site_id, meridian.id);
+  assert.equal(created.body.site_name, 'Meridian Business Park');
+  assert.equal(created.body.mot_due_at, '2026-12-01');
+
+  const updated = await call('PATCH', `/api/vehicles/${created.body.id}`, { site_id: null, tax_due_at: null }, adminT);
+  assert.equal(updated.body.site_id, null);
+  assert.equal(updated.body.tax_due_at, null);
+  await call('DELETE', `/api/vehicles/${created.body.id}`, undefined, adminT);
 });
 
 test('a vehicle cannot be deleted while an MDT or person is still linked to it', async () => {
