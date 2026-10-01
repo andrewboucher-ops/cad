@@ -90,6 +90,11 @@
   </div>
 
   <div class="section-card">
+    <header>Equipment on hire</header>
+    <div class="body" id="rentalsBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card">
     <header>Documents</header>
     <div class="body" id="docsBody"><p class="empty-note">Loading…</p></div>
   </div>
@@ -193,6 +198,24 @@ el('#reqSend').onclick = async () => {
   } catch (e) { el('#reqError').textContent = e.message; }
 };
 
+/* Hire agreements for this client and all its sites — not per site, so a
+ * client sees everything they have signed for in one place. */
+async function paintRentals() {
+  const rows = await api('GET', withAs('/api/client/rentals')).catch(() => []);
+  const t = encodeURIComponent(getSession().token);
+  const label = { ON_HIRE: 'On hire', PART_RETURNED: 'Part returned', RETURNED: 'Returned' };
+  el('#rentalsBody').innerHTML = rows.length ? rows.map((r) => `
+    <div style="border-bottom:1px solid var(--line-soft);padding:10px 0">
+      <div class="list-row" style="border:none;padding:0">
+        <span class="t mono">${esc(r.reference)}</span>
+        <span style="flex:1">${esc(r.site_name || r.hirer_name)} <span class="dim" style="font-size:12px">· from ${esc(fmtDate(r.start_at))}${r.expected_return_at && r.status !== 'RETURNED' ? ` · due back ${esc(fmtDate(r.expected_return_at))}` : ''} · signed by ${esc(r.signed_name)}</span></span>
+        <span class="pill ${r.status === 'RETURNED' ? 'completed' : 'open'}">${esc(label[r.status] || r.status)}</span>
+      </div>
+      <ul style="margin:6px 0 4px 18px;padding:0;font-size:13px">${r.items.map((i) => `<li>${esc(i.tag ? i.tag + ' — ' : '')}${esc(i.description)}${i.serial_no ? ` <span class="dim">(SN ${esc(i.serial_no)})</span>` : ''} — ${i.returned_at ? `<span style="color:var(--available)">returned ${esc(fmtDate(i.returned_at))}</span>` : '<strong>on hire</strong>'}</li>`).join('')}</ul>
+      <div style="font-size:12.5px"><a target="_blank" href="${withAs(`/api/client/rentals/${r.id}/agreement?token=${t}`)}">Rental agreement (PDF)</a>${r.return_notes.map((n) => ` · <a target="_blank" href="${withAs(`/api/client/rentals/${r.id}/returns/${n.n}?token=${t}`)}">Return note ${n.n}</a>`).join('')}</div>
+    </div>`).join('') : '<p class="empty-note">Nothing on hire.</p>';
+}
+
 async function loadSite() {
   const site = sites.find((s) => s.id === currentSiteId);
   el('#siteAddress').textContent = site ? site.address || '' : '';
@@ -220,6 +243,7 @@ async function loadSite() {
     document.title = 'CCCS — client portal (admin view)';
   }
   client = await api('GET', withAs('/api/client/me'));
+  paintRentals();
   if (isAdminView) el('#adminAsName').textContent = client.name;
   sites = client.sites;
   el('#clientName').textContent = client.name;

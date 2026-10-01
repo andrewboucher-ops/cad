@@ -36,20 +36,25 @@
 <script>
 'use strict';
 const { api, el, els, esc } = CCCS;
-if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+if (!CCCS.requireAuth(['SYSTEM_ADMIN'])) throw new Error('auth');
 const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
 if (isAdmin) els('.admin-only').forEach((b) => b.classList.remove('hide'));
 const { modal, close, foot, wire, v, numOrNull, money, date, when, words, options } = KIT;
 
 const CATEGORIES = ['RADIO', 'BODY_CAMERA', 'DEVICE', 'IT', 'KEY', 'EQUIPMENT', 'PPE', 'FIRST_AID', 'UNIFORM', 'OTHER'];
 const CONDITIONS = ['NEW', 'GOOD', 'FAIR', 'POOR', 'DAMAGED'];
-const STATUS_PILL = { IN_STORE: ['In store', 'ok'], IN_USE: ['Issued', 'info'], IN_REPAIR: ['In repair', 'warn'], LOST: ['Lost', 'bad'], RETIRED: ['Retired', 'off'] };
+const FREQS = [[7, 'Weekly'], [14, 'Every 2 weeks'], [30, 'Monthly'], [90, 'Every 3 months'], [180, 'Every 6 months'], [365, 'Yearly'], ['custom', 'Other…']];
+const freqKey = (d) => (!d ? '' : FREQS.some(([n]) => n === d) ? d : 'custom');
+const freqText = (d) => ({ 7: 'a week', 14: '2 weeks', 30: 'a month', 90: '3 months', 180: '6 months', 365: 'a year', 730: '2 years', 1460: '4 years' })[d] || `${d} days`;
+const STATUS_PILL = { IN_STORE: ['In store', 'ok'], IN_USE: ['Issued', 'info'], ON_HIRE: ['On hire', 'info'], IN_REPAIR: ['In repair', 'warn'], LOST: ['Lost', 'bad'], RETIRED: ['Retired', 'off'] };
 const FILTERS = {
   all: ['All', (a) => a.status !== 'RETIRED'],
   store: ['In store', (a) => a.status === 'IN_STORE'],
   issued: ['Issued', (a) => a.checkout || a.status === 'IN_USE'],
+  hire: ['On hire', (a) => a.status === 'ON_HIRE'],
   overdue: ['Overdue back', (a) => a.checkout && a.checkout.overdue],
-  checks: ['Check due', (a) => a.status !== 'RETIRED' && ['OVERDUE', 'DUE_SOON'].includes(a.check_state)],
+  checks: ['Inspection due', (a) => a.status !== 'RETIRED' && ['OVERDUE', 'DUE_SOON'].includes(a.check_state)],
+  pat: ['PAT due', (a) => a.status !== 'RETIRED' && ['OVERDUE', 'DUE_SOON'].includes(a.pat_state)],
   repair: ['In repair', (a) => a.status === 'IN_REPAIR'],
   lost: ['Lost', (a) => a.status === 'LOST'],
   retired: ['Retired', (a) => a.status === 'RETIRED'],
@@ -74,8 +79,9 @@ function paint() {
   const t = (n, l, cls, f) => `<button class="tile ${cls}" data-f="${f}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
   el('#tiles').innerHTML = [
     t(s.total, 'Assets', '', 'all'), t(s.in_store, 'In store', '', 'store'), t(s.issued, 'Issued', '', 'issued'),
+    t(s.on_hire, 'On hire', '', 'hire'),
     t(s.overdue_returns, 'Overdue back', s.overdue_returns ? 'bad' : 'good', 'overdue'),
-    t(s.checks_due, 'Checks due', s.checks_due ? 'warn' : 'good', 'checks'),
+    t(s.checks_due, 'Inspections / PAT due', s.checks_due ? 'warn' : 'good', s.pat_due ? 'pat' : 'checks'),
     t(s.in_repair, 'In repair', s.in_repair ? 'warn' : '', 'repair'), t(s.lost, 'Lost', s.lost ? 'bad' : '', 'lost'),
     t(money(s.value), 'Value', '', 'all'),
   ].join('');
@@ -86,13 +92,16 @@ function paint() {
   const rows = data.assets.filter(FILTERS[filter][1]).filter((a) => (!cat || a.category === cat) && (!loc || a.location_id === Number(loc))
     && (!q || [a.tag, a.description, a.make, a.model, a.serial_no, a.checkout && a.checkout.personnel_name, a.assigned_to_name].some((x) => String(x || '').toLowerCase().includes(q))));
   el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k">
-    <thead><tr><th>Tag</th><th>Asset</th><th>Category</th><th>Status</th><th>With / where</th><th>Condition</th><th>Next check</th><th></th></tr></thead>
+    <thead><tr><th>Tag</th><th>Asset</th><th>Category</th><th>Status</th><th>With / where</th><th>Condition</th><th>Inspection</th><th>PAT</th><th></th></tr></thead>
     <tbody>${rows.map((a) => {
       const [sl, sc] = STATUS_PILL[a.status] || [words(a.status), 'off'];
       const co = a.checkout;
       const withWho = co ? `<strong>${esc(co.personnel_name || '—')}</strong><div class="dim" style="font-size:11.5px">since ${esc(date(co.checked_out_at))}${co.expected_return_at ? ` · due back ${esc(date(co.expected_return_at))}` : ''}</div>${co.overdue ? '<span class="pill bad">Overdue</span>' : ''}`
+        : a.rental ? `On hire to <strong>${esc(a.rental.hirer_name)}</strong><div class="dim" style="font-size:11.5px">${esc(a.rental.reference)}</div>`
         : a.assigned_to_name ? esc(a.assigned_to_name) : esc([a.location_name, a.site_name].filter(Boolean).join(' · ') || '—');
-      const chk = a.next_check_due_at ? `<span class="pill ${a.check_state === 'OVERDUE' ? 'bad' : a.check_state === 'DUE_SOON' ? 'warn' : 'ok'}">${esc(date(a.next_check_due_at))}</span>${a.check_type ? `<div class="dim" style="font-size:11.5px">${esc(a.check_type)}</div>` : ''}` : '<span class="dim">—</span>';
+      const pillFor = (state, d) => `<span class="pill ${state === 'OVERDUE' ? 'bad' : state === 'DUE_SOON' ? 'warn' : 'ok'}">${d ? esc(date(d)) : 'due'}</span>`;
+      const chk = a.next_check_due_at ? `${pillFor(a.check_state, a.next_check_due_at)}${a.check_interval_days ? `<div class="dim" style="font-size:11.5px">every ${esc(freqText(a.check_interval_days))}</div>` : ''}` : '<span class="dim">—</span>';
+      const pat = a.pat_required ? `${pillFor(a.pat_state, a.pat_next_due_at)}${a.pat_last_at ? `<div class="dim" style="font-size:11.5px">last ${esc(date(a.pat_last_at))}</div>` : '<div class="dim" style="font-size:11.5px">never tested</div>'}` : '<span class="dim">No</span>';
       const live = !['RETIRED', 'LOST'].includes(a.status);
       return `<tr>
         <td class="mono" style="white-space:nowrap"><strong>${esc(a.tag || '—')}</strong></td>
@@ -102,10 +111,11 @@ function paint() {
         <td>${withWho}</td>
         <td class="dim">${esc(a.condition ? words(a.condition) : '—')}</td>
         <td>${chk}</td>
+        <td>${pat}</td>
         <td><div class="acts">
-          ${co ? `<button class="btn" data-a="checkin" data-id="${a.id}">Return</button>` : live && a.status !== 'IN_REPAIR' ? `<button class="btn primary" data-a="checkout" data-id="${a.id}">Check out</button>` : ''}
-          ${live ? `<button class="btn" data-a="inspect" data-id="${a.id}">Inspect</button>` : ''}
-          <button class="btn" data-a="status" data-id="${a.id}">Status</button>
+          ${co ? `<button class="btn" data-a="checkin" data-id="${a.id}">Return</button>` : live && a.status === 'IN_STORE' ? `<button class="btn primary" data-a="checkout" data-id="${a.id}">Check out</button>` : ''}
+          ${live ? `<button class="btn" data-a="inspect" data-id="${a.id}">${a.pat_required ? 'Inspect / PAT' : 'Inspect'}</button>` : ''}
+          ${a.status !== 'ON_HIRE' ? `<button class="btn" data-a="status" data-id="${a.id}">Status</button>` : ''}
           <button class="btn" data-a="history" data-id="${a.id}">History</button>
           ${isAdmin ? `<button class="btn" data-a="edit" data-id="${a.id}">Edit</button>` : ''}
         </div></td></tr>`;
@@ -140,14 +150,20 @@ const ACTIONS = {
     }));
   },
   inspect(a) {
-    modal(`Inspect — ${name(a)}`, `<div class="k-form">
-      <div><label>${esc(a.check_type || 'Check')}</label><select id="iR"><option value="PASS">Passed</option><option value="FAIL">Failed</option></select></div>
-      ${a.check_interval_days ? `<div><label>Next due</label><input disabled value="in ${a.check_interval_days} days"></div>` : '<div><label>Next due (optional)</label><input id="iNext" type="date"></div>'}
+    const kinds = [['INSPECTION', a.check_type || 'Inspection'], ...(a.pat_required ? [['PAT', 'PAT test']] : [])];
+    modal(`Record a check — ${name(a)}`, `<div class="k-form">
+      <div><label>Check</label><select id="iK">${options(kinds, a.pat_required && a.pat_state !== 'OK' ? 'PAT' : 'INSPECTION')}</select></div>
+      <div><label>Result</label><select id="iR"><option value="PASS">Passed</option><option value="FAIL">Failed</option></select></div>
+      <div class="full dim" id="iNextTxt" style="font-size:12.5px"></div>
       <div class="full"><label>Note</label><input id="iN" placeholder="e.g. PAT tested, label applied"></div></div>
-      <p class="dim" style="font-size:12.5px">A failed check marks it damaged and, if it is in store, sends it to In repair.</p>${foot('Record')}`, (root) => wire(root, async () => {
-      await api('POST', `/api/assets/${a.id}/inspect`, { result: v(root, '#iR'), note: v(root, '#iN'), next_check_due_at: v(root, '#iNext') || undefined });
-      await done('Inspection recorded.');
-    }));
+      <p class="dim" style="font-size:12.5px">A failed check marks it damaged and, if it is in store, sends it to In repair.</p>${foot('Record')}`, (root) => {
+      const txt = () => { const k = v(root, '#iK'); const n = k === 'PAT' ? a.pat_interval_days : a.check_interval_days; root.querySelector('#iNextTxt').textContent = n ? `Next one will be due in ${freqText(n)}.` : 'No regular frequency set — edit the asset to add one.'; };
+      root.querySelector('#iK').onchange = txt; txt();
+      wire(root, async () => {
+        await api('POST', `/api/assets/${a.id}/inspect`, { kind: v(root, '#iK'), result: v(root, '#iR'), note: v(root, '#iN') });
+        await done('Check recorded.');
+      });
+    });
   },
   status(a) {
     const choices = [['IN_STORE', a.status === 'LOST' ? 'Found — back in store' : 'Back in store'], ['IN_REPAIR', 'Send for repair'], ['LOST', 'Report lost'], ['RETIRED', 'Retire / dispose of']].filter(([s]) => s !== a.status);
@@ -160,7 +176,7 @@ const ACTIONS = {
     }));
   },
   history(a) {
-    const LABEL = { CHECKED_OUT: 'Checked out', RETURNED: 'Returned', INSPECTED: 'Inspected', FAILED_INSPECTION: 'Failed inspection', SENT_FOR_REPAIR: 'Sent for repair', REPORTED_LOST: 'Reported lost', FOUND: 'Found', BACK_IN_STORE: 'Back in store', RETIRED: 'Retired' };
+    const LABEL = { CHECKED_OUT: 'Checked out', RETURNED: 'Returned', INSPECTED: 'Inspected', FAILED_INSPECTION: 'Failed inspection', PAT_PASSED: 'PAT passed', PAT_FAILED: 'PAT failed', HIRED_OUT: 'Hired out', HIRE_RETURNED: 'Back from hire', SENT_FOR_REPAIR: 'Sent for repair', REPORTED_LOST: 'Reported lost', FOUND: 'Found', BACK_IN_STORE: 'Back in store', RETIRED: 'Retired' };
     modal(`History — ${name(a)}`, `<dl class="k-form" style="margin:0 0 10px">
         <div><label>Purchased</label>${esc(date(a.purchase_date))}${a.purchase_cost != null ? ` · ${money(a.purchase_cost)}` : ''}${a.supplier ? ` · ${esc(a.supplier)}` : ''}</div>
         <div><label>Warranty</label>${a.warranty_expires_at ? `until ${esc(date(a.warranty_expires_at))}` : '—'}</div>
@@ -194,12 +210,22 @@ function editor(a) {
     <div><label>Cost (£)</label><input id="eCost" type="number" min="0" step="0.01" value="${a && a.purchase_cost != null ? a.purchase_cost : ''}"></div>
     <div><label>Supplier</label><input id="eSup" value="${esc((a && a.supplier) || '')}"></div>
     <div><label>Warranty until</label><input id="eWar" type="date" value="${esc((a && a.warranty_expires_at) || '')}"></div>
-    <div class="k-section">Regular check</div>
-    <div><label>What check</label><input id="eCType" value="${esc((a && a.check_type) || '')}" placeholder="e.g. PAT test, calibration, service"></div>
-    <div><label>Every (days)</label><input id="eCInt" type="number" min="0" value="${a && a.check_interval_days != null ? a.check_interval_days : ''}" placeholder="e.g. 365"></div>
-    <div><label>Next due</label><input id="eCNext" type="date" value="${esc((a && a.next_check_due_at) || '')}"></div>
+    <div class="k-section">Inspections</div>
+    <div><label>How often</label><select id="eFreq">${options(FREQS, freqKey(a && a.check_interval_days), 'No regular inspection')}</select></div>
+    <div id="eCustomW" class="${freqKey(a && a.check_interval_days) === 'custom' ? '' : 'hide'}"><label>Every (days)</label><input id="eCInt" type="number" min="1" value="${a && a.check_interval_days != null ? a.check_interval_days : ''}"></div>
+    <div><label>What is checked</label><input id="eCType" value="${esc((a && a.check_type) || '')}" placeholder="e.g. visual check, function test"></div>
+    <div><label>Next inspection due</label><input id="eCNext" type="date" value="${esc((a && a.next_check_due_at) || '')}" placeholder="worked out for you"></div>
+    <div class="k-section">PAT testing</div>
+    <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><span>Does this asset need PAT testing?</span>
+      <select id="ePat" style="width:auto">${options([['no', 'No'], ['yes', 'Yes']], a && a.pat_required ? 'yes' : 'no')}</select></label></div>
+    <div class="pat-f"><label>Test every</label><select id="ePatInt">${options([[90, '3 months'], [180, '6 months'], [365, '12 months'], [730, '24 months'], [1460, '48 months']], (a && a.pat_interval_days) || 365)}</select></div>
+    <div class="pat-f"><label>Last tested (if known)</label><input id="ePatLast" type="date" value="${esc((a && a.pat_last_at) || '')}"></div>
+    <div class="pat-f"><label>Next test due</label><input id="ePatNext" type="date" value="${esc((a && a.pat_next_due_at) || '')}"></div>
     <div class="full"><label>Notes</label><textarea id="eNotes" rows="2">${esc((a && a.notes) || '')}</textarea></div></div>
     ${foot(isNew ? 'Create asset' : 'Save', isNew ? '' : '<button type="button" class="btn danger" id="eDel">Delete</button>')}`, (root) => {
+    const patShow = () => root.querySelectorAll('.pat-f').forEach((x) => x.classList.toggle('hide', v(root, '#ePat') !== 'yes'));
+    root.querySelector('#ePat').onchange = patShow; patShow();
+    root.querySelector('#eFreq').onchange = () => root.querySelector('#eCustomW').classList.toggle('hide', v(root, '#eFreq') !== 'custom');
     if (!isNew) root.querySelector('#eDel').onclick = async () => {
       if (a.checkout) { alert('It is checked out — return it first.'); return; }
       if (!confirm(`Delete ${name(a)} permanently? Retiring it (Status → Retire) keeps its history instead.`)) return;
@@ -211,8 +237,12 @@ function editor(a) {
         serial_no: v(root, '#eSerial'), condition: v(root, '#eCond') || null, location_id: numOrNull(v(root, '#eLoc')), site_id: numOrNull(v(root, '#eSite')),
         parent_asset_id: numOrNull(v(root, '#eParent')), purchase_date: v(root, '#ePDate') || null, purchase_cost: numOrNull(v(root, '#eCost')),
         supplier: v(root, '#eSup'), warranty_expires_at: v(root, '#eWar') || null, check_type: v(root, '#eCType'),
-        check_interval_days: numOrNull(v(root, '#eCInt')), next_check_due_at: v(root, '#eCNext') || null, notes: v(root, '#eNotes'),
+        check_interval_days: v(root, '#eFreq') === 'custom' ? numOrNull(v(root, '#eCInt')) : numOrNull(v(root, '#eFreq')),
+        next_check_due_at: v(root, '#eCNext') || null, notes: v(root, '#eNotes'),
+        pat_required: v(root, '#ePat') === 'yes',
       };
+      if (body.pat_required) Object.assign(body, { pat_interval_days: Number(v(root, '#ePatInt')), pat_last_at: v(root, '#ePatLast') || null, pat_next_due_at: v(root, '#ePatNext') || null });
+      if (v(root, '#eFreq') === 'custom' && !body.check_interval_days) throw new Error('enter how many days between inspections');
       if (isNew) await api('POST', '/api/assets', body); else await api('PATCH', `/api/assets/${a.id}`, body);
       await done(isNew ? 'Asset created.' : 'Saved.');
     });
@@ -237,8 +267,8 @@ el('#bLabels').onclick = () => {
 };
 
 el('#bExport').onclick = () => KIT.csv(`assets-${new Date().toISOString().slice(0, 10)}.csv`,
-  ['Tag', 'Name', 'Category', 'Make', 'Model', 'Serial', 'Status', 'Checked out to', 'Due back', 'Location', 'Site', 'Condition', 'Purchase date', 'Cost', 'Supplier', 'Warranty until', 'Check', 'Next check due'],
-  data.assets.map((a) => [a.tag, a.description, words(a.category), a.make, a.model, a.serial_no, (STATUS_PILL[a.status] || [a.status])[0], a.checkout && a.checkout.personnel_name, a.checkout && a.checkout.expected_return_at && a.checkout.expected_return_at.slice(0, 10), a.location_name, a.site_name, a.condition, a.purchase_date, a.purchase_cost, a.supplier, a.warranty_expires_at, a.check_type, a.next_check_due_at]));
+  ['Tag', 'Name', 'Category', 'Make', 'Model', 'Serial', 'Status', 'Checked out to', 'Due back', 'Location', 'Site', 'Condition', 'Purchase date', 'Cost', 'Supplier', 'Warranty until', 'Inspection every (days)', 'Next inspection', 'PAT required', 'Last PAT', 'Next PAT'],
+  data.assets.map((a) => [a.tag, a.description, words(a.category), a.make, a.model, a.serial_no, (STATUS_PILL[a.status] || [a.status])[0], a.checkout && a.checkout.personnel_name, a.checkout && a.checkout.expected_return_at && a.checkout.expected_return_at.slice(0, 10), a.location_name, a.site_name, a.condition, a.purchase_date, a.purchase_cost, a.supplier, a.warranty_expires_at, a.check_interval_days, a.next_check_due_at, a.pat_required ? 'Yes' : 'No', a.pat_last_at, a.pat_next_due_at]));
 
 load();
 setInterval(() => { if (!document.querySelector('.modal-back')) load(); }, 60000);

@@ -26,6 +26,7 @@
   <div class="bar" id="views">
     <button class="chip on" data-view="items">Items</button>
     <button class="chip" data-view="reorder">To reorder</button>
+    <button class="chip" data-view="expiring">Expiring</button>
     <button class="chip" data-view="holdings">Who holds what</button>
     <button class="chip" data-view="movements">Movements</button>
     <button class="chip" data-view="stocktakes">Stocktakes</button>
@@ -44,7 +45,7 @@
 <script>
 'use strict';
 const { api, el, els, esc } = CCCS;
-if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+if (!CCCS.requireAuth(['SYSTEM_ADMIN'])) throw new Error('auth');
 const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
 if (isAdmin) els('.admin-only').forEach((b) => b.classList.remove('hide'));
 const { modal, close, foot, wire, v, numOrNull, money, date, when, words, options } = KIT;
@@ -79,7 +80,7 @@ function paintTiles() {
   el('#tiles').innerHTML = [
     t(s.items, 'Items', '', 'items'), t(money(s.value), 'Stock value', '', 'items'),
     t(s.below_reorder, 'To reorder', s.below_reorder ? 'bad' : 'good', 'reorder'),
-    t(s.expiring, 'Expired / expiring', s.expiring ? 'warn' : 'good', 'items'),
+    t(s.expiring, 'Expired / expiring', s.expiring ? 'warn' : 'good', 'expiring'),
     t(s.issued_out, 'Issued to people', '', 'holdings'),
   ].join('');
   els('#tiles [data-go]').forEach((b) => (b.onclick = () => setView(b.dataset.go)));
@@ -97,7 +98,7 @@ function paint() {
   if (!data) return;
   paintTiles();
   el('#filters').style.display = ['items', 'reorder', 'movements'].includes(view) ? '' : 'none';
-  ({ items: paintItems, reorder: paintReorder, holdings: paintHoldings, movements: paintMovements, stocktakes: paintStocktakes })[view]();
+  ({ items: paintItems, reorder: paintReorder, expiring: paintExpiring, holdings: paintHoldings, movements: paintMovements, stocktakes: paintStocktakes })[view]();
 }
 
 function paintItems() {
@@ -107,13 +108,15 @@ function paintItems() {
     <thead><tr><th>Item</th><th>Code</th><th>Category</th><th class="num">${loc ? esc(locName(loc)) : 'In stock'}</th><th class="num">Reorder at</th><th class="num">Value</th><th>Status</th><th></th></tr></thead>
     <tbody>${rows.map((i) => {
       const lvl = levelHere(i);
-      const flags = [i.below_reorder ? '<span class="pill bad">Reorder</span>' : '', i.expired ? '<span class="pill bad">Expired</span>' : i.expiring_soon ? `<span class="pill warn">Expires ${esc(date(i.expiry_date))}</span>` : '', i.issued_out ? `<span class="pill info">${i.issued_out} issued</span>` : ''].join(' ');
+      const flags = [i.below_reorder ? '<span class="pill bad">Reorder</span>' : '', i.expired ? `<span class="pill bad">Expired ${esc(date(i.next_expiry))}</span>` : i.expiring_soon ? `<span class="pill warn">Expires ${esc(date(i.next_expiry))}</span>` : i.next_expiry ? `<span class="dim" style="font-size:11.5px">next expiry ${esc(date(i.next_expiry))}</span>` : '', i.issued_out ? `<span class="pill info">${i.issued_out} issued</span>` : ''].join(' ');
+      const bs = i.batches.filter((b) => !loc || b.location_id === Number(loc));
+      const batchLine = bs.length ? `<div class="dim" style="font-size:11.5px">${bs.map((b) => `${esc(b.batch_no || 'no batch no.')}${b.expiry_date ? ` exp ${esc(date(b.expiry_date))}` : ''}: ${b.qty}`).join(' · ')}</div>` : '';
       const where = !loc && Object.keys(i.levels).filter((k) => i.levels[k]).length > 1 ? `<div class="dim" style="font-size:11.5px">${Object.entries(i.levels).filter(([, n]) => n).map(([k, n]) => `${esc(locName(k))}: ${n}`).join(' · ')}</div>` : '';
       return `<tr>
         <td><strong>${esc(i.description)}</strong>${i.size ? ` <span class="dim">· ${esc(i.size)}</span>` : ''}${i.supplier ? `<div class="dim" style="font-size:11.5px">${esc(i.supplier)}</div>` : ''}</td>
         <td class="mono dim">${esc(i.sku || '—')}</td>
         <td class="dim">${esc(words(i.category))}</td>
-        <td class="num"><strong>${lvl}</strong> <span class="dim">${esc(i.unit || '')}</span>${where}</td>
+        <td class="num"><strong>${lvl}</strong> <span class="dim">${esc(i.unit || '')}</span>${where}${batchLine}</td>
         <td class="num dim">${i.low_stock_threshold ?? '—'}</td>
         <td class="num">${money(i.value)}</td>
         <td>${flags}</td>
@@ -144,6 +147,39 @@ function paintReorder() {
   els('#main [data-a]').forEach((b) => (b.onclick = () => ACTIONS.receive(data.items.find((i) => i.id === Number(b.dataset.id)))));
 }
 
+function paintExpiring() {
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = data.expiring_batches;
+  el('#main').innerHTML = rows.length ? `<table class="k"><thead><tr><th>Item</th><th>Batch</th><th>Expires</th><th>Where</th><th class="num">Qty</th><th></th></tr></thead><tbody>
+    ${rows.map((b, n) => `<tr><td>${esc(b.item)}</td><td class="mono">${esc(b.batch_no || '—')}</td><td><span class="pill ${b.expired ? 'bad' : 'warn'}">${b.expired ? 'Expired' : 'Expires'} ${esc(date(b.expiry_date))}</span></td>
+      <td class="dim">${esc(locName(b.location_id))}</td><td class="num">${b.qty} ${esc(b.unit)}</td>
+      <td><button class="btn" data-wo="${n}" style="padding:3px 9px;font-size:12px">${b.expiry_date < today ? 'Write off' : 'Write off early'}</button></td></tr>`).join('')}</tbody></table>`
+    : '<p class="dim">Nothing expired or expiring in the next 30 days. Expiry dates are recorded when stock is received.</p>';
+  els('[data-wo]').forEach((btn) => (btn.onclick = async () => {
+    const b = rows[Number(btn.dataset.wo)];
+    if (!confirm(`Write off ${b.qty} × ${b.item} (batch ${b.batch_no || 'none'}, expires ${date(b.expiry_date)}) at ${locName(b.location_id)}?`)) return;
+    try { await api('POST', `/api/stock/${b.item_id}/adjust`, { reason: 'EXPIRED', delta: -b.qty, location_id: b.location_id, batch_no: b.batch_no || '', expiry_date: b.expiry_date, note: 'Expired stock written off' }); await load(); setView('expiring'); }
+    catch (e) { alert(e.message); }
+  }));
+}
+
+/** Batch choice for taking stock out of a location: automatic (earliest
+ * expiry first) unless one is picked. */
+function batchSelect(i, locId, id) {
+  const bs = i.batches.filter((b) => b.location_id === Number(locId));
+  if (!bs.length) return `<input type="hidden" id="${id}" value="">`;
+  return `<label>Batch</label><select id="${id}"><option value="">Earliest expiry first (automatic)</option>${bs.map((b, n) => `<option value="${n}">${esc(b.batch_no || 'No batch no.')}${b.expiry_date ? ` — exp ${esc(date(b.expiry_date))}` : ''} (${b.qty})</option>`).join('')}</select>`;
+}
+const batchBody = (i, locId, val) => {
+  if (val === '' || val == null) return {};
+  const b = i.batches.filter((x) => x.location_id === Number(locId))[Number(val)];
+  return b ? { batch_no: b.batch_no || '', expiry_date: b.expiry_date || undefined } : {};
+};
+function wireBatch(root, i, locSel, hostSel, id) {
+  const paint = () => { root.querySelector(hostSel).innerHTML = batchSelect(i, v(root, locSel), id); };
+  root.querySelector(locSel).addEventListener('change', paint); paint();
+}
+
 async function paintHoldings() {
   el('#main').innerHTML = '<p class="dim">Loading…</p>';
   const rows = await api('GET', '/api/stock/holdings').catch((e) => { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return null; });
@@ -167,11 +203,12 @@ async function paintMovements(itemId) {
   el('#main').innerHTML = shown.length ? movementTable(shown, true) : '<p class="dim">No movements yet.</p>';
 }
 function movementTable(rows, withItem) {
-  return `<div style="overflow-x:auto"><table class="k"><thead><tr><th>When</th>${withItem ? '<th>Item</th>' : ''}<th>What</th><th class="num">Qty</th><th>Location</th><th>Who / where</th><th>By</th><th>Note</th></tr></thead><tbody>
+  return `<div style="overflow-x:auto"><table class="k"><thead><tr><th>When</th>${withItem ? '<th>Item</th>' : ''}<th>What</th><th class="num">Qty</th><th>Location</th><th>Batch</th><th>Who / where</th><th>By</th><th>Note</th></tr></thead><tbody>
     ${rows.map((m) => `<tr><td class="dim" style="white-space:nowrap">${esc(when(m.recorded_at))}</td>${withItem ? `<td>${esc(m.item)}</td>` : ''}
       <td>${esc(REASON[m.reason] || words(m.reason))}</td>
       <td class="num" style="color:${m.delta > 0 ? 'var(--available)' : m.delta < 0 ? 'var(--emergency)' : 'inherit'}">${m.delta > 0 ? '+' : ''}${m.delta || (m.person_delta ? '0' : '')}</td>
       <td class="dim">${esc(m.location_name)}</td>
+      <td class="dim mono" style="font-size:12px">${esc(m.batch_no || '')}${m.expiry_date ? ` <span style="font-family:var(--font)">exp ${esc(date(m.expiry_date))}</span>` : ''}</td>
       <td>${esc(m.personnel_name || m.site_name || (m.supplier ? `from ${m.supplier}` : '') || '')}${m.reference ? ` <span class="dim">ref ${esc(m.reference)}</span>` : ''}</td>
       <td class="dim">${esc(m.recorded_by || '')}</td><td class="dim">${esc(m.note || '')}</td></tr>`).join('')}</tbody></table></div>`;
 }
@@ -182,7 +219,7 @@ async function paintStocktakes() {
     const off = t.lines.filter((l) => l.diff);
     return `<div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px">
       <strong>${esc(t.location_name)}</strong> <span class="dim">· ${esc(when(t.at))} · ${esc(t.by)} · ${t.lines.length} counted, ${off.length} corrected</span>${t.note ? `<div class="dim">${esc(t.note)}</div>` : ''}
-      ${off.length ? `<ul style="margin:6px 0 0 18px;padding:0;font-size:13px">${off.map((l) => `<li>${esc(l.item)}: expected ${l.expected}, counted ${l.counted} (<span style="color:${l.diff > 0 ? 'var(--available)' : 'var(--emergency)'}">${l.diff > 0 ? '+' : ''}${l.diff}</span>)</li>`).join('')}</ul>` : ''}
+      ${off.length ? `<ul style="margin:6px 0 0 18px;padding:0;font-size:13px">${off.map((l) => `<li>${esc(l.item)}${l.batch_no ? ` (batch ${esc(l.batch_no)})` : ''}: expected ${l.expected}, counted ${l.counted} (<span style="color:${l.diff > 0 ? 'var(--available)' : 'var(--emergency)'}">${l.diff > 0 ? '+' : ''}${l.diff}</span>)</li>`).join('')}</ul>` : ''}
     </div>`;
   }).join('') : '<p class="dim">No stocktakes yet. Press <strong>Stocktake</strong> to count a location.</p>';
 }
@@ -198,12 +235,14 @@ const ACTIONS = {
       <div><label>Into</label><select id="rLoc">${locOpts(el('#fLoc').value)}</select></div>
       <div><label>Unit cost (£)</label><input id="rCost" type="number" min="0" step="0.01" value="${i && i.unit_cost != null ? i.unit_cost : ''}"></div>
       <div><label>Supplier</label><input id="rSup" value="${esc((i && i.supplier) || '')}"></div>
+      <div><label>Batch / lot number (optional)</label><input id="rBatch" autocomplete="off"></div>
+      <div><label>Expiry date (optional)</label><input id="rExp" type="date"></div>
       <div class="full"><label>Delivery note / PO reference</label><input id="rRef"></div>
       <div class="full"><label>Note</label><input id="rNote"></div></div>${foot('Receive')}`, (root) => {
       root.querySelector('#rItem').onchange = () => { const x = data.items.find((y) => y.id === Number(v(root, '#rItem'))); if (x) { root.querySelector('#rCost').value = x.unit_cost ?? ''; root.querySelector('#rSup').value = x.supplier || ''; } };
       wire(root, async () => {
         if (!v(root, '#rItem')) throw new Error('choose an item');
-        await api('POST', `/api/stock/${v(root, '#rItem')}/receive`, { quantity: Number(v(root, '#rQty')), location_id: Number(v(root, '#rLoc')), unit_cost: numOrNull(v(root, '#rCost')), supplier: v(root, '#rSup'), reference: v(root, '#rRef'), note: v(root, '#rNote') });
+        await api('POST', `/api/stock/${v(root, '#rItem')}/receive`, { quantity: Number(v(root, '#rQty')), location_id: Number(v(root, '#rLoc')), unit_cost: numOrNull(v(root, '#rCost')), supplier: v(root, '#rSup'), reference: v(root, '#rRef'), note: v(root, '#rNote'), batch_no: v(root, '#rBatch'), expiry_date: v(root, '#rExp') || null });
         await done('Received.');
       });
     });
@@ -215,12 +254,14 @@ const ACTIONS = {
       <div id="iWhere" class="hide"><label>Site</label><select id="iS">${options(sites.map((s) => [s.id, s.name]), '', '— choose site —')}</select></div>
       <div><label>Quantity</label><input id="iQty" type="number" min="1" value="1"></div>
       <div><label>From</label><select id="iLoc">${locOpts(el('#fLoc').value)}</select></div>
+      <div id="iBatchW"></div>
       <div class="full"><label>Note</label><input id="iNote" placeholder="e.g. new starter kit"></div></div>
       <p class="dim" style="font-size:12.5px">In stock: ${Object.entries(i.levels).filter(([, n]) => n).map(([k, n]) => `${esc(locName(k))} ${n}`).join(', ') || 'none'}</p>${foot('Issue')}`, (root) => {
       root.querySelector('#iTo').onchange = () => { const s = v(root, '#iTo') === 's'; root.querySelector('#iWho').classList.toggle('hide', s); root.querySelector('#iWhere').classList.toggle('hide', !s); };
+      wireBatch(root, i, '#iLoc', '#iBatchW', 'iBatch');
       wire(root, async () => {
         const toSite = v(root, '#iTo') === 's';
-        await api('POST', `/api/stock/${i.id}/issue`, { quantity: Number(v(root, '#iQty')), location_id: Number(v(root, '#iLoc')), personnel_id: toSite ? null : numOrNull(v(root, '#iP')), site_id: toSite ? numOrNull(v(root, '#iS')) : null, note: v(root, '#iNote') });
+        await api('POST', `/api/stock/${i.id}/issue`, { quantity: Number(v(root, '#iQty')), location_id: Number(v(root, '#iLoc')), personnel_id: toSite ? null : numOrNull(v(root, '#iP')), site_id: toSite ? numOrNull(v(root, '#iS')) : null, note: v(root, '#iNote'), ...batchBody(i, v(root, '#iLoc'), v(root, '#iBatch')) });
         await done('Issued.');
       });
     });
@@ -243,10 +284,14 @@ const ACTIONS = {
       <div><label>From</label><select id="xF">${locOpts(Object.keys(i.levels).find((k) => i.levels[k] > 0))}</select></div>
       <div><label>To</label><select id="xT">${locOpts()}</select></div>
       <div><label>Quantity</label><input id="xQty" type="number" min="1" value="1"></div>
-      <div><label>Note</label><input id="xNote"></div></div>${foot('Move')}`, (root) => wire(root, async () => {
-      await api('POST', `/api/stock/${i.id}/transfer`, { from_location_id: Number(v(root, '#xF')), to_location_id: Number(v(root, '#xT')), quantity: Number(v(root, '#xQty')), note: v(root, '#xNote') });
-      await done('Moved.');
-    }));
+      <div id="xBatchW"></div>
+      <div class="full"><label>Note</label><input id="xNote"></div></div>${foot('Move')}`, (root) => {
+      wireBatch(root, i, '#xF', '#xBatchW', 'xBatch');
+      wire(root, async () => {
+        await api('POST', `/api/stock/${i.id}/transfer`, { from_location_id: Number(v(root, '#xF')), to_location_id: Number(v(root, '#xT')), quantity: Number(v(root, '#xQty')), note: v(root, '#xNote'), ...batchBody(i, v(root, '#xF'), v(root, '#xBatch')) });
+        await done('Moved.');
+      });
+    });
   },
   adjust(i) {
     modal(`Adjust — ${itemName(i)}`, `<div class="k-form">
@@ -254,12 +299,14 @@ const ACTIONS = {
       <div><label>Quantity</label><input id="aQ" type="number" min="1" value="1"></div>
       <div><label>At</label><select id="aL">${locOpts(el('#fLoc').value)}</select></div>
       <div id="aDirW" class="hide"><label>Direction</label><select id="aDir"><option value="-1">Remove</option><option value="1">Add</option></select></div>
+      <div id="aBatchW"></div>
       <div class="full"><label>Note</label><input id="aN"></div></div>${foot('Save')}`, (root) => {
       root.querySelector('#aR').onchange = () => root.querySelector('#aDirW').classList.toggle('hide', v(root, '#aR') !== 'AUDIT_CORRECTION');
+      wireBatch(root, i, '#aL', '#aBatchW', 'aBatch');
       wire(root, async () => {
         const r = v(root, '#aR'), n = Number(v(root, '#aQ'));
         const sign = r === 'FOUND' ? 1 : r === 'AUDIT_CORRECTION' ? Number(v(root, '#aDir')) : -1;
-        await api('POST', `/api/stock/${i.id}/adjust`, { reason: r, delta: sign * n, location_id: Number(v(root, '#aL')), note: v(root, '#aN') });
+        await api('POST', `/api/stock/${i.id}/adjust`, { reason: r, delta: sign * n, location_id: Number(v(root, '#aL')), note: v(root, '#aN'), ...(sign < 0 ? batchBody(i, v(root, '#aL'), v(root, '#aBatch')) : {}) });
         await done('Adjusted.');
       });
     });
@@ -287,10 +334,12 @@ function itemEditor(i) {
     <div><label>Unit cost (£)</label><input id="eCost" type="number" min="0" step="0.01" value="${i && i.unit_cost != null ? i.unit_cost : ''}"></div>
     <div><label>Reorder when at or below</label><input id="eRe" type="number" min="0" value="${i && i.low_stock_threshold != null ? i.low_stock_threshold : ''}"></div>
     <div><label>Reorder quantity</label><input id="eRq" type="number" min="0" value="${i && i.reorder_qty != null ? i.reorder_qty : ''}"></div>
-    <div><label>Expiry date (if it has one)</label><input id="eExp" type="date" value="${esc((i && i.expiry_date) || '')}"></div>
+
     ${isNew ? `<div class="k-section">Opening stock</div>
       <div><label>Quantity now</label><input id="eQty" type="number" min="0" value="0"></div>
-      <div><label>At</label><select id="eLoc">${locOpts()}</select></div>` : ''}
+      <div><label>At</label><select id="eLoc">${locOpts()}</select></div>
+      <div><label>Batch / lot number (optional)</label><input id="eBatch"></div>
+      <div><label>Expiry date (optional)</label><input id="eExp" type="date"></div>` : '<p class="dim full" style="font-size:12.5px;margin:0">Batch numbers and expiry dates are recorded each time stock is received.</p>'}
     <div class="full"><label>Notes</label><textarea id="eNotes" rows="2">${esc((i && i.notes) || '')}</textarea></div></div>
     ${foot(isNew ? 'Create item' : 'Save', isNew ? '' : '<button type="button" class="btn danger" id="eDel">Delete item</button>')}`, (root) => {
     if (!isNew) root.querySelector('#eDel').onclick = async () => {
@@ -302,12 +351,12 @@ function itemEditor(i) {
       const body = {
         description: v(root, '#eName'), size: v(root, '#eSize'), sku: v(root, '#eSku'), category: v(root, '#eCat'), unit: v(root, '#eUnit'),
         supplier: v(root, '#eSup'), unit_cost: numOrNull(v(root, '#eCost')), low_stock_threshold: numOrNull(v(root, '#eRe')),
-        reorder_qty: numOrNull(v(root, '#eRq')), expiry_date: v(root, '#eExp') || null, notes: v(root, '#eNotes'), is_stock_tracked: true,
+        reorder_qty: numOrNull(v(root, '#eRq')), notes: v(root, '#eNotes'), is_stock_tracked: true,
       };
       if (isNew) {
         const created = await api('POST', '/api/assets', body);
         const q = Number(v(root, '#eQty'));
-        if (q > 0) await api('POST', `/api/stock/${created.id}/receive`, { quantity: q, location_id: Number(v(root, '#eLoc')), note: 'Opening stock', unit_cost: body.unit_cost });
+        if (q > 0) await api('POST', `/api/stock/${created.id}/receive`, { quantity: q, location_id: Number(v(root, '#eLoc')), note: 'Opening stock', unit_cost: body.unit_cost, batch_no: v(root, '#eBatch'), expiry_date: v(root, '#eExp') || null });
       } else await api('PATCH', `/api/assets/${i.id}`, body);
       await done(isNew ? 'Item created.' : 'Saved.');
     });
@@ -326,12 +375,23 @@ el('#bStocktake').onclick = () => {
     <p class="dim" style="font-size:12.5px">Leave a box empty to skip that item. Any difference is booked as a count correction.</p>${foot('Submit count')}`, (root) => {
     const paintList = () => {
       const loc = v(root, '#sLoc'), blind = root.querySelector('#sBlind').checked;
+      // One row per batch where an item has batches here, plus the rest of
+      // its stock with no batch; one row per item otherwise.
+      const rows = [];
+      for (const i of data.items) {
+        const bs = i.batches.filter((b) => b.location_id === Number(loc));
+        if (!bs.length) { rows.push({ i, label: itemName(i), expected: i.levels[loc] || 0, batch: null }); continue; }
+        for (const b of bs) rows.push({ i, label: `${itemName(i)} — ${b.batch_no || 'no batch no.'}${b.expiry_date ? ` exp ${date(b.expiry_date)}` : ''}`, expected: b.qty, batch: { batch_no: b.batch_no || '', expiry_date: b.expiry_date || '' } });
+        const rest = (i.levels[loc] || 0) - bs.reduce((n, b) => n + b.qty, 0);
+        if (rest > 0) rows.push({ i, label: `${itemName(i)} — no batch`, expected: rest, batch: { batch_no: '', expiry_date: '' } });
+      }
+      root._rows = rows;
       root.querySelector('#sList').innerHTML = `<table class="k"><thead><tr><th>Item</th>${blind ? '' : '<th class="num">Expected</th>'}<th class="num" style="width:110px">Counted</th></tr></thead><tbody>
-        ${data.items.map((i) => `<tr><td>${esc(itemName(i))}</td>${blind ? '' : `<td class="num dim">${i.levels[loc] || 0}</td>`}<td><input type="number" min="0" inputmode="numeric" data-count="${i.id}" style="width:100px"></td></tr>`).join('')}</tbody></table>`;
+        ${rows.map((r, n) => `<tr><td>${esc(r.label)}</td>${blind ? '' : `<td class="num dim">${r.expected}</td>`}<td><input type="number" min="0" inputmode="numeric" data-count="${n}" style="width:100px"></td></tr>`).join('')}</tbody></table>`;
     };
     root.querySelector('#sLoc').onchange = paintList; root.querySelector('#sBlind').onchange = paintList; paintList();
     wire(root, async () => {
-      const counts = [...root.querySelectorAll('[data-count]')].filter((x) => x.value !== '').map((x) => ({ item_id: Number(x.dataset.count), counted: Number(x.value) }));
+      const counts = [...root.querySelectorAll('[data-count]')].filter((x) => x.value !== '').map((x) => { const r = root._rows[Number(x.dataset.count)]; return { item_id: r.i.id, counted: Number(x.value), ...(r.batch || {}) }; });
       if (!counts.length) throw new Error('enter at least one count');
       const t = await api('POST', '/api/stock/stocktake', { location_id: Number(v(root, '#sLoc')), counts, note: v(root, '#sNote') });
       await done(`Stocktake saved — ${t.lines.filter((l) => l.diff).length} correction(s).`);
@@ -356,8 +416,8 @@ el('#bLocations').onclick = function locations() {
 };
 
 el('#bExport').onclick = () => KIT.csv(`stock-${new Date().toISOString().slice(0, 10)}.csv`,
-  ['Item', 'Size', 'Code', 'Category', 'Unit', ...data.locations.map((l) => l.name), 'Total', 'Issued to people', 'Reorder at', 'Reorder qty', 'Unit cost', 'Value', 'Supplier', 'Expiry'],
-  data.items.map((i) => [i.description, i.size, i.sku, words(i.category), i.unit, ...data.locations.map((l) => i.levels[l.id] || 0), i.total, i.issued_out, i.low_stock_threshold, i.reorder_qty, i.unit_cost, i.value, i.supplier, i.expiry_date]));
+  ['Item', 'Size', 'Code', 'Category', 'Unit', ...data.locations.map((l) => l.name), 'Total', 'Issued to people', 'Reorder at', 'Reorder qty', 'Unit cost', 'Value', 'Supplier', 'Next expiry', 'Batches'],
+  data.items.map((i) => [i.description, i.size, i.sku, words(i.category), i.unit, ...data.locations.map((l) => i.levels[l.id] || 0), i.total, i.issued_out, i.low_stock_threshold, i.reorder_qty, i.unit_cost, i.value, i.supplier, i.next_expiry, i.batches.map((b) => `${b.batch_no || '-'}${b.expiry_date ? ' exp ' + b.expiry_date : ''}: ${b.qty} @ ${locName(b.location_id)}`).join('; ')]));
 
 load();
 setInterval(() => { if (!document.querySelector('.modal-back')) load(); }, 60000);

@@ -94,7 +94,7 @@ const db = {
   training_courses: [], training_records: [],
   leave_requests: [],
   ui_settings: [],
-  stock_locations: [], asset_events: [], stocktakes: [],
+  stock_locations: [], asset_events: [], stocktakes: [], rentals: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -1588,7 +1588,7 @@ route('DELETE', '/api/maintenance-logs/:id', ADMIN, ({ params }) => {
 });
 
 const ASSET_CATEGORIES = ['EQUIPMENT', 'UNIFORM', 'KEY', 'DEVICE', 'RADIO', 'BODY_CAMERA', 'PPE', 'FIRST_AID', 'IT', 'CONSUMABLE', 'OTHER'];
-const ASSET_STATUSES = ['IN_USE', 'IN_STORE', 'IN_REPAIR', 'LOST', 'RETIRED'];
+const ASSET_STATUSES = ['IN_USE', 'IN_STORE', 'IN_REPAIR', 'ON_HIRE', 'LOST', 'RETIRED'];
 const ASSET_CONDITIONS = ['NEW', 'GOOD', 'FAIR', 'POOR', 'DAMAGED'];
 /** The asset-register and stock-catalogue details (routes-inventory.js):
  * shared by create and edit, each field optional and validated. */
@@ -1613,8 +1613,9 @@ function applyAssetExtras(a, body) {
     if (sku && db.assets.some((x) => x.id !== a.id && x.sku === sku)) throw httpError(409, 'another item already uses that code');
     a.sku = sku;
   }
-  ['purchase_cost', 'unit_cost', 'reorder_qty', 'check_interval_days'].forEach(num);
-  ['warranty_expires_at', 'next_check_due_at'].forEach(date);
+  ['purchase_cost', 'unit_cost', 'reorder_qty', 'check_interval_days', 'pat_interval_days'].forEach(num);
+  ['warranty_expires_at', 'next_check_due_at', 'pat_next_due_at', 'pat_last_at'].forEach(date);
+  if ('pat_required' in body) a.pat_required = body.pat_required === true;
   if ('condition' in body) {
     if (body.condition && !ASSET_CONDITIONS.includes(body.condition)) throw httpError(400, `condition must be one of ${ASSET_CONDITIONS.join(', ')}`);
     a.condition = body.condition || null;
@@ -1653,6 +1654,7 @@ route('POST', '/api/assets', ADMIN, ({ body, user }) => {
     parent_asset_id: parent ? parent.id : null,
   };
   applyAssetExtras(a, body);
+  if (!a.is_stock_tracked) inventory.firstDueDates(a);
   db.assets.push(a);
   if (isStockTracked && body.initial_quantity != null && body.initial_quantity !== '' && Number(body.initial_quantity) > 0) {
     recordStockMovement(a.id, Number(body.initial_quantity), 'RESTOCK', 'Initial stock on creation', null, user);
@@ -1734,7 +1736,7 @@ route('POST', '/api/assets/:id/checkout', ALL, ({ params, body, user }) => {
     expected_return_at: body.expected_return_at && !isNaN(Date.parse(body.expected_return_at)) ? new Date(body.expected_return_at).toISOString() : null,
     condition_out: ASSET_CONDITIONS.includes(body.condition) ? body.condition : (a.condition || null),
   };
-  if (['LOST', 'RETIRED', 'IN_REPAIR'].includes(a.status)) throw httpError(409, `this asset is ${a.status.replace('_', ' ').toLowerCase()} — it cannot be issued`);
+  if (['LOST', 'RETIRED', 'IN_REPAIR', 'ON_HIRE'].includes(a.status)) throw httpError(409, `this asset is ${a.status.replace('_', ' ').toLowerCase()} — it cannot be issued`);
   db.asset_checkouts.push(co);
   a.assigned_to = personnelId; a.status = 'IN_USE';
   const p = db.personnel.find((x) => x.id === personnelId);
@@ -3834,6 +3836,9 @@ const inventory = require('./routes-inventory.js')({
   route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, visibleToUser, isControlRole,
   publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, flushNow: () => store.flushNow(),
 });
+
+// Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
+require('./routes-rentals.js')({ route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, UPLOADS_DIR, publicAsset, flushNow: () => store.flushNow() });
 
 // Which roles see which section of the menus — see ui-sections.js.
 const sections = require('./ui-sections.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });

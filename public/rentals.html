@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — rentals</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .wiz { position: fixed; inset: 0; z-index: 900; background: var(--bg); overflow-y: auto; }
+  .wiz-in { width: min(820px, 100%); margin: 0 auto; padding: 16px; }
+  .wiz-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .wiz-head h2 { flex: 1; margin: 0; font-size: 18px; }
+  .steps { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+  .steps span { font-size: 12px; padding: 4px 10px; border-radius: 20px; border: 1px solid var(--line); color: var(--ink-dim); }
+  .steps span.on { background: var(--accent-dim); border-color: var(--accent-dim); color: #fff; }
+  .steps span.done { color: var(--ink); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .card h3 { margin: 0 0 10px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); }
+  .terms { max-height: 280px; overflow-y: auto; white-space: pre-wrap; font-size: 13px; line-height: 1.5; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--bg); }
+  .wiz-foot { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
+  .wiz-foot .btn { padding: 11px 18px; font-size: 15px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { border: none; background: none; padding: 9px 16px; font: inherit; color: var(--ink-dim); cursor: pointer; }
+  .seg button.on { background: var(--accent-dim); color: #fff; }
+  .msg-ok { color: var(--available); } .msg-bad { color: var(--emergency); }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>Rentals</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary" id="bNew">New rental</button>
+  <button class="btn" id="bTerms">Terms &amp; company details</button>
+  <button class="btn" id="bExport">Export CSV</button>
+</div>
+<div class="k-body">
+  <div class="tiles" id="tiles"></div>
+  <div class="bar">
+    <span id="chips"></span>
+    <input id="q" placeholder="Search reference, hirer or tag">
+  </div>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+<div class="wiz hide" id="wiz"><div class="wiz-in" id="wizIn"></div></div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script src="/forms-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['SYSTEM_ADMIN'])) throw new Error('auth');
+const { modal, close, foot, wire, v, numOrNull, money, date, when, words, options } = KIT;
+const token = () => encodeURIComponent(CCCS.getSession().token);
+const STATUS = { ON_HIRE: ['On hire', 'info'], PART_RETURNED: ['Part returned', 'warn'], RETURNED: ['Returned', 'ok'] };
+const CONDITIONS = ['NEW', 'GOOD', 'FAIR', 'POOR', 'DAMAGED', 'LOST'];
+let rentals = [], filter = 'open';
+
+async function load() {
+  try { rentals = await api('GET', '/api/rentals'); } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  paint();
+}
+function paint() {
+  const open = rentals.filter((r) => r.status !== 'RETURNED');
+  const monthAgo = Date.now() - 30 * 86400e3;
+  const t = (n, l, cls, f) => `<button class="tile ${cls}" data-f="${f}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
+  el('#tiles').innerHTML = [
+    t(open.length, 'Rentals out', '', 'open'), t(open.reduce((n, r) => n + r.outstanding, 0), 'Items on hire', '', 'open'),
+    t(open.filter((r) => r.overdue).length, 'Overdue back', open.some((r) => r.overdue) ? 'bad' : 'good', 'overdue'),
+    t(rentals.filter((r) => r.status === 'RETURNED' && Date.parse(r.returned_at) > monthAgo).length, 'Returned (30 days)', '', 'returned'),
+  ].join('');
+  const F = { open: ['Out now', (r) => r.status !== 'RETURNED'], overdue: ['Overdue', (r) => r.overdue], returned: ['Returned', (r) => r.status === 'RETURNED'], all: ['All', () => true] };
+  el('#chips').innerHTML = Object.entries(F).map(([k, [l]]) => `<button class="chip ${k === filter ? 'on' : ''}" data-f="${k}">${l}</button>`).join(' ');
+  els('[data-f]').forEach((b) => (b.onclick = () => { filter = b.dataset.f; paint(); }));
+  const q = el('#q').value.trim().toLowerCase();
+  const rows = rentals.filter(F[filter][1]).filter((r) => !q || [r.reference, r.hirer_name, r.signed_name, ...r.items.map((i) => i.tag)].some((x) => String(x || '').toLowerCase().includes(q)));
+  el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k">
+    <thead><tr><th>Reference</th><th>Hirer</th><th>Items</th><th>Out</th><th>Due back</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows.map((r) => {
+      const [sl, sc] = STATUS[r.status] || [r.status, 'off'];
+      return `<tr>
+        <td class="mono" style="white-space:nowrap"><strong>${esc(r.reference)}</strong></td>
+        <td>${esc(r.hirer_name)}<div class="dim" style="font-size:11.5px">signed by ${esc(r.signed_name)}</div></td>
+        <td>${r.items.map((i) => `<span class="mono" style="${i.returned_at ? 'text-decoration:line-through;opacity:.6' : ''}">${esc(i.tag || i.description)}</span>`).join(', ')}<div class="dim" style="font-size:11.5px">${r.outstanding} of ${r.items.length} still out</div></td>
+        <td class="dim" style="white-space:nowrap">${esc(date(r.start_at))}</td>
+        <td style="white-space:nowrap">${r.expected_return_at ? esc(date(r.expected_return_at)) : '<span class="dim">on request</span>'}${r.overdue ? ' <span class="pill bad">Overdue</span>' : ''}</td>
+        <td><span class="pill ${sc}">${sl}</span></td>
+        <td><div class="acts">
+          <a class="btn" target="_blank" href="${r.agreement_url}?token=${token()}">Agreement</a>
+          ${r.status !== 'RETURNED' ? `<button class="btn primary" data-ret="${r.id}">Return</button>` : ''}
+          ${r.return_notes.map((n) => `<a class="btn" target="_blank" href="${n.url}?token=${token()}">Return note ${n.n}</a>`).join('')}
+        </div></td></tr>`;
+    }).join('')}</tbody></table></div>` : `<p class="dim">${rentals.length ? 'No rentals match.' : 'No rentals yet. Press <strong>New rental</strong> to hire equipment out.'}</p>`;
+  els('[data-ret]').forEach((b) => (b.onclick = () => returnModal(rentals.find((r) => r.id === Number(b.dataset.ret)))));
+}
+el('#q').addEventListener('input', paint);
+
+/* ---------------- return ---------------- */
+function returnModal(r) {
+  const out = r.items.filter((i) => !i.returned_at);
+  modal(`Return — ${r.reference}`, `<p style="margin-top:0">${esc(r.hirer_name)}. Tick what has come back and record its condition.</p>
+    <table class="k"><thead><tr><th></th><th>Item</th><th>Went out</th><th>Back as</th></tr></thead><tbody>
+    ${out.map((i) => `<tr><td><input type="checkbox" data-back="${i.asset_id}" checked style="width:18px;height:18px"></td><td><strong class="mono">${esc(i.tag || '')}</strong> ${esc(i.description)}</td><td class="dim">${esc(words(i.condition_out) || '—')}</td>
+      <td><select data-cond="${i.asset_id}">${options(CONDITIONS.map((c) => [c, c === 'LOST' ? 'Not returned — lost' : words(c)]), i.condition_out || 'GOOD')}</select></td></tr>`).join('')}</tbody></table>
+    <div class="k-form" style="margin-top:10px"><div class="full"><label>Note</label><input id="rnNote" placeholder="e.g. returned by Pat Jones, all accessories present"></div></div>${foot('Book back in')}`, (root) => wire(root, async () => {
+    const ids = [...root.querySelectorAll('[data-back]')].filter((c) => c.checked).map((c) => Number(c.dataset.back));
+    if (!ids.length) throw new Error('tick at least one item');
+    const conditions = Object.fromEntries(ids.map((id) => [id, root.querySelector(`[data-cond="${id}"]`).value]));
+    const res = await api('POST', `/api/rentals/${r.id}/return`, { asset_ids: ids, conditions, note: v(root, '#rnNote') });
+    close(); await load();
+    const n = res.return_notes[res.return_notes.length - 1];
+    if (n && confirm('Booked back in. Open the return note to print?')) window.open(`${n.url}?token=${token()}`, '_blank');
+  }));
+}
+
+/* ---------------- terms & company ---------------- */
+el('#bTerms').onclick = async () => {
+  const s = await api('GET', '/api/rentals/settings');
+  modal('Terms & company details', `<div class="k-form">
+    <div><label>Company name</label><input id="tName" value="${esc(s.company_name)}"></div>
+    <div><label>Phone</label><input id="tPhone" value="${esc(s.company_phone)}"></div>
+    <div><label>Email</label><input id="tEmail" value="${esc(s.company_email)}"></div>
+    <div><label>Address</label><input id="tAddr" value="${esc(s.company_address)}"></div>
+    <div class="full"><label>Terms and conditions of rental ${s.terms_are_default ? '<span class="dim" style="text-transform:none;letter-spacing:0">(our standard wording — have it checked before relying on it)</span>' : ''}</label>
+      <textarea id="tTerms" rows="16" style="font-size:13px">${esc(s.terms)}</textarea></div></div>
+    <p class="dim" style="font-size:12.5px">These go on every new agreement. Agreements already signed keep the wording they were signed under. Clear the box to go back to the standard terms.</p>${foot('Save')}`, (root) => wire(root, async () => {
+    await api('PUT', '/api/rentals/settings', { company_name: v(root, '#tName'), company_phone: v(root, '#tPhone'), company_email: v(root, '#tEmail'), company_address: v(root, '#tAddr'), terms: root.querySelector('#tTerms').value });
+    close();
+  }), { wide: true });
+};
+
+el('#bExport').onclick = () => KIT.csv(`rentals-${new Date().toISOString().slice(0, 10)}.csv`,
+  ['Reference', 'Hirer', 'Signed by', 'Out', 'Due back', 'Status', 'Tag', 'Item', 'Serial', 'Returned', 'Returned condition'],
+  rentals.flatMap((r) => r.items.map((i) => [r.reference, r.hirer_name, r.signed_name, r.start_at.slice(0, 10), r.expected_return_at && r.expected_return_at.slice(0, 10), (STATUS[r.status] || [r.status])[0], i.tag, i.description, i.serial_no, i.returned_at && i.returned_at.slice(0, 10), i.returned_condition])));
+
+/* ---------------- new rental: items → hirer → sign → done ---------------- */
+let W = null;
+el('#bNew').onclick = async () => {
+  const [register, clients, sites, settings] = await Promise.all([api('GET', '/api/assets/register'), api('GET', '/api/clients'), api('GET', '/api/sites'), api('GET', '/api/rentals/settings')]);
+  W = { step: 1, items: [], register: register.assets, clients, sites, settings, hirer: { type: 'CLIENT' } };
+  el('#wiz').classList.remove('hide'); document.body.style.overflow = 'hidden';
+  paintWizard();
+};
+function closeWizard() { if (W && W.scan) W.scan.stop(); W = null; el('#wiz').classList.add('hide'); document.body.style.overflow = ''; load(); }
+function stepsBar() {
+  return `<div class="steps">${['Items', 'Hirer', 'Sign', 'Done'].map((s, i) => `<span class="${W.step === i + 1 ? 'on' : W.step > i + 1 ? 'done' : ''}">${i + 1}. ${s}</span>`).join('')}</div>`;
+}
+const available = (a) => a.status === 'IN_STORE' && !a.checkout && !a.rental;
+function paintWizard() {
+  if (W.scan) { W.scan.stop(); W.scan = null; }
+  const head = `<div class="wiz-head"><h2>New rental</h2><button class="btn" id="wX">${W.step === 4 ? 'Close' : 'Cancel'}</button></div>${stepsBar()}`;
+  if (W.step === 1) {
+    el('#wizIn').innerHTML = `${head}
+      <div class="card"><h3>Scan the items going out</h3><div id="wScan"></div><p id="wMsg" style="min-height:18px;margin:8px 0 0"></p>
+        <label style="display:block;font-size:11px;color:var(--ink-dim);margin-top:4px">Or pick from the store</label>
+        <select id="wPick">${options(W.register.filter(available).filter((a) => !W.items.some((x) => x.id === a.id)).map((a) => [a.id, `${a.tag ? a.tag + ' — ' : ''}${a.description}`]), '', '— items in store —')}</select></div>
+      <div class="card"><h3>On this rental (${W.items.length})</h3>${W.items.length ? `<table class="k"><tbody>${W.items.map((a) => `<tr><td class="mono"><strong>${esc(a.tag || '—')}</strong></td><td>${esc(a.description)}<div class="dim" style="font-size:11.5px">${esc([a.make, a.model, a.serial_no && 'SN ' + a.serial_no].filter(Boolean).join(' · '))}</div></td><td class="dim">${esc(words(a.condition) || '')}</td><td class="num"><button class="btn" data-rm="${a.id}" style="padding:3px 9px;font-size:12px">Remove</button></td></tr>`).join('')}</tbody></table>` : '<p class="dim">Nothing yet.</p>'}</div>
+      <div class="wiz-foot"><span></span><button class="btn primary" id="wNext" ${W.items.length ? '' : 'disabled'}>Next: who is hiring</button></div>`;
+    const add = (a, viaScan) => {
+      const m = el('#wMsg');
+      if (W.items.some((x) => x.id === a.id)) { m.className = 'msg-bad'; m.textContent = `${a.tag || a.description} is already on this rental.`; return; }
+      if (!available(a)) { m.className = 'msg-bad'; m.textContent = `${a.tag || a.description} can't go out — ${a.rental ? `on hire (${a.rental.reference})` : a.checkout ? `signed out to ${a.checkout.personnel_name}` : words(a.status).toLowerCase()}.`; return; }
+      W.items.push(a); paintWizard();
+      el('#wMsg').className = 'msg-ok'; el('#wMsg').textContent = `Added ${a.tag || a.description}.`;
+      if (viaScan) W.scan && W.scan.focus();
+    };
+    W.scan = KIT.scanner(el('#wScan'), async (code) => {
+      const a = W.register.find((x) => (x.tag && x.tag.toLowerCase() === code.toLowerCase()) || (x.serial_no && x.serial_no.toLowerCase() === code.toLowerCase()));
+      if (!a) { el('#wMsg').className = 'msg-bad'; el('#wMsg').textContent = `No asset with tag ${code}.`; return; }
+      add(a, true);
+    });
+    el('#wPick').onchange = () => { const a = W.register.find((x) => x.id === Number(el('#wPick').value)); if (a) add(a); };
+    els('[data-rm]').forEach((b) => (b.onclick = () => { W.items = W.items.filter((x) => x.id !== Number(b.dataset.rm)); paintWizard(); }));
+    el('#wNext').onclick = () => { W.step = 2; paintWizard(); };
+  } else if (W.step === 2) {
+    const h = W.hirer;
+    el('#wizIn').innerHTML = `${head}
+      <div class="card"><h3>Hired to</h3>
+        <div class="seg" style="margin-bottom:10px"><button data-t="CLIENT" class="${h.type === 'CLIENT' ? 'on' : ''}">A client</button><button data-t="SITE" class="${h.type === 'SITE' ? 'on' : ''}">A site</button></div>
+        <div class="k-form">
+          <div class="full">${h.type === 'CLIENT'
+            ? `<label>Client</label><select id="hWho">${options(W.clients.map((c) => [c.id, c.name]), h.client_id, '— choose client —')}</select>`
+            : `<label>Site</label><select id="hWho">${options(W.sites.map((s) => [s.id, s.name]), h.site_id, '— choose site —')}</select>`}</div>
+          <div><label>Contact name</label><input id="hName" value="${esc(h.contact_name || '')}" placeholder="who is collecting"></div>
+          <div><label>Contact phone</label><input id="hPhone" type="tel" value="${esc(h.contact_phone || '')}"></div>
+          <div><label>Contact email</label><input id="hEmail" type="email" value="${esc(h.contact_email || '')}"></div>
+          <div><label>Due back</label><input id="hDue" type="date" value="${esc(h.expected_return_at || '')}"></div>
+        </div></div>
+      <div class="card"><h3>Charges (optional)</h3><div class="k-form">
+          <div><label>Hire charge (£)</label><input id="hCharge" type="number" min="0" step="0.01" value="${h.charge_amount ?? ''}"></div>
+          <div><label>Charged</label><select id="hPer">${options([['DAY', 'per day'], ['WEEK', 'per week'], ['MONTH', 'per month'], ['FIXED', 'fixed charge']], h.charge_period || 'WEEK')}</select></div>
+          <div><label>Deposit (£)</label><input id="hDep" type="number" min="0" step="0.01" value="${h.deposit ?? ''}"></div>
+          <div class="full"><label>Notes on the agreement</label><textarea id="hNotes" rows="2">${esc(h.notes || '')}</textarea></div>
+      </div></div>
+      <p class="err" id="hErr"></p>
+      <div class="wiz-foot"><button class="btn" id="wBack">Back</button><button class="btn primary" id="wNext">Next: sign</button></div>`;
+    const save = () => Object.assign(h, {
+      [h.type === 'CLIENT' ? 'client_id' : 'site_id']: numOrNull(el('#hWho').value), contact_name: el('#hName').value.trim(), contact_phone: el('#hPhone').value.trim(),
+      contact_email: el('#hEmail').value.trim(), expected_return_at: el('#hDue').value, charge_amount: numOrNull(el('#hCharge').value), charge_period: el('#hPer').value,
+      deposit: numOrNull(el('#hDep').value), notes: el('#hNotes').value.trim(),
+    });
+    els('.seg [data-t]').forEach((b) => (b.onclick = () => { save(); h.type = b.dataset.t; paintWizard(); }));
+    el('#wBack').onclick = () => { save(); W.step = 1; paintWizard(); };
+    el('#wNext').onclick = () => {
+      save();
+      if (!(h.type === 'CLIENT' ? h.client_id : h.site_id)) { el('#hErr').textContent = `Choose the ${h.type === 'CLIENT' ? 'client' : 'site'}.`; return; }
+      if (!h.contact_name) { el('#hErr').textContent = 'Who is collecting? Enter a contact name.'; return; }
+      W.step = 3; paintWizard();
+    };
+  } else if (W.step === 3) {
+    const h = W.hirer;
+    const who = h.type === 'CLIENT' ? (W.clients.find((c) => c.id === h.client_id) || {}).name : (W.sites.find((s) => s.id === h.site_id) || {}).name;
+    el('#wizIn').innerHTML = `${head}
+      <div class="card"><h3>Summary</h3>
+        <p style="margin:0 0 6px"><strong>${esc(who)}</strong> — collected by ${esc(h.contact_name)}${h.expected_return_at ? `, due back ${esc(date(h.expected_return_at))}` : ''}</p>
+        <p style="margin:0 0 6px">${W.items.map((a) => `<span class="mono">${esc(a.tag || '')}</span> ${esc(a.description)}`).join(' · ')}</p>
+        ${h.charge_amount != null ? `<p style="margin:0">Charge ${money(h.charge_amount)} ${({ DAY: 'per day', WEEK: 'per week', MONTH: 'per month', FIXED: 'fixed' })[h.charge_period]}${h.deposit != null ? ` · deposit ${money(h.deposit)}` : ''}</p>` : ''}</div>
+      <div class="card"><h3>Terms and conditions of rental</h3><div class="terms">${esc(W.settings.terms)}</div>
+        <label style="display:flex;gap:10px;align-items:center;margin-top:12px;font-size:15px"><input type="checkbox" id="sAgree" style="width:22px;height:22px"> I have read and agree to these terms on behalf of the hirer</label></div>
+      <div class="card"><h3>Signature</h3>
+        <label style="display:block;font-size:11px;color:var(--ink-dim);margin-bottom:4px">Name of person signing</label>
+        <input id="sName" value="${esc(h.contact_name)}" style="width:100%;font-size:16px;margin-bottom:10px">
+        <div id="sPad"></div></div>
+      <p class="err" id="sErr"></p>
+      <div class="wiz-foot"><button class="btn" id="wBack">Back</button><button class="btn primary" id="wGo">Sign &amp; create agreement</button></div>`;
+    const pad = CCCSForms.signaturePad(el('#sPad'));
+    el('#wBack').onclick = () => { W.step = 2; paintWizard(); };
+    el('#wGo').onclick = async () => {
+      el('#sErr').textContent = '';
+      if (!el('#sAgree').checked) { el('#sErr').textContent = 'The terms must be agreed first.'; return; }
+      if (!el('#sName').value.trim()) { el('#sErr').textContent = 'Enter the name of the person signing.'; return; }
+      if (!pad.inked) { el('#sErr').textContent = 'Please sign in the box.'; return; }
+      el('#wGo').disabled = true; el('#wGo').textContent = 'Creating…';
+      try {
+        W.result = await api('POST', '/api/rentals', {
+          asset_ids: W.items.map((a) => a.id), [h.type === 'CLIENT' ? 'client_id' : 'site_id']: h.type === 'CLIENT' ? h.client_id : h.site_id,
+          contact_name: h.contact_name, contact_phone: h.contact_phone, contact_email: h.contact_email,
+          expected_return_at: h.expected_return_at || null, charge_amount: h.charge_amount, charge_period: h.charge_period, deposit: h.deposit, notes: h.notes,
+          signed_name: el('#sName').value.trim(), agreed: true, signature: { mimetype: 'image/jpeg', data: pad.jpeg() },
+        });
+        W.step = 4; paintWizard();
+      } catch (e) { el('#sErr').textContent = e.message; el('#wGo').disabled = false; el('#wGo').textContent = 'Sign & create agreement'; }
+    };
+  } else {
+    const r = W.result;
+    el('#wizIn').innerHTML = `${head}
+      <div class="card" style="text-align:center;padding:28px 14px">
+        <div style="font-size:42px">✓</div>
+        <h2 style="margin:6px 0">Agreement ${esc(r.reference)} created</h2>
+        <p class="dim">${r.items.length} item${r.items.length === 1 ? '' : 's'} on hire to ${esc(r.hirer_name)}. A copy is in the Rentals list and in the client's portal.</p>
+        <div class="btn-row" style="justify-content:center;margin-top:14px">
+          <a class="btn primary" target="_blank" href="${r.agreement_url}?token=${token()}" style="padding:11px 18px">Open agreement to print</a>
+          <button class="btn" id="wAgain" style="padding:11px 18px">Another rental</button>
+        </div></div>`;
+    el('#wAgain').onclick = () => { closeWizard(); el('#bNew').click(); };
+  }
+  el('#wX').onclick = () => { if (W.step > 1 && W.step < 4 && !confirm('Cancel this rental? Nothing has been saved.')) return; closeWizard(); };
+}
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — sign in / out</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .card h3 { margin: 0 0 10px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); }
+  .found { border-width: 2px; }
+  .found .tag { font-family: var(--mono); font-size: 20px; font-weight: 800; }
+  .found .btn { padding: 11px 18px; font-size: 15px; }
+  .k-body { width: min(980px, 100%); margin: 0 auto; }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>Sign in / out</h1>
+  <span class="dim" id="updated"></span>
+</div>
+<div class="k-body">
+  <div class="card"><h3>Scan an item</h3><div id="scan"></div><p class="err" id="scanErr" style="margin:8px 0 0"></p></div>
+  <div id="result"></div>
+  <div class="card"><h3>Signed out to staff <span id="nStaff" style="text-transform:none;letter-spacing:0"></span></h3><div id="staff"><p class="dim">Loading…</p></div></div>
+  <div class="card"><h3>Out on hire <span id="nHire" style="text-transform:none;letter-spacing:0"></span></h3><div id="hire"><p class="dim">Loading…</p></div></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const { options, date, when, words } = KIT;
+const CONDITIONS = ['NEW', 'GOOD', 'FAIR', 'POOR', 'DAMAGED'];
+let people = [];
+
+/* The desk: scan a tag and the item says what can happen to it next —
+ * sign out to someone, sign back in, or book back in from a hire. */
+KIT.scanner(el('#scan'), (code) => find(code));
+async function find(code, byId) {
+  el('#scanErr').textContent = '';
+  try { show(await api('GET', `/api/assets/lookup?${byId ? 'id' : 'tag'}=${encodeURIComponent(code)}`)); }
+  catch (e) { el('#scanErr').textContent = e.message; el('#result').innerHTML = ''; }
+}
+function show(a) {
+  const head = `<div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap"><span class="tag">${esc(a.tag || '—')}</span><strong style="font-size:16px">${esc(a.description)}</strong><span class="dim">${esc([a.make, a.model, a.serial_no && 'SN ' + a.serial_no].filter(Boolean).join(' · '))}</span></div>`;
+  let body;
+  if (a.checkout) {
+    body = `<p>Signed out to <strong>${esc(a.checkout.personnel_name)}</strong> since ${esc(when(a.checkout.checked_out_at))}${a.checkout.expected_return_at ? `, due back ${esc(date(a.checkout.expected_return_at))}` : ''}${a.checkout.overdue ? ' <span class="pill bad">Overdue</span>' : ''}.</p>
+      <div class="k-form"><div><label>Condition coming back</label><select id="xCond">${options(CONDITIONS.map((c) => [c, words(c)]), a.condition || 'GOOD')}</select></div><div><label>Note</label><input id="xNote"></div></div>
+      <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="xGo">Sign in</button></div>`;
+  } else if (a.rental) {
+    body = `<p>On hire to <strong>${esc(a.rental.hirer_name)}</strong> — ${esc(a.rental.reference)}, since ${esc(date(a.rental.start_at))}${a.rental.overdue ? ' <span class="pill bad">Overdue</span>' : ''}.</p>
+      <div class="k-form"><div><label>Condition coming back</label><select id="xCond">${options([...CONDITIONS.map((c) => [c, words(c)])], a.condition || 'GOOD')}</select></div><div><label>Note</label><input id="xNote"></div></div>
+      <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="xGo">Book back in from hire</button></div>`;
+  } else if (a.status === 'IN_STORE') {
+    const due = new Date(Date.now() + 86400e3).toISOString().slice(0, 10);
+    body = `<p>In store${a.location_name ? ` (${esc(a.location_name)})` : ''}.</p>
+      <div class="k-form">
+        <div class="full"><label>Sign out to</label><select id="xWho">${options(people.map((p) => [p.id, p.callsign ? `${p.name} (${p.callsign})` : p.name]), '', '— choose person —')}</select></div>
+        <div><label>Due back</label><input id="xDue" type="date" value="${due}"></div>
+        <div><label>Condition going out</label><select id="xCond">${options(CONDITIONS.map((c) => [c, words(c)]), a.condition || 'GOOD')}</select></div>
+        <div class="full"><label>Note</label><input id="xNote" placeholder="e.g. with charger"></div></div>
+      <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="xGo">Sign out</button></div>`;
+  } else {
+    body = `<p class="err">${esc(words(a.status))} — it can't be signed out. An admin can change that on the Assets page.</p>`;
+  }
+  el('#result').innerHTML = `<div class="card found">${head}${body}<p class="err" id="xErr"></p></div>`;
+  const go = el('#xGo'); if (!go) return;
+  go.onclick = async () => {
+    el('#xErr').textContent = ''; go.disabled = true;
+    try {
+      if (a.checkout) await api('POST', `/api/assets/${a.id}/return`, { condition: el('#xCond').value, notes: el('#xNote').value.trim() });
+      else if (a.rental) await api('POST', `/api/rentals/${a.rental.id}/return`, { asset_ids: [a.id], conditions: { [a.id]: el('#xCond').value }, note: el('#xNote').value.trim() });
+      else {
+        if (!el('#xWho').value) throw new Error('choose who it is going to');
+        await api('POST', `/api/assets/${a.id}/checkout`, { personnel_id: Number(el('#xWho').value), expected_return_at: el('#xDue').value || null, condition: el('#xCond').value, notes: el('#xNote').value.trim() });
+      }
+      el('#result').innerHTML = `<div class="card"><strong>${esc(a.tag || a.description)}</strong> — ${a.checkout ? 'signed in' : a.rental ? 'booked back in from hire' : 'signed out'}. Scan the next item.</div>`;
+      loadOut();
+    } catch (e) { el('#xErr').textContent = e.message; go.disabled = false; }
+  };
+}
+
+async function loadOut() {
+  let out;
+  try { out = await api('GET', '/api/assets/out'); } catch (e) { el('#staff').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const staff = out.filter((a) => a.checkout).sort((x, y) => Number(y.checkout.overdue) - Number(x.checkout.overdue) || x.checkout.personnel_name.localeCompare(y.checkout.personnel_name));
+  const hire = out.filter((a) => a.rental);
+  el('#nStaff').textContent = `· ${staff.length}`; el('#nHire').textContent = `· ${hire.length}`;
+  el('#staff').innerHTML = staff.length ? `<table class="k"><thead><tr><th>Tag</th><th>Item</th><th>With</th><th>Since</th><th>Due back</th><th></th></tr></thead><tbody>
+    ${staff.map((a) => `<tr><td class="mono"><strong>${esc(a.tag || '—')}</strong></td><td>${esc(a.description)}</td><td>${esc(a.checkout.personnel_name)}</td><td class="dim">${esc(date(a.checkout.checked_out_at))}</td>
+      <td>${a.checkout.expected_return_at ? esc(date(a.checkout.expected_return_at)) : '—'}${a.checkout.overdue ? ' <span class="pill bad">Overdue</span>' : ''}</td><td><button class="btn" data-open="${a.id}" style="padding:3px 9px;font-size:12px">Sign in</button></td></tr>`).join('')}</tbody></table>` : '<p class="dim">Nothing signed out.</p>';
+  el('#hire').innerHTML = hire.length ? `<table class="k"><thead><tr><th>Tag</th><th>Item</th><th>Hired to</th><th>Agreement</th><th>Due back</th><th></th></tr></thead><tbody>
+    ${hire.map((a) => `<tr><td class="mono"><strong>${esc(a.tag || '—')}</strong></td><td>${esc(a.description)}</td><td>${esc(a.rental.hirer_name)}</td><td class="mono dim">${esc(a.rental.reference)}</td>
+      <td>${a.rental.expected_return_at ? esc(date(a.rental.expected_return_at)) : 'on request'}${a.rental.overdue ? ' <span class="pill bad">Overdue</span>' : ''}</td><td><button class="btn" data-open="${a.id}" style="padding:3px 9px;font-size:12px">Book in</button></td></tr>`).join('')}</tbody></table>` : '<p class="dim">Nothing on hire.</p>';
+  els('[data-open]').forEach((b) => (b.onclick = () => { find(b.dataset.open, true); window.scrollTo(0, 0); }));
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+(async () => {
+  people = (await api('GET', '/api/personnel').catch(() => [])).filter((p) => (p.employment_status || 'ACTIVE') === 'ACTIVE').sort((a, b) => a.name.localeCompare(b.name));
+  loadOut();
+})();
+setInterval(loadOut, 60000);
+</script>
+</body>
+</html>

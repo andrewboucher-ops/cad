@@ -57,6 +57,8 @@ const TABLES = [
   'ui_settings',
   // Stock & asset management (routes-inventory.js).
   'stock_locations', 'asset_events', 'stocktakes',
+  // Asset hire to clients (routes-rentals.js) — signed agreements, keep.
+  'rentals',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

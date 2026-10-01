@@ -63,6 +63,8 @@
     leave: i('<path d="M3 20h18M5 20c0-6 3-10 7-10s7 4 7 10M12 10V4M9 6h6" stroke-linecap="round"/>'),
     training: i('<path d="M2 9l10-5 10 5-10 5z" stroke-linejoin="round"/><path d="M6 11v5c3 2 9 2 12 0v-5" stroke-linecap="round"/>'),
     asset: i('<path d="M3 7l9-4 9 4v10l-9 4-9-4z" stroke-linejoin="round"/><path d="M3 7l9 4 9-4M12 11v10"/>'),
+    scan: i('<path d="M4 8V5a1 1 0 011-1h3M16 4h3a1 1 0 011 1v3M20 16v3a1 1 0 01-1 1h-3M8 20H5a1 1 0 01-1-1v-3" stroke-linecap="round"/><path d="M7 12h10" stroke-linecap="round"/>'),
+    rental: i('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4" stroke-linecap="round"/><path d="M15 17l1.5 1.5L19 15" stroke-linecap="round" stroke-linejoin="round"/>'),
     stock: i('<rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/><rect x="8" y="3" width="8" height="8" rx="1"/>'),
     equipment: i('<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2M3 12h18" stroke-linecap="round"/>'),
   };

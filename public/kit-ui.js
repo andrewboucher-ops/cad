@@ -87,5 +87,66 @@ const KIT = (() => {
   const options = (list, selected, blank) => (blank != null ? `<option value="">${esc(blank)}</option>` : '')
     + list.map(([val, text]) => `<option value="${esc(val)}" ${String(val) === String(selected ?? '') ? 'selected' : ''}>${esc(text)}</option>`).join('');
 
-  return { modal, close, foot, wire, v, numOrNull, csv, money, date, when, words, options };
+  /* ---- Tag scanner ----
+   * One box that takes a tag however it arrives: typed, from a USB or
+   * Bluetooth barcode scanner (they type the code and press Enter), or
+   * from the device camera. The camera uses the browser's own barcode
+   * reader where there is one (Chrome on Android) and otherwise loads a
+   * small QR reader, so it also works on iPhone/iPad. It stays open for
+   * several items in a row; onCode(code) is called once per new code. */
+  function scanner(host, onCode, { placeholder = 'Scan or type an asset tag, then Enter' } = {}) {
+    host.innerHTML = `<div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input data-scan-in placeholder="${esc(placeholder)}" autocomplete="off" autocapitalize="characters" style="flex:1;min-width:200px;font-size:16px">
+        <button type="button" class="btn" data-scan-add>Add</button>
+        <button type="button" class="btn primary" data-scan-cam>Scan with camera</button>
+      </div>
+      <div data-scan-video class="hide" style="margin-top:10px;position:relative">
+        <video playsinline muted style="width:100%;max-height:50vh;border-radius:10px;background:#000"></video>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px"><span class="dim" data-scan-msg>Point the camera at a tag's QR code</span><button type="button" class="btn" data-scan-stop>Done scanning</button></div>
+      </div>`;
+    const input = host.querySelector('[data-scan-in]');
+    const submit = () => { const c = input.value.trim(); if (c) { onCode(c); input.value = ''; } input.focus(); };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    host.querySelector('[data-scan-add]').onclick = submit;
+    let stream = null, running = false, last = '', lastAt = 0;
+    const box = host.querySelector('[data-scan-video]'), video = box.querySelector('video'), msg = box.querySelector('[data-scan-msg]');
+    const stop = () => { running = false; if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null; box.classList.add('hide'); };
+    host.querySelector('[data-scan-stop]').onclick = stop;
+    host.querySelector('[data-scan-cam]').onclick = async () => {
+      try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); }
+      catch (e) { alert(`Camera not available (${e.message}). Type the tag or use a barcode scanner instead.`); return; }
+      video.srcObject = stream; await video.play(); box.classList.remove('hide'); running = true;
+      let detect;
+      if ('BarcodeDetector' in window) {
+        const d = new BarcodeDetector({ formats: ['qr_code', 'code_128', 'code_39', 'ean_13'] });
+        detect = async () => { const r = await d.detect(video); return r[0] && r[0].rawValue; };
+      } else {
+        if (!window.jsQR) await new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js'; sc.onload = ok; sc.onerror = () => bad(new Error('could not load the QR reader')); document.head.appendChild(sc); }).catch((e) => { msg.textContent = e.message; });
+        const c = document.createElement('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
+        detect = async () => {
+          if (!window.jsQR || !video.videoWidth) return null;
+          c.width = video.videoWidth; c.height = video.videoHeight; ctx.drawImage(video, 0, 0);
+          const r = window.jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height);
+          return r && r.data;
+        };
+      }
+      const tick = async () => {
+        if (!running) return;
+        try {
+          const code = await detect();
+          if (code && (code !== last || Date.now() - lastAt > 2500)) {
+            last = code; lastAt = Date.now(); msg.textContent = `Read ${code}`;
+            if (navigator.vibrate) navigator.vibrate(60);
+            onCode(String(code).trim());
+          }
+        } catch {}
+        setTimeout(tick, 250);
+      };
+      tick();
+    };
+    setTimeout(() => input.focus(), 50);
+    return { stop, focus: () => input.focus() };
+  }
+
+  return { modal, close, foot, wire, v, numOrNull, csv, money, date, when, words, options, scanner };
 })();

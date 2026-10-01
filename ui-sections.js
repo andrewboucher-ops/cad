@@ -51,8 +51,12 @@ const SECTIONS = [
   { key: 'training', label: 'Training', group: 'Fleet & people', icon: 'training', mobile: '#training', needs_person: true, allowed: STAFF, default: STAFF },
   { key: 'equipment', label: 'My equipment', group: 'Fleet & people', icon: 'equipment', mobile: '#equipment', needs_person: true, allowed: STAFF, default: STAFF },
   // Stock & assets
-  { key: 'assets', label: 'Assets', group: 'Stock & assets', icon: 'asset', desktop: '/assets.html', mobile: '/assets.html', allowed: CONTROL, default: CONTROL },
-  { key: 'stock', label: 'Stock', group: 'Stock & assets', icon: 'stock', desktop: '/stock.html', mobile: '/stock.html', allowed: CONTROL, default: CONTROL },
+  // Assets, stock and rentals are admin-only; signing kit in and out to
+  // staff is the control desk's job.
+  { key: 'signout', label: 'Sign in / out', group: 'Stock & assets', icon: 'scan', desktop: '/signout.html', mobile: '/signout.html', allowed: CONTROL, default: CONTROL },
+  { key: 'rentals', label: 'Rentals', group: 'Stock & assets', icon: 'rental', desktop: '/rentals.html', mobile: '/rentals.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
+  { key: 'assets', label: 'Assets', group: 'Stock & assets', icon: 'asset', desktop: '/assets.html', mobile: '/assets.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
+  { key: 'stock', label: 'Stock', group: 'Stock & assets', icon: 'stock', desktop: '/stock.html', mobile: '/stock.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   // Finance
   { key: 'finance', label: 'Finance', group: 'Finance', icon: 'finance', desktop: '/finance.html', mobile: '/finance.html', allowed: [...CONTROL, 'FINANCE'], default: [...CONTROL, 'FINANCE'] },
   // System

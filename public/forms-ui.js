@@ -75,6 +75,8 @@ const CCCSForms = (() => {
     return {
       get inked() { return inked; },
       png: () => canvas.toDataURL('image/png').split(',')[1],
+      // JPEG (white background) for documents that embed it, e.g. a PDF.
+      jpeg: () => canvas.toDataURL('image/jpeg', 0.9).split(',')[1],
     };
   }
 
@@ -318,5 +320,5 @@ const CCCSForms = (() => {
     host.querySelectorAll('[data-ff-open]').forEach((r) => (r.onclick = () => onOpen(Number(r.dataset.ffOpen))));
   }
 
-  return { fill, view, edit, list, SUBJECT_LABEL, OUTCOME_LABEL };
+  return { fill, view, edit, list, signaturePad, SUBJECT_LABEL, OUTCOME_LABEL };
 })();
