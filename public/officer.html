@@ -709,7 +709,7 @@ async function openSiteDocsModal(siteId) {
   modal('Site documents', '<p class="dim">Loading…</p>', async () => {
     try {
       const docs = await api('GET', `/api/sites/${siteId}/documents`);
-      const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map' };
+      const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map', INDUCTION: 'Induction' };
       el('#modalHost .content').innerHTML = docs.length
         ? docs.map((d) => `<div class="field"><span>${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</span>
             <div><a href="/api/documents/${d.id}/file?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(d.filename)}</a></div></div>`).join('')

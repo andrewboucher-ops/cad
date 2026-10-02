@@ -34,11 +34,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-// ASSIGNMENT_INSTRUCTIONS and SITE_MAP are versioned (see the upload route);
-// CONTRACT and SITE_DOCUMENT keep their original, independent-upload
-// behaviour unchanged.
-const DOC_TYPES = ['CONTRACT', 'SITE_DOCUMENT', 'ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP'];
-const VERSIONED_DOC_TYPES = ['ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP'];
+// ASSIGNMENT_INSTRUCTIONS, SITE_MAP and INDUCTION are versioned (see the
+// upload route); CONTRACT and SITE_DOCUMENT keep their original,
+// independent-upload behaviour unchanged.
+const DOC_TYPES = ['CONTRACT', 'SITE_DOCUMENT', 'ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP', 'INDUCTION'];
+const VERSIONED_DOC_TYPES = ['ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP', 'INDUCTION'];
 const DOC_MAX_BYTES = 15e6;
 
 // Magic bytes, not the declared mimetype — same reasoning as routes-forms.js:
@@ -197,7 +197,8 @@ module.exports = function registerClientRoutes({
       uploaded_by: user.display_name, uploaded_at: new Date().toISOString(),
     };
     db.documents.push(d);
-    const label = versioned ? `${body.type === 'SITE_MAP' ? 'SITE MAP' : 'ASSIGNMENT INSTRUCTIONS'} "${title}" v${version}` : (body.type === 'CONTRACT' ? 'CONTRACT' : 'DOCUMENT');
+    const versionedLabel = { SITE_MAP: 'SITE MAP', INDUCTION: 'INDUCTION' }[body.type] || 'ASSIGNMENT INSTRUCTIONS';
+    const label = versioned ? `${versionedLabel} "${title}" v${version}` : (body.type === 'CONTRACT' ? 'CONTRACT' : 'DOCUMENT');
     logEvent('site.document_uploaded', `${label} UPLOADED FOR ${site.name}`, { site_id: site.id, document_id: d.id });
     return { __status: 201, __body: publicDocument(d) };
   });

@@ -1175,6 +1175,15 @@ function siteForm(s) {
       </div>
       <p class="dim" id="sMapError" style="min-height:16px;margin:0"></p>
 
+      <label>Inductions — versioned; the current version is what staff see</label>
+      <div id="sInductionsList" class="dim">Loading…</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="sIndTitle" autocomplete="off" placeholder="Title, e.g. Site induction pack" style="flex:1">
+        <input type="file" id="sIndFile" accept="application/pdf,image/png,image/jpeg">
+        <button type="button" class="btn" id="sIndUpload">Upload</button>
+      </div>
+      <p class="dim" id="sIndError" style="min-height:16px;margin:0"></p>
+
       <label>Passdown — shift-handover notes</label>
       <div id="sPassdownLog" class="dim">Loading…</div>
       <div style="display:flex;gap:8px">
@@ -1234,6 +1243,7 @@ function siteModal(s) {
       };
       const openDoc = (url, mimetype, title) => { if (mimetype === 'application/pdf') window.open(url, '_blank'); else openImageViewer(url, title); };
       const paintInstructions = (docs) => paintVersionedList(docs, 'ASSIGNMENT_INSTRUCTIONS', 'sInstructionsList', openDoc);
+      const paintInductions = (docs) => paintVersionedList(docs, 'INDUCTION', 'sInductionsList', openDoc);
       const paintMapsGallery = (docs) => {
         const maps = docs.filter((d) => d.type === 'SITE_MAP');
         const current = new Map();
@@ -1249,7 +1259,7 @@ function siteModal(s) {
         els('#sMapsGallery [data-view]').forEach((el_) => (el_.onclick = () => openDoc(docUrl(el_.dataset.view), el_.dataset.mime, el_.dataset.title)));
       };
       function refreshDocs() {
-        api('GET', `/api/sites/${s.id}/documents`).then((docs) => { paintDocs(docs); paintInstructions(docs); paintMapsGallery(docs); })
+        api('GET', `/api/sites/${s.id}/documents`).then((docs) => { paintDocs(docs); paintInstructions(docs); paintMapsGallery(docs); paintInductions(docs); })
           .catch(() => { el('#sDocsList').textContent = 'Failed to load.'; });
       }
       refreshDocs();
@@ -1289,6 +1299,7 @@ function siteModal(s) {
       }
       wireVersionedUpload('ASSIGNMENT_INSTRUCTIONS', '#sInstrTitle', '#sInstrFile', '#sInstrUpload', '#sInstrError');
       wireVersionedUpload('SITE_MAP', '#sMapTitle', '#sMapFile', '#sMapUpload', '#sMapError');
+      wireVersionedUpload('INDUCTION', '#sIndTitle', '#sIndFile', '#sIndUpload', '#sIndError');
       const paintPassdown = (logs) => {
         el('#sPassdownLog').innerHTML = logs.length
           ? `<div class="log" style="max-height:160px;overflow:auto">${logs.map((l) => `<div><span class="t">${esc(new Date(l.created_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span>${esc(l.author_name)}: ${esc(l.body)}</div>`).join('')}</div>`
