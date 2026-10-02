@@ -3900,7 +3900,7 @@ const forms = require('./routes-forms.js')({
 // Client portal — see routes-client.js for the trust-boundary invariants.
 require('./routes-client.js')({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess,
+  isControlRole, assertPassdownAccess, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL,
 });
 
 // Finance — a read-only view of cost/billing figures. See routes-finance.js.

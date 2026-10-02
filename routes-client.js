@@ -54,7 +54,7 @@ const CLIENT_REQUEST_STATUSES = ['OPEN', 'ACKNOWLEDGED', 'CLOSED'];
 
 module.exports = function registerClientRoutes({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess,
+  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl,
 }) {
   for (const t of ['clients', 'documents', 'client_requests']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -154,6 +154,49 @@ module.exports = function registerClientRoutes({
     if (db.users.some((u) => u.client_id === c.id)) throw httpError(409, 'client has a linked login — remove or reassign it first');
     db.clients = db.clients.filter((x) => x.id !== c.id);
     logEvent('client.deleted', `CLIENT ${c.name} DELETED`);
+    return { ok: true };
+  });
+
+  const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  /** Same house style as the resolution-report email (server.js) — max-width
+   * 640px, Arial, #111827/#f3f4f6/#6b7280/#9ca3af — but with no inline cid:
+   * logo, since sendEmail here (sendGraphEmail) doesn't support attachments
+   * with contentId. Plain text/colour branding instead. */
+  function buildWelcomeEmailHtml(client) {
+    const loginUrl = `${publicBaseUrl}/index.html`;
+    const features = [
+      ['Jobs & patrol visits', 'See activity at your sites as it happens — dispatches, patrol visits, and when each one is resolved.'],
+      ['Service reports', 'A clear record of what happened on site and when, for every job and visit.'],
+      ['Quotes & contracts', 'Review and sign quotes and contracts online.'],
+      ['Invoices', 'View and keep track of invoices raised to your account.'],
+      ['Equipment on hire', 'See what equipment you currently have on hire from us.'],
+      ['Documents', 'Site maps, assignment instructions and other paperwork for your sites, in one place.'],
+      ['Raise a request', 'Send us a request directly and track its progress.'],
+    ];
+    return `<!doctype html><html><body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
+      <div style="max-width:640px;margin:0 auto;padding:24px 20px">
+        <p style="color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin:0 0 4px">Echelon CCCS</p>
+        <h1 style="font-size:20px;margin:0 0 4px">Welcome to your client portal, ${escHtml(client.name)}</h1>
+        <p style="color:#6b7280;margin:0 0 20px">You now have online access to your account with Echelon.</p>
+        <p style="margin:0 0 20px">From your portal you can:</p>
+        <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px">
+          ${features.map(([label, desc]) => `<tr><td style="padding:8px 0;border-bottom:1px solid #e2e5ea;vertical-align:top;width:170px"><strong>${escHtml(label)}</strong></td><td style="padding:8px 0;border-bottom:1px solid #e2e5ea;color:#6b7280">${escHtml(desc)}</td></tr>`).join('')}
+        </table>
+        <p style="margin:0 0 24px">
+          <a href="${loginUrl}" style="display:inline-block;background:#111827;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px">Sign in to your portal</a>
+        </p>
+        <p style="color:#6b7280;font-size:13px;margin:0 0 4px">If you don't have login details yet, or need a password reset, let us know and we'll sort it out.</p>
+        <p style="color:#9ca3af;font-size:11px;margin-top:32px">Sent automatically by CCCS — comms.echeloncic.com</p>
+      </div>
+    </body></html>`;
+  }
+  route('POST', '/api/clients/:id/welcome-email', ADMIN, async ({ params }) => {
+    const c = db.clients.find((x) => x.id === Number(params.id));
+    if (!c) throw httpError(404, 'client not found');
+    if (!c.contact_email) throw httpError(400, 'client has no contact email set');
+    const result = await sendEmail(c.contact_email, 'Welcome to your Echelon client portal', buildWelcomeEmailHtml(c));
+    if (!result || result.ok === false) throw httpError(502, (result && result.error) || 'email send failed');
+    logEvent('client.welcome_email_sent', `WELCOME EMAIL SENT TO ${c.name}`, { client_id: c.id });
     return { ok: true };
   });
 
