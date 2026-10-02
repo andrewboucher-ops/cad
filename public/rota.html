@@ -46,6 +46,7 @@
   .coverage-badge { font-weight: 700; padding: 0 4px; border-radius: 3px; margin-left: 4px; }
   .coverage-badge.gap { color: var(--emergency); background: rgba(239,68,68,.12); }
   .coverage-badge.over { color: var(--priority); background: rgba(249,115,22,.12); }
+  .coverage-badge.adhoc { color: #b45309; background: rgba(242,169,60,.18); }
   .add-hint { font-size: 10.5px; color: var(--ink-dim); opacity: 0; transition: opacity .1s; }
   .rota-cell:hover .add-hint { opacity: 1; }
   .visit-chip {
@@ -319,8 +320,9 @@ function paintGridByStaff() {
           // requirement) is a click away in the full shift modal, not
           // crammed onto the chip face.
           const badge = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount}</span>` : '';
+          const adhocBadge = s.detail && s.detail.adhoc ? '<span class="coverage-badge adhoc">AD HOC</span>' : '';
           return `<div class="shift-chip status-${chipStatusClass(s, a)}${a.on_leave_conflict ? ' leave-conflict' : ''}${s.status === 'DRAFT' ? ' draft' : ''}" data-shift="${s.id}" title="${a.on_leave_conflict ? 'This person has approved leave covering this day' : ''}">
-          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${badge}</div>
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${badge}${adhocBadge}</div>
           <div>${esc(s.site_name || s.shift_type_name || '')}</div>
         </div>`;
         }).join('')}
@@ -364,8 +366,9 @@ function paintGridBySite() {
           // on the chip face; type, duty sup, draft, patrol requirement
           // all live in the modal behind a click.
           const badge = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount}</span>` : '';
+          const adhocBadge = s.detail && s.detail.adhoc ? '<span class="coverage-badge adhoc">AD HOC</span>' : '';
           return `<div class="shift-chip${s.status === 'CANCELLED' ? ' status-CANCELLED' : ''}${onLeave ? ' leave-conflict' : ''}${s.status === 'DRAFT' ? ' draft' : ''}" data-shift="${s.id}" title="${onLeave ? 'Someone on this shift has approved leave covering this day' : ''}">
-          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${badge}</div>
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${badge}${adhocBadge}</div>
           <div>${esc(names)}</div>
         </div>`;
         }).join('')}
@@ -418,8 +421,8 @@ function shiftForm(s, defaults) {
   // snapshots those fields before rebuilding and passes them back in as
   // `pr`; every field below prefers that snapshot over the server value.
   const pr = d.preserved || {};
-  const startDefault = isNew ? `${d.date}T09:00` : (pr.starts_at || new Date(s.starts_at).toISOString().slice(0, 16));
-  const endDefault = isNew ? `${d.date}T17:00` : (pr.ends_at || new Date(s.ends_at).toISOString().slice(0, 16));
+  const startDefault = isNew ? `${d.date}T09:00` : (pr.starts_at || localDT(s.starts_at));
+  const endDefault = isNew ? `${d.date}T17:00` : (pr.ends_at || localDT(s.ends_at));
   const typeIdSel = !isNew && pr.shift_type_id != null ? pr.shift_type_id : (!isNew ? s.shift_type_id : null);
   const siteIdSel = !isNew && 'site_id' in pr ? pr.site_id : (!isNew ? s.site_id : (isNew ? d.siteId : null));
   const headcountVal = !isNew && pr.required_headcount != null ? pr.required_headcount : (isNew ? 1 : s.required_headcount);

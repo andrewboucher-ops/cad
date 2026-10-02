@@ -78,6 +78,11 @@
   </div>
 
   <div class="section-card">
+    <header>Rota</header>
+    <div class="body" id="rotaBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card">
     <header>Service report</header>
     <div class="body">
       <div class="range-row">
@@ -163,6 +168,21 @@ async function paintActivity() {
   el('#activityBody').innerHTML = rows.length
     ? rows.map((r) => `<div class="list-row"><span class="t">${esc(r.t)}</span><span style="flex:1">${esc(r.label)}</span>${statusPill(r.status)}</div>`).join('')
     : '<p class="empty-note">Nothing open right now.</p>';
+}
+
+/** Coverage, not names — routes-client.js deliberately keeps personnel
+ * identity out of a client-facing shift, the same stance as jobs/visits. */
+async function paintRota() {
+  const rows = await api('GET', withAs(`/api/client/shifts?site_id=${currentSiteId}`)).catch(() => []);
+  const now = Date.now();
+  el('#rotaBody').innerHTML = rows.length
+    ? rows.map((s) => {
+        const current = Date.parse(s.starts_at) <= now && Date.parse(s.ends_at) >= now;
+        const [pillText, pillCls] = current ? ['Now', 'open'] : s.coverage_gap > 0 ? ['Gap', 'missed'] : ['Covered', 'completed'];
+        const end = new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        return `<div class="list-row"><span class="t">${esc(fmtDateTime(s.starts_at))}–${esc(end)}</span><span style="flex:1">${esc(s.shift_type_name || 'Coverage')}</span><span class="pill ${pillCls}">${pillText}</span></div>`;
+      }).join('')
+    : '<p class="empty-note">No upcoming coverage scheduled.</p>';
 }
 
 function renderReport(r) {
@@ -326,7 +346,7 @@ async function loadSite() {
   const today = new Date(), monthAgo = new Date(today.getTime() - 30 * 86400000);
   el('#repFrom').value = monthAgo.toISOString().slice(0, 10);
   el('#repTo').value = today.toISOString().slice(0, 10);
-  await Promise.all([paintActivity(), runReport(), paintDocs(), paintRequests()]);
+  await Promise.all([paintActivity(), paintRota(), runReport(), paintDocs(), paintRequests()]);
 }
 
 (async function init() {
@@ -355,7 +375,7 @@ async function loadSite() {
   el('#clientName').textContent = client.name;
   if (!sites.length) {
     el('#activityBody').innerHTML = '<p class="empty-note">No sites are linked to this account yet — contact Echelon to have them added.</p>';
-    el('#reportBody').innerHTML = ''; el('#docsBody').innerHTML = ''; el('#reqList').innerHTML = '';
+    el('#reportBody').innerHTML = ''; el('#docsBody').innerHTML = ''; el('#reqList').innerHTML = ''; el('#rotaBody').innerHTML = '';
     return;
   }
   currentSiteId = sites[0].id;

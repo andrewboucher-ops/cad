@@ -2208,7 +2208,14 @@ async function sendGraphEmail(to, subject, html, opts = {}) {
   if (!to) return { ok: false, error: 'no recipient' };
   try {
     const token = await getGraphAppToken();
-    const attachments = (opts.attachments || []).map((f) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: f.name, contentType: f.contentType || 'application/octet-stream', contentBytes: Buffer.from(f.content).toString('base64') }));
+    // contentId/isInline are optional passthroughs for a cid: reference in
+    // the HTML (an inline logo, say) — omitted entirely for a plain
+    // attachment, same as before this existed.
+    const attachments = (opts.attachments || []).map((f) => ({
+      '@odata.type': '#microsoft.graph.fileAttachment', name: f.name, contentType: f.contentType || 'application/octet-stream',
+      contentBytes: Buffer.from(f.content).toString('base64'),
+      ...(f.contentId ? { contentId: f.contentId, isInline: Boolean(f.isInline) } : {}),
+    }));
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }], ...(attachments.length ? { attachments } : {}) } }),
@@ -3779,6 +3786,49 @@ route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, user }) =>
   broadcast('shift.updated', pub, { personnelIds: [a.personnel_id] });
   logEvent('shift.clocked_out', `${p ? p.name : 'PERSON'} CLOCKED OUT`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
+});
+
+/* Ad hoc clock-in — covering work nobody rostered (someone called in sick,
+ * a last-minute cover request). Rather than a parallel attendance system,
+ * this creates a genuine shift + assignment on the fly (status IN_PROGRESS,
+ * detail.adhoc true to flag it apart on the rota) and clocks the caller
+ * into it immediately, through the exact same geofence check as a normal
+ * clock-in — from here on it IS a normal shift: clock-out, breaks, hours,
+ * auto-clock-out-on-leaving-site, all the existing attendance machinery
+ * applies untouched. A generous 12h placeholder end time stands in for a
+ * real rostered end — the shift is still open until they clock out. */
+route('POST', '/api/shifts/adhoc', ALL, ({ body, user }) => {
+  if (!user.personnel_id) throw httpError(400, 'this login is not linked to a member of staff');
+  const siteId = Number(body.site_id);
+  const site = siteId ? db.sites.find((x) => x.id === siteId) : null;
+  if (!site || !siteVisibleTo(siteId, user)) throw httpError(404, 'site not found');
+  const alreadyOn = db.shift_assignments.find((a) => a.personnel_id === user.personnel_id && a.clocked_in_at && !a.clocked_out_at);
+  if (alreadyOn) throw httpError(409, 'you are already clocked in on another shift — clock out of that one first');
+  const now = new Date();
+  const s = {
+    id: nextId('shifts'), site_id: siteId, shift_type_id: null,
+    starts_at: now.toISOString(), ends_at: new Date(now.getTime() + 12 * 3600000).toISOString(),
+    break_minutes: 0, required_headcount: 1, status: 'IN_PROGRESS',
+    pay_rate: null, bill_rate: null, uniform_ppe: '', briefing: '',
+    notes: 'Ad hoc shift — not pre-rostered.', detail: { adhoc: true }, template_id: null, revision: 1,
+    created_by: user.id, created_at: now.toISOString(),
+  };
+  db.shifts.push(s);
+  const a = {
+    id: nextId('shift_assignments'), shift_id: s.id, personnel_id: user.personnel_id, role_on_shift: '',
+    is_duty_supervisor: false, status: 'CONFIRMED', confirmed_at: now.toISOString(),
+    attendance: null, clocked_in_at: null, clocked_out_at: null,
+    created_by: user.id, created_at: now.toISOString(), updated_at: now.toISOString(),
+  };
+  db.shift_assignments.push(a);
+  attendance.checkClockIn(a, s, body || {}, user);
+  a.clocked_in_at = new Date().toISOString(); a.updated_at = a.clocked_in_at;
+  const p = db.personnel.find((x) => x.id === user.personnel_id);
+  const pub = publicShift(s);
+  pub.my = pub.assignments.find((x) => x.personnel_id === user.personnel_id) || null;
+  broadcast('shift.updated', pub, { personnelIds: [user.personnel_id] });
+  logEvent('shift.adhoc_created', `${p ? p.name : 'PERSON'} CLOCKED IN AD HOC AT ${site.name.toUpperCase()}`, { shift_id: s.id, personnel_id: user.personnel_id });
+  return { __status: 201, __body: pub };
 });
 
 /* ---- Personal iCal feed — a long unguessable token stands in for a

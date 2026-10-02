@@ -110,6 +110,21 @@ module.exports = function registerClientRoutes({
       scheduled_for: v.scheduled_for, dispatched_at: v.dispatched_at, on_scene_at: v.on_scene_at, completed_at: v.completed_at,
     };
   };
+  /** No personnel names — same conservative default as clientJob/clientVisit
+   * above. A client sees that a post is covered and by how it's going
+   * (gap or not), not who specifically is standing it. */
+  const clientShift = (s) => {
+    const site = db.sites.find((x) => x.id === s.site_id);
+    const type = s.shift_type_id ? db.shift_types.find((t) => t.id === s.shift_type_id) : null;
+    const activeCount = db.shift_assignments.filter((a) => a.shift_id === s.id && ['ASSIGNED', 'CONFIRMED'].includes(a.status)).length;
+    return {
+      id: s.id, site_id: s.site_id, site_name: site ? site.name : null,
+      shift_type_name: type ? type.name : null,
+      starts_at: s.starts_at, ends_at: s.ends_at, status: s.status,
+      required_headcount: s.required_headcount || 0, assigned_count: activeCount,
+      coverage_gap: Math.max(0, (s.required_headcount || 0) - activeCount),
+    };
+  };
   const publicDocument = (d) => ({
     id: d.id, site_id: d.site_id, type: d.type, title: d.title || null,
     version: d.version || 1, is_current: d.is_current !== false,
@@ -158,12 +173,17 @@ module.exports = function registerClientRoutes({
   });
 
   const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  /** Same house style as the resolution-report email (server.js) — max-width
-   * 640px, Arial, #111827/#f3f4f6/#6b7280/#9ca3af — but with no inline cid:
-   * logo, since sendEmail here (sendGraphEmail) doesn't support attachments
-   * with contentId. Plain text/colour branding instead. */
+  /** Same brand language as the printed marketing material (dark navy band,
+   * amber accent, numbered feature rows, tracked uppercase labels) rather
+   * than the plainer resolution-report email style — this one goes to a
+   * client's inbox as their first impression of the portal, not an
+   * operational record. The logo is the existing white-on-transparent
+   * wordmark (public/assets/echelon-wordmark.png) — it's invisible on a
+   * light background (that's why the resolution-report email's copy of it
+   * barely shows), so it only ever sits on the dark band here. */
   function buildWelcomeEmailHtml(client) {
     const loginUrl = `${publicBaseUrl}/index.html`;
+    const NAVY = '#0c1624', AMBER = '#f2a93c', LINE = '#e2e5ea', MUTED = '#6b7280';
     const features = [
       ['Jobs & patrol visits', 'See activity at your sites as it happens — dispatches, patrol visits, and when each one is resolved.'],
       ['Service reports', 'A clear record of what happened on site and when, for every job and visit.'],
@@ -173,20 +193,48 @@ module.exports = function registerClientRoutes({
       ['Documents', 'Site maps, assignment instructions and other paperwork for your sites, in one place.'],
       ['Raise a request', 'Send us a request directly and track its progress.'],
     ];
-    return `<!doctype html><html><body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827">
-      <div style="max-width:640px;margin:0 auto;padding:24px 20px">
-        <p style="color:#6b7280;font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin:0 0 4px">Echelon CCCS</p>
-        <h1 style="font-size:20px;margin:0 0 4px">Welcome to your client portal, ${escHtml(client.name)}</h1>
-        <p style="color:#6b7280;margin:0 0 20px">You now have online access to your account with Echelon.</p>
-        <p style="margin:0 0 20px">From your portal you can:</p>
-        <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px">
-          ${features.map(([label, desc]) => `<tr><td style="padding:8px 0;border-bottom:1px solid #e2e5ea;vertical-align:top;width:170px"><strong>${escHtml(label)}</strong></td><td style="padding:8px 0;border-bottom:1px solid #e2e5ea;color:#6b7280">${escHtml(desc)}</td></tr>`).join('')}
-        </table>
-        <p style="margin:0 0 24px">
-          <a href="${loginUrl}" style="display:inline-block;background:#111827;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-size:14px">Sign in to your portal</a>
-        </p>
-        <p style="color:#6b7280;font-size:13px;margin:0 0 4px">If you don't have login details yet, or need a password reset, let us know and we'll sort it out.</p>
-        <p style="color:#9ca3af;font-size:11px;margin-top:32px">Sent automatically by CCCS — comms.echeloncic.com</p>
+    return `<!doctype html><html><body style="margin:0;padding:0;background:${LINE};font-family:Arial,Helvetica,sans-serif;color:#111827">
+      <div style="max-width:640px;margin:0 auto">
+        <div style="background:${NAVY};padding:30px 32px 26px">
+          <img src="cid:echelon-wordmark" height="24" alt="Echelon" style="display:block;margin:0 0 22px;border:0">
+          <p style="margin:0 0 10px;color:${AMBER};font-size:11px;font-weight:bold;letter-spacing:.14em;text-transform:uppercase">Client portal &middot; Welcome</p>
+          <h1 style="margin:0 0 10px;color:#ffffff;font-size:23px;line-height:1.3">Your account is <span style="color:${AMBER}">ready</span>, ${escHtml(client.name)}.</h1>
+          <p style="margin:0;color:#9fb0c3;font-size:14px;line-height:1.5">You now have online access to your account with Echelon.</p>
+        </div>
+        <div style="background:#ffffff;padding:28px 32px">
+          <p style="margin:0 0 16px;color:${MUTED};font-size:11px;font-weight:bold;letter-spacing:.1em;text-transform:uppercase">What you can do</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            ${features.map(([label, desc], i) => `<tr>
+              <td style="padding:10px 12px 10px 0;border-bottom:1px solid ${LINE};width:30px;vertical-align:top;color:${AMBER};font-weight:bold;font-size:13px">${String(i + 1).padStart(2, '0')}</td>
+              <td style="padding:10px 0;border-bottom:1px solid ${LINE};vertical-align:top">
+                <strong style="color:#111827">${escHtml(label)}</strong><br>
+                <span style="color:${MUTED};font-size:13px">${escHtml(desc)}</span>
+              </td>
+            </tr>`).join('')}
+          </table>
+          <table style="width:100%;border-collapse:collapse;margin-top:22px"><tr><td style="background:#fdf3e0;border-left:3px solid ${AMBER};padding:14px 16px;font-size:13px;color:#57534e">
+            Questions about your account? Reply to this email or call <strong>01472 352462</strong> — we're happy to help.
+          </td></tr></table>
+        </div>
+        <div style="background:${AMBER};padding:24px 32px">
+          <table style="width:100%;border-collapse:collapse"><tr>
+            <td style="vertical-align:middle">
+              <p style="margin:0 0 2px;font-size:17px;font-weight:bold;color:${NAVY}">Ready when you are.</p>
+              <p style="margin:0;font-size:13px;color:#3a2e14">Sign in to see jobs, reports, invoices and more.</p>
+            </td>
+            <td align="right" style="vertical-align:middle;white-space:nowrap">
+              <a href="${loginUrl}" style="display:inline-block;background:${NAVY};color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:6px;font-size:13px;font-weight:bold">Sign in &rarr;</a>
+            </td>
+          </tr></table>
+        </div>
+        <div style="background:${NAVY};padding:20px 32px">
+          <p style="margin:0 0 6px;color:#64748b;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase">Inspections &middot; Monitoring &middot; Keyholding &middot; Response</p>
+          <p style="margin:0;color:#475569;font-size:10.5px;line-height:1.6">
+            Echelon Command Information Centre Ltd &middot; Company No. 13765107<br>
+            Regent House, Brookenby Business Park, Binbrook, Market Rasen LN8 6HF<br>
+            Sent automatically by CCCS &mdash; comms.echeloncic.com
+          </p>
+        </div>
       </div>
     </body></html>`;
   }
@@ -194,7 +242,11 @@ module.exports = function registerClientRoutes({
     const c = db.clients.find((x) => x.id === Number(params.id));
     if (!c) throw httpError(404, 'client not found');
     if (!c.contact_email) throw httpError(400, 'client has no contact email set');
-    const result = await sendEmail(c.contact_email, 'Welcome to your Echelon client portal', buildWelcomeEmailHtml(c));
+    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark.png');
+    const attachments = fs.existsSync(logoFile)
+      ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
+      : [];
+    const result = await sendEmail(c.contact_email, 'Welcome to your Echelon client portal', buildWelcomeEmailHtml(c), { attachments });
     if (!result || result.ok === false) throw httpError(502, (result && result.error) || 'email send failed');
     logEvent('client.welcome_email_sent', `WELCOME EMAIL SENT TO ${c.name}`, { client_id: c.id });
     return { ok: true };
@@ -357,6 +409,19 @@ module.exports = function registerClientRoutes({
     if (siteId) ownedSite(client, siteId);
     return db.site_visits.filter((v) => client.site_ids.includes(v.site_id) && (!siteId || v.site_id === siteId))
       .sort((a, b) => (a.scheduled_for < b.scheduled_for ? 1 : -1)).slice(0, 100).map(clientVisit);
+  });
+  /** Rota coverage for a client's own site(s) — published/in-progress/
+   * completed only, same as every staff-facing rota view already hides a
+   * DRAFT shift from anyone it isn't ready for yet. Defaults to "from
+   * yesterday" so what's currently on site still shows, not just what's
+   * still to come. */
+  route('GET', '/api/client/shifts', CLIENT_OR_ADMIN, ({ user, query }) => {
+    const client = requireClient(user, query);
+    const siteId = query.get('site_id') ? Number(query.get('site_id')) : null;
+    if (siteId) ownedSite(client, siteId);
+    const from = query.get('from') ? Date.parse(query.get('from')) : Date.now() - 86400000;
+    return db.shifts.filter((s) => !['DRAFT', 'CANCELLED'].includes(s.status) && client.site_ids.includes(s.site_id) && (!siteId || s.site_id === siteId) && Date.parse(s.ends_at) >= from)
+      .sort((a, b) => (a.starts_at < b.starts_at ? -1 : 1)).slice(0, 100).map(clientShift);
   });
   route('GET', '/api/client/sites/:id/report', CLIENT_OR_ADMIN, ({ params, query, user }) => {
     const client = requireClient(user, query);

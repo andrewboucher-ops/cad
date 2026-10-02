@@ -446,7 +446,9 @@ function paintShiftBar() {
       const next = shifts.filter((x) => x.status !== 'CANCELLED' && x.status !== 'DRAFT' && Date.parse(x.starts_at) > Date.now()).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at))[0];
       bar.className = 'shiftbar';
       bar.innerHTML = `<div class="sb-top"><span class="sb-state">Not on shift</span><span class="sb-where">${next ? `next: ${esc(fmtShiftTime(next.starts_at))}${next.site_name ? ' · ' + esc(next.site_name) : ''}` : 'no shifts booked'}</span></div>
-        <div class="sb-sub">${next ? 'Clock in opens here an hour before your shift starts.' : 'When you are rostered, your clock-in appears here.'}</div>`;
+        <div class="sb-sub">${next ? 'Clock in opens here an hour before your shift starts.' : 'When you are rostered, your clock-in appears here.'}</div>
+        <div class="sb-acts" style="margin-top:8px"><button class="btn" id="sbAdhoc" style="font-size:12px;padding:6px 12px">Not rostered? Clock in anyway</button></div>`;
+      el('#sbAdhoc').onclick = openAdhocClockInModal;
       return;
     }
     const h = hoursOf(f.my);
@@ -719,6 +721,39 @@ async function openSiteDocsModal(siteId) {
 }
 function siteDocsButton(siteId) {
   return siteId ? `<button type="button" class="btn" data-sitedocs="${siteId}" style="padding:4px 10px;font-size:11px">Site documents</button>` : '';
+}
+
+/** Covering work nobody rostered — a last-minute call-out, someone else's
+ * no-show. Picks a site, then clocks straight into a freshly created shift
+ * (POST /api/shifts/adhoc on the server) through the same geofence check
+ * as a normal clock-in; from there it behaves exactly like any other
+ * shift (clock-out, breaks, hours all work unchanged). */
+async function openAdhocClockInModal() {
+  modal('Clock in without a rostered shift', '<p class="dim">Loading sites…</p>', async () => {
+    try {
+      const sites = await api('GET', '/api/sites');
+      el('#modalHost .content').innerHTML = `
+        <p class="dim" style="margin:0 0 14px">Use this only when you're covering work that wasn't on the rota — the shift it creates is flagged "ad hoc" so control can see it wasn't planned.</p>
+        <label>Site</label>
+        <select id="adhocSite" style="width:100%;margin-bottom:12px">${sites.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select>
+        <p class="dim" id="adhocMsg" style="min-height:16px;margin:0 0 10px"></p>
+        <button class="btn ok wide" id="adhocGo">Clock in</button>`;
+      el('#adhocGo').onclick = async () => {
+        el('#adhocMsg').textContent = 'Checking your location…';
+        const f = await getFix(15000, 0);
+        try {
+          await api('POST', '/api/shifts/adhoc', { site_id: Number(el('#adhocSite').value), ...(f || {}) });
+          closeModal();
+          startFootTracking();
+          toast('Clocked in.');
+          await refreshShifts();
+        } catch (e) {
+          const text = !f && /location/i.test(e.message) ? 'Turn on location for this app (and allow it in your browser), then try again.' : e.message;
+          el('#adhocMsg').textContent = text; el('#adhocMsg').style.color = 'var(--emergency)';
+        }
+      };
+    } catch (e) { el('#modalHost .content').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  });
 }
 function paintJob() {
   if (!job) {
