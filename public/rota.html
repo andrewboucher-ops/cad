@@ -53,6 +53,7 @@
     border-left: 3px dotted var(--ink-dim); line-height: 1.3; opacity: .85; cursor: default;
   }
   .visit-chip .times { font-family: var(--mono); font-weight: 700; }
+  .visit-chip > div:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .visit-chip.dbl-booked { border-left-color: var(--emergency); }
   .visit-chip .dbl-flag { color: var(--emergency); font-weight: 700; }
   form.stack { display: flex; flex-direction: column; gap: 12px; }
@@ -65,14 +66,24 @@
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .seg button { border: none; background: var(--panel); padding: 7px 14px; font: inherit; font-size: 13px; color: var(--ink-dim); cursor: pointer; }
   .seg button.on { background: var(--accent-dim); color: #fff; }
-  /* Days never shrink below a readable width; the grid scrolls sideways
-     instead, with the names column pinned. */
+  /* All 7 days fit in one screen width on any normal desktop — columns
+     flex down to a floor that still reads fine now chips are just time +
+     name, rather than forcing a fixed minimum that guaranteed horizontal
+     scroll on anything under ~1300px. overflow-x stays as a fallback, not
+     the default behaviour, for a window narrower than the floor allows. */
   #gridWrap { overflow-x: auto; border-radius: 8px; }
-  .rota-grid { grid-template-columns: 170px repeat(7, minmax(158px, 1fr)) !important; min-width: max-content; }
+  .rota-grid { grid-template-columns: minmax(120px, 160px) repeat(7, minmax(90px, 1fr)) !important; min-width: 0; }
   .rota-grid .person-name, .rota-grid .hdr:first-child { position: sticky; left: 0; z-index: 2; }
   .rota-grid .hdr { z-index: 3; }
-  .shift-chip { font-size: 12px; padding: 5px 7px; }
+  .rota-grid > div { padding: 6px; }
+  /* A long site/person name truncates with an ellipsis (full name on
+     hover and always in the modal) instead of wrapping to two or three
+     lines and making row heights uneven down the whole column. */
+  .rota-grid .person-name { padding: 6px 8px; min-width: 0; }
+  .rota-grid .person-name .main, .rota-grid .person-name .sub { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .shift-chip { font-size: 11px; padding: 4px 6px; }
   .shift-chip .times { white-space: nowrap; }
+  .shift-chip > div:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .day-list h3 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin: 18px 0 6px; }
   .day-list h3.today { color: var(--accent); }
   .day-list table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
@@ -297,7 +308,7 @@ function paintGridByStaff() {
   html += `<div class="hdr"></div>`;
   for (const d of days) html += `<div class="hdr ${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()].slice(0, 3)} ${d.getDate()}</div>`;
   for (const p of rows) {
-    html += `<div class="person-name">${esc(p.name)}<span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
+    html += `<div class="person-name" title="${esc(p.name)}"><span class="main">${esc(p.name)}</span><span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
     for (const d of days) {
       const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.assignments.some((a) => a.personnel_id === p.id));
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
@@ -341,7 +352,7 @@ function paintGridBySite() {
   html += `<div class="hdr"></div>`;
   for (const d of days) html += `<div class="hdr ${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()].slice(0, 3)} ${d.getDate()}</div>`;
   for (const site of rows) {
-    html += `<div class="person-name">${esc(site.name)}</div>`;
+    html += `<div class="person-name" title="${esc(site.name)}"><span class="main">${esc(site.name)}</span></div>`;
     for (const d of days) {
       const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.site_id === site.id);
       html += `<div class="rota-cell" data-site="${site.id ?? ''}" data-date="${fmtDate(d)}">
