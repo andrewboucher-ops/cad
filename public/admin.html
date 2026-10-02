@@ -652,7 +652,7 @@ function personnelForm(p) {
       <label>SIA licence — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">no API exists to verify this automatically; check it yourself against the SIA register and record what you found</span></label>
       <div style="display:flex;gap:8px">
         <input id="npnSiaNo" autocomplete="off" placeholder="Licence number" value="${isNew ? '' : esc(p.sia_licence_no || '')}" style="flex:1">
-        <input id="npnSiaExpiry" type="date" value="${!isNew && p.sia_licence_expiry ? p.sia_licence_expiry.slice(0, 10) : ''}">
+        <input id="npnSiaExpiry" type="date" style="width:150px" value="${!isNew && p.sia_licence_expiry ? p.sia_licence_expiry.slice(0, 10) : ''}">
       </div>
       ${!isNew && p.compliance && p.compliance.sia !== 'unset' && p.compliance.sia !== 'ok' ? `<p class="err" style="margin:0">${p.compliance.sia === 'expired' ? 'Expired' : 'Expires within 30 days'}</p>` : ''}
       <label>DBS check — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">the Update Service check is manual and needs the person's consent; this only records that you did it</span></label>
