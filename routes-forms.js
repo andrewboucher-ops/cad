@@ -250,6 +250,37 @@ const DEFAULT_EXTRA_FORMS = [
       { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
     ],
   },
+  {
+    // RESTRICTED by default, same reasoning as patient-care/safeguarding
+    // above: this can carry a named third party's injury details and is
+    // the record an SIA licence review or a claim would turn on — a
+    // default should err towards the stricter handling. An admin can
+    // relax it in Admin -> Forms; relaxing is a logged decision.
+    key: 'use-of-force', name: 'Use of force report', visibility: 'RESTRICTED', subject_types: ['JOB', 'SITE_VISIT', 'SITE', 'PERSONNEL'],
+    description: 'Any physical force used on duty, including restraint — required whenever force is used, whether or not anyone was hurt.',
+    fields: [
+      { id: 'occurred_at', label: 'Time force was used', type: 'datetime', required: true },
+      { id: 'subject_name', label: 'Name of the person force was used against (if known)', type: 'text' },
+      { id: 'subject_description', label: 'Description (if not known by name)', type: 'textarea' },
+      { id: 'reason', label: 'Reason force was necessary', type: 'select', required: true, options: ['Self-defence', 'Defence of another person', 'Prevention of a crime', 'Effecting a lawful arrest or detention', 'Preventing escape', 'Other'] },
+      { id: 'force_type', label: 'Type of force used', type: 'select', required: true, options: ['Verbal commands / de-escalation only', 'Physical restraint or control', 'Handcuffs or limb restraints applied', 'Strike or parry', 'Use of an issued defensive item', 'Other'] },
+      { id: 'force_duration', label: 'Approximate duration force was applied', type: 'text' },
+      { id: 'narrative', label: 'What happened, in sequence — what was said, what was done, and why', type: 'textarea', required: true },
+      { id: 'subject_injured', label: 'The subject was injured', type: 'checkbox' },
+      { id: 'subject_injury_details', label: 'Details of the subject\'s injury', type: 'textarea' },
+      { id: 'officer_injured', label: 'The officer was injured', type: 'checkbox' },
+      { id: 'officer_injury_details', label: 'Details of the officer\'s injury', type: 'textarea' },
+      { id: 'medical_attention', label: 'Medical attention was given or requested', type: 'checkbox' },
+      { id: 'arrested_detained', label: 'Subject was arrested or detained', type: 'checkbox' },
+      { id: 'police_informed', label: 'Police informed', type: 'checkbox' },
+      { id: 'police_reference', label: 'Police reference', type: 'text' },
+      { id: 'witnesses', label: 'Witnesses (names and contact details if available)', type: 'textarea' },
+      { id: 'cctv_bwv_ref', label: 'CCTV / body-worn video reference', type: 'text' },
+      { id: 'supervisor_notified', label: 'A supervisor was notified at the time', type: 'checkbox' },
+      { id: 'photo', label: 'Photo (e.g. scene — never an injury photo without the subject\'s consent)', type: 'photo' },
+      { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
+    ],
+  },
 ];
 
 /** The public job application form, installed once if no APPLICATION form
