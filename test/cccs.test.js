@@ -104,6 +104,7 @@ function wsClient(token) {
 
 let adminT, dispT, danT, ellieT, ryanT, mdtT;
 let danId, ellieId, ryanId, mdt1Id;
+const mails = [];
 
 before(async () => {
   app.start();
@@ -120,6 +121,7 @@ before(async () => {
   ellieId = personnel.find((p) => p.name === 'Ellie Marsh').id;
   ryanId = personnel.find((p) => p.name === 'Ryan Cole').id;
   mdt1Id = (await call('GET', '/api/mdts', undefined, dispT)).body.find((m) => m.mdt_code === 'MDT-001').id;
+  app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, attachments: opts.attachments || [] }); return { ok: true }; };
 });
 after(() => {
   app.server.closeAllConnections?.();
@@ -157,6 +159,33 @@ test('a "set your password" link signs in with the new password, rejects a bad/e
   assert.equal((await call('POST', '/api/auth/set-password', { token: goodToken, password: 'anothernew1' })).status, 400, 'the same link cannot be used a second time');
 
   await call('DELETE', `/api/users/${userId}`, undefined, adminT);
+});
+
+test('a welcome link explains Microsoft SSO by whichever of email/SMS is on file', async () => {
+  const noContact = await call('POST', '/api/users', { username: 'welcome-none', password: 'password1', role: 'DISPATCHER' }, adminT);
+  assert.equal((await call('POST', `/api/users/${noContact.body.id}/send-welcome-link`, {}, adminT)).status, 400, 'nothing to send to');
+  assert.equal((await call('POST', `/api/users/${noContact.body.id}/send-welcome-link`, {}, dispT)).status, 403, 'admin only');
+
+  const before = mails.length;
+  const emailOnly = await call('POST', '/api/users', { username: 'welcome-email', password: 'password1', role: 'DISPATCHER', email: 'welcome-email@example.test' }, adminT);
+  const r1 = await call('POST', `/api/users/${emailOnly.body.id}/send-welcome-link`, {}, adminT);
+  assert.equal(r1.status, 200, JSON.stringify(r1.body));
+  assert.equal(r1.body.email, true);
+  assert.equal(r1.body.sms, false, 'no personnel link, so no phone to text');
+  assert.equal(mails.length, before + 1);
+  assert.equal(mails[mails.length - 1].to, 'welcome-email@example.test');
+
+  // Dan is personnel-linked with a contact_phone — both channels should fire.
+  const danUser = (await call('GET', '/api/users', undefined, adminT)).body.find((u) => u.username === 'dwhitfield');
+  await call('PATCH', `/api/users/${danUser.id}`, { email: 'dan.welcome@example.test' }, adminT);
+  await call('PATCH', `/api/personnel/${danId}`, { contact_phone: '07700900555' }, adminT);
+  const r2 = await call('POST', `/api/users/${danUser.id}/send-welcome-link`, {}, adminT);
+  assert.equal(r2.status, 200, JSON.stringify(r2.body));
+  assert.equal(r2.body.email, true);
+  assert.equal(r2.body.sms, true);
+
+  await call('DELETE', `/api/users/${noContact.body.id}`, undefined, adminT);
+  await call('DELETE', `/api/users/${emailOnly.body.id}`, undefined, adminT);
 });
 
 /* ---------------- MDTs ---------------- */

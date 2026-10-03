@@ -4239,6 +4239,66 @@ route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
   logEvent('user.deleted', `USER ${u.username} DELETED`, { user_id: u.id });
   return { ok: true };
 });
+/** Staff sign in with Microsoft 365, not a password — there's nothing to
+ * "reset" for them the way there is for a CLIENT login (see
+ * POST /api/clients/:id/send-password-link), just an explanation of how
+ * SSO works and which email it's matched against. Sends by whichever of
+ * email/SMS it can: `u.email` for email (the same field SSO matching
+ * already uses), the linked personnel record's contact_phone for SMS
+ * (respecting sms_opt_out, same as every other SMS in this codebase) —
+ * refuses outright only if neither is reachable at all. */
+route('POST', '/api/users/:id/send-welcome-link', ADMIN, async ({ params }) => {
+  const u = db.users.find((x) => x.id === Number(params.id));
+  if (!u) throw httpError(404, 'user not found');
+  const person = u.personnel_id ? db.personnel.find((p) => p.id === u.personnel_id) : null;
+  const email = u.email || (person && person.contact_email) || null;
+  const phone = person && !person.sms_opt_out ? sms.normalizeNumber(person.contact_phone) : null;
+  if (!email && !phone) throw httpError(400, 'this account has no email or phone number on file to send to');
+  const first = (u.display_name || u.username).split(/\s+/)[0];
+  const loginUrl = `${PUBLIC_BASE_URL}/index.html`;
+  const sent = { email: false, sms: false };
+  if (email) {
+    const NAVY = '#0c1624', AMBER = '#f2a93c';
+    const html = `<!doctype html><html><body style="margin:0;padding:0;background:#e2e5ea;font-family:Arial,Helvetica,sans-serif;color:#111827">
+      <div style="max-width:560px;margin:0 auto">
+        <div style="background:${NAVY};padding:30px 32px 26px">
+          <img src="cid:echelon-wordmark" height="24" alt="Echelon" style="display:block;margin:0 0 22px;border:0">
+          <p style="margin:0 0 10px;color:${AMBER};font-size:11px;font-weight:bold;letter-spacing:.14em;text-transform:uppercase">Your account</p>
+          <h1 style="margin:0 0 10px;color:#ffffff;font-size:21px;line-height:1.3">You're set up on CCCS, ${escHtml(first)}.</h1>
+          <p style="margin:0;color:#9fb0c3;font-size:14px;line-height:1.5">Sign in with your work Microsoft 365 account — there's no separate password to remember.</p>
+        </div>
+        <div style="background:#ffffff;padding:28px 32px">
+          <ol style="margin:0 0 20px;padding-left:20px;font-size:14px;line-height:1.8">
+            <li>Go to <a href="${loginUrl}">${PUBLIC_BASE_URL.replace(/^https?:\/\//, '')}</a></li>
+            <li>Choose <strong>Sign in with Microsoft</strong></li>
+            <li>Sign in with your work account${email ? ` (${escHtml(email)})` : ''}</li>
+          </ol>
+          <div style="text-align:center">
+            <a href="${loginUrl}" style="display:inline-block;background:${NAVY};color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-size:14px;font-weight:bold">Sign in &rarr;</a>
+          </div>
+        </div>
+        <div style="background:${NAVY};padding:18px 32px">
+          <p style="margin:0;color:#475569;font-size:10.5px;line-height:1.6">Sent automatically by CCCS &mdash; comms.echeloncic.com</p>
+        </div>
+      </div>
+    </body></html>`;
+    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark.png');
+    const attachments = fs.existsSync(logoFile)
+      ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
+      : [];
+    const r = await mailer.send(email, 'Your Echelon CCCS account', html, { attachments });
+    writeNotifyLog({ channel: 'EMAIL', personnel_id: person ? person.id : null, to_email: email, body: 'Welcome link sent', provider: r.ok ? 'graph' : 'none', outcome: r.ok ? 'QUEUED' : 'FAILED', error_code: r.ok ? null : r.error });
+    sent.email = Boolean(r.ok);
+  }
+  if (phone) {
+    const body = `Hi ${first}, your CCCS account is ready. Go to ${PUBLIC_BASE_URL.replace(/^https?:\/\//, '')} and choose "Sign in with Microsoft" using your work account. — Echelon`;
+    const r = await sms.send({ to: phone, body, label: u.display_name });
+    writeNotifyLog({ channel: 'SMS', personnel_id: person ? person.id : null, to_number: phone, body, provider: r.dryRun ? 'none' : 'twilio', provider_ref: r.sid || null, outcome: r.ok ? (r.dryRun ? 'ATTEMPTED' : 'QUEUED') : 'FAILED', error_code: r.ok ? null : (r.error || 'send failed') });
+    sent.sms = Boolean(r.ok);
+  }
+  logEvent('user.welcome_link_sent', `WELCOME LINK SENT TO ${u.username} (email: ${sent.email ? 'yes' : 'no'}, sms: ${sent.sms ? 'yes' : 'no'})`, { user_id: u.id });
+  return sent;
+});
 
 /* Branches — see the comment on BRANCH_SCOPED_ROLES for what this does and
  * doesn't restrict. Read is open to ALL (a name is not sensitive, and every

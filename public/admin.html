@@ -526,7 +526,7 @@ function editModal(u) {
     const isSelf = u && u.id === me.id;
     foot.innerHTML = `
       <div class="foot-split">
-        <span>${u && !isSelf ? '<button class="btn danger" id="fDelete">Delete account</button>' : ''}</span>
+        <span>${u && !isSelf ? '<button class="btn danger" id="fDelete">Delete account</button>' : ''} ${u && u.role !== 'CLIENT' ? '<button class="btn" id="fWelcome">Send welcome link</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
           <button class="btn" id="fCancel">Cancel</button>
           <button class="btn primary" id="fSave">${u ? 'Save changes' : 'Create account'}</button>
@@ -538,6 +538,16 @@ function editModal(u) {
       if (!confirm(`Delete the account "${u.username}"? This cannot be undone.`)) return;
       try { await api('DELETE', `/api/users/${u.id}`); closeModal(); load(); }
       catch (e) { el('#fError').textContent = e.message; }
+    };
+    if (el('#fWelcome')) el('#fWelcome').onclick = async () => {
+      if (!confirm(`Send ${u.display_name} sign-in instructions by email/text (whichever is on file)?`)) return;
+      try {
+        const r = await api('POST', `/api/users/${u.id}/send-welcome-link`);
+        const bits = [];
+        if (r.email) bits.push('emailed');
+        if (r.sms) bits.push('texted');
+        alert(bits.length ? `Sent — ${bits.join(' and ')}.` : 'Nothing was sent — check the email/phone on file.');
+      } catch (e) { el('#fError').textContent = e.message; }
     };
     el('#fSave').onclick = async () => {
       const body = {
