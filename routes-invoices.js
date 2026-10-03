@@ -32,7 +32,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Doc } = require('./pdf.js');
+const { Doc, A4 } = require('./pdf.js');
 
 module.exports = function registerInvoices({
   route, httpError, ADMIN, FINANCE, CLIENT = ['CLIENT'], db, nextId, logEvent, attendance, agreements, xero, sendEmail = null, publicBaseUrl = '', flushNow = () => {},
@@ -74,17 +74,32 @@ module.exports = function registerInvoices({
   }
 
   /* ---- the PDF ---- */
+  // Same brand language as the printed marketing material and the client
+  // welcome email: a dark navy band, amber accent. The PDF writer (pdf.js)
+  // only draws rects/text/images at explicit coordinates, so the band is
+  // drawn by hand before anything else, and doc.y is reset below it — the
+  // rest of the document (pairs/table/para) still flows normally.
+  const NAVY = [0.047, 0.086, 0.141], AMBER = [0.949, 0.663, 0.235], WHITE = [1, 1, 1], LIGHT = [0.78, 0.82, 0.88];
   function invoicePdf(inv) {
     const c = company(), st = settingsRow(), client = clientOf(inv) || {};
     const grey = [0.35, 0.38, 0.42];
     const doc = new Doc({ footer: `${c.company_name} — invoice ${inv.number || '(draft)'}` });
-    doc.para(c.company_name, { size: 18, bold: true, gap: 0 });
+    const bandH = 112;
+    doc.rect(0, A4.h - bandH, A4.w, bandH, { fill: NAVY, stroke: null });
+    doc.text(c.company_name.toUpperCase(), doc.margin, A4.h - 42, { size: 17, bold: true, color: WHITE });
     const contact = [c.company_address, c.company_phone, c.company_email].filter(Boolean).join('  ·  ');
-    if (contact) doc.para(contact, { size: 9, color: grey, gap: 6 });
-    doc.rule(6);
-    doc.para(inv.status === 'DRAFT' ? 'Draft invoice — not yet issued' : inv.status === 'VOID' ? 'Invoice — VOID' : 'Invoice', { size: 15, bold: true, gap: 6 });
+    if (contact) doc.text(contact, doc.margin, A4.h - 60, { size: 8.5, color: LIGHT });
+    const label = inv.status === 'DRAFT' ? 'DRAFT INVOICE' : inv.status === 'VOID' ? 'INVOICE — VOID' : 'INVOICE';
+    const rightEdge = A4.w - doc.margin;
+    doc.text(label, rightEdge - doc.textWidth(label, 10, true), A4.h - 36, { size: 10, bold: true, color: AMBER });
+    const numStr = inv.number || '(given when approved)';
+    doc.text(numStr, rightEdge - doc.textWidth(numStr, 14, true), A4.h - 54, { size: 14, bold: true, color: WHITE });
+    const dueStr = `Due ${longDate(inv.due_date)}`;
+    doc.text(dueStr, rightEdge - doc.textWidth(dueStr, 9), A4.h - 70, { size: 9, color: LIGHT });
+    doc.y = A4.h - bandH - 26;
+
     doc.pairs([
-      ['Invoice number', inv.number || '— (given when approved)'], ['Invoice date', longDate(inv.issue_date)], ['Due date', longDate(inv.due_date)],
+      ['Invoice date', longDate(inv.issue_date)],
       ['Bill to', [client.name || inv.client_name, client.billing_address].filter(Boolean).join('\n')],
       ['Site', inv.site_name], ['Period', span(inv.period_from, inv.period_to)], ['Contract', inv.contract_reference],
       ...(st.vat_number ? [['Our VAT number', st.vat_number]] : []),
@@ -96,13 +111,29 @@ module.exports = function registerInvoices({
       doc.text(label, doc.margin + doc.width * 0.55, doc.y, { size: 10, bold });
       doc.text(value, doc.margin + doc.width - 4 - doc.textWidth(value, 10, bold), doc.y, { size: 10, bold });
     };
-    total('Net', money(inv.subtotal)); total(`VAT at ${inv.vat_rate}%`, money(inv.vat)); total('Total due', money(inv.total), true);
-    doc.y -= 10;
+    total('Net', money(inv.subtotal)); total(`VAT at ${inv.vat_rate}%`, money(inv.vat));
+    doc.room(30); doc.y -= 6;
+    doc.rect(doc.margin, doc.y - 20, doc.width, 24, { fill: NAVY, stroke: null });
+    doc.text('Total due', doc.margin + 10, doc.y - 14, { size: 11, bold: true, color: WHITE });
+    const totalStr = money(inv.total);
+    doc.text(totalStr, doc.margin + doc.width - 10 - doc.textWidth(totalStr, 11, true), doc.y - 14, { size: 11, bold: true, color: AMBER });
+    doc.y -= 30;
     if (inv.status === 'PAID') doc.para('PAID — thank you', { size: 13, bold: true, color: [0.09, 0.55, 0.27], gap: 6 });
     if (inv.notes) { doc.heading('Notes', 11); doc.para(inv.notes, { size: 9.5 }); }
     if (inv.status !== 'PAID' && (st.account_number || st.sort_code)) {
-      doc.heading('How to pay', 11);
-      doc.pairs([['Bank', st.bank_name], ['Account name', st.account_name || c.company_name], ['Sort code', st.sort_code], ['Account number', st.account_number], ['Reference', inv.number || '—']].filter(([, v]) => v), { size: 9.5 });
+      const rows = [['Bank', st.bank_name], ['Account name', st.account_name || c.company_name], ['Sort code', st.sort_code], ['Account number', st.account_number], ['Reference', inv.number || '—']].filter(([, v]) => v);
+      const padX = 14, rowGap = 13.5, rowH = rows.length * rowGap + 30;
+      doc.room(rowH + 10); doc.y -= 6;
+      const top = doc.y;
+      doc.rect(doc.margin, top - rowH, doc.width, rowH, { fill: [0.99, 0.95, 0.87], stroke: null });
+      doc.rect(doc.margin, top - rowH, 3, rowH, { fill: AMBER, stroke: null });
+      doc.text('HOW TO PAY', doc.margin + padX, top - 16, { size: 9, bold: true, color: [0.7, 0.47, 0.1] });
+      rows.forEach(([label, value], i) => {
+        const ry = top - 32 - i * rowGap;
+        doc.text(label, doc.margin + padX, ry, { size: 9, color: grey });
+        doc.text(value, doc.margin + padX + 110, ry, { size: 9.5 });
+      });
+      doc.y = top - rowH - 6;
     }
     if (st.footer) doc.para(st.footer, { size: 9.5, color: grey, gap: 4 });
     if (st.company_number) doc.para(`Registered in England and Wales, company number ${st.company_number}.`, { size: 8.5, color: grey });
