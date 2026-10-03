@@ -215,6 +215,20 @@ test('invoices come from the signed contract and the hours worked at its site', 
   assert.equal(rg.body.made[0].lines[0].quantity, 7.5);
 });
 
+test('generate can be narrowed to one site', async () => {
+  // Both contracts (siteA and siteB, from the tests above) are running by
+  // October, with nothing invoiced yet for it.
+  const bySite = await call('POST', '/api/invoices/generate', { from: '2026-10-01', to: '2026-10-31', site_id: siteB.id }, adminT);
+  assert.equal(bySite.status, 200, JSON.stringify(bySite.body));
+  assert.equal(bySite.body.made.length, 1, 'only the one site\'s contract, not siteA\'s too');
+  assert.equal(bySite.body.made[0].site_id, siteB.id);
+
+  const noContractSite = (await call('POST', '/api/sites', { name: 'No Contract Site' }, adminT)).body;
+  const none = await call('POST', '/api/invoices/generate', { from: '2026-10-01', to: '2026-10-31', site_id: noContractSite.id }, adminT);
+  assert.equal(none.status, 400);
+  assert.match(none.body.error, /no signed contract/);
+});
+
 test('a draft is checked and edited, approved, sent to Xero, and its payment read back', async () => {
   const inv = app.db.invoices.find((i) => i.contract_id === contract.id && i.status === 'DRAFT');
   const lines = inv.lines.map((l) => ({ id: l.id, description: l.description, quantity: l.kind === 'HOURLY' ? 15.5 : l.quantity, unit_amount: l.unit_amount }));

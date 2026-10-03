@@ -627,7 +627,7 @@ test('shift types are admin-extensible, and retiring one hides it from the defau
 
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 9 * 3600000).toISOString();
-  const shift = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: created.body.id, starts_at: start, ends_at: end }, dispT);
+  const shift = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: created.body.id, starts_at: start, ends_at: end }, adminT);
   assert.equal(shift.body.shift_type_name, 'Night Patrol');
 
   const retired = await call('PATCH', `/api/shift-types/${created.body.id}`, { active: false }, adminT);
@@ -644,7 +644,8 @@ const patrolTypeId = () => app.db.shift_types.find((t) => t.key === 'MOBILE_PATR
 test('a shift is created with an initial assignment, and only that officer or control can clock in and out', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 9 * 3600000).toISOString();
-  const shift = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT);
+  assert.equal((await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT)).status, 403, 'creating a shift is admin-only — a dispatcher is read-only on the rota');
+  const shift = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, adminT);
   assert.equal(shift.status, 201);
   assert.equal(shift.body.status, 'PUBLISHED');
   assert.equal(shift.body.assignments.length, 1);
@@ -664,31 +665,39 @@ test('a shift is created with an initial assignment, and only that officer or co
 
 test('shifts reject a bad time range and can be filtered by personnel', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
-  const bad = await call('POST', '/api/shifts', { personnel: ryanId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: start }, dispT);
+  const bad = await call('POST', '/api/shifts', { personnel: ryanId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: start }, adminT);
   assert.equal(bad.status, 400);
 
   const end = new Date(Date.now() + 8 * 3600000).toISOString();
-  await call('POST', '/api/shifts', { personnel: ryanId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT);
+  await call('POST', '/api/shifts', { personnel: ryanId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, adminT);
   const mine = await call('GET', `/api/shifts?personnel_id=${ryanId}`, undefined, dispT);
   assert.ok(mine.body.every((s) => s.assignments.some((a) => a.personnel_id === ryanId)));
   assert.ok(mine.body.every((s) => s.my && s.my.personnel_id === ryanId), 'the "my" convenience field points at the queried person');
   assert.ok(mine.body.length >= 1);
 });
 
-test('a shift can be edited and deleted by control, and a second person can be added', async () => {
+test('editing, staffing and deleting a shift is admin-only — a dispatcher is read-only on the rota', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 5 * 3600000).toISOString();
-  const shift = await call('POST', '/api/shifts', { personnel: ellieId, shift_type_id: patrolTypeId(), required_headcount: 2, starts_at: start, ends_at: end }, dispT);
-  const edited = await call('PATCH', `/api/shifts/${shift.body.id}`, { notes: 'Cover for Dan', status: 'PUBLISHED' }, dispT);
+  const shift = await call('POST', '/api/shifts', { personnel: ellieId, shift_type_id: patrolTypeId(), required_headcount: 2, starts_at: start, ends_at: end }, adminT);
+
+  assert.equal((await call('PATCH', `/api/shifts/${shift.body.id}`, { notes: 'Cover for Dan' }, dispT)).status, 403, 'a dispatcher cannot edit a shift');
+  const edited = await call('PATCH', `/api/shifts/${shift.body.id}`, { notes: 'Cover for Dan', status: 'PUBLISHED' }, adminT);
   assert.equal(edited.body.notes, 'Cover for Dan');
   assert.equal(edited.body.status, 'PUBLISHED');
   assert.equal(edited.body.coverage_gap, 1, 'one seat still open against a headcount of 2');
 
-  const added = await call('POST', `/api/shifts/${shift.body.id}/assignments`, { personnel: danId }, dispT);
+  assert.equal((await call('POST', `/api/shifts/${shift.body.id}/assignments`, { personnel: danId }, dispT)).status, 403, 'a dispatcher cannot add someone to a shift');
+  const added = await call('POST', `/api/shifts/${shift.body.id}/assignments`, { personnel: danId }, adminT);
   assert.equal(added.status, 201);
   assert.equal(added.body.assignments.length, 2);
   assert.equal(added.body.coverage_gap, 0);
-  assert.equal((await call('POST', `/api/shifts/${shift.body.id}/assignments`, { personnel: danId }, dispT)).status, 409, 'already on this shift');
+  assert.equal((await call('POST', `/api/shifts/${shift.body.id}/assignments`, { personnel: danId }, adminT)).status, 409, 'already on this shift');
+
+  const danAssignmentId = added.body.assignments.find((a) => a.personnel_id === danId).id;
+  assert.equal((await call('PATCH', `/api/shift-assignments/${danAssignmentId}`, { is_duty_supervisor: true }, dispT)).status, 403, 'a dispatcher cannot make someone duty supervisor');
+  assert.equal((await call('PATCH', `/api/shift-assignments/${danAssignmentId}`, { is_duty_supervisor: true }, adminT)).body.assignments.find((a) => a.id === danAssignmentId).is_duty_supervisor, true);
+  assert.equal((await call('PATCH', `/api/shift-assignments/${danAssignmentId}`, { status: 'REMOVED' }, dispT)).status, 403, 'a dispatcher cannot remove someone from a shift');
 
   assert.equal((await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, dispT)).status, 403, 'delete is admin-only');
   assert.equal((await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, adminT)).status, 200);
@@ -697,18 +706,18 @@ test('a shift can be edited and deleted by control, and a second person can be a
 test('a shift created as DRAFT is invisible to its own assignee until published', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 5 * 3600000).toISOString();
-  assert.equal((await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end, status: 'IN_PROGRESS' }, dispT)).status, 400, 'a new shift can only be DRAFT or PUBLISHED');
+  assert.equal((await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end, status: 'IN_PROGRESS' }, adminT)).status, 400, 'a new shift can only be DRAFT or PUBLISHED');
 
-  const draft = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end, status: 'DRAFT' }, dispT);
+  const draft = await call('POST', '/api/shifts', { personnel: danId, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end, status: 'DRAFT' }, adminT);
   assert.equal(draft.status, 201);
   assert.equal(draft.body.status, 'DRAFT');
 
   const danSees = await call('GET', `/api/shifts?personnel_id=${danId}`, undefined, danT);
   assert.ok(!danSees.body.some((s) => s.id === draft.body.id), 'a draft never reaches the officer it names, even by their own filtered fetch');
   const controlSees = await call('GET', `/api/shifts?personnel_id=${danId}`, undefined, dispT);
-  assert.ok(controlSees.body.some((s) => s.id === draft.body.id), 'control sees it fine');
+  assert.ok(controlSees.body.some((s) => s.id === draft.body.id), 'control sees it fine, read-only');
 
-  const published = await call('PATCH', `/api/shifts/${draft.body.id}`, { status: 'PUBLISHED' }, dispT);
+  const published = await call('PATCH', `/api/shifts/${draft.body.id}`, { status: 'PUBLISHED' }, adminT);
   assert.equal(published.body.status, 'PUBLISHED');
   const danSeesNow = await call('GET', `/api/shifts?personnel_id=${danId}`, undefined, danT);
   assert.ok(danSeesNow.body.some((s) => s.id === draft.body.id), 'visible the moment it is published');
@@ -808,7 +817,7 @@ test('a field officer gains passdown access to a site once they have a shift or 
 
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 9 * 3600000).toISOString();
-  await call('POST', '/api/shifts', { personnel: ryanId, site_id: meridian.id, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT);
+  await call('POST', '/api/shifts', { personnel: ryanId, site_id: meridian.id, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, adminT);
 
   const posted = await call('POST', '/api/passdown-logs', { site_id: meridian.id, body: 'Fire panel silenced after false trigger in zone 2.' }, ryanT);
   assert.equal(posted.status, 201);
@@ -834,7 +843,7 @@ test('an officer posted to a site can see its current assignment instructions an
 
   const start = new Date(Date.now() + 3600000).toISOString();
   const end = new Date(Date.now() + 9 * 3600000).toISOString();
-  await call('POST', '/api/shifts', { personnel: ellieId, site_id: carlton.id, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, dispT);
+  await call('POST', '/api/shifts', { personnel: ellieId, site_id: carlton.id, shift_type_id: patrolTypeId(), starts_at: start, ends_at: end }, adminT);
 
   const docs = await call('GET', `/api/sites/${carlton.id}/documents`, undefined, ellieT);
   assert.equal(docs.status, 200);

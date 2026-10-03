@@ -145,6 +145,13 @@
 const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const me = CCCS.getSession().user;
+// Editing the rota (times, site, headcount, who's on it, resources) is
+// admin-only now — a dispatcher or supervisor gets the same page, read-only:
+// the server enforces this too (POST/PATCH /api/shifts, assignments and
+// shift resources all now require SYSTEM_ADMIN), this just keeps the UI from
+// showing controls that would only 403.
+const isAdmin = me.role === 'SYSTEM_ADMIN';
+if (!isAdmin) { el('#btnNewShift').remove(); el('#btnPublishDrafts').remove(); el('#btnDuplicateWeek').remove(); }
 
 el('#whoName').textContent = me.display_name;
 el('#whoRole').textContent = me.role.replace('_', ' ');
@@ -327,7 +334,7 @@ function paintGridByStaff() {
         </div>`;
         }).join('')}
         ${visitsForPersonOnDay(p.id, d).map((v) => visitChipHtml(v, visitOverlapsAny(v, dayShifts))).join('')}
-        <span class="add-hint">+ add shift</span>
+        ${isAdmin ? '<span class="add-hint">+ add shift</span>' : ''}
       </div>`;
     }
   }
@@ -373,7 +380,7 @@ function paintGridBySite() {
         </div>`;
         }).join('')}
         ${site.id != null ? visitsForSiteOnDay(site.id, d).map((v) => visitChipHtml(v, visitOverlapsAny(v, dayShifts))).join('') : ''}
-        <span class="add-hint">+ add shift</span>
+        ${isAdmin ? '<span class="add-hint">+ add shift</span>' : ''}
       </div>`;
     }
   }
@@ -401,9 +408,11 @@ function finishGridPaint(shifts, days, defaultsForCell) {
     e.stopPropagation();
     visitPopup(allSiteVisits.find((v) => v.id === Number(chip.dataset.visit)));
   }));
-  els('.rota-cell').forEach((cell) => cell.addEventListener('click', () => {
-    shiftModal(null, defaultsForCell(cell));
-  }));
+  if (isAdmin) {
+    els('.rota-cell').forEach((cell) => cell.addEventListener('click', () => {
+      shiftModal(null, defaultsForCell(cell));
+    }));
+  }
 }
 
 el('#prevWeek').onclick = () => { weekStart.setDate(weekStart.getDate() - 7); load(); };
@@ -429,29 +438,32 @@ function shiftForm(s, defaults) {
   const notesVal = !isNew && pr.notes != null ? pr.notes : (isNew ? '' : (s.notes || ''));
   const statusSel = !isNew && pr.status != null ? pr.status : (!isNew ? s.status : null);
   const patrolVal = !isNew && pr.patrol_interval_min != null ? pr.patrol_interval_min : (isNew ? '' : ((s.detail && s.detail.patrol_interval_min) || ''));
+  // Editing is admin-only (server-enforced); a dispatcher/supervisor gets
+  // every field disabled rather than a form that would just 403 on save.
+  const dis = isAdmin ? '' : 'disabled';
   return `
     <form class="stack" id="shForm">
       ${isNew ? `<label>Personnel</label>
-      <select id="shPersonnel">${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
+      <select id="shPersonnel" ${dis}>${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
       <label>Shift type</label>
-      <select id="shType">${allShiftTypes.map((t) => `<option value="${t.id}" ${Number(typeIdSel) === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+      <select id="shType" ${dis}>${allShiftTypes.map((t) => `<option value="${t.id}" ${Number(typeIdSel) === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
         ${!isNew && !allShiftTypes.some((t) => t.id === s.shift_type_id) ? `<option value="${s.shift_type_id}" ${Number(typeIdSel) === s.shift_type_id ? 'selected' : ''}>${esc(s.shift_type_name)} (retired)</option>` : ''}</select>
       <label>Site (optional)</label>
-      <select id="shSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${Number(siteIdSel) === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <select id="shSite" ${dis}><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${Number(siteIdSel) === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       <label>Starts</label>
-      <input id="shStart" type="datetime-local" value="${startDefault}">
+      <input id="shStart" type="datetime-local" value="${startDefault}" ${dis}>
       <label>Ends</label>
-      <input id="shEnd" type="datetime-local" value="${endDefault}">
+      <input id="shEnd" type="datetime-local" value="${endDefault}" ${dis}>
       <label>Required headcount</label>
-      <input id="shHeadcount" type="number" min="1" value="${headcountVal}">
+      <input id="shHeadcount" type="number" min="1" value="${headcountVal}" ${dis}>
       <label>Patrol requirement (optional)</label>
-      <input id="shPatrolMinutes" type="number" min="1" placeholder="e.g. 60 — a checkpoint patrol every hour" value="${esc(patrolVal)}">
+      <input id="shPatrolMinutes" type="number" min="1" placeholder="e.g. 60 — a checkpoint patrol every hour" value="${esc(patrolVal)}" ${dis}>
       <label>Notes</label>
-      <textarea id="shNotes" rows="2">${esc(notesVal)}</textarea>
+      <textarea id="shNotes" rows="2" ${dis}>${esc(notesVal)}</textarea>
       ${isNew
-        ? `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDraft"> Create as draft — not shown to staff until published</label>`
+        ? `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDraft" ${dis}> Create as draft — not shown to staff until published</label>`
         : `<label>Status</label>
-      <select id="shStatus">${['DRAFT', 'PUBLISHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((v) => `<option value="${v}" ${statusSel === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
+      <select id="shStatus" ${dis}>${['DRAFT', 'PUBLISHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((v) => `<option value="${v}" ${statusSel === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
       <p class="dim" id="shError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
@@ -476,11 +488,11 @@ function assignmentsSection(s) {
             <span style="flex:1">${esc(a.personnel_name)}${a.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}</span>
             <span class="dim" style="font-size:11px">${esc(a.status)}${a.clocked_in_at ? ` · ${hm(a.clocked_in_at)}–${a.clocked_out_at ? hm(a.clocked_out_at) : 'now'}` : ''}${a.auto_clocked_out ? ' · auto' : ''}</span>
             ${a.clock_out_needs_review ? '<span class="leave-flag" title="Clocked out automatically after the app had been closed — the time is the last time they were seen on site">⚠ check time</span>' : ''}
-            <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:11px"><input type="checkbox" data-duty="${a.id}" ${a.is_duty_supervisor ? 'checked' : ''}> duty sup.</label>
+            <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:11px"><input type="checkbox" data-duty="${a.id}" ${a.is_duty_supervisor ? 'checked' : ''} ${isAdmin ? '' : 'disabled'}> duty sup.</label>
             ${!a.clocked_in_at ? `<button type="button" class="btn" data-clockin="${a.id}" style="padding:4px 8px;font-size:11px">Clock in</button>` : ''}
             ${a.clocked_in_at && !a.clocked_out_at ? `<button type="button" class="btn" data-clockout="${a.id}" style="padding:4px 8px;font-size:11px">Clock out</button>` : ''}
             ${a.clocked_in_at ? `<button type="button" class="btn" data-times="${a.id}" style="padding:4px 8px;font-size:11px">Times</button>` : ''}
-            <button type="button" class="btn danger" data-remove="${a.id}" style="padding:4px 8px;font-size:11px">Remove</button>
+            ${isAdmin ? `<button type="button" class="btn danger" data-remove="${a.id}" style="padding:4px 8px;font-size:11px">Remove</button>` : ''}
           </div>
           ${a.clocked_in_at ? `<div class="hide" data-times-form="${a.id}" style="border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:-4px;font-size:12px">
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
@@ -492,7 +504,7 @@ function assignmentsSection(s) {
             <button type="button" class="btn primary" data-t-save="${a.id}" style="margin-top:6px;padding:4px 10px;font-size:12px">Save times</button>
           </div>` : ''}`).join('') || '<p class="dim" style="font-size:13px">Nobody assigned yet.</p>'}
       </div>
-      ${available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
+      ${isAdmin && available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
         <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
         <button type="button" class="btn" id="shAddPerson" style="padding:6px 12px;font-size:12px">Add</button>
       </div>` : ''}
@@ -516,10 +528,10 @@ function resourcesSection(s) {
         ${s.vehicle_allocations.map((v) => `
           <div style="display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px">
             <span style="flex:1">${esc(v.vehicle_registration)}${v.driver_name ? ' · driver ' + esc(v.driver_name) : ''}</span>
-            <button type="button" class="btn danger" data-unallocvehicle="${v.id}" style="padding:4px 8px;font-size:11px">Remove</button>
+            ${isAdmin ? `<button type="button" class="btn danger" data-unallocvehicle="${v.id}" style="padding:4px 8px;font-size:11px">Remove</button>` : ''}
           </div>`).join('') || '<p class="dim" style="font-size:13px">No vehicle allocated.</p>'}
       </div>
-      ${availableVehicles.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      ${isAdmin && availableVehicles.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <select id="shAddVehicle" style="flex:1;min-width:120px">${availableVehicles.map((v) => `<option value="${v.id}">${esc(v.registration)}</option>`).join('')}</select>
         <select id="shVehicleDriver" style="min-width:140px"><option value="">— no driver —</option>${allPersonnel.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
         <button type="button" class="btn" id="shAddVehicleBtn" style="padding:6px 12px;font-size:12px">Allocate</button>
@@ -530,10 +542,10 @@ function resourcesSection(s) {
         ${openAssetAllocs.map((a) => `
           <div style="display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px">
             <span style="flex:1">${a.quantity_out} × ${esc(a.asset_description)}</span>
-            <button type="button" class="btn ok" data-returnasset="${a.id}" style="padding:4px 8px;font-size:11px">Return</button>
+            ${isAdmin ? `<button type="button" class="btn ok" data-returnasset="${a.id}" style="padding:4px 8px;font-size:11px">Return</button>` : ''}
           </div>`).join('') || '<p class="dim" style="font-size:13px">No equipment allocated.</p>'}
       </div>
-      ${allAssets.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      ${isAdmin && allAssets.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <select id="shAddAsset" style="flex:1;min-width:140px">${allAssets.map((a) => `<option value="${a.id}">${esc(a.description)}${a.is_stock_tracked ? ` (${a.stock_level} in stock)` : ''}</option>`).join('')}</select>
         <input id="shAssetQty" type="number" min="1" value="1" style="width:70px">
         <button type="button" class="btn" id="shAddAssetBtn" style="padding:6px 12px;font-size:12px">Allocate</button>
@@ -573,10 +585,10 @@ function shiftModal(s, defaults) {
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
-        <span>${s ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}</span>
+        <span>${s && isAdmin ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
-          <button class="btn" id="shCancel">Cancel</button>
-          <button class="btn primary" id="shSave">${s ? 'Save changes' : 'Create shift'}</button>
+          <button class="btn" id="shCancel">${isAdmin ? 'Cancel' : 'Close'}</button>
+          ${isAdmin ? `<button class="btn primary" id="shSave">${s ? 'Save changes' : 'Create shift'}</button>` : ''}
         </span>
       </div>`;
     el('#shCancel').onclick = closeModal;
@@ -640,9 +652,10 @@ function shiftModal(s, defaults) {
         el('#shApplications').innerHTML = open.length ? open.map((a) => `
           <div style="display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:6px" data-application="${a.id}">
             <span style="flex:1">${esc(a.personnel_name)}<span class="dim"> — ${esc(a.status === 'SHORTLISTED' ? 'shortlisted' : 'applied')}</span></span>
+            ${isAdmin ? `
             ${a.status === 'APPLIED' ? `<button type="button" class="btn" data-shortlist="${a.id}" style="padding:4px 8px;font-size:11px">Shortlist</button>` : ''}
             <button type="button" class="btn ok" data-approve="${a.id}" style="padding:4px 8px;font-size:11px">Approve</button>
-            <button type="button" class="btn danger" data-reject="${a.id}" style="padding:4px 8px;font-size:11px">Reject</button>
+            <button type="button" class="btn danger" data-reject="${a.id}" style="padding:4px 8px;font-size:11px">Reject</button>` : ''}
           </div>`).join('') : '<p class="dim" style="font-size:13px;margin:0">No open applications.</p>';
         els('#shApplications [data-shortlist]').forEach((b) => (b.onclick = async () => {
           try { await api('PATCH', `/api/shift-applications/${b.dataset.shortlist}`, { status: 'SHORTLISTED' }); await reopen(); }
@@ -683,7 +696,7 @@ function shiftModal(s, defaults) {
       try { await api('PATCH', `/api/shift-asset-allocations/${b.dataset.returnasset}`, {}); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     }));
-    el('#shSave').onclick = async () => {
+    if (el('#shSave')) el('#shSave').onclick = async () => {
       const patrolMinutes = el('#shPatrolMinutes').value ? Number(el('#shPatrolMinutes').value) : null;
       const body = {
         shift_type_id: Number(el('#shType').value),
@@ -708,48 +721,53 @@ function shiftModal(s, defaults) {
     };
   });
 }
-el('#btnNewShift').onclick = () => shiftModal(null, { personnelId: allPersonnel[0] && allPersonnel[0].id, date: fmtDate(new Date()) });
+// These three buttons don't exist in the DOM at all for a non-admin (removed
+// at the top of this script) — wiring them only for isAdmin avoids an
+// onclick assignment against a null element.
+if (isAdmin) {
+  el('#btnNewShift').onclick = () => shiftModal(null, { personnelId: allPersonnel[0] && allPersonnel[0].id, date: fmtDate(new Date()) });
 
-el('#btnPublishDrafts').onclick = async () => {
-  const days = weekDays();
-  const drafts = visibleShifts().filter((s) => s.status === 'DRAFT' && days.some((d) => sameDay(new Date(s.starts_at), d)));
-  if (!drafts.length) { alert('No drafts in the current view.'); return; }
-  if (!confirm(`Publish ${drafts.length} draft shift${drafts.length === 1 ? '' : 's'}?`)) return;
-  for (const s of drafts) await api('PATCH', `/api/shifts/${s.id}`, { status: 'PUBLISHED' });
-  await load();
-};
+  el('#btnPublishDrafts').onclick = async () => {
+    const days = weekDays();
+    const drafts = visibleShifts().filter((s) => s.status === 'DRAFT' && days.some((d) => sameDay(new Date(s.starts_at), d)));
+    if (!drafts.length) { alert('No drafts in the current view.'); return; }
+    if (!confirm(`Publish ${drafts.length} draft shift${drafts.length === 1 ? '' : 's'}?`)) return;
+    for (const s of drafts) await api('PATCH', `/api/shifts/${s.id}`, { status: 'PUBLISHED' });
+    await load();
+  };
 
-/** Copies every (non-cancelled) shift in the current view N weeks ahead,
- * including its active assignees — the same core team usually covers a
- * recurring week, so re-staffing from scratch would be the common case to
- * avoid, not the default to design for. Lands as DRAFT, not published: a
- * bulk copy is exactly the moment someone's left, a date needs nudging, or
- * a site has changed, so it is reviewed via "Publish drafts" rather than
- * notifying everyone immediately. */
-el('#btnDuplicateWeek').onclick = async () => {
-  const weeksStr = prompt('Duplicate the shifts in view how many weeks forward?', '1');
-  const weeks = Number(weeksStr);
-  if (!weeksStr || !Number.isFinite(weeks) || weeks < 1) return;
-  const days = weekDays();
-  const source = visibleShifts().filter((s) => s.status !== 'CANCELLED' && days.some((d) => sameDay(new Date(s.starts_at), d)));
-  if (!source.length) { alert('No shifts in the current view to duplicate.'); return; }
-  if (!confirm(`Duplicate ${source.length} shift${source.length === 1 ? '' : 's'} ${weeks} week${weeks === 1 ? '' : 's'} forward, as drafts?`)) return;
-  const shiftMs = weeks * 7 * 86400000;
-  for (const s of source) {
-    const created = await api('POST', '/api/shifts', {
-      site_id: s.site_id, shift_type_id: s.shift_type_id,
-      starts_at: new Date(Date.parse(s.starts_at) + shiftMs).toISOString(),
-      ends_at: new Date(Date.parse(s.ends_at) + shiftMs).toISOString(),
-      break_minutes: s.break_minutes, required_headcount: s.required_headcount,
-      pay_rate: s.pay_rate, bill_rate: s.bill_rate, uniform_ppe: s.uniform_ppe, briefing: s.briefing,
-      detail: s.detail, notes: s.notes, status: 'DRAFT',
-    });
-    for (const a of s.assignments.filter((x) => ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
-      await api('POST', `/api/shifts/${created.id}/assignments`, { personnel: a.personnel_id, role_on_shift: a.role_on_shift, is_duty_supervisor: a.is_duty_supervisor });
+  /** Copies every (non-cancelled) shift in the current view N weeks ahead,
+   * including its active assignees — the same core team usually covers a
+   * recurring week, so re-staffing from scratch would be the common case to
+   * avoid, not the default to design for. Lands as DRAFT, not published: a
+   * bulk copy is exactly the moment someone's left, a date needs nudging, or
+   * a site has changed, so it is reviewed via "Publish drafts" rather than
+   * notifying everyone immediately. */
+  el('#btnDuplicateWeek').onclick = async () => {
+    const weeksStr = prompt('Duplicate the shifts in view how many weeks forward?', '1');
+    const weeks = Number(weeksStr);
+    if (!weeksStr || !Number.isFinite(weeks) || weeks < 1) return;
+    const days = weekDays();
+    const source = visibleShifts().filter((s) => s.status !== 'CANCELLED' && days.some((d) => sameDay(new Date(s.starts_at), d)));
+    if (!source.length) { alert('No shifts in the current view to duplicate.'); return; }
+    if (!confirm(`Duplicate ${source.length} shift${source.length === 1 ? '' : 's'} ${weeks} week${weeks === 1 ? '' : 's'} forward, as drafts?`)) return;
+    const shiftMs = weeks * 7 * 86400000;
+    for (const s of source) {
+      const created = await api('POST', '/api/shifts', {
+        site_id: s.site_id, shift_type_id: s.shift_type_id,
+        starts_at: new Date(Date.parse(s.starts_at) + shiftMs).toISOString(),
+        ends_at: new Date(Date.parse(s.ends_at) + shiftMs).toISOString(),
+        break_minutes: s.break_minutes, required_headcount: s.required_headcount,
+        pay_rate: s.pay_rate, bill_rate: s.bill_rate, uniform_ppe: s.uniform_ppe, briefing: s.briefing,
+        detail: s.detail, notes: s.notes, status: 'DRAFT',
+      });
+      for (const a of s.assignments.filter((x) => ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
+        await api('POST', `/api/shifts/${created.id}/assignments`, { personnel: a.personnel_id, role_on_shift: a.role_on_shift, is_duty_supervisor: a.is_duty_supervisor });
+      }
     }
-  }
-  await load();
-};
+    await load();
+  };
+}
 
 el('#btnCalSync').onclick = () => CCCS.calendarSync();
 

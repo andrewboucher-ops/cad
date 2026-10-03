@@ -273,7 +273,7 @@ test('line manager and duty supervisor are settable through the real routes, and
   const shift = await call('POST', '/api/shifts', {
     personnel: ryan.id, shift_type_id: app.db.shift_types[0].id,
     starts_at: new Date(now - 3600e3).toISOString(), ends_at: new Date(now + 3600e3).toISOString(), is_duty_supervisor: true,
-  }, dispT);
+  }, adminT);
   assert.equal(shift.status, 201);
   assert.equal(shift.body.assignments[0].is_duty_supervisor, true);
   const assignmentId = shift.body.assignments[0].id;
@@ -281,7 +281,8 @@ test('line manager and duty supervisor are settable through the real routes, and
   assert.equal(c.body.supervisor.name, 'Ryan Cole');
   assert.equal(c.body.supervisor.source, 'DUTY_SUPERVISOR');
 
-  const off = await call('PATCH', `/api/shift-assignments/${assignmentId}`, { is_duty_supervisor: false }, dispT);
+  assert.equal((await call('PATCH', `/api/shift-assignments/${assignmentId}`, { is_duty_supervisor: false }, dispT)).status, 403, 'toggling duty supervisor on a shift is admin-only');
+  const off = await call('PATCH', `/api/shift-assignments/${assignmentId}`, { is_duty_supervisor: false }, adminT);
   assert.equal(off.body.assignments[0].is_duty_supervisor, false);
   assert.ok(app.db.audit_logs.some((e) => e.type === 'shift_assignment.updated' && /Ryan Cole ON SHIFT/.test(e.summary)), 'the change is logged by name');
   assert.equal((await call('GET', `/api/personnel/${dan.id}/contact`, undefined, dispT)).body.supervisor.source, 'LINE_MANAGER');

@@ -37,9 +37,9 @@ after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 async function shiftFor(startOffsetMin, lengthH = 8, siteId = site.id) {
   const type = (await call('GET', '/api/shift-types', undefined, dispT)).body[0];
   const st = new Date(Date.now() + startOffsetMin * 60000);
-  const s = (await call('POST', '/api/shifts', { shift_type_id: type.id, site_id: siteId, starts_at: st.toISOString(), ends_at: new Date(st.getTime() + lengthH * 3600e3).toISOString() }, dispT)).body;
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: dan.id }, dispT);
-  await call('POST', `/api/shifts/${s.id}/publish`, {}, dispT);
+  const s = (await call('POST', '/api/shifts', { shift_type_id: type.id, site_id: siteId, starts_at: st.toISOString(), ends_at: new Date(st.getTime() + lengthH * 3600e3).toISOString() }, adminT)).body;
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: dan.id }, adminT);
+  await call('POST', `/api/shifts/${s.id}/publish`, {}, adminT);
   const shift = app.db.shifts.find((x) => x.id === s.id);
   shift.status = 'PUBLISHED';
   const a = app.db.shift_assignments.find((x) => x.shift_id === s.id && x.personnel_id === dan.id);

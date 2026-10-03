@@ -48,7 +48,7 @@ after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 
 function future(hours) { return new Date(Date.now() + hours * 3600000).toISOString(); }
 async function shift(siteId, startHour, endHour) {
-  const r = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, site_id: siteId, starts_at: future(startHour), ends_at: future(endHour) }, dispT);
+  const r = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, site_id: siteId, starts_at: future(startHour), ends_at: future(endHour) }, adminT);
   return r.body;
 }
 async function makeSupervisor(username, siteIds) {
@@ -94,20 +94,13 @@ test('GET /api/sites is narrowed the same way', async () => {
   assert.ok(!ids.includes(siteA2));
 });
 
-test('a site-list-scoped supervisor cannot create, edit or staff a shift outside their sites', async () => {
+test('a supervisor cannot create, edit or staff a shift even at a site within their own scope — editing is admin-only now', async () => {
   const supT = await makeSupervisor('sup-site-write', [siteA1]);
-  const createOutside = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, site_id: siteA2, starts_at: future(50), ends_at: future(58) }, supT);
-  assert.equal(createOutside.status, 404);
+  assert.equal((await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, site_id: siteA1, starts_at: future(50), ends_at: future(58) }, supT)).status, 403, 'creating is admin-only, even at a site they can see');
 
-  const okShift = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, site_id: siteA1, starts_at: future(50), ends_at: future(58) }, supT);
-  assert.equal(okShift.status, 201);
-
-  const outsideShift = await shift(siteA2, 60, 68); // created by dispatcher, outside the supervisor's scope
-  assert.equal((await call('PATCH', `/api/shifts/${outsideShift.id}`, { notes: 'nope' }, supT)).status, 404);
-  assert.equal((await call('POST', `/api/shifts/${outsideShift.id}/assignments`, { personnel: 1 }, supT)).status, 404);
-
-  // and can't move their own shift's site to one outside scope either
-  assert.equal((await call('PATCH', `/api/shifts/${okShift.body.id}`, { site_id: siteA2 }, supT)).status, 404);
+  const okShift = await shift(siteA1, 50, 58);
+  assert.equal((await call('PATCH', `/api/shifts/${okShift.id}`, { notes: 'nope' }, supT)).status, 403, 'editing is admin-only, even at a site they can see');
+  assert.equal((await call('POST', `/api/shifts/${okShift.id}/assignments`, { personnel: 1 }, supT)).status, 403, 'staffing is admin-only, even at a site they can see');
 });
 
 test('a scoped supervisor cannot read another site\'s passdown log, but a dispatcher can', async () => {
@@ -128,7 +121,7 @@ test('FINANCE can read shift rates and vehicle costs, scoped like a branch-scope
   await call('POST', '/api/users', { username: 'fin-branch', password: 'fin12345', role: 'FINANCE', branch_id: branchAId }, adminT);
   const finT = await login('fin-branch', 'fin12345');
   const s1 = await shift(siteA1, 70, 78);
-  await call('PATCH', `/api/shifts/${s1.id}`, { pay_rate: 12.5, bill_rate: 22 }, dispT);
+  await call('PATCH', `/api/shifts/${s1.id}`, { pay_rate: 12.5, bill_rate: 22 }, adminT);
 
   const rows = (await call('GET', '/api/finance/shifts', undefined, finT)).body;
   const row = rows.find((r) => r.id === s1.id);
@@ -163,8 +156,8 @@ test('GET /api/vehicles/:id/allocations does not crash past the first row (same 
   const vanId = app.db.vehicles.find((v) => v.registration === 'VAN-101').id;
   const s1 = await shift(siteA1, 160, 168);
   const s2 = await shift(siteA1, 170, 178);
-  await call('POST', `/api/shifts/${s1.id}/vehicles`, { vehicle_id: vanId }, dispT);
-  await call('POST', `/api/shifts/${s2.id}/vehicles`, { vehicle_id: vanId }, dispT);
+  await call('POST', `/api/shifts/${s1.id}/vehicles`, { vehicle_id: vanId }, adminT);
+  await call('POST', `/api/shifts/${s2.id}/vehicles`, { vehicle_id: vanId }, adminT);
   const list = await call('GET', `/api/vehicles/${vanId}/allocations`, undefined, adminT);
   assert.equal(list.status, 200);
   assert.equal(list.body.length, 2);
@@ -175,8 +168,8 @@ test('a shift with several assignments, a vehicle and an asset allocated returns
   const s = await shift(siteA1, 90, 98);
   const dan = app.db.users.find((u) => u.username === 'dwhitfield').personnel_id;
   const ellie = app.db.users.find((u) => u.username === 'emarsh').personnel_id;
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: dan }, dispT);
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: ellie }, dispT);
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: dan }, adminT);
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: ellie }, adminT);
 
   const viaList = (await call('GET', '/api/shifts', undefined, dispT)).body.find((r) => r.id === s.id);
   const viaSingle = (await call('GET', `/api/shifts?site_id=${siteA1}`, undefined, dispT)).body.find((r) => r.id === s.id);

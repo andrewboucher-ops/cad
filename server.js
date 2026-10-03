@@ -3577,7 +3577,7 @@ route('GET', '/api/shifts', ALL, ({ query, user }) => {
   if (personnelId) for (const s of out) s.my = s.assignments.find((a) => a.personnel_id === personnelId) || null;
   return out;
 });
-route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
+route('POST', '/api/shifts', ADMIN, ({ body, user }) => {
   const startsAt = body.starts_at ? new Date(body.starts_at) : null;
   const endsAt = body.ends_at ? new Date(body.ends_at) : null;
   if (!startsAt || isNaN(startsAt) || !endsAt || isNaN(endsAt)) throw httpError(400, 'starts_at and ends_at (ISO timestamps) required');
@@ -3631,12 +3631,8 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
   logEvent('shift.created', `SHIFT CREATED (${type.name}) ${s.starts_at} — ${s.ends_at}${firstAssignment ? ` FOR ${findPersonnel(firstAssignment.personnel_id).name}` : ''}`, { shift_id: s.id });
   return { __status: 201, __body: pub };
 });
-route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body, user }) => {
+route('PATCH', '/api/shifts/:id', ADMIN, ({ params, body, user }) => {
   const s = findShift(params.id);
-  // A scoped SUPERVISOR can't edit a shift outside their patch, and can't
-  // use this route to move one of their own shifts to a site outside it
-  // either — checked against both the shift's current site and, if it's
-  // changing, the one it's moving to.
   if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   if ('site_id' in body && body.site_id && !siteVisibleTo(Number(body.site_id), user)) throw httpError(404, 'site not found');
   const wasDraft = s.status === 'DRAFT';
@@ -3701,7 +3697,7 @@ function assertAssignmentAccess(a, user) {
   if (user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id) return;
   throw httpError(403, 'not your shift');
 }
-route('POST', '/api/shifts/:id/assignments', CONTROL, ({ params, body, user }) => {
+route('POST', '/api/shifts/:id/assignments', ADMIN, ({ params, body, user }) => {
   const s = findShift(params.id);
   if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   const p = findPersonnel(body.personnel); if (!p) throw httpError(400, 'personnel required');
@@ -3726,22 +3722,26 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   const a = findAssignment(params.id);
   const s = findShift(a.shift_id);
   const isOwn = user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id;
-  const isControl = isControlRole(user.role);
-  if (!isOwn && !isControl) throw httpError(403, 'not your shift');
-  if (!isOwn && isControl && !siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
+  // Editing WHO is on a shift, and how, is admin-only now (dispatchers and
+  // officers are read-only on the rota) — confirming or declining your own
+  // offered shift is a different, self-service action and stays open to
+  // the assignee regardless.
+  const isAdmin = user.role === 'SYSTEM_ADMIN';
+  if (!isOwn && !isAdmin) throw httpError(403, 'not your shift');
+  if (!isOwn && isAdmin && !siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   let justRemoved = false;
   if ('status' in body) {
     const status = String(body.status || '').toUpperCase();
     if (!SHIFT_ASSIGNMENT_STATES.includes(status)) throw httpError(400, 'invalid status');
     if (isOwn && !['CONFIRMED', 'DECLINED'].includes(status)) throw httpError(403, 'you can only confirm or decline your own assignment');
-    if (status === 'REMOVED' && !isControl) throw httpError(403, 'insufficient role');
+    if (status === 'REMOVED' && !isAdmin) throw httpError(403, 'insufficient role');
     justRemoved = status === 'REMOVED' && a.status !== 'REMOVED';
     a.status = status;
     if (status === 'CONFIRMED') a.confirmed_at = new Date().toISOString();
   }
-  if ('role_on_shift' in body && isControl) a.role_on_shift = body.role_on_shift || '';
-  if ('is_duty_supervisor' in body && isControl) a.is_duty_supervisor = Boolean(body.is_duty_supervisor);
-  if ('attendance' in body && isControl) {
+  if ('role_on_shift' in body && isAdmin) a.role_on_shift = body.role_on_shift || '';
+  if ('is_duty_supervisor' in body && isAdmin) a.is_duty_supervisor = Boolean(body.is_duty_supervisor);
+  if ('attendance' in body && isAdmin) {
     if (body.attendance !== null && !ATTENDANCE_STATES.includes(body.attendance)) throw httpError(400, 'invalid attendance');
     a.attendance = body.attendance;
   }
@@ -3749,9 +3749,9 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   s.revision = (s.revision || 0) + 1;
   const pub = publicShift(s);
   broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [a.personnel_id] });
-  // A control-initiated removal is news to the officer; their own
+  // An admin-initiated removal is news to the officer; their own
   // confirm/decline is something they just did, so it needs no echo back.
-  if (justRemoved && isControl && s.status !== 'DRAFT') notifyShiftEvent('REMOVED', s, [a.personnel_id]);
+  if (justRemoved && isAdmin && s.status !== 'DRAFT') notifyShiftEvent('REMOVED', s, [a.personnel_id]);
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   logEvent('shift_assignment.updated', `${p ? p.name : 'PERSON'} ON SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
@@ -3983,7 +3983,7 @@ const shiftApplications = require('./routes-shift-applications.js')({
 
 // Vehicle/asset allocation and the stock ledger — see routes-fleet-stock.js.
 require('./routes-fleet-stock.js')({
-  route, httpError, ALL, CONTROL, db, nextId, logEvent,
+  route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent,
   findShift, publicVehicleAllocation, publicAssetAllocation, publicAsset, stockLevel, recordStockMovement,
 });
 

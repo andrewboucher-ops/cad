@@ -92,11 +92,12 @@ module.exports = function registerShiftApplicationRoutes({
   route('PATCH', '/api/shift-applications/:id', ALL, ({ params, body, user }) => {
     const a = findApplication(params.id); if (!a) throw httpError(404, 'application not found');
     const isOwn = user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id;
-    const isControl = isControlRole(user.role);
+    // Deciding someone else's application assigns them to the shift — that's
+    // shift editing, admin-only now; withdrawing your own stays self-service.
+    const isControl = user.role === 'SYSTEM_ADMIN';
     if (!isOwn && !isControl) throw httpError(403, 'insufficient role');
     const shiftForScope = db.shifts.find((x) => x.id === a.shift_id);
-    // A branch-scoped supervisor reviewing someone else's application is
-    // still bound by the same visibility a shift list would give them —
+    // Still bound by the same visibility a shift list would give them —
     // 404, not 403, the same "don't confirm it exists" reasoning used
     // elsewhere for a record outside a caller's own scope.
     if (isControl && !isOwn && shiftForScope && !siteVisibleTo(shiftForScope.site_id, user)) throw httpError(404, 'application not found');

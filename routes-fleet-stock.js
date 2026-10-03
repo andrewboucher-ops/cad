@@ -19,7 +19,7 @@
 const STOCK_REASONS = ['RESTOCK', 'USED_ON_SHIFT', 'DAMAGED', 'AUDIT_CORRECTION', 'ALLOCATED', 'RETURNED'];
 
 module.exports = function registerFleetStockRoutes({
-  route, httpError, ALL, CONTROL, db, nextId, logEvent,
+  route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent,
   findShift, publicVehicleAllocation, publicAssetAllocation, publicAsset, stockLevel, recordStockMovement,
 }) {
   for (const t of ['shift_vehicle_allocations', 'shift_asset_allocations', 'stock_movements']) if (!Array.isArray(db[t])) db[t] = [];
@@ -40,7 +40,7 @@ module.exports = function registerFleetStockRoutes({
       .map((a) => publicVehicleAllocation(a))
       .sort((a, b) => { const sa = db.shifts.find((s) => s.id === a.shift_id), sb = db.shifts.find((s) => s.id === b.shift_id); return Date.parse((sa || {}).starts_at || 0) - Date.parse((sb || {}).starts_at || 0); });
   });
-  route('POST', '/api/shifts/:id/vehicles', CONTROL, ({ params, body, user }) => {
+  route('POST', '/api/shifts/:id/vehicles', ADMIN, ({ params, body, user }) => {
     const s = findShift(params.id);
     const v = db.vehicles.find((x) => x.id === Number(body.vehicle_id)); if (!v) throw httpError(400, 'vehicle not found');
     if (v.status === 'OFF_ROAD') throw httpError(409, `${v.registration} is off road`);
@@ -55,7 +55,7 @@ module.exports = function registerFleetStockRoutes({
     logEvent('shift.vehicle_allocated', `${v.registration} ALLOCATED TO SHIFT ${s.id}`, { shift_id: s.id, vehicle_id: v.id });
     return { __status: 201, __body: publicVehicleAllocation(a) };
   });
-  route('DELETE', '/api/shift-vehicle-allocations/:id', CONTROL, ({ params }) => {
+  route('DELETE', '/api/shift-vehicle-allocations/:id', ADMIN, ({ params }) => {
     const a = db.shift_vehicle_allocations.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'allocation not found');
     db.shift_vehicle_allocations = db.shift_vehicle_allocations.filter((x) => x.id !== a.id);
     logEvent('shift.vehicle_unallocated', `VEHICLE ALLOCATION ${a.id} REMOVED`, { shift_id: a.shift_id, vehicle_id: a.vehicle_id });
@@ -64,7 +64,7 @@ module.exports = function registerFleetStockRoutes({
 
   /* ---- Asset allocation — quantity for a stock-tracked asset, a single
    * reserved item otherwise ---- */
-  route('POST', '/api/shifts/:id/assets', CONTROL, ({ params, body, user }) => {
+  route('POST', '/api/shifts/:id/assets', ADMIN, ({ params, body, user }) => {
     const s = findShift(params.id);
     const asset = db.assets.find((x) => x.id === Number(body.asset_id)); if (!asset) throw httpError(400, 'asset not found');
     const quantity = body.quantity != null && body.quantity !== '' ? Number(body.quantity) : 1;
@@ -88,7 +88,7 @@ module.exports = function registerFleetStockRoutes({
     logEvent('shift.asset_allocated', `${quantity} × ${asset.description} ALLOCATED TO SHIFT ${s.id}`, { shift_id: s.id, asset_id: asset.id });
     return { __status: 201, __body: publicAssetAllocation(a) };
   });
-  route('PATCH', '/api/shift-asset-allocations/:id', CONTROL, ({ params, body, user }) => {
+  route('PATCH', '/api/shift-asset-allocations/:id', ADMIN, ({ params, body, user }) => {
     const a = db.shift_asset_allocations.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'allocation not found');
     if (a.returned_at) throw httpError(409, 'already returned');
     const asset = db.assets.find((x) => x.id === a.asset_id);

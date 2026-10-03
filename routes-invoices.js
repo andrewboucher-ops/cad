@@ -203,8 +203,11 @@ module.exports = function registerInvoices({
   route('POST', '/api/invoices/generate', MONEY, ({ body, user }) => {
     const from = String(body.from || ''), to = String(body.to || '');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) throw httpError(400, 'choose the period (from and to dates)');
-    const contracts = (db.agreements || []).filter((c) => running(c, from, to) && (!body.contract_id || c.id === Number(body.contract_id)));
+    const contracts = (db.agreements || []).filter((c) => running(c, from, to)
+      && (!body.contract_id || c.id === Number(body.contract_id))
+      && (!body.site_id || c.site_id === Number(body.site_id)));
     if (body.contract_id && !contracts.length) throw httpError(400, 'that contract is not signed or was not running in this period');
+    if (body.site_id && !body.contract_id && !contracts.length) throw httpError(400, 'that site has no signed contract running in this period');
     const made = [], skipped = [];
     for (const c of contracts) {
       if (!c.client_id) { skipped.push({ contract: c.reference, reason: 'no client' }); continue; }
