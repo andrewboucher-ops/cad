@@ -570,6 +570,9 @@ el('#btnNewUser').onclick = () => editModal(null);
 
 /* ---------- personnel ---------- */
 const EMPLOYMENT_LABEL = { ACTIVE: 'Active', LEAVE: 'On leave', TERMINATED: 'Terminated' };
+// The real SIA licensable sectors — a person can hold more than one (Door
+// Supervision and CCTV together is the common case this was added for).
+const SIA_LICENCE_TYPES = ['Door Supervision', 'Security Guarding', 'CCTV (Public Space Surveillance)', 'Close Protection', 'Cash and Valuables in Transit', 'Key Holding', 'Vehicle Immobilisation'];
 const EMPLOYMENT_TYPE_LABEL = { EMPLOYED: 'Employed', SUBCONTRACTOR: 'Subcontractor' };
 function paintPersonnel() {
   const q = el('#pnSearch').value.trim().toLowerCase();
@@ -649,12 +652,10 @@ function personnelForm(p) {
       <label style="display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-weight:400">
         <input type="checkbox" id="npnEmailOptOut" style="width:auto" ${!isNew && p.email_opt_out ? 'checked' : ''}> Don't email this person shift notifications
       </label>
-      <label>SIA licence — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">no API exists to verify this automatically; check it yourself against the SIA register and record what you found</span></label>
-      <div style="display:flex;gap:8px">
-        <input id="npnSiaNo" autocomplete="off" placeholder="Licence number" value="${isNew ? '' : esc(p.sia_licence_no || '')}" style="flex:1">
-        <input id="npnSiaExpiry" type="date" style="width:150px" value="${!isNew && p.sia_licence_expiry ? p.sia_licence_expiry.slice(0, 10) : ''}">
-      </div>
-      ${!isNew && p.compliance && p.compliance.sia !== 'unset' && p.compliance.sia !== 'ok' ? `<p class="err" style="margin:0">${p.compliance.sia === 'expired' ? 'Expired' : 'Expires within 30 days'}</p>` : ''}
+      <label>SIA licences — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">no API exists to verify these automatically; check each against the SIA register and record what you found. Most people hold one; some hold more (e.g. Door Supervision and CCTV)</span></label>
+      <div id="pnSiaRows"></div>
+      <button type="button" class="btn" id="pnAddLicence" style="align-self:flex-start;padding:5px 12px;font-size:12px">+ Add licence</button>
+      ${!isNew && p.compliance && p.compliance.sia !== 'unset' && p.compliance.sia !== 'ok' ? `<p class="err" style="margin:0">${p.compliance.sia === 'expired' ? 'One or more licences expired' : 'A licence expires within 30 days'}</p>` : ''}
       <label>DBS check — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">the Update Service check is manual and needs the person's consent; this only records that you did it</span></label>
       <div style="display:flex;gap:8px">
         <input id="npnDbsNo" autocomplete="off" placeholder="Certificate number" value="${isNew ? '' : esc(p.dbs_certificate_no || '')}" style="flex:1">
@@ -669,6 +670,24 @@ function personnelForm(p) {
         <span class="dim" id="pnDbsChecked">${p.dbs_last_checked_at ? 'Last checked ' + new Date(p.dbs_last_checked_at).toLocaleDateString('en-GB') : 'Never checked'}</span>
         <button type="button" class="btn" id="pnDbsCheckNow" style="padding:4px 10px;font-size:11px">Mark checked today</button>
       </div>${p.compliance && p.compliance.dbs === 'overdue' ? '<p class="err" style="margin:0">Recheck overdue</p>' : ''}` : ''}
+      <label>Emergency contact — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">the person can also keep this up to date themselves from their own profile</span></label>
+      <div style="display:flex;gap:8px">
+        <input id="npnEcName" autocomplete="off" placeholder="Name" value="${isNew ? '' : esc((p.emergency_contact && p.emergency_contact.name) || '')}" style="flex:1">
+        <input id="npnEcRelationship" autocomplete="off" placeholder="Relationship" value="${isNew ? '' : esc((p.emergency_contact && p.emergency_contact.relationship) || '')}" style="width:140px">
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="npnEcPhone" autocomplete="off" placeholder="Phone" value="${isNew ? '' : esc((p.emergency_contact && p.emergency_contact.phone) || '')}" style="flex:1">
+        <input id="npnEcEmail" type="email" autocomplete="off" placeholder="Email (optional)" value="${isNew ? '' : esc((p.emergency_contact && p.emergency_contact.email) || '')}" style="flex:1">
+      </div>
+      <label>Bank details — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">for payroll. Admin-only to set, deliberately — the person can see what's on file from their own profile but can't change it themselves; get a change confirmed by them directly before updating it here</span></label>
+      <div style="display:flex;gap:8px">
+        <input id="npnBankAccName" autocomplete="off" placeholder="Account name" value="${isNew ? '' : esc((p.bank_details && p.bank_details.account_name) || '')}" style="flex:1">
+        <input id="npnBankName" autocomplete="off" placeholder="Bank name" value="${isNew ? '' : esc((p.bank_details && p.bank_details.bank_name) || '')}" style="flex:1">
+      </div>
+      <div style="display:flex;gap:8px">
+        <input id="npnBankSortCode" autocomplete="off" placeholder="Sort code" value="${isNew ? '' : esc((p.bank_details && p.bank_details.sort_code) || '')}" style="width:150px">
+        <input id="npnBankAccNo" autocomplete="off" placeholder="Account number" value="${isNew ? '' : esc((p.bank_details && p.bank_details.account_number) || '')}" style="flex:1">
+      </div>
       <label>Branch (optional — leave shared if you don't use branches)</label>
       <select id="npnBranch">${branchOptions(isNew ? null : p.branch_id)}</select>
       ${!isNew ? `
@@ -754,6 +773,37 @@ function personnelModal(p) {
     el('#npnEmpType').addEventListener('change', () => {
       el('#npnAllowanceRow').style.display = el('#npnEmpType').value === 'SUBCONTRACTOR' ? 'none' : '';
     });
+    // Repeatable SIA licence rows — a plain array in JS, re-rendered on add/
+    // remove (reading the DOM's current values first so an in-progress edit
+    // to another row survives), read fresh from the DOM again at save time.
+    let siaRows = (p && Array.isArray(p.sia_licences) ? p.sia_licences : []).map((l) => ({ ...l }));
+    function readSiaRowsFromDom() {
+      return els('#pnSiaRows .sia-row').map((row) => ({
+        licence_type: row.querySelector('.sia-type').value,
+        licence_no: row.querySelector('.sia-no').value.trim(),
+        expiry: row.querySelector('.sia-expiry').value || null,
+      }));
+    }
+    function paintSiaRows() {
+      el('#pnSiaRows').innerHTML = siaRows.length ? siaRows.map((l, i) => `
+        <div class="sia-row" style="display:flex;gap:8px;margin-bottom:6px" data-i="${i}">
+          <select class="sia-type" style="width:220px">${SIA_LICENCE_TYPES.map((t) => `<option value="${esc(t)}" ${l.licence_type === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>
+          <input class="sia-no" autocomplete="off" placeholder="Licence number" value="${esc(l.licence_no || '')}" style="flex:1">
+          <input class="sia-expiry" type="date" value="${l.expiry ? String(l.expiry).slice(0, 10) : ''}" style="width:150px">
+          <button type="button" class="btn danger sia-remove" style="padding:4px 8px;font-size:11px">Remove</button>
+        </div>`).join('') : '<p class="dim" style="margin:0 0 6px">No licences recorded yet.</p>';
+      els('#pnSiaRows .sia-remove').forEach((b) => (b.onclick = () => {
+        siaRows = readSiaRowsFromDom();
+        siaRows.splice(Number(b.closest('.sia-row').dataset.i), 1);
+        paintSiaRows();
+      }));
+    }
+    paintSiaRows();
+    el('#pnAddLicence').onclick = () => {
+      siaRows = readSiaRowsFromDom();
+      siaRows.push({ licence_type: SIA_LICENCE_TYPES[0], licence_no: '', expiry: null });
+      paintSiaRows();
+    };
     el('#pnSave').onclick = async () => {
       const name = el('#npnName').value.trim();
       if (!name) { el('#pnError').textContent = 'name is required'; return; }
@@ -763,9 +813,11 @@ function personnelModal(p) {
         employment_status: el('#npnStatus').value, callsign_id: el('#npnCallsign').value ? Number(el('#npnCallsign').value) : null,
         contact_phone: el('#npnPhone').value.trim(), contact_email: el('#npnEmail').value.trim(), notes: el('#npnNotes').value.trim(),
         sms_opt_out: el('#npnSmsOptOut').checked, email_opt_out: el('#npnEmailOptOut').checked,
-        sia_licence_no: el('#npnSiaNo').value.trim() || null, sia_licence_expiry: el('#npnSiaExpiry').value || null,
+        sia_licences: readSiaRowsFromDom().filter((l) => l.licence_no),
         dbs_certificate_no: el('#npnDbsNo').value.trim() || null, dbs_certificate_type: el('#npnDbsType').value || null,
         dbs_update_service_id: el('#npnDbsUpdateId').value.trim() || null,
+        emergency_contact: { name: el('#npnEcName').value.trim(), relationship: el('#npnEcRelationship').value.trim(), phone: el('#npnEcPhone').value.trim(), email: el('#npnEcEmail').value.trim() },
+        bank_details: { account_name: el('#npnBankAccName').value.trim(), bank_name: el('#npnBankName').value.trim(), sort_code: el('#npnBankSortCode').value.trim(), account_number: el('#npnBankAccNo').value.trim() },
         branch_id: el('#npnBranch').value ? Number(el('#npnBranch').value) : null,
         employment_type: empType,
         annual_leave_allowance_days: empType === 'SUBCONTRACTOR' ? null : (el('#npnAllowance').value ? Number(el('#npnAllowance').value) : null),
@@ -774,8 +826,13 @@ function personnelModal(p) {
       try {
         if (p) await api('PATCH', `/api/personnel/${p.id}`, { ...body, supervisor_id: supervisorId });
         else {
+          // POST only accepts the base fields (always has — SIA/DBS could
+          // never be set at creation either); a follow-up PATCH with the
+          // full body, same as the existing supervisor_id-only one below
+          // used to do, is what actually lands licences/DBS/emergency
+          // contact/bank details/supervisor on a brand new record too.
           const created = await api('POST', '/api/personnel', body);
-          if (supervisorId) await api('PATCH', `/api/personnel/${created.id}`, { supervisor_id: supervisorId });
+          await api('PATCH', `/api/personnel/${created.id}`, { ...body, supervisor_id: supervisorId });
         }
         closeModal(); await load(); showTab('personnel');
       } catch (e) { el('#pnError').textContent = e.message; }

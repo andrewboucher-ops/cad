@@ -582,14 +582,28 @@ function normalizedSiteIds(raw) {
  * or an overdue vehicle service. */
 const SIA_EXPIRY_WARN_DAYS = 30;
 const DBS_RECHECK_DUE_DAYS = 365; // DBS sets no fixed frequency; a year is a common risk-based default, not a legal requirement
+/** A person can hold more than one SIA licence (Door Supervision and CCTV
+ * are both common). sia_licences is the canonical list; the original
+ * single sia_licence_no/sia_licence_expiry fields are kept on the record
+ * for backward compatibility (nothing deletes them) and, for a person who
+ * predates this and has never been re-saved with a licences array, are
+ * synthesised into one here rather than needing a one-off migration pass. */
+function siaLicencesOf(p) {
+  if (Array.isArray(p.sia_licences)) return p.sia_licences;
+  return p.sia_licence_no ? [{ id: 1, licence_type: 'Door Supervision', licence_no: p.sia_licence_no, expiry: p.sia_licence_expiry || null }] : [];
+}
 function personnelCompliance(p) {
   const now = Date.now();
+  // Worst case across every licence held: one expired licence matters more
+  // than another being fine.
   let sia = 'unset';
-  if (p.sia_licence_expiry) {
-    const expiry = Date.parse(p.sia_licence_expiry);
-    if (expiry < now) sia = 'expired';
-    else if (expiry - now < SIA_EXPIRY_WARN_DAYS * 86400000) sia = 'expiring';
-    else sia = 'ok';
+  for (const l of siaLicencesOf(p)) {
+    if (!l.expiry) continue;
+    const expiry = Date.parse(l.expiry);
+    const state = expiry < now ? 'expired' : expiry - now < SIA_EXPIRY_WARN_DAYS * 86400000 ? 'expiring' : 'ok';
+    if (state === 'expired') { sia = 'expired'; break; }
+    if (state === 'expiring' && sia !== 'expired') sia = 'expiring';
+    else if (state === 'ok' && sia === 'unset') sia = 'ok';
   }
   let dbs = 'unset';
   if (p.dbs_last_checked_at) {
@@ -658,9 +672,39 @@ function leaveBalanceForPerson(p) {
     .reduce((sum, r) => sum + r.days, 0);
   return { allowance, taken, remaining: Math.round((allowance - taken) * 10) / 10 };
 }
-function publicPersonnel(p) {
+function cleanEmergencyContact(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const name = String(raw.name || '').trim().slice(0, 120);
+  const relationship = String(raw.relationship || '').trim().slice(0, 60);
+  const phone = String(raw.phone || '').trim().slice(0, 30);
+  const email = String(raw.email || '').trim().slice(0, 160);
+  if (!name && !relationship && !phone && !email) return null;
+  return { name, relationship, phone, email };
+}
+function cleanBankDetails(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const account_name = String(raw.account_name || '').trim().slice(0, 120);
+  const bank_name = String(raw.bank_name || '').trim().slice(0, 120);
+  let sort_code = String(raw.sort_code || '').trim().replace(/\s/g, '');
+  if (sort_code && !/^\d{2}-?\d{2}-?\d{2}$/.test(sort_code)) throw httpError(400, 'sort code should be 6 digits, e.g. 12-34-56');
+  let account_number = String(raw.account_number || '').trim().replace(/\s/g, '');
+  if (account_number && !/^\d{6,10}$/.test(account_number)) throw httpError(400, 'account number should be 8 digits');
+  if (!account_name && !bank_name && !sort_code && !account_number) return null;
+  return { account_name, bank_name, sort_code, account_number };
+}
+/** `user` is optional and new: every existing call site that doesn't pass
+ * it (chiefly broadcasts, which go to many recipients at once and can't
+ * sensibly be redacted for one viewer) simply never gets emergency_contact
+ * or bank_details in the payload — stricter than before adding them, never
+ * laxer, so nothing already relying on the old (always-called-with-no-
+ * user) shape changes behaviour. Only a direct, per-viewer read — today
+ * just GET /api/personnel — passes `user`, and only then does a control
+ * role or the person themself see their own emergency contact or bank
+ * details; colleagues never do. */
+function publicPersonnel(p, user) {
   const cs = db.callsigns.find((c) => c.id === p.callsign_id);
   const veh = db.vehicles.find((v) => v.id === p.vehicle_id);
+  const canSeeSensitive = user && (isControlRole(user.role) || user.personnel_id === p.id);
   return {
     id: p.id, employee_no: p.employee_no, name: p.name, rank: p.rank,
     contact_phone: p.contact_phone || '', contact_email: p.contact_email || '',
@@ -672,6 +716,7 @@ function publicPersonnel(p) {
     welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
     welfare_note: p.welfare_note || null,
     sia_licence_no: p.sia_licence_no || null, sia_licence_expiry: p.sia_licence_expiry || null,
+    sia_licences: siaLicencesOf(p),
     dbs_certificate_no: p.dbs_certificate_no || null, dbs_certificate_type: p.dbs_certificate_type || null,
     dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
     compliance: personnelCompliance(p),
@@ -681,6 +726,7 @@ function publicPersonnel(p) {
     employment_type: p.employment_type || 'EMPLOYED',
     annual_leave_allowance_days: p.annual_leave_allowance_days ?? null,
     leave_balance: leaveBalanceForPerson(p),
+    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null } : {}),
   };
 }
 function publicMdt(m) {
@@ -1769,8 +1815,8 @@ route('POST', '/api/assets/:id/return', ALL, ({ params, body, user }) => {
   logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
   return publicAsset(a);
 });
-route('GET', '/api/personnel', ALL, ({ user }) => db.personnel.filter((p) => visibleToUser(p, user)).map(publicPersonnel));
-route('POST', '/api/personnel', ADMIN, ({ body }) => {
+route('GET', '/api/personnel', ALL, ({ user }) => db.personnel.filter((p) => visibleToUser(p, user)).map((p) => publicPersonnel(p, user)));
+route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');
   const employeeNo = body.employee_no ? String(body.employee_no).trim() : null;
@@ -1792,9 +1838,9 @@ route('POST', '/api/personnel', ADMIN, ({ body }) => {
   };
   db.personnel.push(p);
   logEvent('personnel.created', `PERSONNEL ${name} ADDED`, { personnel_id: p.id });
-  return { __status: 201, __body: publicPersonnel(p) };
+  return { __status: 201, __body: publicPersonnel(p, user) };
 });
-route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
+route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
   const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
   if ('name' in body) { const name = String(body.name || '').trim(); if (!name) throw httpError(400, 'name required'); p.name = name; }
   if ('employee_no' in body) {
@@ -1844,6 +1890,33 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
   // Update Service check, which does not happen just because someone typed
   // in a certificate number.
   if ('dbs_checked_now' in body && body.dbs_checked_now) p.dbs_last_checked_at = new Date().toISOString();
+  // Several SIA licences are normal — Door Supervision and CCTV together is
+  // the common case this was added for. The old single sia_licence_no/
+  // sia_licence_expiry fields are left exactly as they were (untouched,
+  // never cleared by this) — siaLicencesOf() only falls back to them for a
+  // record that has never been saved with a licences array at all.
+  if ('sia_licences' in body) {
+    if (!Array.isArray(body.sia_licences)) throw httpError(400, 'sia_licences must be an array');
+    if (body.sia_licences.length > 8) throw httpError(400, 'too many SIA licences');
+    p.sia_licences = body.sia_licences.map((l, i) => {
+      const licence_type = String((l && l.licence_type) || '').trim().slice(0, 80);
+      if (!licence_type) throw httpError(400, `licence ${i + 1}: type required`);
+      const licence_no = String((l && l.licence_no) || '').trim().slice(0, 40);
+      if (!licence_no) throw httpError(400, `licence ${i + 1}: licence number required`);
+      const expiry = l && l.expiry ? String(l.expiry).slice(0, 10) : null;
+      if (expiry && isNaN(Date.parse(expiry))) throw httpError(400, `licence ${i + 1}: invalid expiry date`);
+      return { id: i + 1, licence_type, licence_no, expiry };
+    });
+  }
+  // Next of kin — self-editable too, via PATCH /api/personnel/:id/emergency-
+  // contact below; this admin route can set it as well (e.g. HR entering it
+  // from a paper form on the person's behalf).
+  if ('emergency_contact' in body) p.emergency_contact = cleanEmergencyContact(body.emergency_contact);
+  // Payroll destination — admin-only to set, deliberately with no self-
+  // service write path: a staff member changing their own bank details
+  // unsupervised is exactly the fraud pattern (a compromised account
+  // redirecting its own pay) a real HR process checks before acting on.
+  if ('bank_details' in body) p.bank_details = cleanBankDetails(body.bank_details);
   if ('notes' in body) p.notes = body.notes || '';
   // Both fields are validated against the FULL intended result before either
   // is written — a request that sets both at once (e.g. SUBCONTRACTOR + an
@@ -1870,7 +1943,7 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
     p.annual_leave_allowance_days = body.annual_leave_allowance_days == null ? null : Number(body.annual_leave_allowance_days);
   }
   logEvent('personnel.updated', `PERSONNEL ${p.name} UPDATED`, { personnel_id: p.id });
-  return publicPersonnel(p);
+  return publicPersonnel(p, user);
 });
 route('DELETE', '/api/personnel/:id', ADMIN, ({ params }) => {
   const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
@@ -1888,6 +1961,22 @@ route('DELETE', '/api/personnel/:id', ADMIN, ({ params }) => {
   db.personnel = db.personnel.filter((x) => x.id !== p.id);
   logEvent('personnel.deleted', `PERSONNEL ${p.name} DELETED`, { personnel_id: p.id });
   return { ok: true };
+});
+/** A person keeping their own next-of-kin details current is routine
+ * self-service, unlike SIA/DBS/bank details above — nothing compliance- or
+ * payroll-critical hangs off it, and staff are the ones most likely to
+ * actually know when it's gone stale. Gated on isControlRole + personnel_id
+ * match, not `role === 'FIELD_USER'` — a role-name check here is exactly
+ * the bug test/access-review.test.js caught before (a role-named check let
+ * a shared MDT_USER terminal login act on any officer's own-record route;
+ * the fix was always comparing personnel_id, which has no meaning for a
+ * shared terminal login in the first place). */
+route('PATCH', '/api/personnel/:id/emergency-contact', ALL, ({ params, body, user }) => {
+  const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
+  if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not your record');
+  p.emergency_contact = cleanEmergencyContact(body);
+  logEvent('personnel.emergency_contact_updated', `${p.name} UPDATED THEIR EMERGENCY CONTACT`, { personnel_id: p.id });
+  return publicPersonnel(p, user);
 });
 
 // Call signs
@@ -2989,18 +3078,18 @@ function welfareTick() {
 route('POST', '/api/personnel/:id/welfare', ALL, ({ params, body, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
   if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
-  return publicPersonnel(startWelfare(p, Number(body.interval_s), body.note, user));
+  return publicPersonnel(startWelfare(p, Number(body.interval_s), body.note, user), user);
 });
 route('POST', '/api/personnel/:id/welfare/check', ALL, ({ params, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
   if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
-  return publicPersonnel(checkInWelfare(p, user));
+  return publicPersonnel(checkInWelfare(p, user), user);
 });
 route('DELETE', '/api/personnel/:id/welfare', ALL, ({ params, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
   if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
   if (!p.welfare_due_at) throw httpError(409, 'no welfare timer running');
-  return publicPersonnel(stopWelfare(p, user.role === 'FIELD_USER' ? 'cancelled by officer' : 'cancelled by control', user));
+  return publicPersonnel(stopWelfare(p, user.role === 'FIELD_USER' ? 'cancelled by officer' : 'cancelled by control', user), user);
 });
 
 /* Sites under contract — what alarm response jobs are attached to. */

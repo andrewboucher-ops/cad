@@ -585,6 +585,75 @@ test('SIA licence and DBS check fields compute a compliance flag, and are valida
   await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT);
 });
 
+test('a person can hold multiple SIA licences, worst compliance wins, and legacy single-licence records still work', async () => {
+  const p = await call('POST', '/api/personnel', { name: 'Multi Licence Test' }, adminT);
+  const bad = await call('PATCH', `/api/personnel/${p.body.id}`, { sia_licences: 'not an array' }, adminT);
+  assert.equal(bad.status, 400);
+  const missingType = await call('PATCH', `/api/personnel/${p.body.id}`, { sia_licences: [{ licence_no: '123' }] }, adminT);
+  assert.equal(missingType.status, 400);
+
+  const set = await call('PATCH', `/api/personnel/${p.body.id}`, {
+    sia_licences: [
+      { licence_type: 'Door Supervision', licence_no: 'DS-1', expiry: new Date(Date.now() + 200 * 86400000).toISOString().slice(0, 10) },
+      { licence_type: 'CCTV (Public Space Surveillance)', licence_no: 'CCTV-1', expiry: new Date(Date.now() - 86400000).toISOString().slice(0, 10) },
+    ],
+  }, adminT);
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+  assert.equal(set.body.sia_licences.length, 2);
+  assert.equal(set.body.compliance.sia, 'expired', 'one expired licence makes the overall flag expired, even with another fine');
+
+  const fixed = await call('PATCH', `/api/personnel/${p.body.id}`, {
+    sia_licences: [{ licence_type: 'Door Supervision', licence_no: 'DS-1', expiry: new Date(Date.now() + 200 * 86400000).toISOString().slice(0, 10) }],
+  }, adminT);
+  assert.equal(fixed.body.compliance.sia, 'ok');
+
+  // A record that predates this feature (only the old singleton fields,
+  // never saved with a licences array) still reports a sensible array and
+  // compliance via the fallback, with no migration needed.
+  const legacy = await call('POST', '/api/personnel', { name: 'Legacy Licence Test' }, adminT);
+  await call('PATCH', `/api/personnel/${legacy.body.id}`, { sia_licence_no: 'OLD-1', sia_licence_expiry: new Date(Date.now() + 100 * 86400000).toISOString() }, adminT);
+  const legacyGet = (await call('GET', '/api/personnel', undefined, adminT)).body.find((x) => x.id === legacy.body.id);
+  assert.equal(legacyGet.sia_licences.length, 1);
+  assert.equal(legacyGet.sia_licences[0].licence_no, 'OLD-1');
+  assert.equal(legacyGet.compliance.sia, 'ok');
+
+  await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT);
+  await call('DELETE', `/api/personnel/${legacy.body.id}`, undefined, adminT);
+});
+
+test('emergency contact and bank details: self-service for one, admin-only for the other, and neither leaks to a colleague', async () => {
+  const p = await call('POST', '/api/personnel', { name: 'Privacy Test Officer' }, adminT);
+  const u = await call('POST', '/api/users', { username: 'privacy-test', password: 'test12345', role: 'FIELD_USER', personnel_id: p.body.id }, adminT);
+  const myT = await login('privacy-test', 'test12345');
+
+  assert.equal((await call('PATCH', `/api/personnel/${p.body.id}/emergency-contact`, { name: 'Jo Bloggs', relationship: 'Partner', phone: '07700900000' }, danT)).status, 403, 'not their own record');
+  const mine = await call('PATCH', `/api/personnel/${p.body.id}/emergency-contact`, { name: 'Jo Bloggs', relationship: 'Partner', phone: '07700900000' }, myT);
+  assert.equal(mine.status, 200, JSON.stringify(mine.body));
+  assert.equal(mine.body.emergency_contact.name, 'Jo Bloggs');
+
+  assert.equal((await call('PATCH', `/api/personnel/${p.body.id}/emergency-contact`, { name: 'X' }, dispT)).status, 200, 'control can set it too');
+
+  assert.equal((await call('PATCH', `/api/personnel/${p.body.id}`, { bank_details: { account_name: 'Jo Bloggs', sort_code: '12-34-56', account_number: '12345678' } }, myT)).status, 403, 'bank details are admin-only, not self-service');
+  const bank = await call('PATCH', `/api/personnel/${p.body.id}`, { bank_details: { account_name: 'Jo Bloggs', sort_code: '12-34-56', account_number: '12345678' } }, adminT);
+  assert.equal(bank.status, 200, JSON.stringify(bank.body));
+  assert.equal(bank.body.bank_details.sort_code, '12-34-56');
+  assert.equal((await call('PATCH', `/api/personnel/${p.body.id}`, { bank_details: { sort_code: 'not-a-sort-code' } }, adminT)).status, 400);
+
+  // Self and admin both see it on a GET /api/personnel list fetch...
+  const mySelfView = (await call('GET', '/api/personnel', undefined, myT)).body.find((x) => x.id === p.body.id);
+  assert.ok(mySelfView.emergency_contact, 'I can see my own emergency contact');
+  assert.ok(mySelfView.bank_details, 'I can see my own bank details');
+  const adminView = (await call('GET', '/api/personnel', undefined, adminT)).body.find((x) => x.id === p.body.id);
+  assert.ok(adminView.bank_details, 'admin sees it too');
+  // ...but a colleague looking at the same list does not.
+  const colleagueView = (await call('GET', '/api/personnel', undefined, danT)).body.find((x) => x.id === p.body.id);
+  assert.equal(colleagueView.emergency_contact, undefined, 'a colleague never sees it');
+  assert.equal(colleagueView.bank_details, undefined, 'a colleague never sees it');
+
+  await call('DELETE', `/api/users/${u.body.id}`, undefined, adminT);
+  await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT);
+});
+
 test('personnel cannot be deleted while assigned to an open job or site visit, or linked to a login', async () => {
   const p = await call('POST', '/api/personnel', { name: 'Temp Officer' }, adminT);
   const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Test site' }, dispT);
