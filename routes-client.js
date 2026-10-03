@@ -54,7 +54,7 @@ const CLIENT_REQUEST_STATUSES = ['OPEN', 'ACKNOWLEDGED', 'CLOSED'];
 
 module.exports = function registerClientRoutes({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl,
+  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl, sign, hashPassword,
 }) {
   for (const t of ['clients', 'documents', 'client_requests']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -181,9 +181,9 @@ module.exports = function registerClientRoutes({
    * wordmark (public/assets/echelon-wordmark.png) — it's invisible on a
    * light background (that's why the resolution-report email's copy of it
    * barely shows), so it only ever sits on the dark band here. */
+  const NAVY = '#0c1624', AMBER = '#f2a93c', LINE = '#e2e5ea', MUTED = '#6b7280';
   function buildWelcomeEmailHtml(client) {
     const loginUrl = `${publicBaseUrl}/index.html`;
-    const NAVY = '#0c1624', AMBER = '#f2a93c', LINE = '#e2e5ea', MUTED = '#6b7280';
     const features = [
       ['Jobs & patrol visits', 'See activity at your sites as it happens — dispatches, patrol visits, and when each one is resolved.'],
       ['Service reports', 'A clear record of what happened on site and when, for every job and visit.'],
@@ -250,6 +250,70 @@ module.exports = function registerClientRoutes({
     if (!result || result.ok === false) throw httpError(502, (result && result.error) || 'email send failed');
     logEvent('client.welcome_email_sent', `WELCOME EMAIL SENT TO ${c.name}`, { client_id: c.id });
     return { ok: true };
+  });
+
+  /** Same shell as the welcome email, a narrower job: get them to a working
+   * password, nothing else. Shares the house style (navy/amber) rather than
+   * the welcome email's own full layout — this one has one job, so it's a
+   * single CTA, not a feature list. */
+  function buildPasswordLinkEmailHtml(client, link) {
+    return `<!doctype html><html><body style="margin:0;padding:0;background:${LINE};font-family:Arial,Helvetica,sans-serif;color:#111827">
+      <div style="max-width:560px;margin:0 auto">
+        <div style="background:${NAVY};padding:30px 32px 26px">
+          <img src="cid:echelon-wordmark" height="24" alt="Echelon" style="display:block;margin:0 0 22px;border:0">
+          <p style="margin:0 0 10px;color:${AMBER};font-size:11px;font-weight:bold;letter-spacing:.14em;text-transform:uppercase">Client portal</p>
+          <h1 style="margin:0 0 10px;color:#ffffff;font-size:21px;line-height:1.3">Set your password, ${escHtml(client.name)}.</h1>
+          <p style="margin:0;color:#9fb0c3;font-size:14px;line-height:1.5">Choose a password for your Echelon client portal account.</p>
+        </div>
+        <div style="background:#ffffff;padding:28px 32px;text-align:center">
+          <a href="${link}" style="display:inline-block;background:${NAVY};color:#ffffff;text-decoration:none;padding:13px 26px;border-radius:6px;font-size:14px;font-weight:bold">Set your password &rarr;</a>
+          <p style="margin:20px 0 0;color:${MUTED};font-size:12.5px">This link works once and expires in 48 hours. If you didn't ask for this, you can ignore it — no changes will be made.</p>
+        </div>
+        <div style="background:${NAVY};padding:18px 32px">
+          <p style="margin:0;color:#475569;font-size:10.5px;line-height:1.6">
+            Echelon Command Information Centre Ltd &middot; Company No. 13765107<br>
+            Sent automatically by CCCS &mdash; comms.echeloncic.com
+          </p>
+        </div>
+      </div>
+    </body></html>`;
+  }
+  /** Creates the client's login if one doesn't exist yet (a random, never-
+   * communicated password that the link below immediately supersedes — this
+   * button is the whole onboarding step, not a second one after someone
+   * remembers to create the login by hand first), then emails a one-time,
+   * 48-hour set-password link built from the same sign()/verifyToken()
+   * mechanism sessions already use (POST /api/auth/set-password, server.js).
+   * The account itself never carries a password anyone actually knows until
+   * the client sets it; nothing here or in the email contains it. */
+  route('POST', '/api/clients/:id/send-password-link', ADMIN, async ({ params }) => {
+    const c = db.clients.find((x) => x.id === Number(params.id));
+    if (!c) throw httpError(404, 'client not found');
+    if (!c.contact_email) throw httpError(400, 'client has no contact email set');
+    let u = db.users.find((x) => x.client_id === c.id);
+    if (!u) {
+      const base = (String(c.contact_email).split('@')[0] || c.name).toLowerCase().replace(/[^a-z0-9.]/g, '') || 'client';
+      let username = base, n = 1;
+      while (db.users.some((x) => x.username === username)) username = `${base}${++n}`;
+      u = {
+        id: nextId('users'), username, password_hash: hashPassword(crypto.randomBytes(24).toString('hex')),
+        role: 'CLIENT', display_name: c.name, personnel_id: null, mdt_id: null, client_id: c.id,
+        branch_id: null, site_ids: null, email: c.contact_email, created_at: new Date().toISOString(),
+      };
+      db.users.push(u);
+      logEvent('client.login_created', `LOGIN CREATED FOR CLIENT ${c.name} (${username})`, { client_id: c.id, user_id: u.id });
+    }
+    const iat = Date.now();
+    const token = sign({ purpose: 'set_password', user_id: u.id, iat, exp: iat + 48 * 3600000 });
+    const link = `${publicBaseUrl}/set-password.html?token=${encodeURIComponent(token)}`;
+    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark.png');
+    const attachments = fs.existsSync(logoFile)
+      ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
+      : [];
+    const result = await sendEmail(c.contact_email, 'Set your password for the Echelon client portal', buildPasswordLinkEmailHtml(c, link), { attachments });
+    if (!result || result.ok === false) throw httpError(502, (result && result.error) || 'email send failed');
+    logEvent('client.password_link_sent', `PASSWORD LINK SENT TO ${c.name} (${u.username})`, { client_id: c.id, user_id: u.id });
+    return { ok: true, username: u.username };
   });
 
   /* -------------------------------------------------------------- *

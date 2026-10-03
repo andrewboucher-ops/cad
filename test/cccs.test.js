@@ -138,6 +138,27 @@ test('role permissions are enforced', async () => {
   assert.equal((await call('POST', '/api/users', { username: 'x', password: 'password1', role: 'DISPATCHER' }, dispT)).status, 403);
 });
 
+test('a "set your password" link signs in with the new password, rejects a bad/expired token, and cannot be reused', async () => {
+  const created = await call('POST', '/api/users', { username: 'set-pw-test', password: 'temporary1', role: 'FIELD_USER' }, adminT);
+  const userId = created.body.id;
+
+  assert.equal((await call('POST', '/api/auth/set-password', { token: 'not-a-real-token', password: 'brandnew1' })).status, 400);
+  assert.equal((await call('POST', '/api/auth/set-password', { token: app.sign({ purpose: 'something_else', user_id: userId, iat: Date.now(), exp: Date.now() + 100000 }), password: 'brandnew1' })).status, 400, 'wrong purpose is refused, not just any signed token');
+  assert.equal((await call('POST', '/api/auth/set-password', { token: app.sign({ purpose: 'set_password', user_id: userId, iat: Date.now(), exp: Date.now() - 1000 }), password: 'brandnew1' })).status, 400, 'expired');
+
+  const goodToken = app.sign({ purpose: 'set_password', user_id: userId, iat: Date.now(), exp: Date.now() + 48 * 3600000 });
+  assert.equal((await call('POST', '/api/auth/set-password', { token: goodToken, password: 'short' })).status, 400, 'too short');
+  const set = await call('POST', '/api/auth/set-password', { token: goodToken, password: 'brandnew1' });
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+
+  assert.equal((await call('POST', '/api/auth/login', { username: 'set-pw-test', password: 'temporary1' })).status, 401, 'the old password no longer works');
+  assert.equal((await call('POST', '/api/auth/login', { username: 'set-pw-test', password: 'brandnew1' })).status, 200, 'the new one does');
+
+  assert.equal((await call('POST', '/api/auth/set-password', { token: goodToken, password: 'anothernew1' })).status, 400, 'the same link cannot be used a second time');
+
+  await call('DELETE', `/api/users/${userId}`, undefined, adminT);
+});
+
 /* ---------------- MDTs ---------------- */
 test('creates an MDT with a unique code', async () => {
   const res = await call('POST', '/api/mdts', { mdt_code: 'MDT-900', serial: 'SN-900' }, adminT);

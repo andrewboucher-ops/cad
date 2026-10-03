@@ -1157,6 +1157,28 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   logEvent('auth.login', `${user.username} signed in (${user.role})`, { user_id: user.id });
   return { token, user: publicUser(user) };
 });
+/** A "create your password" link — reuses the existing sign()/verifyToken()
+ * HMAC mechanism (already used for session tokens) rather than inventing a
+ * second token scheme: stateless, self-expiring, and never a valid session
+ * itself since this payload carries user_id, not the `sub` a session token
+ * needs (authFrom() only ever looks up payload.sub). One-time use is
+ * enforced without a token store too: the issue time (iat) is stamped into
+ * the token, and is rejected once it is older than the user's own
+ * password_set_at — so a second click after the link was already used, or
+ * an older email after a newer one was sent, both fail cleanly rather than
+ * silently letting an intercepted old link still work. */
+route('POST', '/api/auth/set-password', null, ({ body }) => {
+  const payload = verifyToken(body.token);
+  if (!payload || payload.purpose !== 'set_password') throw httpError(400, 'this link is invalid or has expired — ask for a new one');
+  const u = db.users.find((x) => x.id === payload.user_id);
+  if (!u) throw httpError(404, 'account not found');
+  if (u.password_set_at && payload.iat < u.password_set_at) throw httpError(400, 'this link has already been used — ask for a new one');
+  if (!body.password || String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
+  u.password_hash = hashPassword(String(body.password));
+  u.password_set_at = Date.now();
+  logEvent('auth.password_set_via_link', `${u.username} SET THEIR PASSWORD VIA EMAIL LINK`, { user_id: u.id });
+  return { ok: true };
+});
 route('PATCH', '/api/me/preferences', ALL, ({ body, user }) => {
   const u = db.users.find((x) => x.id === user.id); if (!u) throw httpError(404, 'account not found');
   const next = normalizeUiPrefs(u.ui_prefs);
@@ -4039,7 +4061,7 @@ const forms = require('./routes-forms.js')({
 // Client portal — see routes-client.js for the trust-boundary invariants.
 require('./routes-client.js')({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL,
+  isControlRole, assertPassdownAccess, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, sign, hashPassword,
 });
 
 // Finance — a read-only view of cost/billing figures. See routes-finance.js.

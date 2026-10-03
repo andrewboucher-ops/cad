@@ -1882,15 +1882,16 @@ function paintClients() {
         <td>${esc(c.name)}</td>
         <td class="dim">${esc(c.contact_email || '—')}</td>
         <td class="dim">${c.site_ids.length ? c.site_ids.map((id) => esc((allSites.find((s) => s.id === id) || {}).name || '?')).join(', ') : 'none linked'}</td>
-        <td><a class="btn" href="/client.html?client_id=${c.id}" data-viewportal style="padding:4px 10px;font-size:11px">View portal</a> ${c.contact_email ? `<button class="btn" data-welcomeclient="${c.id}" style="padding:4px 10px;font-size:11px">Send welcome email</button>` : ''} <button class="btn danger" data-delclient="${c.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
+        <td><a class="btn" href="/client.html?client_id=${c.id}" data-viewportal style="padding:4px 10px;font-size:11px">View portal</a> ${c.contact_email ? `<button class="btn" data-welcomeclient="${c.id}" style="padding:4px 10px;font-size:11px">Send welcome email</button> <button class="btn" data-pwclient="${c.id}" style="padding:4px 10px;font-size:11px">Send password link</button>` : ''} <button class="btn danger" data-delclient="${c.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
       </tr>`).join('')}</tbody>
     </table>` : '<p class="empty-note">No clients yet.</p>';
   els('#clTableWrap [data-client]').forEach((row) => row.addEventListener('click', (e) => {
-    if (e.target.closest('[data-delclient]') || e.target.closest('[data-viewportal]') || e.target.closest('[data-welcomeclient]')) return;
+    if (e.target.closest('[data-delclient]') || e.target.closest('[data-viewportal]') || e.target.closest('[data-welcomeclient]') || e.target.closest('[data-pwclient]')) return;
     clientModal(allClients.find((c) => c.id === Number(row.dataset.client)));
   }));
   els('#clTableWrap [data-delclient]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteClient(Number(b.dataset.delclient)); }));
   els('#clTableWrap [data-welcomeclient]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); sendWelcomeEmail(Number(b.dataset.welcomeclient)); }));
+  els('#clTableWrap [data-pwclient]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); sendPasswordLink(Number(b.dataset.pwclient)); }));
 }
 el('#clSearch').addEventListener('input', paintClients);
 async function deleteClient(id) {
@@ -1903,6 +1904,17 @@ async function sendWelcomeEmail(id) {
   const c = allClients.find((x) => x.id === id);
   if (!c || !confirm(`Send a welcome email to ${c.name} (${c.contact_email})?`)) return;
   try { await api('POST', `/api/clients/${id}/welcome-email`); alert('Welcome email sent.'); }
+  catch (e) { alert(e.message); }
+}
+/** Creates the client's login first if one doesn't exist yet (the server
+ * does this, not this button) — so this is the whole "get a client an
+ * account" step, not a second one after someone remembers to create a
+ * login by hand. The password itself is never generated or seen here;
+ * the client sets it themselves from the emailed link. */
+async function sendPasswordLink(id) {
+  const c = allClients.find((x) => x.id === id);
+  if (!c || !confirm(`Email ${c.name} (${c.contact_email}) a link to set their portal password? This creates their login first if they don't have one yet.`)) return;
+  try { const r = await api('POST', `/api/clients/${id}/send-password-link`); alert(`Password link sent. Their username is "${r.username}".`); }
   catch (e) { alert(e.message); }
 }
 function clientForm(c) {
@@ -1931,7 +1943,7 @@ function clientModal(c) {
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
-        <span>${c ? '<button class="btn danger" id="clDelete">Delete client</button>' : ''} ${c && c.contact_email ? '<button class="btn" id="clWelcome">Send welcome email</button>' : ''}</span>
+        <span>${c ? '<button class="btn danger" id="clDelete">Delete client</button>' : ''} ${c && c.contact_email ? '<button class="btn" id="clWelcome">Send welcome email</button> <button class="btn" id="clPwLink">Send password link</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
           <button class="btn" id="clCancel">Cancel</button>
           <button class="btn primary" id="clSave">${c ? 'Save changes' : 'Create client'}</button>
@@ -1940,6 +1952,7 @@ function clientModal(c) {
     el('#clCancel').onclick = closeModal;
     if (el('#clDelete')) el('#clDelete').onclick = () => deleteClient(c.id);
     if (el('#clWelcome')) el('#clWelcome').onclick = () => sendWelcomeEmail(c.id);
+    if (el('#clPwLink')) el('#clPwLink').onclick = () => sendPasswordLink(c.id);
     el('#clSave').onclick = async () => {
       const name = el('#nclName').value.trim();
       if (!name) { el('#clError').textContent = 'name is required'; return; }

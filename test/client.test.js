@@ -49,11 +49,13 @@ function rawSocket(token) {
 const PDF = Buffer.from('%PDF-1.4 not a real pdf, just needs the header').toString('base64');
 
 let adminT, dispT;
+const mails = [];
 before(async () => {
   app.start();
   await new Promise((r) => setTimeout(r, 200));
   adminT = await login('admin', 'admin123');
   dispT = await login('dispatcher', 'dispatch123');
+  app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, attachments: opts.attachments || [] }); return { ok: true }; };
 });
 after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 
@@ -181,4 +183,32 @@ test('a CLIENT websocket receives nothing from an untargeted broadcast, and only
   await new Promise((r) => setTimeout(r, 150));
   assert.ok(!sock.bytes.includes(canary), 'an untargeted broadcast must never reach a CLIENT socket');
   sock.close();
+});
+
+/* ---------------- send-password-link ---------------- */
+test('sending a password link creates the client\'s login if needed, is admin-only, and the resulting link actually works', async () => {
+  const client = (await call('POST', '/api/clients', { name: 'Password Link Co', contact_email: 'pwlink@example.test' }, adminT)).body;
+  assert.equal((await call('POST', `/api/clients/${client.id}/send-password-link`, {}, dispT)).status, 403, 'admin only');
+
+  const noEmail = (await call('POST', '/api/clients', { name: 'No Email Co' }, adminT)).body;
+  assert.equal((await call('POST', `/api/clients/${noEmail.id}/send-password-link`, {}, adminT)).status, 400, 'needs a contact email');
+
+  const before = mails.length;
+  const sent = await call('POST', `/api/clients/${client.id}/send-password-link`, {}, adminT);
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.ok(sent.body.username, 'a login was created and its username returned');
+  assert.equal(mails.length, before + 1);
+  const mail = mails[mails.length - 1];
+  assert.equal(mail.to, 'pwlink@example.test');
+  const link = mail.html.match(/href="([^"]*set-password\.html\?token=[^"]*)"/);
+  assert.ok(link, 'the email contains a set-password link');
+  const token = decodeURIComponent(new URL(link[1]).searchParams.get('token'));
+
+  const set = await call('POST', '/api/auth/set-password', { token, password: 'clientnewpass1' });
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+  assert.equal((await call('POST', '/api/auth/login', { username: sent.body.username, password: 'clientnewpass1' })).status, 200);
+
+  // Sending again reuses the same login rather than creating a second one.
+  const again = await call('POST', `/api/clients/${client.id}/send-password-link`, {}, adminT);
+  assert.equal(again.body.username, sent.body.username);
 });
