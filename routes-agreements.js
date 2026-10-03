@@ -133,9 +133,17 @@ module.exports = function registerAgreements({
     const doc = new Doc({ footer: `${c.company_name} — ${quote ? 'quotation' : 'contract'} ${a.reference}` });
     const bandH = 104;
     doc.rect(0, A4.h - bandH, A4.w, bandH, { fill: NAVY_A, stroke: null });
-    doc.text(c.company_name.toUpperCase(), doc.margin, A4.h - 40, { size: 17, bold: true, color: WHITE_A });
+    // See routes-invoices.js's invoicePdf() for why this is a separate,
+    // pre-flattened JPEG rather than the PNG wordmark used in HTML emails.
+    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark-navy.jpg');
+    if (fs.existsSync(logoFile)) {
+      doc.y = A4.h - 30;
+      doc.image(fs.readFileSync(logoFile), { maxH: 20, maxW: 170, x: doc.margin });
+    } else {
+      doc.text(c.company_name.toUpperCase(), doc.margin, A4.h - 40, { size: 17, bold: true, color: WHITE_A });
+    }
     const contact = [c.company_address, c.company_phone, c.company_email].filter(Boolean).join('  ·  ');
-    if (contact) doc.text(contact, doc.margin, A4.h - 58, { size: 8.5, color: LIGHT_A });
+    if (contact) doc.text(contact, doc.margin, A4.h - 64, { size: 8.5, color: LIGHT_A });
     const label = quote ? 'QUOTATION' : 'CONTRACT';
     const rightEdge = A4.w - doc.margin;
     doc.text(label, rightEdge - doc.textWidth(label, 10, true), A4.h - 36, { size: 10, bold: true, color: AMBER_A });

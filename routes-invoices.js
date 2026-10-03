@@ -32,6 +32,8 @@
 'use strict';
 
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { Doc, A4 } = require('./pdf.js');
 
 module.exports = function registerInvoices({
@@ -86,9 +88,20 @@ module.exports = function registerInvoices({
     const doc = new Doc({ footer: `${c.company_name} — invoice ${inv.number || '(draft)'}` });
     const bandH = 112;
     doc.rect(0, A4.h - bandH, A4.w, bandH, { fill: NAVY, stroke: null });
-    doc.text(c.company_name.toUpperCase(), doc.margin, A4.h - 42, { size: 17, bold: true, color: WHITE });
+    // The wordmark is white-on-transparent (public/assets/echelon-wordmark.png,
+    // used as-is in HTML emails) — pdf.js's Doc only embeds JPEGs (DCTDecode),
+    // so a copy pre-flattened onto this same navy is kept alongside it
+    // specifically for PDFs. Falls back to the text name if that file is
+    // ever missing, same safety the welcome email's logo attachment has.
+    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark-navy.jpg');
+    if (fs.existsSync(logoFile)) {
+      doc.y = A4.h - 32;
+      doc.image(fs.readFileSync(logoFile), { maxH: 20, maxW: 170, x: doc.margin });
+    } else {
+      doc.text(c.company_name.toUpperCase(), doc.margin, A4.h - 42, { size: 17, bold: true, color: WHITE });
+    }
     const contact = [c.company_address, c.company_phone, c.company_email].filter(Boolean).join('  ·  ');
-    if (contact) doc.text(contact, doc.margin, A4.h - 60, { size: 8.5, color: LIGHT });
+    if (contact) doc.text(contact, doc.margin, A4.h - 66, { size: 8.5, color: LIGHT });
     const label = inv.status === 'DRAFT' ? 'DRAFT INVOICE' : inv.status === 'VOID' ? 'INVOICE — VOID' : 'INVOICE';
     const rightEdge = A4.w - doc.margin;
     doc.text(label, rightEdge - doc.textWidth(label, 10, true), A4.h - 36, { size: 10, bold: true, color: AMBER });
