@@ -43,7 +43,7 @@ after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 
 function future(hours) { return new Date(Date.now() + hours * 3600000).toISOString(); }
 async function shift(startHour, endHour) {
-  const r = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, starts_at: future(startHour), ends_at: future(endHour) }, dispT);
+  const r = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, starts_at: future(startHour), ends_at: future(endHour) }, adminT);
   return r.body;
 }
 
@@ -52,29 +52,31 @@ test('a vehicle cannot be allocated to two overlapping shifts, but a later non-o
   const shiftB = await shift(28, 36); // overlaps shiftA
   const shiftC = await shift(40, 48); // does not overlap either
 
-  const allocA = await call('POST', `/api/shifts/${shiftA.id}/vehicles`, { vehicle_id: vanId }, dispT);
+  assert.equal((await call('POST', `/api/shifts/${shiftA.id}/vehicles`, { vehicle_id: vanId }, dispT)).status, 403, 'vehicle allocation is admin-only');
+  const allocA = await call('POST', `/api/shifts/${shiftA.id}/vehicles`, { vehicle_id: vanId }, adminT);
   assert.equal(allocA.status, 201);
   assert.equal(allocA.body.vehicle_registration, 'VAN-101');
 
-  assert.equal((await call('POST', `/api/shifts/${shiftB.id}/vehicles`, { vehicle_id: vanId }, dispT)).status, 409, 'overlapping window refused');
-  const allocC = await call('POST', `/api/shifts/${shiftC.id}/vehicles`, { vehicle_id: vanId }, dispT);
+  assert.equal((await call('POST', `/api/shifts/${shiftB.id}/vehicles`, { vehicle_id: vanId }, adminT)).status, 409, 'overlapping window refused');
+  const allocC = await call('POST', `/api/shifts/${shiftC.id}/vehicles`, { vehicle_id: vanId }, adminT);
   assert.equal(allocC.status, 201, 'a later, non-overlapping shift is fine');
 
   const withAlloc = (await call('GET', '/api/shifts', undefined, dispT)).body.find((s) => s.id === shiftA.id);
   assert.equal(withAlloc.vehicle_allocations.length, 1);
 
-  await call('DELETE', `/api/shift-vehicle-allocations/${allocA.body.id}`, undefined, dispT);
-  const allocBRetry = await call('POST', `/api/shifts/${shiftB.id}/vehicles`, { vehicle_id: vanId }, dispT);
+  assert.equal((await call('DELETE', `/api/shift-vehicle-allocations/${allocA.body.id}`, undefined, dispT)).status, 403, 'removing an allocation is admin-only');
+  await call('DELETE', `/api/shift-vehicle-allocations/${allocA.body.id}`, undefined, adminT);
+  const allocBRetry = await call('POST', `/api/shifts/${shiftB.id}/vehicles`, { vehicle_id: vanId }, adminT);
   assert.equal(allocBRetry.status, 201, 'freed up once the conflicting allocation is removed');
 });
 
 test('cancelling a shift frees its vehicle for an overlapping allocation elsewhere', async () => {
   const shiftA = await shift(60, 68);
   const shiftB = await shift(62, 70);
-  await call('POST', `/api/shifts/${shiftA.id}/vehicles`, { vehicle_id: vanId }, dispT);
-  assert.equal((await call('POST', `/api/shifts/${shiftB.id}/vehicles`, { vehicle_id: vanId }, dispT)).status, 409);
-  await call('PATCH', `/api/shifts/${shiftA.id}`, { status: 'CANCELLED' }, dispT);
-  assert.equal((await call('POST', `/api/shifts/${shiftB.id}/vehicles`, { vehicle_id: vanId }, dispT)).status, 201, 'a cancelled shift no longer holds the vehicle');
+  await call('POST', `/api/shifts/${shiftA.id}/vehicles`, { vehicle_id: vanId }, adminT);
+  assert.equal((await call('POST', `/api/shifts/${shiftB.id}/vehicles`, { vehicle_id: vanId }, adminT)).status, 409);
+  await call('PATCH', `/api/shifts/${shiftA.id}`, { status: 'CANCELLED' }, adminT);
+  assert.equal((await call('POST', `/api/shifts/${shiftB.id}/vehicles`, { vehicle_id: vanId }, adminT)).status, 201, 'a cancelled shift no longer holds the vehicle');
 });
 
 test('a stock-tracked asset is allocated and returned through the ledger, never a field anyone can overwrite', async () => {
@@ -84,19 +86,21 @@ test('a stock-tracked asset is allocated and returned through the ledger, never 
   assert.equal(kit.stock_level, 40);
 
   const s = await shift(80, 88);
-  const alloc = await call('POST', `/api/shifts/${s.id}/assets`, { asset_id: kit.id, quantity: 15 }, dispT);
+  assert.equal((await call('POST', `/api/shifts/${s.id}/assets`, { asset_id: kit.id, quantity: 15 }, dispT)).status, 403, 'asset allocation is admin-only');
+  const alloc = await call('POST', `/api/shifts/${s.id}/assets`, { asset_id: kit.id, quantity: 15 }, adminT);
   assert.equal(alloc.status, 201);
   const afterAllocate = (await call('GET', '/api/assets', undefined, dispT)).body.find((a) => a.id === kit.id);
   assert.equal(afterAllocate.stock_level, 25, 'allocating withdraws from the ledger immediately');
 
-  assert.equal((await call('POST', `/api/shifts/${s.id}/assets`, { asset_id: kit.id, quantity: 100 }, dispT)).status, 409, 'cannot allocate more than is in stock');
+  assert.equal((await call('POST', `/api/shifts/${s.id}/assets`, { asset_id: kit.id, quantity: 100 }, adminT)).status, 409, 'cannot allocate more than is in stock');
 
-  const returned = await call('PATCH', `/api/shift-asset-allocations/${alloc.body.id}`, { quantity_returned: 9 }, dispT);
+  assert.equal((await call('PATCH', `/api/shift-asset-allocations/${alloc.body.id}`, { quantity_returned: 9 }, dispT)).status, 403, 'returning an allocation is admin-only');
+  const returned = await call('PATCH', `/api/shift-asset-allocations/${alloc.body.id}`, { quantity_returned: 9 }, adminT);
   assert.equal(returned.status, 200);
   const afterReturn = (await call('GET', '/api/assets', undefined, dispT)).body.find((a) => a.id === kit.id);
   assert.equal(afterReturn.stock_level, 34, 'only what actually came back (9 of 15) is credited — 6 were used on the job');
 
-  assert.equal((await call('PATCH', `/api/shift-asset-allocations/${alloc.body.id}`, { quantity_returned: 5 }, dispT)).status, 409, 'cannot return an allocation twice');
+  assert.equal((await call('PATCH', `/api/shift-asset-allocations/${alloc.body.id}`, { quantity_returned: 5 }, adminT)).status, 409, 'cannot return an allocation twice');
 
   const movements = (await call('GET', `/api/assets/${kit.id}/stock-movements`, undefined, dispT)).body;
   assert.deepEqual(movements.map((m) => m.delta), [9, -15, 40], 'most recent first: returned, allocated, initial restock');
@@ -115,7 +119,7 @@ test('a manual stock movement is refused below zero, and a non-stock asset refus
   assert.equal(ok.body.resulting_balance, 1);
 
   const s = await shift(100, 108);
-  assert.equal((await call('POST', `/api/shifts/${s.id}/assets`, { asset_id: radio.id, quantity: 2 }, dispT)).status, 400, 'a discrete asset can only be allocated as quantity 1');
+  assert.equal((await call('POST', `/api/shifts/${s.id}/assets`, { asset_id: radio.id, quantity: 2 }, adminT)).status, 400, 'a discrete asset can only be allocated as quantity 1');
 });
 
 test('the stock dashboard flags items below threshold and expiring within 30 days, control-only', async () => {

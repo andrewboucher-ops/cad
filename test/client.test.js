@@ -47,13 +47,19 @@ function rawSocket(token) {
 }
 
 const PDF = Buffer.from('%PDF-1.4 not a real pdf, just needs the header').toString('base64');
+// Smallest valid PNG (1x1), standing in for a signature pad capture.
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+const sig = (name) => ({ mimetype: 'image/png', data: PNG, signer_name: name });
+const def = (key) => app.db.form_definitions.find((d) => d.key === key);
 
 let adminT, dispT;
+const mails = [];
 before(async () => {
   app.start();
   await new Promise((r) => setTimeout(r, 200));
   adminT = await login('admin', 'admin123');
   dispT = await login('dispatcher', 'dispatch123');
+  app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, attachments: opts.attachments || [] }); return { ok: true }; };
 });
 after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 
@@ -181,4 +187,130 @@ test('a CLIENT websocket receives nothing from an untargeted broadcast, and only
   await new Promise((r) => setTimeout(r, 150));
   assert.ok(!sock.bytes.includes(canary), 'an untargeted broadcast must never reach a CLIENT socket');
   sock.close();
+});
+
+/* ---------------- send-password-link ---------------- */
+test('sending a password link creates the client\'s login if needed, is admin-only, and the resulting link actually works', async () => {
+  const client = (await call('POST', '/api/clients', { name: 'Password Link Co', contact_email: 'pwlink@example.test' }, adminT)).body;
+  assert.equal((await call('POST', `/api/clients/${client.id}/send-password-link`, {}, dispT)).status, 403, 'admin only');
+
+  const noEmail = (await call('POST', '/api/clients', { name: 'No Email Co' }, adminT)).body;
+  assert.equal((await call('POST', `/api/clients/${noEmail.id}/send-password-link`, {}, adminT)).status, 400, 'needs a contact email');
+
+  const before = mails.length;
+  const sent = await call('POST', `/api/clients/${client.id}/send-password-link`, {}, adminT);
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.ok(sent.body.username, 'a login was created and its username returned');
+  assert.equal(mails.length, before + 1);
+  const mail = mails[mails.length - 1];
+  assert.equal(mail.to, 'pwlink@example.test');
+  const link = mail.html.match(/href="([^"]*set-password\.html\?token=[^"]*)"/);
+  assert.ok(link, 'the email contains a set-password link');
+  const token = decodeURIComponent(new URL(link[1]).searchParams.get('token'));
+
+  const set = await call('POST', '/api/auth/set-password', { token, password: 'clientnewpass1' });
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+  assert.equal((await call('POST', '/api/auth/login', { username: sent.body.username, password: 'clientnewpass1' })).status, 200);
+
+  // Sending again reuses the same login rather than creating a second one.
+  const again = await call('POST', `/api/clients/${client.id}/send-password-link`, {}, adminT);
+  assert.equal(again.body.username, sent.body.username);
+});
+
+/* ---------------- sharing a redacted incident report with a client ---------------- */
+test('an unshared report never reaches the client portal; a shared one shows only the admin-redacted copy, never the original', async () => {
+  const site = (await call('POST', '/api/sites', { name: 'Share Test Site' }, adminT)).body;
+  const client = (await call('POST', '/api/clients', { name: 'Share Test Co', site_ids: [site.id] }, adminT)).body;
+  await call('POST', '/api/users', { username: 'shareclient', password: 'realpassword1', role: 'CLIENT', client_id: client.id }, adminT);
+  const clientT = await login('shareclient', 'realpassword1');
+
+  const canary = `CANARY-NAME-${crypto.randomUUID()}`;
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'SITE', subject_id: site.id,
+    values: { person_description: canary, advised_at: new Date().toISOString(), narrative: `Advised by ${canary} and left.`, officer_signature: sig('Dan Whitfield') },
+  }, dispT);
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+
+  // Not shared yet — invisible to the client, and doesn't move the "shared" count.
+  let incidents = await call('GET', `/api/client/sites/${site.id}/incidents`, undefined, clientT);
+  assert.equal(incidents.status, 200);
+  assert.equal(incidents.body.length, 0, 'an unshared report must not appear in the client portal');
+  let report = await call('GET', `/api/client/sites/${site.id}/report`, undefined, clientT);
+  assert.equal(report.body.incidents.total, 0);
+
+  // Only ADMIN may share.
+  assert.equal((await call('POST', `/api/form-submissions/${filed.body.id}/share`, { values: { narrative: 'A visitor was advised to leave and did so.' } }, dispT)).status, 403);
+
+  const shared = await call('POST', `/api/form-submissions/${filed.body.id}/share`, {
+    values: { narrative: 'A visitor was advised to leave and did so.' }, subject_label: site.name,
+  }, adminT);
+  assert.equal(shared.status, 200, JSON.stringify(shared.body));
+  // The admin's OWN view of the report still shows the real answers (that's
+  // correct — they filed or are reviewing it); only client_share, the copy
+  // that actually leaves for the client, is redacted.
+  assert.equal(shared.body.client_share.values.narrative, 'A visitor was advised to leave and did so.');
+  assert.ok(!JSON.stringify(shared.body.client_share).includes(canary), 'the redacted copy itself must not carry the original canary');
+
+  incidents = await call('GET', `/api/client/sites/${site.id}/incidents`, undefined, clientT);
+  assert.equal(incidents.status, 200);
+  assert.equal(incidents.body.length, 1);
+  const row = incidents.body[0];
+  assert.equal(row.values.narrative, 'A visitor was advised to leave and did so.');
+  assert.ok(!('person_description' in row.values), 'a field the admin left out of the redacted copy is not shared by default');
+  assert.ok(!incidents.raw.includes(canary), 'the original canary text must never reach the client, by any field');
+  assert.ok(!('submitted_by' in row) && !JSON.stringify(row).includes('dispatcher'), 'who filed it is never part of the client-facing projection');
+
+  report = await call('GET', `/api/client/sites/${site.id}/report`, undefined, clientT);
+  assert.equal(report.body.incidents.total, 1, 'a shared report counts in the site report rollup');
+
+  // Unsharing removes it again.
+  const unshared = await call('DELETE', `/api/form-submissions/${filed.body.id}/share`, undefined, adminT);
+  assert.equal(unshared.status, 200, JSON.stringify(unshared.body));
+  incidents = await call('GET', `/api/client/sites/${site.id}/incidents`, undefined, clientT);
+  assert.equal(incidents.body.length, 0, 'unsharing removes it from the client portal immediately');
+});
+
+test('a RESTRICTED report can still be shared once redacted, and a VEHICLE/PERSONNEL report cannot be shared at all', async () => {
+  const site = (await call('POST', '/api/sites', { name: 'Share Restricted Site' }, adminT)).body;
+
+  const canary = `CANARY-SAFEGUARD-${crypto.randomUUID()}`;
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: def('safeguarding').id, subject_type: 'SITE', subject_id: site.id,
+    values: {
+      concern_about: canary, at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      what_happened: canary, action_taken: 'Safeguarding lead notified.', officer_signature: sig('Dan Whitfield'),
+    },
+  }, dispT);
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+
+  // Sharing is a read like any other (readableSubmission()) — an admin with
+  // no grant on this RESTRICTED form is refused exactly like actioning one
+  // would be; name them as a reader first, the same logged decision the
+  // review workflow already requires.
+  assert.equal((await call('POST', `/api/form-submissions/${filed.body.id}/share`, { values: {} }, adminT)).status, 404, 'an admin with no grant cannot share a restricted report either');
+  await call('POST', `/api/form-definitions/${def('safeguarding').id}/grants`, { username: 'admin' }, adminT);
+
+  const shared = await call('POST', `/api/form-submissions/${filed.body.id}/share`, {
+    values: { action_taken: 'The matter was referred appropriately.' }, subject_label: 'This site',
+  }, adminT);
+  assert.equal(shared.status, 200, JSON.stringify(shared.body));
+
+  const client = (await call('POST', '/api/clients', { name: 'Share Restricted Co', site_ids: [site.id] }, adminT)).body;
+  await call('POST', '/api/users', { username: 'restrictedclient', password: 'realpassword1', role: 'CLIENT', client_id: client.id }, adminT);
+  const clientT = await login('restrictedclient', 'realpassword1');
+  const incidents = await call('GET', `/api/client/sites/${site.id}/incidents`, undefined, clientT);
+  assert.equal(incidents.status, 200);
+  assert.equal(incidents.body.length, 1);
+  assert.ok(!incidents.raw.includes(canary), 'a shared RESTRICTED report still never leaks its original free-text content');
+  assert.equal(incidents.body[0].values.action_taken, 'The matter was referred appropriately.');
+  assert.ok(!('concern_about' in incidents.body[0].values), 'a redacted-out field stays out');
+
+  // A vehicle report has no site to resolve to, whatever it's redacted to.
+  const vehicle = (await call('POST', '/api/vehicles', { registration: `SHR-${Date.now()}` }, adminT)).body;
+  const vehicleReport = await call('POST', '/api/form-submissions', {
+    definition_id: def('vehicle-inspection').id, subject_type: 'VEHICLE', subject_id: vehicle.id,
+    values: { odometer: 1000, fuel_level: 'Full', driver_signature: sig('Dan Whitfield') },
+  }, dispT);
+  assert.equal(vehicleReport.status, 201, JSON.stringify(vehicleReport.body));
+  assert.equal((await call('POST', `/api/form-submissions/${vehicleReport.body.id}/share`, { values: {} }, adminT)).status, 400);
 });

@@ -35,6 +35,24 @@ const CCCSForms = (() => {
   const OUTCOME_LABEL = { APPROVED: 'Approved', REJECTED: 'Rejected', NOTED: 'Noted' };
   const OUTCOME_COLOUR = { APPROVED: 'var(--available)', REJECTED: 'var(--emergency)', NOTED: 'var(--ink-dim)' };
   const SUBJECT_LABEL = { JOB: 'Job', SITE_VISIT: 'Patrol visit', SITE: 'Site', PERSONNEL: 'Person', VEHICLE: 'Vehicle' };
+  const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+  const SEVERITY_PRI = { LOW: 'ROUTINE', MEDIUM: 'GREEN', HIGH: 'AMBER', CRITICAL: 'RED' };
+
+  /** Best-effort device location, never blocking a submission on it: resolves
+   * null on denial, timeout, or a browser with no geolocation at all. Short
+   * timeout and no high-accuracy request — this is "were you roughly here",
+   * not a tracking fix. */
+  function bestEffortGeo() {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) return resolve(null);
+      const done = (v) => resolve(v);
+      navigator.geolocation.getCurrentPosition(
+        (pos) => done({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy || 0) }),
+        () => done(null),
+        { timeout: 4000, maximumAge: 60000 },
+      );
+    });
+  }
 
   /* ---------------- signature pad ---------------- */
 
@@ -177,7 +195,7 @@ const CCCSForms = (() => {
       submitBtn.disabled = true; submitBtn.textContent = 'Sending…';
       try {
         const sub = submit ? await submit(values)
-          : await api('POST', '/api/form-submissions', { definition_id: def.id, subject_type: subject.type, subject_id: subject.id, values, ...more });
+          : await api('POST', '/api/form-submissions', { definition_id: def.id, subject_type: subject.type, subject_id: subject.id, values, geo: await bestEffortGeo(), ...more });
         onDone && onDone(sub);
       } catch (e) {
         const offline = e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(e.message || '');
@@ -198,6 +216,7 @@ const CCCSForms = (() => {
       case 'date': return `${label}<input data-ff="${f.id}" type="date">`;
       case 'datetime': return `${label}<input data-ff="${f.id}" type="datetime-local">`;
       case 'select': return `${label}<select data-ff="${f.id}"><option value="">— choose —</option>${f.options.map((o) => `<option>${esc(o)}</option>`).join('')}</select>`;
+      case 'severity': return `${label}<select data-ff="${f.id}"><option value="">— choose —</option>${SEVERITIES.map((o) => `<option>${esc(o)}</option>`).join('')}</select>`;
       case 'checkbox': return `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input data-ff="${f.id}" type="checkbox" style="width:20px;height:20px">${esc(f.label)}${req}</label>`;
       case 'signature': return `${label}<div data-ff-pad="${f.id}"></div><input data-ff-signer="${f.id}" placeholder="Name of person signing" style="margin-top:6px">`;
       case 'photo': return `${label}<div style="display:flex;gap:8px;align-items:center"><button type="button" class="btn" data-ff-photobtn="${f.id}">Take / choose photo</button><span class="dim" data-ff-photostatus="${f.id}"></span></div><input type="file" accept="image/*" capture="environment" class="hide" data-ff-photo="${f.id}">`;
@@ -231,6 +250,7 @@ const CCCSForms = (() => {
         case 'signature': return `<img data-ff-src="${esc(v.url)}" alt="signature" style="max-width:260px;height:90px;object-fit:contain;background:#fff;border-radius:6px;border:1px solid var(--line)"><div class="dim" style="font-size:12px">${esc(v.signer_name)} · ${esc(fmt(v.signed_at))}</div>`;
         case 'photo': return `<img data-ff-src="${esc(v.url)}" alt="photo" style="max-width:100%;max-height:260px;border-radius:6px;border:1px solid var(--line)">${v.caption ? `<div class="dim">${esc(v.caption)}</div>` : ''}`;
         case 'textarea': return `<div style="white-space:pre-wrap">${esc(v)}</div>`;
+        case 'severity': return `<span class="pri pri-${SEVERITY_PRI[v] || 'ROUTINE'}">${esc(v)}</span>`;
         default: return esc(v);
       }
     };
@@ -240,8 +260,11 @@ const CCCSForms = (() => {
           <span class="mono" style="font-weight:700">${esc(sub.reference)}</span>
           <span>${esc(sub.definition_name)}</span>
           ${sub.visibility === 'RESTRICTED' ? '<span class="pri pri-RED">RESTRICTED</span>' : ''}
+          <button type="button" class="btn" style="padding:2px 10px;font-size:11px;margin-left:auto" data-ff-pdf>PDF</button>
         </div>
         <p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[sub.subject_type] || sub.subject_type)} ${esc(sub.subject_label)} · filed by ${esc(sub.submitted_by)} · ${esc(fmt(sub.submitted_at))} · form v${sub.definition_version}</p>
+        ${sub.geo ? `<p class="dim" style="margin:0;font-size:12px">Filed near <a href="https://www.openstreetmap.org/?mlat=${sub.geo.lat}&mlon=${sub.geo.lon}#map=17/${sub.geo.lat}/${sub.geo.lon}" target="_blank" rel="noopener">${sub.geo.lat.toFixed(5)}, ${sub.geo.lon.toFixed(5)}</a>${sub.geo.accuracy ? ` (±${sub.geo.accuracy}m)` : ''}</p>` : ''}
+        ${sub.client_share ? `<p class="dim" style="margin:0;font-size:12px;color:var(--available)">Shared with the client ${esc(fmt(sub.client_share.shared_at))} by ${esc(sub.client_share.shared_by)}</p>` : ''}
         ${sub.status === 'ACTIONED' ? `<div style="border:1px solid var(--line);border-left:4px solid ${OUTCOME_COLOUR[sub.outcome] || 'var(--line)'};border-radius:8px;padding:8px 10px">
           <div style="font-weight:700">${esc(OUTCOME_LABEL[sub.outcome] || sub.outcome)} <span class="dim" style="font-weight:400;font-size:12px">by ${esc(sub.actioned_by)} · ${esc(fmt(sub.actioned_at))}</span></div>
           ${sub.feedback ? `<div style="white-space:pre-wrap;margin-top:4px">${esc(sub.feedback)}</div>` : ''}</div>` : ''}
@@ -255,6 +278,16 @@ const CCCSForms = (() => {
         ${sub.editable ? '<div class="btn-row"><button type="button" class="btn" data-ff-edit>Edit this report</button></div>' : ''}
       </div>`;
     loadImages(host);
+    const pdfBtn = host.querySelector('[data-ff-pdf]');
+    if (pdfBtn) pdfBtn.onclick = async () => {
+      pdfBtn.disabled = true; const was = pdfBtn.textContent; pdfBtn.textContent = '…';
+      try {
+        const res = await fetch(`/api/form-submissions/${sub.id}/pdf`, { headers: { authorization: `Bearer ${CCCS.getSession().token}` } });
+        if (!res.ok) throw new Error('could not build the PDF');
+        window.open(URL.createObjectURL(await res.blob()), '_blank');
+      } catch (e) { alert(e.message); }
+      pdfBtn.disabled = false; pdfBtn.textContent = was;
+    };
     const btn = host.querySelector('[data-ff-edit]');
     if (btn) btn.onclick = () => edit(host, sub, {
       onSaved: (updated) => { view(host, updated, { onChanged }); onChanged && onChanged(updated); },
@@ -311,12 +344,70 @@ const CCCSForms = (() => {
     };
   }
 
+  /* ---------------- sharing a redacted copy with the client ---------------- */
+
+  /** Admin-only redaction UI: lets an admin type a client-safe copy of each
+   * field (prefilled from the last shared copy, or the original answers if
+   * never shared) and release or revoke it. There is no auto-redaction —
+   * see routes-forms.js's cleanSharedValues() for why — so this is a manual
+   * editor, not a toggle. Renders nothing for a report whose subject type
+   * can never be shared (sub.client_shareable is false). */
+  function shareEditor(host, sub, { onChanged } = {}) {
+    if (!sub.client_shareable) { host.innerHTML = ''; return; }
+    const fields = sub.fields.filter((f) => f.type !== 'signature' && f.type !== 'photo');
+    const prefillSrc = sub.client_share ? sub.client_share.values : sub.values;
+    host.innerHTML = `
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+        <label>Share a redacted copy with the client</label>
+        <p class="dim" style="font-size:12px;margin:2px 0 8px">Edit the text below to remove any names or other personal details before sharing — only this version is ever visible in the client portal. Photos and signatures are never shared. Leave a field blank to leave it out entirely.</p>
+        <div class="ff-stack">
+          <label>What the client sees this is about</label>
+          <input data-sh-subject value="${esc(sub.client_share ? sub.client_share.subject_label : sub.subject_label)}">
+          ${fields.map((f) => fieldHtml(f)).join('')}
+        </div>
+        <div class="btn-row" style="margin-top:8px">
+          <button type="button" class="btn primary" data-sh-go>${sub.client_share ? 'Update shared copy' : 'Share with client'}</button>
+          ${sub.client_share ? '<button type="button" class="btn danger" data-sh-unshare>Unshare</button>' : ''}
+        </div>
+        <p class="err" data-sh-err style="min-height:16px;margin:4px 0 0"></p>
+      </div>`;
+    for (const f of fields) {
+      const input = host.querySelector(`[data-ff="${f.id}"]`);
+      const v = prefillSrc[f.id];
+      if (!input || v === undefined || v === null) continue;
+      if (f.type === 'checkbox') input.checked = v === true;
+      else if (f.type === 'datetime') input.value = toLocalInput(new Date(v));
+      else input.value = v;
+    }
+    const errEl = host.querySelector('[data-sh-err]');
+    host.querySelector('[data-sh-go]').onclick = async () => {
+      errEl.textContent = '';
+      const values = {};
+      for (const f of fields) {
+        const input = host.querySelector(`[data-ff="${f.id}"]`);
+        if (f.type === 'checkbox') values[f.id] = input.checked;
+        else if (f.type === 'number') { if (input.value !== '') values[f.id] = Number(input.value); }
+        else if (f.type === 'datetime') { if (input.value) values[f.id] = new Date(input.value).toISOString(); }
+        else if (input.value.trim() !== '') values[f.id] = input.value.trim();
+      }
+      try {
+        onChanged && onChanged(await api('POST', `/api/form-submissions/${sub.id}/share`, { values, subject_label: host.querySelector('[data-sh-subject]').value }));
+      } catch (e) { errEl.textContent = e.message; }
+    };
+    const unshareBtn = host.querySelector('[data-sh-unshare]');
+    if (unshareBtn) unshareBtn.onclick = async () => {
+      try { onChanged && onChanged(await api('DELETE', `/api/form-submissions/${sub.id}/share`)); }
+      catch (e) { errEl.textContent = e.message; }
+    };
+  }
+
   /** A compact list of submission summaries; onOpen(id) when one is clicked. */
   function list(host, rows, onOpen, empty = 'No reports.') {
     host.innerHTML = rows.length ? rows.map((s) => `
       <div class="row clickable" data-ff-open="${s.id}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line-soft);cursor:pointer">
         <span class="mono" style="font-size:12px">${esc(s.reference)}</span>
         <span style="flex:1">${esc(s.definition_name)} <span class="dim">— ${esc(s.subject_label)}</span></span>
+        ${s.severity ? `<span class="pri pri-${SEVERITY_PRI[s.severity] || 'ROUTINE'}" style="font-size:10px">${esc(s.severity)}</span>` : ''}
         ${s.visibility === 'RESTRICTED' ? '<span class="pri pri-RED" style="font-size:10px">R</span>' : ''}
         ${s.status === 'ACTIONED' ? `<span style="font-size:10px;font-weight:700;color:${OUTCOME_COLOUR[s.outcome] || 'inherit'}">${esc(OUTCOME_LABEL[s.outcome] || s.outcome)}</span>` : ''}
         <span class="dim" style="font-size:11px">${esc(fmt(s.submitted_at))}</span>
@@ -362,5 +453,5 @@ const CCCSForms = (() => {
     };
   }
 
-  return { fill, view, edit, list, signaturePad, downscale, vehicleKitExtra, SUBJECT_LABEL, OUTCOME_LABEL };
+  return { fill, view, edit, list, signaturePad, downscale, vehicleKitExtra, shareEditor, SUBJECT_LABEL, OUTCOME_LABEL };
 })();

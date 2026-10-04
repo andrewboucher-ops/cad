@@ -148,7 +148,7 @@
   <button class="btn" id="btnMessage" style="padding:6px 10px;font-size:11px">Message</button>
   <button class="btn" id="btnFitMap" style="padding:6px 10px;font-size:11px">Fit map</button>
   <button class="btn" id="btnCallsigns" style="padding:6px 10px;font-size:11px">Call signs</button>
-  <a class="btn" href="/forms.html" style="padding:6px 10px;font-size:11px">Reports</a>
+  <a class="btn" href="/forms.html" style="padding:6px 10px;font-size:11px">Reports <span id="reportsBadge"></span></a>
   <span class="clock" id="clock">--:--:--</span>
   <div class="user-block">
     <span class="avatar" id="avatar"></span>
@@ -218,7 +218,7 @@ el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.ht
 setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
 
 const state = {
-  personnel: [], mdts: [], jobs: [], sites: [], site_visits: [], shifts: [], requests: [], emergencies: [], events: [],
+  personnel: [], mdts: [], jobs: [], sites: [], site_visits: [], shifts: [], requests: [], emergencies: [], events: [], reports: [],
   selected: null,          // { kind: 'j'|'v'|'p'|'m', id }
   mode: null,              // non-selection Detail modes: newJob, newVisit, assign, message, notify, callsigns, report
   modeArg: null,
@@ -393,11 +393,28 @@ function lateAlerts() {
   }
   return [...out.values()].filter((x) => !x.clocked && !lateDismissed.has(x.assignment_id) && (!x.ends_at || Date.parse(x.ends_at) > now));
 }
+// Only STANDARD-visibility reports ever reach state.reports (a RESTRICTED
+// one broadcasts no content, by design — see routes-forms.js's header) and
+// only OPEN ones stay in it, so a severity banner can never show a report
+// this login isn't entitled to read, and clears itself once reviewed.
+function urgentReports() { return state.reports.filter((r) => r.severity === 'HIGH' || r.severity === 'CRITICAL'); }
+function updateReportsBadge() {
+  const n = state.reports.length, badge = el('#reportsBadge');
+  if (badge) badge.textContent = n ? `(${n})` : '';
+}
 function renderAttention() {
   const emgs = state.emergencies.filter((e) => e.state !== 'RESOLVED');
   const reqs = state.requests.filter((r) => r.state === 'PENDING')
     .sort((a, b) => (b.priority - a.priority) || (Date.parse(a.requested_at) - Date.parse(b.requested_at)));
-  el('#attn').innerHTML = emgs.map((e) => `
+  updateReportsBadge();
+  el('#attn').innerHTML = urgentReports().map((r) => `
+    <div class="banner ${r.severity === 'CRITICAL' ? 'emg' : 'req pri'}">
+      <strong>${esc(r.severity)} SEVERITY REPORT</strong>
+      <span class="mono">${esc(r.reference)} · ${esc(r.definition_name)}</span>
+      <span class="dim">${esc(r.subject_label || '')} · filed by ${esc(r.submitted_by)}</span>
+      <span style="flex:1"></span>
+      <button class="btn primary" data-reviewreport="${r.id}">Review</button>
+    </div>`).join('') + emgs.map((e) => `
     <div class="banner emg">
       <strong>${e.kind === 'WELFARE' ? 'WELFARE OVERDUE — NO CHECK-IN' : 'EMERGENCY'}</strong>
       <span class="mono">${esc(e.callsign)} · ${e.lat ? e.lat.toFixed(4) + ', ' + e.lon.toFixed(4) : 'no fix'} · ${new Date(e.activated_at).toLocaleTimeString()}</span>
@@ -426,6 +443,7 @@ function renderAttention() {
       <button class="btn primary" data-reqp="${x.personnel_id}">Contact</button>
       <button class="btn" data-latedismiss="${x.assignment_id}">Dismiss</button>
     </div>`).join('');
+  els('[data-reviewreport]').forEach((b) => (b.onclick = () => setMode('report', Number(b.dataset.reviewreport))));
   els('[data-latedismiss]').forEach((b) => (b.onclick = () => { lateDismissed.add(Number(b.dataset.latedismiss)); renderAttention(); }));
   els('[data-ack]').forEach((b) => (b.onclick = () => api('POST', `/api/emergency/${b.dataset.ack}/ack`)));
   els('[data-emgres]').forEach((b) => armed(b, 'Confirm reset', () => api('POST', `/api/emergency/${b.dataset.emgres}/resolve`)));
@@ -1048,6 +1066,7 @@ function beep(freq, ms, delayMs = 0, gain = 0.25, type = 'sine') {
 const sound = {
   jobCreated() { beep(1100, 90); beep(1500, 110, 110); },
   callRequest() { beep(1300, 80); beep(1300, 80, 140); },
+  reportEscalated() { beep(1500, 100); beep(1000, 160, 120); beep(1500, 100, 320); },
   _emergencyTimer: null,
   // Keeps sounding while ANY emergency is still ACTIVE (not yet
   // acknowledged) — re-evaluated after every emergency.* event.
@@ -1100,8 +1119,23 @@ bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderShift(); rend
    .on('welfare.checked_in', onPersonChange)
    .on('welfare.stopped', onPersonChange)
    .on('personnel.location', (p) => { upsert(state.personnel, p); renderMap(); })
+   // RESTRICTED submissions never broadcast (see routes-forms.js's header) —
+   // every row this ever receives is one this login was already allowed to
+   // read, same as the per-job/visit/person Reports lists elsewhere on this
+   // page. A report stops appearing in the OPEN-only state.reports once it's
+   // actioned, via the form.actioned event.logged entry below — there is no
+   // separate broadcast for that, reusing the log line routes-forms.js
+   // already sends rather than adding a second feed to keep in sync.
+   .on('form.submitted', (r) => {
+     upsert(state.reports, r); renderAttention();
+     if (r.severity === 'HIGH' || r.severity === 'CRITICAL') sound.reportEscalated();
+   })
    .on('event.logged', (e) => {
      state.events.push(e); if (state.events.length > 400) state.events.shift(); renderLog();
+     if (e.type === 'form.actioned' && e.data && e.data.submission_id) {
+       state.reports = state.reports.filter((r) => r.id !== e.data.submission_id);
+       renderAttention();
+     }
      // A PBX-placed call settles later; refresh the officer's contact log
      // if that's who is on screen.
      if (e.type === 'contact.dial_outcome' && pendingDials.has(e.data.dial_log_id)) {
@@ -1128,6 +1162,9 @@ async function boot() {
   const from = new Date(Date.now() - 18 * 3600e3).toISOString(), to = new Date(Date.now() + 3600e3).toISOString();
   state.shifts = await api('GET', `/api/shifts?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`).catch(() => []);
   state.requests = await api('GET', '/api/calls/requests').catch(() => []);
+  // Already scoped to what this login may read (canRead()) — a RESTRICTED
+  // report without a grant is simply absent, same as everywhere else.
+  state.reports = await api('GET', '/api/form-submissions?status=OPEN&limit=200').catch(() => []);
   // The map loads from a CDN. If that fails the console must still show
   // emergencies, welfare alarms and the dispatch list — a map outage must
   // never blank the screen that tells control someone needs help.

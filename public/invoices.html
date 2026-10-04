@@ -145,16 +145,24 @@ function lastWeek() {
   const mon = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate() - day - 7));
   return [mon.toISOString().slice(0, 10), new Date(mon.getTime() + 6 * 864e5).toISOString().slice(0, 10)];
 }
-el('#bGen').onclick = () => {
+el('#bGen').onclick = async () => {
   const [f, t] = lastMonth();
+  // Already scoped to one contract (arrived via a contract's own "Generate
+  // invoice" link) — that's more specific than a site, so no site picker.
+  const lockedToContract = params.get('contract_id');
+  const sites = lockedToContract ? [] : await api('GET', '/api/sites').catch(() => []);
   modal('Make invoices', `<p style="margin-top:0;font-size:13.5px">One draft invoice per signed contract that ran in the period, from its rates and the hours at its site. Nothing is sent anywhere until you approve it and press <strong>Send to Xero</strong>.</p>
     <div class="btn-row" style="margin-bottom:10px"><button type="button" class="btn" id="gM">Last month</button><button type="button" class="btn" id="gW">Last week</button></div>
     <div class="k-form"><div><label>From</label><input id="gF" type="date" value="${f}"></div><div><label>To</label><input id="gT" type="date" value="${t}"></div></div>
+    ${!lockedToContract ? `<div style="margin-top:10px"><label>Site</label><select id="gSite"><option value="">All sites</option>${sites.slice().sort((a, b) => a.name.localeCompare(b.name)).map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>` : ''}
     <div id="gOut"></div>${foot('Make draft invoices')}`, (root) => {
     root.querySelector('#gM').onclick = () => { const [a, b] = lastMonth(); root.querySelector('#gF').value = a; root.querySelector('#gT').value = b; };
     root.querySelector('#gW').onclick = () => { const [a, b] = lastWeek(); root.querySelector('#gF').value = a; root.querySelector('#gT').value = b; };
     wire(root, async () => {
-      const r = await api('POST', '/api/invoices/generate', { from: v(root, '#gF'), to: v(root, '#gT'), contract_id: params.get('contract_id') || undefined });
+      const r = await api('POST', '/api/invoices/generate', {
+        from: v(root, '#gF'), to: v(root, '#gT'), contract_id: lockedToContract || undefined,
+        site_id: root.querySelector('#gSite') ? (v(root, '#gSite') || undefined) : undefined,
+      });
       await load();
       root.querySelector('#gOut').innerHTML = `<p style="font-size:13.5px"><strong>${r.made.length} draft invoice${r.made.length === 1 ? '' : 's'} made.</strong></p>${r.skipped.length ? `<ul class="dim" style="font-size:12.5px">${r.skipped.map((s) => `<li>${esc(s.contract)}: ${esc(s.reason)}</li>`).join('')}</ul>` : ''}`;
       if (!r.skipped.length && r.made.length) close();

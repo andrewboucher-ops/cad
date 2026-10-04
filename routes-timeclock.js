@@ -80,7 +80,8 @@ module.exports = function registerTimeclock({
     return t;
   }
   const openFor = (pid) => db.shift_assignments.find((x) => x.personnel_id === pid && x.clocked_in_at && !x.clocked_out_at && x.status !== 'REMOVED');
-  route('POST', '/api/timeclock/clock-in', ['FIELD_USER', ...CONTROL], ({ body, user }) => {
+  /** Also behind POST /api/shifts/adhoc (server.js), the same thing. */
+  function clockInAdHoc(body, user) {
     const pid = isControlRole(user.role) && body.personnel_id ? Number(body.personnel_id) : user.personnel_id;
     const person = db.personnel.find((p) => p.id === pid);
     if (!person) throw httpError(400, isControlRole(user.role) ? 'choose who to clock in' : 'this login is not linked to a member of staff');
@@ -90,10 +91,10 @@ module.exports = function registerTimeclock({
     const reason = String(body.reason || '').trim().slice(0, 300);
     const now = new Date();
     const s = {
-      id: nextId('shifts'), site_id: site.id, shift_type_id: adHocType().id, ad_hoc: true,
+      id: nextId('shifts'), site_id: site.id, shift_type_id: adHocType().id, ad_hoc: true, // detail.adhoc: the rota's "AD HOC" badge
       starts_at: now.toISOString(), ends_at: new Date(now.getTime() + 12 * 3600000).toISOString(), // set at clock-out
       break_minutes: 0, required_headcount: 1, status: 'IN_PROGRESS', pay_rate: null, bill_rate: null,
-      uniform_ppe: '', briefing: '', notes: reason, detail: {}, template_id: null, revision: 0, created_by: user.id, created_at: now.toISOString(),
+      uniform_ppe: '', briefing: '', notes: reason ? `Ad hoc — ${reason}` : 'Ad hoc shift — not pre-rostered.', detail: { adhoc: true }, template_id: null, revision: 0, created_by: user.id, created_at: now.toISOString(),
     };
     const a = {
       id: nextId('shift_assignments'), shift_id: s.id, personnel_id: pid, role_on_shift: '', is_duty_supervisor: false,
@@ -106,11 +107,13 @@ module.exports = function registerTimeclock({
     db.shifts.push(s); db.shift_assignments.push(a);
     addException(a, 'UNSCHEDULED', 0, reason, user);
     const pub = publicShift(s);
+    pub.my = pub.assignments.find((x) => x.personnel_id === pid) || null;
     broadcast('shift.created', pub, { personnelIds: [pid] });
-    logEvent('shift.clocked_in', `${person.name} CLOCKED IN — AD-HOC SHIFT AT ${site.name.toUpperCase()}`, { shift_id: s.id, personnel_id: pid });
+    logEvent('shift.adhoc_created', `${person.name} CLOCKED IN AD HOC AT ${site.name.toUpperCase()}`, { shift_id: s.id, personnel_id: pid });
     flushNow();
     return { __status: 201, __body: pub };
-  });
+  }
+  route('POST', '/api/timeclock/clock-in', ['FIELD_USER', ...CONTROL], ({ body, user }) => clockInAdHoc(body, user));
 
   /* ---- approvals ---- */
   function exceptionRows(filter) {
@@ -189,5 +192,5 @@ module.exports = function registerTimeclock({
   /** Officer's own: the sites they can clock in at with no shift. */
   route('GET', '/api/timeclock/sites', ['FIELD_USER', ...CONTROL], ({ user }) => db.sites.filter((s) => s.active !== false && siteVisibleTo(s.id, user)).map((s) => ({ id: s.id, name: s.name })));
 
-  return { check, record, KIND };
+  return { check, record, clockInAdHoc, KIND };
 };

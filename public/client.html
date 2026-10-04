@@ -78,6 +78,11 @@
   </div>
 
   <div class="section-card">
+    <header>Incident &amp; site reports</header>
+    <div class="body" id="incidentsBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card">
     <header>Service report</header>
     <div class="body">
       <div class="range-row">
@@ -90,7 +95,7 @@
   </div>
 
   <div class="section-card">
-    <header>Shifts &amp; patrols</header>
+    <header>Rota &amp; patrols</header>
     <div class="body">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px" id="spRange">
         <button type="button" class="btn" data-sp="today">Today</button><button type="button" class="btn" data-sp="week">Last 7 days</button><button type="button" class="btn" data-sp="next">Next 7 days</button>
@@ -175,12 +180,39 @@ async function paintActivity() {
     : '<p class="empty-note">Nothing open right now.</p>';
 }
 
+/** A report only ever appears here once an admin has explicitly released a
+ * redacted copy of it (routes-forms.js's client_share) — never automatically
+ * on filing, and never the raw original. r.fields lists only what the admin
+ * chose to include; r.values is that same redacted copy, not the report. */
+function fmtVal(f, v) {
+  if (v === null || v === undefined || v === '') return '<span class="dim">—</span>';
+  if (f.type === 'checkbox') return v ? 'Yes' : 'No';
+  if (f.type === 'datetime') return esc(fmtDateTime(v));
+  if (f.type === 'severity') return `<span class="pill ${v === 'CRITICAL' || v === 'HIGH' ? 'missed' : v === 'MEDIUM' ? 'open' : ''}">${esc(v)}</span>`;
+  return esc(String(v));
+}
+async function paintIncidents() {
+  const rows = await api('GET', withAs(`/api/client/sites/${currentSiteId}/incidents`)).catch(() => []);
+  el('#incidentsBody').innerHTML = rows.length ? rows.map((r) => `
+    <div style="border-bottom:1px solid var(--line-soft);padding:10px 0">
+      <div class="list-row" style="border:none;padding:0">
+        <span class="t mono">${esc(r.reference)}</span>
+        <span style="flex:1">${esc(r.definition_name)} <span class="dim" style="font-size:12px">— ${esc(r.subject_label)}</span></span>
+        <span class="t" style="min-width:auto">${esc(fmtDate(r.occurred_at))}</span>
+      </div>
+      ${r.fields.length ? `<dl style="margin:6px 0 0;font-size:12.5px;display:grid;grid-template-columns:140px 1fr;gap:4px 10px">${r.fields.map((f) => `<dt class="dim">${esc(f.label)}</dt><dd style="margin:0;white-space:pre-wrap">${fmtVal(f, r.values[f.id])}</dd>`).join('')}</dl>` : ''}
+    </div>`).join('') : '<p class="empty-note">No reports have been shared for this site yet.</p>';
+}
+
+/** Coverage, not names — routes-client.js deliberately keeps personnel
+ * identity out of a client-facing shift, the same stance as jobs/visits. */
 function renderReport(r) {
   el('#reportBody').innerHTML = `
     <div class="stat-row">
       <div class="stat-tile"><div class="label">Alarm jobs</div><div class="num">${r.jobs.total}</div><div class="dim" style="font-size:12px">${r.jobs.completed} completed${r.jobs.cancelled ? `, ${r.jobs.cancelled} cancelled` : ''}</div></div>
       <div class="stat-tile"><div class="label">Avg response</div><div class="num">${r.jobs.avg_response_minutes != null ? r.jobs.avg_response_minutes + ' min' : '—'}</div><div class="dim" style="font-size:12px">${r.jobs.sla_minutes ? `SLA ${r.jobs.sla_minutes} min — ${r.jobs.within_sla}/${r.jobs.total} within` : 'no SLA set on this site'}</div></div>
       <div class="stat-tile"><div class="label">Patrol visits</div><div class="num">${r.visits.total}</div><div class="dim" style="font-size:12px">${r.visits.completed} completed${r.visits.missed ? `, ${r.visits.missed} missed` : ''}</div></div>
+      <div class="stat-tile"><div class="label">Reports shared</div><div class="num">${r.incidents.total}</div><div class="dim" style="font-size:12px">see Incident &amp; site reports below</div></div>
     </div>`;
 }
 async function runReport() {
@@ -293,7 +325,7 @@ async function paintShifts() {
     const mine = patrols.filter((p) => p.shift_id === s.id);
     return `<div style="border:1px solid var(--line-soft);border-radius:10px;padding:10px 12px;margin-bottom:8px">
       <div class="list-row" style="border:none;padding:0"><span class="t">${esc(fmtDate(s.starts_at))} ${hhmm(s.starts_at)}–${hhmm(s.ends_at)}</span>
-        <span style="flex:1;font-size:13px">${s.officers_required} officer${s.officers_required === 1 ? '' : 's'}${s.state === 'ON_SITE' ? ` · ${s.officers_on_site} on site` : ''}${s.arrived_at ? ` · arrived ${hhmm(s.arrived_at)}` : ''}${s.left_at ? ` · left ${hhmm(s.left_at)}` : ''}
+        <span style="flex:1;font-size:13px">${s.shift_type_name ? `${esc(s.shift_type_name)} · ` : ''}${s.required_headcount} officer${s.required_headcount === 1 ? '' : 's'}${s.state === 'NOT_YET_COVERED' && s.coverage_gap ? ` (${s.coverage_gap} still to arrange)` : ''}${s.state === 'ON_SITE' ? ` · ${s.officers_on_site} on site` : ''}${s.arrived_at ? ` · arrived ${hhmm(s.arrived_at)}` : ''}${s.left_at ? ` · left ${hhmm(s.left_at)}` : ''}
           ${s.patrol_every_min ? `<span class="dim"> · patrol every ${s.patrol_every_min % 60 === 0 ? `${s.patrol_every_min / 60} h` : `${s.patrol_every_min} min`}${s.patrols.total ? ` — ${s.patrols.completed} done${s.patrols.missed ? `, ${s.patrols.missed} missed` : ''}` : ''}</span>` : ''}</span>
         <span class="pill ${cls}">${label}</span></div>
       ${mine.map(patrolRow).join('')}</div>`;
@@ -370,7 +402,7 @@ async function loadSite() {
   const today = new Date(), monthAgo = new Date(today.getTime() - 30 * 86400000);
   el('#repFrom').value = monthAgo.toISOString().slice(0, 10);
   el('#repTo').value = today.toISOString().slice(0, 10);
-  await Promise.all([paintActivity(), runReport(), paintDocs(), paintRequests(), paintShifts()]);
+  await Promise.all([paintActivity(), paintIncidents(), runReport(), paintDocs(), paintRequests(), paintShifts()]);
 }
 
 (async function init() {
@@ -399,7 +431,7 @@ async function loadSite() {
   el('#clientName').textContent = client.name;
   if (!sites.length) {
     el('#activityBody').innerHTML = '<p class="empty-note">No sites are linked to this account yet — contact Echelon to have them added.</p>';
-    el('#reportBody').innerHTML = ''; el('#docsBody').innerHTML = ''; el('#reqList').innerHTML = '';
+    el('#reportBody').innerHTML = ''; el('#docsBody').innerHTML = ''; el('#reqList').innerHTML = ''; el('#incidentsBody').innerHTML = '';
     return;
   }
   currentSiteId = sites[0].id;

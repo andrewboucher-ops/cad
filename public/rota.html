@@ -46,8 +46,17 @@
   .coverage-badge { font-weight: 700; padding: 0 4px; border-radius: 3px; margin-left: 4px; }
   .coverage-badge.gap { color: var(--emergency); background: rgba(239,68,68,.12); }
   .coverage-badge.over { color: var(--priority); background: rgba(249,115,22,.12); }
+  .coverage-badge.adhoc { color: #b45309; background: rgba(242,169,60,.18); }
   .add-hint { font-size: 10.5px; color: var(--ink-dim); opacity: 0; transition: opacity .1s; }
   .rota-cell:hover .add-hint { opacity: 1; }
+  .visit-chip {
+    font-size: 10.5px; padding: 3px 6px; border-radius: 5px; background: var(--panel-3);
+    border-left: 3px dotted var(--ink-dim); line-height: 1.3; opacity: .85; cursor: default;
+  }
+  .visit-chip .times { font-family: var(--mono); font-weight: 700; }
+  .visit-chip > div:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .visit-chip.dbl-booked { border-left-color: var(--emergency); }
+  .visit-chip .dbl-flag { color: var(--emergency); font-weight: 700; }
   form.stack { display: flex; flex-direction: column; gap: 12px; }
   form.stack label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: -6px; }
   .foot-split { display: flex; justify-content: space-between; align-items: center; width: 100%; }
@@ -58,14 +67,24 @@
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .seg button { border: none; background: var(--panel); padding: 7px 14px; font: inherit; font-size: 13px; color: var(--ink-dim); cursor: pointer; }
   .seg button.on { background: var(--accent-dim); color: #fff; }
-  /* Days never shrink below a readable width; the grid scrolls sideways
-     instead, with the names column pinned. */
+  /* All 7 days fit in one screen width on any normal desktop — columns
+     flex down to a floor that still reads fine now chips are just time +
+     name, rather than forcing a fixed minimum that guaranteed horizontal
+     scroll on anything under ~1300px. overflow-x stays as a fallback, not
+     the default behaviour, for a window narrower than the floor allows. */
   #gridWrap { overflow-x: auto; border-radius: 8px; }
-  .rota-grid { grid-template-columns: 170px repeat(7, minmax(158px, 1fr)) !important; min-width: max-content; }
+  .rota-grid { grid-template-columns: minmax(120px, 160px) repeat(7, minmax(90px, 1fr)) !important; min-width: 0; }
   .rota-grid .person-name, .rota-grid .hdr:first-child { position: sticky; left: 0; z-index: 2; }
   .rota-grid .hdr { z-index: 3; }
-  .shift-chip { font-size: 12px; padding: 5px 7px; }
+  .rota-grid > div { padding: 6px; }
+  /* A long site/person name truncates with an ellipsis (full name on
+     hover and always in the modal) instead of wrapping to two or three
+     lines and making row heights uneven down the whole column. */
+  .rota-grid .person-name { padding: 6px 8px; min-width: 0; }
+  .rota-grid .person-name .main, .rota-grid .person-name .sub { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .shift-chip { font-size: 11px; padding: 4px 6px; }
   .shift-chip .times { white-space: nowrap; }
+  .shift-chip > div:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .day-list h3 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin: 18px 0 6px; }
   .day-list h3.today { color: var(--accent); }
   .day-list table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
@@ -126,6 +145,13 @@
 const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const me = CCCS.getSession().user;
+// Editing the rota (times, site, headcount, who's on it, resources) is
+// admin-only now — a dispatcher or supervisor gets the same page, read-only:
+// the server enforces this too (POST/PATCH /api/shifts, assignments and
+// shift resources all now require SYSTEM_ADMIN), this just keeps the UI from
+// showing controls that would only 403.
+const isAdmin = me.role === 'SYSTEM_ADMIN';
+if (!isAdmin) { el('#btnNewShift').remove(); el('#btnPublishDrafts').remove(); el('#btnDuplicateWeek').remove(); }
 
 el('#whoName').textContent = me.display_name;
 el('#whoRole').textContent = me.role.replace('_', ' ');
@@ -147,7 +173,7 @@ function startOfWeek(d) {
   return x;
 }
 let weekStart = startOfWeek(new Date());
-let allPersonnel = [], allSites = [], allShifts = [], allShiftTypes = [], allVehicles = [], allAssets = [];
+let allPersonnel = [], allSites = [], allShifts = [], allShiftTypes = [], allVehicles = [], allAssets = [], allSiteVisits = [];
 /** A shift chip shows one person's own involvement — their assignment
  * carries the clock/attendance state now, the shift itself only carries
  * DRAFT/PUBLISHED/IN_PROGRESS/COMPLETED/CANCELLED. */
@@ -177,10 +203,15 @@ async function load() {
   const from = new Date(days[0]); from.setHours(0, 0, 0, 0);
   const to = new Date(days[6]); to.setHours(23, 59, 59, 999);
   el('#weekRange').textContent = `${days[0].toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${days[6].toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
-  [allPersonnel, allSites, allShifts, allShiftTypes, allVehicles, allAssets] = await Promise.all([
+  [allPersonnel, allSites, allShifts, allShiftTypes, allVehicles, allAssets, allSiteVisits] = await Promise.all([
     api('GET', '/api/personnel'), api('GET', '/api/sites'),
     api('GET', `/api/shifts?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`),
     api('GET', '/api/shift-types'), api('GET', '/api/vehicles'), api('GET', '/api/assets'),
+    // No from/to filter exists server-side for site-visits yet — filtered
+    // to this week client-side below, same as admin.html already does for
+    // patrol schedules. Read-only here: scheduling a patrol is still done
+    // from Patrol schedules, this is purely "don't double-book" visibility.
+    api('GET', '/api/site-visits').catch(() => []),
   ]);
   paintGrid();
 }
@@ -207,6 +238,42 @@ function shiftSearchText(s) {
 function visibleShifts() {
   const q = el('#rotaSearch').value.trim().toLowerCase();
   return q ? allShifts.filter((s) => shiftSearchText(s).includes(q)) : allShifts;
+}
+/** Scheduled patrol visits, read-only here — they're created and managed
+ * from Patrol schedules, not from the rota. Shown so a dispatcher staffing
+ * a shift can see a person's already got a patrol run that hour, same
+ * reason on_leave_conflict is shown: a thing you need to know about
+ * before you double-book someone, not something this page edits. */
+function visitsForPersonOnDay(personId, d) {
+  return allSiteVisits.filter((v) => v.status !== 'CANCELLED' && sameDay(new Date(v.scheduled_for), d) && v.resources.some((r) => r.personnel_id === personId));
+}
+function visitsForSiteOnDay(siteId, d) {
+  return allSiteVisits.filter((v) => v.status !== 'CANCELLED' && sameDay(new Date(v.scheduled_for), d) && v.site_id === siteId);
+}
+function visitOverlapsAny(v, shiftsThatDay) {
+  const vStart = Date.parse(v.scheduled_for);
+  const vEnd = vStart + (v.duration_expected_min || 30) * 60000;
+  return shiftsThatDay.some((s) => s.status !== 'CANCELLED' && Date.parse(s.starts_at) < vEnd && vStart < Date.parse(s.ends_at));
+}
+function visitChipHtml(v, overlap) {
+  const start = new Date(v.scheduled_for);
+  const who = v.resources.map((r) => r.personnel).filter(Boolean).join(', ');
+  return `<div class="visit-chip${overlap ? ' dbl-booked' : ''}" data-visit="${v.id}">
+    <div class="times">${start.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} patrol${overlap ? ' <span class="dbl-flag">⚠ clash</span>' : ''}</div>
+    <div>${esc(v.site_name || '')}${who ? ' · ' + esc(who) : ''}${v.status !== 'SCHEDULED' ? ' · ' + esc(v.status.toLowerCase()) : ''}</div>
+  </div>`;
+}
+function visitPopup(v) {
+  modal('Patrol visit', `
+    <p><strong>${esc(v.site_name || '')}</strong></p>
+    <p class="dim">${esc(new Date(v.scheduled_for).toLocaleString('en-GB'))} · ${esc(v.status)}</p>
+    <p>${esc(v.resources.map((r) => r.personnel).filter(Boolean).join(', ') || 'Unassigned')}</p>
+    <p class="dim" style="font-size:12px">Read-only here — manage from Patrol schedules.</p>
+  `, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = '<span></span><button class="btn" id="vpClose">Close</button>';
+    el('#vpClose').onclick = closeModal;
+  });
 }
 function paintGrid() {
   const v = el('#groupBy').value;
@@ -249,20 +316,25 @@ function paintGridByStaff() {
   html += `<div class="hdr"></div>`;
   for (const d of days) html += `<div class="hdr ${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()].slice(0, 3)} ${d.getDate()}</div>`;
   for (const p of rows) {
-    html += `<div class="person-name">${esc(p.name)}<span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
+    html += `<div class="person-name" title="${esc(p.name)}"><span class="main">${esc(p.name)}</span><span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
     for (const d of days) {
       const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.assignments.some((a) => a.personnel_id === p.id));
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
         ${dayShifts.map((s) => {
           const a = s.assignments.find((x) => x.personnel_id === p.id);
-          const badge = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount}</span>`
-            : s.over_staffed ? `<span class="coverage-badge over">${s.assigned_count}/${s.required_headcount}</span>` : '';
-          return `<div class="shift-chip status-${chipStatusClass(s, a)}${a.on_leave_conflict ? ' leave-conflict' : ''}${s.status === 'DRAFT' ? ' draft' : ''}" data-shift="${s.id}" ${a.on_leave_conflict ? 'title="This person has approved leave covering this day"' : ''}>
-          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${a.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}${badge}</div>
-          <div>${esc(s.site_name || s.shift_type_name || '')}${a.is_duty_supervisor ? ' · <strong>duty sup.</strong>' : ''}${s.status === 'DRAFT' ? ' · <em>draft</em>' : ''}</div>
+          // Kept deliberately minimal — time and where, nothing else. Every
+          // other detail (coverage, duty sup, draft, leave conflict, patrol
+          // requirement) is a click away in the full shift modal, not
+          // crammed onto the chip face.
+          const badge = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount}</span>` : '';
+          const adhocBadge = s.detail && s.detail.adhoc ? '<span class="coverage-badge adhoc">AD HOC</span>' : '';
+          return `<div class="shift-chip status-${chipStatusClass(s, a)}${a.on_leave_conflict ? ' leave-conflict' : ''}${s.status === 'DRAFT' ? ' draft' : ''}" data-shift="${s.id}" title="${a.on_leave_conflict ? 'This person has approved leave covering this day' : ''}">
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${badge}${adhocBadge}</div>
+          <div>${esc(s.site_name || s.shift_type_name || '')}</div>
         </div>`;
         }).join('')}
-        <span class="add-hint">+ add shift</span>
+        ${visitsForPersonOnDay(p.id, d).map((v) => visitChipHtml(v, visitOverlapsAny(v, dayShifts))).join('')}
+        ${isAdmin ? '<span class="add-hint">+ add shift</span>' : ''}
       </div>`;
     }
   }
@@ -289,22 +361,26 @@ function paintGridBySite() {
   html += `<div class="hdr"></div>`;
   for (const d of days) html += `<div class="hdr ${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()].slice(0, 3)} ${d.getDate()}</div>`;
   for (const site of rows) {
-    html += `<div class="person-name">${esc(site.name)}</div>`;
+    html += `<div class="person-name" title="${esc(site.name)}"><span class="main">${esc(site.name)}</span></div>`;
     for (const d of days) {
       const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.site_id === site.id);
       html += `<div class="rota-cell" data-site="${site.id ?? ''}" data-date="${fmtDate(d)}">
         ${dayShifts.map((s) => {
           const active = s.assignments.filter((a) => a.status !== 'REMOVED');
-          const names = active.map((a) => `${esc(a.personnel_name)}${a.is_duty_supervisor ? ' (duty sup.)' : ''}${a.on_leave_conflict ? ' ⚠' : ''}`).join(', ') || 'unstaffed';
-          const badge = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount}</span>`
-            : s.over_staffed ? `<span class="coverage-badge over">${s.assigned_count}/${s.required_headcount}</span>` : '';
+          const names = active.map((a) => a.personnel_name).join(', ') || 'unstaffed';
           const onLeave = active.some((a) => a.on_leave_conflict);
-          return `<div class="shift-chip${s.status === 'CANCELLED' ? ' status-CANCELLED' : ''}${onLeave ? ' leave-conflict' : ''}${s.status === 'DRAFT' ? ' draft' : ''}" data-shift="${s.id}" ${onLeave ? 'title="Someone on this shift has approved leave covering this day"' : ''}>
-          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${badge}</div>
-          <div>${esc(s.shift_type_name || '')} · ${esc(names)}${s.status === 'DRAFT' ? ' · <em>draft</em>' : ''}</div>
+          // Minimal, same as the staff view — time and who, nothing else
+          // on the chip face; type, duty sup, draft, patrol requirement
+          // all live in the modal behind a click.
+          const badge = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount}</span>` : '';
+          const adhocBadge = s.detail && s.detail.adhoc ? '<span class="coverage-badge adhoc">AD HOC</span>' : '';
+          return `<div class="shift-chip${s.status === 'CANCELLED' ? ' status-CANCELLED' : ''}${onLeave ? ' leave-conflict' : ''}${s.status === 'DRAFT' ? ' draft' : ''}" data-shift="${s.id}" title="${onLeave ? 'Someone on this shift has approved leave covering this day' : ''}">
+          <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}${badge}${adhocBadge}</div>
+          <div>${esc(names)}</div>
         </div>`;
         }).join('')}
-        <span class="add-hint">+ add shift</span>
+        ${site.id != null ? visitsForSiteOnDay(site.id, d).map((v) => visitChipHtml(v, visitOverlapsAny(v, dayShifts))).join('') : ''}
+        ${isAdmin ? '<span class="add-hint">+ add shift</span>' : ''}
       </div>`;
     }
   }
@@ -328,9 +404,15 @@ function finishGridPaint(shifts, days, defaultsForCell) {
     e.stopPropagation();
     shiftModal(allShifts.find((s) => s.id === Number(chip.dataset.shift)));
   }));
-  els('.rota-cell').forEach((cell) => cell.addEventListener('click', () => {
-    shiftModal(null, defaultsForCell(cell));
+  els('.visit-chip').forEach((chip) => chip.addEventListener('click', (e) => {
+    e.stopPropagation();
+    visitPopup(allSiteVisits.find((v) => v.id === Number(chip.dataset.visit)));
   }));
+  if (isAdmin) {
+    els('.rota-cell').forEach((cell) => cell.addEventListener('click', () => {
+      shiftModal(null, defaultsForCell(cell));
+    }));
+  }
 }
 
 el('#prevWeek').onclick = () => { weekStart.setDate(weekStart.getDate() - 7); load(); };
@@ -340,29 +422,45 @@ el('#thisWeek').onclick = () => { weekStart = startOfWeek(new Date()); load(); }
 function shiftForm(s, defaults) {
   const isNew = !s;
   const d = defaults || {};
-  const startDefault = isNew ? `${d.date}T09:00` : new Date(s.starts_at).toISOString().slice(0, 16);
-  const endDefault = isNew ? `${d.date}T17:00` : new Date(s.ends_at).toISOString().slice(0, 16);
+  // A row action inside an already-open modal (clock in, add a vehicle,
+  // approve an application...) reopens this same form fresh from the
+  // server so it reflects what that action changed — but that used to
+  // silently discard anything the dispatcher had typed into the top
+  // fields (start/end time especially) and not yet saved. reopen() now
+  // snapshots those fields before rebuilding and passes them back in as
+  // `pr`; every field below prefers that snapshot over the server value.
+  const pr = d.preserved || {};
+  const startDefault = isNew ? `${d.date}T09:00` : (pr.starts_at || localDT(s.starts_at));
+  const endDefault = isNew ? `${d.date}T17:00` : (pr.ends_at || localDT(s.ends_at));
+  const typeIdSel = !isNew && pr.shift_type_id != null ? pr.shift_type_id : (!isNew ? s.shift_type_id : null);
+  const siteIdSel = !isNew && 'site_id' in pr ? pr.site_id : (!isNew ? s.site_id : (isNew ? d.siteId : null));
+  const headcountVal = !isNew && pr.required_headcount != null ? pr.required_headcount : (isNew ? 1 : s.required_headcount);
+  const notesVal = !isNew && pr.notes != null ? pr.notes : (isNew ? '' : (s.notes || ''));
+  const statusSel = !isNew && pr.status != null ? pr.status : (!isNew ? s.status : null);
+  // Editing is admin-only (server-enforced); a dispatcher/supervisor gets
+  // every field disabled rather than a form that would just 403 on save.
+  const dis = isAdmin ? '' : 'disabled';
   return `
     <form class="stack" id="shForm">
       ${isNew ? `<label>Personnel</label>
-      <select id="shPersonnel">${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
+      <select id="shPersonnel" ${dis}>${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
       <label>Shift type</label>
-      <select id="shType">${allShiftTypes.map((t) => `<option value="${t.id}" ${!isNew && s.shift_type_id === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
-        ${!isNew && !allShiftTypes.some((t) => t.id === s.shift_type_id) ? `<option value="${s.shift_type_id}" selected>${esc(s.shift_type_name)} (retired)</option>` : ''}</select>
+      <select id="shType" ${dis}>${allShiftTypes.map((t) => `<option value="${t.id}" ${Number(typeIdSel) === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+        ${!isNew && !allShiftTypes.some((t) => t.id === s.shift_type_id) ? `<option value="${s.shift_type_id}" ${Number(typeIdSel) === s.shift_type_id ? 'selected' : ''}>${esc(s.shift_type_name)} (retired)</option>` : ''}</select>
       <label>Site (optional)</label>
-      <select id="shSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${(!isNew && s.site_id === x.id) || (isNew && d.siteId === x.id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <select id="shSite" ${dis}><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}" ${Number(siteIdSel) === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       <label>Starts</label>
-      <input id="shStart" type="datetime-local" value="${startDefault}">
+      <input id="shStart" type="datetime-local" value="${startDefault}" ${dis}>
       <label>Ends</label>
-      <input id="shEnd" type="datetime-local" value="${endDefault}">
+      <input id="shEnd" type="datetime-local" value="${endDefault}" ${dis}>
       <label>Required headcount</label>
-      <input id="shHeadcount" type="number" min="1" value="${isNew ? 1 : s.required_headcount}">
+      <input id="shHeadcount" type="number" min="1" value="${headcountVal}" ${dis}>
       <label>Notes</label>
-      <textarea id="shNotes" rows="2">${isNew ? '' : esc(s.notes || '')}</textarea>
+      <textarea id="shNotes" rows="2" ${dis}>${esc(notesVal)}</textarea>
       ${isNew
-        ? `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDraft"> Create as draft — not shown to staff until published</label>`
+        ? `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDraft" ${dis}> Create as draft — not shown to staff until published</label>`
         : `<label>Status</label>
-      <select id="shStatus">${['DRAFT', 'PUBLISHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((v) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
+      <select id="shStatus" ${dis}>${['DRAFT', 'PUBLISHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((v) => `<option value="${v}" ${statusSel === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
       <p class="dim" id="shError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
@@ -387,11 +485,11 @@ function assignmentsSection(s) {
             <span style="flex:1">${esc(a.personnel_name)}${a.on_leave_conflict ? ' <span class="leave-flag">⚠ on leave</span>' : ''}</span>
             <span class="dim" style="font-size:11px">${esc(a.status)}${a.clocked_in_at ? ` · ${hm(a.clocked_in_at)}–${a.clocked_out_at ? hm(a.clocked_out_at) : 'now'}` : ''}${a.auto_clocked_out ? ' · auto' : ''}</span>
             ${a.clock_out_needs_review ? '<span class="leave-flag" title="Clocked out automatically after the app had been closed — the time is the last time they were seen on site">⚠ check time</span>' : ''}
-            <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:11px"><input type="checkbox" data-duty="${a.id}" ${a.is_duty_supervisor ? 'checked' : ''}> duty sup.</label>
+            <label style="display:flex;gap:4px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:11px"><input type="checkbox" data-duty="${a.id}" ${a.is_duty_supervisor ? 'checked' : ''} ${isAdmin ? '' : 'disabled'}> duty sup.</label>
             ${!a.clocked_in_at ? `<button type="button" class="btn" data-clockin="${a.id}" style="padding:4px 8px;font-size:11px">Clock in</button>` : ''}
             ${a.clocked_in_at && !a.clocked_out_at ? `<button type="button" class="btn" data-clockout="${a.id}" style="padding:4px 8px;font-size:11px">Clock out</button>` : ''}
             ${a.clocked_in_at ? `<button type="button" class="btn" data-times="${a.id}" style="padding:4px 8px;font-size:11px">Times</button>` : ''}
-            <button type="button" class="btn danger" data-remove="${a.id}" style="padding:4px 8px;font-size:11px">Remove</button>
+            ${isAdmin ? `<button type="button" class="btn danger" data-remove="${a.id}" style="padding:4px 8px;font-size:11px">Remove</button>` : ''}
           </div>
           ${a.clocked_in_at ? `<div class="hide" data-times-form="${a.id}" style="border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:-4px;font-size:12px">
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
@@ -403,7 +501,7 @@ function assignmentsSection(s) {
             <button type="button" class="btn primary" data-t-save="${a.id}" style="margin-top:6px;padding:4px 10px;font-size:12px">Save times</button>
           </div>` : ''}`).join('') || '<p class="dim" style="font-size:13px">Nobody assigned yet.</p>'}
       </div>
-      ${available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
+      ${isAdmin && available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
         <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
         <button type="button" class="btn" id="shAddPerson" style="padding:6px 12px;font-size:12px">Add</button>
       </div>` : ''}
@@ -427,10 +525,10 @@ function resourcesSection(s) {
         ${s.vehicle_allocations.map((v) => `
           <div style="display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px">
             <span style="flex:1">${esc(v.vehicle_registration)}${v.driver_name ? ' · driver ' + esc(v.driver_name) : ''}</span>
-            <button type="button" class="btn danger" data-unallocvehicle="${v.id}" style="padding:4px 8px;font-size:11px">Remove</button>
+            ${isAdmin ? `<button type="button" class="btn danger" data-unallocvehicle="${v.id}" style="padding:4px 8px;font-size:11px">Remove</button>` : ''}
           </div>`).join('') || '<p class="dim" style="font-size:13px">No vehicle allocated.</p>'}
       </div>
-      ${availableVehicles.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      ${isAdmin && availableVehicles.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <select id="shAddVehicle" style="flex:1;min-width:120px">${availableVehicles.map((v) => `<option value="${v.id}">${esc(v.registration)}</option>`).join('')}</select>
         <select id="shVehicleDriver" style="min-width:140px"><option value="">— no driver —</option>${allPersonnel.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
         <button type="button" class="btn" id="shAddVehicleBtn" style="padding:6px 12px;font-size:12px">Allocate</button>
@@ -441,10 +539,10 @@ function resourcesSection(s) {
         ${openAssetAllocs.map((a) => `
           <div style="display:flex;align-items:center;gap:8px;font-size:13px;border:1px solid var(--line);border-radius:6px;padding:8px">
             <span style="flex:1">${a.quantity_out} × ${esc(a.asset_description)}</span>
-            <button type="button" class="btn ok" data-returnasset="${a.id}" style="padding:4px 8px;font-size:11px">Return</button>
+            ${isAdmin ? `<button type="button" class="btn ok" data-returnasset="${a.id}" style="padding:4px 8px;font-size:11px">Return</button>` : ''}
           </div>`).join('') || '<p class="dim" style="font-size:13px">No equipment allocated.</p>'}
       </div>
-      ${allAssets.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+      ${isAdmin && allAssets.length ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
         <select id="shAddAsset" style="flex:1;min-width:140px">${allAssets.map((a) => `<option value="${a.id}">${esc(a.description)}${a.is_stock_tracked ? ` (${a.stock_level} in stock)` : ''}</option>`).join('')}</select>
         <input id="shAssetQty" type="number" min="1" value="1" style="width:70px">
         <button type="button" class="btn" id="shAddAssetBtn" style="padding:6px 12px;font-size:12px">Allocate</button>
@@ -455,18 +553,21 @@ function resourcesSection(s) {
  * and which patrol route (a beat — its checkpoints are the QR/NFC tags). */
 function patrolSection(s) {
   if (!s.site_id) return '';
-  const p = s.patrol || {};
+  // Shifts given a "patrol every N minutes" note before patrols were run
+  // (detail.patrol_interval_min) start from that; saving makes it real.
+  const p = s.patrol || (s.detail && s.detail.patrol_interval_min ? { every_min: Number(s.detail.patrol_interval_min) } : {});
+  const dis = isAdmin ? '' : 'disabled';
   const opts = [['', 'No patrols'], [30, 'Every 30 min'], [60, 'Every hour'], [90, 'Every 1½ hours'], [120, 'Every 2 hours'], [180, 'Every 3 hours'], [240, 'Every 4 hours']];
   if (p.every_min && !opts.some(([v]) => v === p.every_min)) opts.push([p.every_min, `Every ${p.every_min} min`]);
   return `
     <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
       <label>Patrols on this shift</label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px">
-        <select id="ptEvery">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(p.every_min || '') ? 'selected' : ''}>${l}</option>`).join('')}</select>
-        <select id="ptBeat"><option value="">Loading routes…</option></select>
+        <select id="ptEvery" ${dis}>${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(p.every_min || '') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <select id="ptBeat" ${dis}><option value="">Loading routes…</option></select>
       </div>
       <p class="dim" style="font-size:12px;margin:6px 0">The officer on shift is sent each patrol as it falls due and scans the route's checkpoints (QR or NFC). Not done within the interval = missed, and control is alerted. Checkpoints are set up in Admin → Beats.</p>
-      <button type="button" class="btn" id="ptSave" style="padding:5px 12px;font-size:12px">Save patrols</button> <span class="dim" id="ptMsg" style="font-size:12px"></span>
+      ${isAdmin ? '<button type="button" class="btn" id="ptSave" style="padding:5px 12px;font-size:12px">Save patrols</button> <span class="dim" id="ptMsg" style="font-size:12px"></span>' : ''}
     </div>`;
 }
 async function wirePatrol(s, reopen) {
@@ -474,6 +575,7 @@ async function wirePatrol(s, reopen) {
   const beats = await api('GET', `/api/beats?site_id=${s.site_id}`).catch(() => []);
   const cur = s.patrol && s.patrol.beat_id;
   el('#ptBeat').innerHTML = `<option value="">No checkpoints — just a patrol</option>${beats.filter((b) => b.active !== false).map((b) => `<option value="${b.id}" ${b.id === cur ? 'selected' : ''}>${esc(b.name)} (${(b.waypoints || []).length} checkpoints)</option>`).join('')}`;
+  if (!el('#ptSave')) return;
   el('#ptSave').onclick = async () => {
     try {
       await api('PUT', `/api/shifts/${s.id}/patrol`, { every_min: el('#ptEvery').value ? Number(el('#ptEvery').value) : null, beat_id: el('#ptBeat').value || null });
@@ -481,16 +583,43 @@ async function wirePatrol(s, reopen) {
     } catch (e) { el('#ptMsg').textContent = e.message; }
   };
 }
+/** Where the shift actually is and what a staff member needs to know to
+ * work it — read-only here, same source as officer.html's own "Site
+ * documents" button and admin.html's site editor, so there's exactly one
+ * place any of this ever gets uploaded. Loaded async (a shift doesn't
+ * carry its site's documents on it, only its site_id) rather than baked
+ * into the sync HTML the rest of the modal uses. */
+function siteInfoSection(s) {
+  if (!s.site_id) return '';
+  return `
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+      <label>Site</label>
+      <div id="shSiteInfo" class="dim" style="font-size:13px">Loading…</div>
+    </div>`;
+}
+async function loadSiteInfo(s) {
+  if (!s.site_id || !el('#shSiteInfo')) return;
+  try {
+    const site = allSites.find((x) => x.id === s.site_id);
+    const docs = await api('GET', `/api/sites/${s.site_id}/documents`);
+    const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map', INDUCTION: 'Induction' };
+    const docLinks = docs.length
+      ? docs.map((d) => `<div><a href="/api/documents/${d.id}/file?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</a></div>`).join('')
+      : '<div class="dim">No maps, instructions or inductions on file for this site yet.</div>';
+    el('#shSiteInfo').innerHTML = `<div>${esc(site && site.address || '')}</div>${docLinks}`;
+  } catch (e) { if (el('#shSiteInfo')) el('#shSiteInfo').textContent = 'Failed to load site information.'; }
+}
 function shiftModal(s, defaults) {
   const isNew = !s;
-  modal(isNew ? 'New shift' : `Shift — ${s.site_name || s.shift_type_name}`, shiftForm(s, defaults) + (isNew ? '' : assignmentsSection(s) + patrolSection(s) + resourcesSection(s)), () => {
+  modal(isNew ? 'New shift' : `Shift — ${s.site_name || s.shift_type_name}`, shiftForm(s, defaults) + (isNew ? '' : siteInfoSection(s) + assignmentsSection(s) + patrolSection(s) + resourcesSection(s)), () => {
+    if (!isNew) loadSiteInfo(s);
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
-        <span>${s ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}</span>
+        <span>${s && isAdmin ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
-          <button class="btn" id="shCancel">Cancel</button>
-          <button class="btn primary" id="shSave">${s ? 'Save changes' : 'Create shift'}</button>
+          <button class="btn" id="shCancel">${isAdmin ? 'Cancel' : 'Close'}</button>
+          ${isAdmin ? `<button class="btn primary" id="shSave">${s ? 'Save changes' : 'Create shift'}</button>` : ''}
         </span>
       </div>`;
     el('#shCancel').onclick = closeModal;
@@ -500,8 +629,21 @@ function shiftModal(s, defaults) {
       catch (e) { el('#shError').textContent = e.message; }
     };
     // Reopens the same shift fresh from the server after a row action, so
-    // several adds/removes/clock-ins in one sitting never act on stale data.
-    const reopen = async () => { await load(); shiftModal(allShifts.find((x) => x.id === s.id)); };
+    // several adds/removes/clock-ins in one sitting never act on stale
+    // data — but a row action (clock in, add a vehicle, approve an
+    // application...) has nothing to do with the top form fields, so
+    // whatever's currently typed into them must survive the rebuild
+    // rather than being silently reset to the last-saved server values.
+    const reopen = async () => {
+      const preserved = el('#shStart') ? {
+        starts_at: el('#shStart').value, ends_at: el('#shEnd').value,
+        shift_type_id: el('#shType').value, site_id: el('#shSite').value,
+        required_headcount: el('#shHeadcount').value, notes: el('#shNotes').value,
+        status: el('#shStatus') ? el('#shStatus').value : null,
+      } : null;
+      await load();
+      shiftModal(allShifts.find((x) => x.id === s.id), preserved ? { preserved } : undefined);
+    };
     wirePatrol(s, reopen);
     els('[data-times]').forEach((b) => (b.onclick = () => el(`[data-times-form="${b.dataset.times}"]`).classList.toggle('hide')));
     els('[data-t-save]').forEach((b) => (b.onclick = async () => {
@@ -541,9 +683,10 @@ function shiftModal(s, defaults) {
         el('#shApplications').innerHTML = open.length ? open.map((a) => `
           <div style="display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:6px" data-application="${a.id}">
             <span style="flex:1">${esc(a.personnel_name)}<span class="dim"> — ${esc(a.status === 'SHORTLISTED' ? 'shortlisted' : 'applied')}</span></span>
+            ${isAdmin ? `
             ${a.status === 'APPLIED' ? `<button type="button" class="btn" data-shortlist="${a.id}" style="padding:4px 8px;font-size:11px">Shortlist</button>` : ''}
             <button type="button" class="btn ok" data-approve="${a.id}" style="padding:4px 8px;font-size:11px">Approve</button>
-            <button type="button" class="btn danger" data-reject="${a.id}" style="padding:4px 8px;font-size:11px">Reject</button>
+            <button type="button" class="btn danger" data-reject="${a.id}" style="padding:4px 8px;font-size:11px">Reject</button>` : ''}
           </div>`).join('') : '<p class="dim" style="font-size:13px;margin:0">No open applications.</p>';
         els('#shApplications [data-shortlist]').forEach((b) => (b.onclick = async () => {
           try { await api('PATCH', `/api/shift-applications/${b.dataset.shortlist}`, { status: 'SHORTLISTED' }); await reopen(); }
@@ -584,7 +727,7 @@ function shiftModal(s, defaults) {
       try { await api('PATCH', `/api/shift-asset-allocations/${b.dataset.returnasset}`, {}); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     }));
-    el('#shSave').onclick = async () => {
+    if (el('#shSave')) el('#shSave').onclick = async () => {
       const body = {
         shift_type_id: Number(el('#shType').value),
         site_id: el('#shSite').value ? Number(el('#shSite').value) : null,
@@ -592,6 +735,7 @@ function shiftModal(s, defaults) {
         ends_at: new Date(el('#shEnd').value).toISOString(),
         required_headcount: Number(el('#shHeadcount').value) || 1,
         notes: el('#shNotes').value.trim(),
+        detail: { ...(s && s.detail) },
       };
       try {
         if (s) {
@@ -607,48 +751,53 @@ function shiftModal(s, defaults) {
     };
   });
 }
-el('#btnNewShift').onclick = () => shiftModal(null, { personnelId: allPersonnel[0] && allPersonnel[0].id, date: fmtDate(new Date()) });
+// These three buttons don't exist in the DOM at all for a non-admin (removed
+// at the top of this script) — wiring them only for isAdmin avoids an
+// onclick assignment against a null element.
+if (isAdmin) {
+  el('#btnNewShift').onclick = () => shiftModal(null, { personnelId: allPersonnel[0] && allPersonnel[0].id, date: fmtDate(new Date()) });
 
-el('#btnPublishDrafts').onclick = async () => {
-  const days = weekDays();
-  const drafts = visibleShifts().filter((s) => s.status === 'DRAFT' && days.some((d) => sameDay(new Date(s.starts_at), d)));
-  if (!drafts.length) { alert('No drafts in the current view.'); return; }
-  if (!confirm(`Publish ${drafts.length} draft shift${drafts.length === 1 ? '' : 's'}?`)) return;
-  for (const s of drafts) await api('PATCH', `/api/shifts/${s.id}`, { status: 'PUBLISHED' });
-  await load();
-};
+  el('#btnPublishDrafts').onclick = async () => {
+    const days = weekDays();
+    const drafts = visibleShifts().filter((s) => s.status === 'DRAFT' && days.some((d) => sameDay(new Date(s.starts_at), d)));
+    if (!drafts.length) { alert('No drafts in the current view.'); return; }
+    if (!confirm(`Publish ${drafts.length} draft shift${drafts.length === 1 ? '' : 's'}?`)) return;
+    for (const s of drafts) await api('PATCH', `/api/shifts/${s.id}`, { status: 'PUBLISHED' });
+    await load();
+  };
 
-/** Copies every (non-cancelled) shift in the current view N weeks ahead,
- * including its active assignees — the same core team usually covers a
- * recurring week, so re-staffing from scratch would be the common case to
- * avoid, not the default to design for. Lands as DRAFT, not published: a
- * bulk copy is exactly the moment someone's left, a date needs nudging, or
- * a site has changed, so it is reviewed via "Publish drafts" rather than
- * notifying everyone immediately. */
-el('#btnDuplicateWeek').onclick = async () => {
-  const weeksStr = prompt('Duplicate the shifts in view how many weeks forward?', '1');
-  const weeks = Number(weeksStr);
-  if (!weeksStr || !Number.isFinite(weeks) || weeks < 1) return;
-  const days = weekDays();
-  const source = visibleShifts().filter((s) => s.status !== 'CANCELLED' && days.some((d) => sameDay(new Date(s.starts_at), d)));
-  if (!source.length) { alert('No shifts in the current view to duplicate.'); return; }
-  if (!confirm(`Duplicate ${source.length} shift${source.length === 1 ? '' : 's'} ${weeks} week${weeks === 1 ? '' : 's'} forward, as drafts?`)) return;
-  const shiftMs = weeks * 7 * 86400000;
-  for (const s of source) {
-    const created = await api('POST', '/api/shifts', {
-      site_id: s.site_id, shift_type_id: s.shift_type_id,
-      starts_at: new Date(Date.parse(s.starts_at) + shiftMs).toISOString(),
-      ends_at: new Date(Date.parse(s.ends_at) + shiftMs).toISOString(),
-      break_minutes: s.break_minutes, required_headcount: s.required_headcount,
-      pay_rate: s.pay_rate, bill_rate: s.bill_rate, uniform_ppe: s.uniform_ppe, briefing: s.briefing,
-      detail: s.detail, notes: s.notes, status: 'DRAFT',
-    });
-    for (const a of s.assignments.filter((x) => ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
-      await api('POST', `/api/shifts/${created.id}/assignments`, { personnel: a.personnel_id, role_on_shift: a.role_on_shift, is_duty_supervisor: a.is_duty_supervisor });
+  /** Copies every (non-cancelled) shift in the current view N weeks ahead,
+   * including its active assignees — the same core team usually covers a
+   * recurring week, so re-staffing from scratch would be the common case to
+   * avoid, not the default to design for. Lands as DRAFT, not published: a
+   * bulk copy is exactly the moment someone's left, a date needs nudging, or
+   * a site has changed, so it is reviewed via "Publish drafts" rather than
+   * notifying everyone immediately. */
+  el('#btnDuplicateWeek').onclick = async () => {
+    const weeksStr = prompt('Duplicate the shifts in view how many weeks forward?', '1');
+    const weeks = Number(weeksStr);
+    if (!weeksStr || !Number.isFinite(weeks) || weeks < 1) return;
+    const days = weekDays();
+    const source = visibleShifts().filter((s) => s.status !== 'CANCELLED' && days.some((d) => sameDay(new Date(s.starts_at), d)));
+    if (!source.length) { alert('No shifts in the current view to duplicate.'); return; }
+    if (!confirm(`Duplicate ${source.length} shift${source.length === 1 ? '' : 's'} ${weeks} week${weeks === 1 ? '' : 's'} forward, as drafts?`)) return;
+    const shiftMs = weeks * 7 * 86400000;
+    for (const s of source) {
+      const created = await api('POST', '/api/shifts', {
+        site_id: s.site_id, shift_type_id: s.shift_type_id,
+        starts_at: new Date(Date.parse(s.starts_at) + shiftMs).toISOString(),
+        ends_at: new Date(Date.parse(s.ends_at) + shiftMs).toISOString(),
+        break_minutes: s.break_minutes, required_headcount: s.required_headcount,
+        pay_rate: s.pay_rate, bill_rate: s.bill_rate, uniform_ppe: s.uniform_ppe, briefing: s.briefing,
+        detail: s.detail, notes: s.notes, status: 'DRAFT',
+      });
+      for (const a of s.assignments.filter((x) => ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
+        await api('POST', `/api/shifts/${created.id}/assignments`, { personnel: a.personnel_id, role_on_shift: a.role_on_shift, is_duty_supervisor: a.is_duty_supervisor });
+      }
     }
-  }
-  await load();
-};
+    await load();
+  };
+}
 
 el('#btnCalSync').onclick = () => CCCS.calendarSync();
 

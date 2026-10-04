@@ -31,7 +31,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { Doc } = require('./pdf.js');
+const { Doc, A4 } = require('./pdf.js');
 
 const LINE_KINDS = { HOURLY: 'per hour', FIXED_PERIOD: 'per invoice period', ONE_OFF: 'one-off' };
 const PERIODS = { WEEKLY: 'weekly', MONTHLY: 'monthly' };
@@ -116,19 +116,40 @@ module.exports = function registerAgreements({
     if ('terms' in body) a.terms = String(body.terms || '').trim().slice(0, 20000) || null;
   }
 
-  /* ---- PDF ---- */
+  /* ---- PDF ----
+   * Same house style as the invoice PDF and the client-facing emails: a
+   * full-bleed navy header band with an amber accent, drawn by hand before
+   * anything else (pdf.js's Doc only places things at explicit coordinates,
+   * there's no CSS to theme), then doc.y is reset below it and the rest of
+   * the document flows through the ordinary pairs()/table()/para() helpers
+   * unstyled — a contract is a legal document someone signs, not a flyer,
+   * so the branding stays at the header rather than tinting the body. */
+  const NAVY_A = [0.047, 0.086, 0.141], AMBER_A = [0.949, 0.663, 0.235], WHITE_A = [1, 1, 1], LIGHT_A = [0.78, 0.82, 0.88];
   function pdf(a, signatureJpeg) {
     const c = company();
     const site = db.sites.find((s) => s.id === a.site_id) || {};
     const client = db.clients.find((x) => x.id === a.client_id) || {};
     const quote = a.kind === 'QUOTE';
     const doc = new Doc({ footer: `${c.company_name} — ${quote ? 'quotation' : 'contract'} ${a.reference}` });
-    doc.para(c.company_name, { size: 18, bold: true, gap: 0 });
+    const bandH = 104;
+    doc.rect(0, A4.h - bandH, A4.w, bandH, { fill: NAVY_A, stroke: null });
+    // See routes-invoices.js's invoicePdf() for why this is a separate,
+    // pre-flattened JPEG rather than the PNG wordmark used in HTML emails.
+    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark-navy.jpg');
+    if (fs.existsSync(logoFile)) {
+      doc.y = A4.h - 30;
+      doc.image(fs.readFileSync(logoFile), { maxH: 20, maxW: 170, x: doc.margin });
+    } else {
+      doc.text(c.company_name.toUpperCase(), doc.margin, A4.h - 40, { size: 17, bold: true, color: WHITE_A });
+    }
     const contact = [c.company_address, c.company_phone, c.company_email].filter(Boolean).join('  ·  ');
-    if (contact) doc.para(contact, { size: 9, color: [0.35, 0.38, 0.42], gap: 6 });
-    doc.rule(6);
-    doc.para(quote ? 'Quotation' : 'Contract for security services', { size: 15, bold: true, gap: 2 });
-    doc.para(`${a.reference} — ${a.title}`, { size: 10, color: [0.35, 0.38, 0.42], gap: 6 });
+    if (contact) doc.text(contact, doc.margin, A4.h - 64, { size: 8.5, color: LIGHT_A });
+    const label = quote ? 'QUOTATION' : 'CONTRACT';
+    const rightEdge = A4.w - doc.margin;
+    doc.text(label, rightEdge - doc.textWidth(label, 10, true), A4.h - 36, { size: 10, bold: true, color: AMBER_A });
+    doc.text(a.reference, rightEdge - doc.textWidth(a.reference, 13, true), A4.h - 54, { size: 13, bold: true, color: WHITE_A });
+    doc.y = A4.h - bandH - 22;
+    doc.para(a.title, { size: 13, bold: true, gap: 8 });
     const fmt = (d) => (d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '—');
     doc.pairs([
       ['Client', client.name || '—'], ['Site', `${site.name || '—'}${site.address ? `, ${site.address}` : ''}`],

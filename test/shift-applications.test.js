@@ -48,7 +48,7 @@ after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 function future(hours) { return new Date(Date.now() + hours * 3600000).toISOString(); }
 
 async function openShift(headcount = 1) {
-  const r = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, required_headcount: headcount, starts_at: future(24), ends_at: future(32) }, dispT);
+  const r = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, required_headcount: headcount, starts_at: future(24), ends_at: future(32) }, adminT);
   return r.body;
 }
 
@@ -66,7 +66,7 @@ test('an officer applies for an open shift, not a full or already-joined one, an
   const availableAfter = await call('GET', '/api/shifts/available', undefined, danT);
   assert.ok(!availableAfter.body.some((s) => s.id === shift.id), 'no longer shown as available once applied');
 
-  await call('POST', `/api/shifts/${shift.id}/assignments`, { personnel: ellie.id }, dispT);
+  await call('POST', `/api/shifts/${shift.id}/assignments`, { personnel: ellie.id }, adminT);
   assert.equal((await call('POST', '/api/shift-applications', { shift: shift.id }, ryanT)).status, 400, 'a now-full shift refuses a new application');
 });
 
@@ -81,9 +81,10 @@ test('approving an application creates the real assignment and expires the other
   const ellieApp = (await call('POST', '/api/shift-applications', { shift: shift.id }, ellieT)).body;
 
   assert.equal((await call('PATCH', `/api/shift-applications/${danApp.id}`, { status: 'APPROVED' }, danT)).status, 403, 'an officer cannot approve their own application');
-  const approved = await call('PATCH', `/api/shift-applications/${danApp.id}`, { status: 'APPROVED' }, dispT);
+  assert.equal((await call('PATCH', `/api/shift-applications/${danApp.id}`, { status: 'APPROVED' }, dispT)).status, 403, 'deciding an application is admin-only now');
+  const approved = await call('PATCH', `/api/shift-applications/${danApp.id}`, { status: 'APPROVED' }, adminT);
   assert.equal(approved.status, 200);
-  assert.equal(approved.body.reviewed_by, 'Controller Hale');
+  assert.equal(approved.body.reviewed_by, 'System Admin');
 
   const shiftNow = (await call('GET', `/api/shifts?personnel_id=${dan.id}`, undefined, dispT)).body.find((s) => s.id === shift.id);
   assert.ok(shiftNow.assignments.some((a) => a.personnel_id === dan.id), 'approval actually assigned Dan to the shift');
@@ -95,8 +96,9 @@ test('approving an application creates the real assignment and expires the other
 test('rejecting requires a reason; the requester can withdraw their own pending application but not a resolved one', async () => {
   const shift = await openShift(2);
   const app1 = (await call('POST', '/api/shift-applications', { shift: shift.id }, danT)).body;
-  assert.equal((await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'REJECTED' }, dispT)).status, 400, 'rejecting needs a reason');
-  const rejected = await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'REJECTED', rejection_reason: 'Not enough recent patrol hours' }, dispT);
+  assert.equal((await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'REJECTED' }, dispT)).status, 403, 'rejecting an application is admin-only now');
+  assert.equal((await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'REJECTED' }, adminT)).status, 400, 'rejecting needs a reason');
+  const rejected = await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'REJECTED', rejection_reason: 'Not enough recent patrol hours' }, adminT);
   assert.equal(rejected.status, 200);
   assert.equal(rejected.body.status, 'REJECTED');
   assert.equal((await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'WITHDRAWN' }, danT)).status, 409, 'cannot withdraw an already-resolved application');
@@ -110,9 +112,10 @@ test('rejecting requires a reason; the requester can withdraw their own pending 
 test('control can shortlist an application, and an unresolved application expires if the shift is cancelled or deleted', async () => {
   const shift1 = await openShift(1);
   const app1 = (await call('POST', '/api/shift-applications', { shift: shift1.id }, danT)).body;
-  const shortlisted = await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'SHORTLISTED' }, dispT);
+  assert.equal((await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'SHORTLISTED' }, dispT)).status, 403, 'shortlisting is admin-only now');
+  const shortlisted = await call('PATCH', `/api/shift-applications/${app1.id}`, { status: 'SHORTLISTED' }, adminT);
   assert.equal(shortlisted.body.status, 'SHORTLISTED');
-  await call('PATCH', `/api/shifts/${shift1.id}`, { status: 'CANCELLED' }, dispT);
+  await call('PATCH', `/api/shifts/${shift1.id}`, { status: 'CANCELLED' }, adminT);
   const afterCancel = await call('GET', '/api/shift-applications', undefined, danT);
   assert.equal(afterCancel.body.find((a) => a.id === app1.id).status, 'EXPIRED', 'cancelling the shift expires a shortlisted application too');
 
@@ -124,7 +127,7 @@ test('control can shortlist an application, and an unresolved application expire
 });
 
 test('a draft shift never appears as available, and applying to one is refused', async () => {
-  const draft = (await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, starts_at: future(24), ends_at: future(32), status: 'DRAFT' }, dispT)).body;
+  const draft = (await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, starts_at: future(24), ends_at: future(32), status: 'DRAFT' }, adminT)).body;
   const available = await call('GET', '/api/shifts/available', undefined, danT);
   assert.ok(!available.body.some((s) => s.id === draft.id));
   assert.equal((await call('POST', '/api/shift-applications', { shift: draft.id }, danT)).status, 400);

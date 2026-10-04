@@ -86,11 +86,12 @@ async function open(id) {
   let sub;
   try { sub = await api('GET', `/api/form-submissions/${id}`); }
   catch (e) { el('#detail').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
-  el('#detail').innerHTML = '<div id="viewHost"></div><div id="actionHost"></div>';
+  el('#detail').innerHTML = '<div id="viewHost"></div><div id="actionHost"></div><div id="shareHost"></div>';
   CCCSForms.view(el('#viewHost'), sub, { onChanged: () => refresh() });
   history.replaceState(null, '', `?id=${id}`);
   if (isAdmin && sub.status === 'OPEN') paintAction(sub);
   if (isAdmin && sub.status === 'ACTIONED') paintDelete(sub);
+  if (isAdmin) CCCSForms.shareEditor(el('#shareHost'), sub, { onChanged: () => { refresh(); open(sub.id); } });
 }
 
 /** Permanent delete of a reviewed report. Two steps, with a reason the

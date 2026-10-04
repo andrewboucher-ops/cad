@@ -58,8 +58,18 @@ module.exports = function registerLeaveRoutes({
 
   route('POST', '/api/leave-requests', ALL, ({ body, user }) => {
     if (!CONTROL.includes(user.role) && user.role !== 'FIELD_USER') throw httpError(403, 'insufficient role');
-    const p = user.role === 'FIELD_USER' ? db.personnel.find((x) => x.id === user.personnel_id) : findPersonnel(body.personnel);
-    if (!p) throw httpError(400, user.role === 'FIELD_USER' ? 'this login has no personnel record' : 'personnel required');
+    // A FIELD_USER is always forced to their own record — body.personnel
+    // naming someone else must never be honoured for that role, unchanged.
+    // officer.html's self-service "Request leave" never sends `personnel`
+    // at all, though, and any control role (DISPATCHER, SUPERVISOR,
+    // SYSTEM_ADMIN) can be rostered and use that same button — they were
+    // getting "personnel required" for their own request because only
+    // FIELD_USER fell back to self. Omitting `personnel` now means "me"
+    // for any role; an explicit id (admin.html's own "New leave request",
+    // asking on someone else's behalf) still goes through findPersonnel.
+    const self = () => db.personnel.find((x) => x.id === user.personnel_id);
+    const p = user.role === 'FIELD_USER' ? self() : (body.personnel != null ? findPersonnel(body.personnel) : self());
+    if (!p) throw httpError(400, (user.role !== 'FIELD_USER' && body.personnel != null) ? 'personnel required' : 'this login has no personnel record');
     if ((p.employment_type || 'EMPLOYED') !== 'EMPLOYED') throw httpError(400, `${p.name} is a subcontractor — leave management does not apply`);
     const type = String(body.type || '').toUpperCase();
     if (!LEAVE_TYPES.includes(type)) throw httpError(400, `type must be one of ${LEAVE_TYPES.join(', ')}`);

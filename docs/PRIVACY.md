@@ -14,8 +14,10 @@ review it, particularly the legitimate interest assessment.
 | Status changes | 1 year | Operational record, client SLA evidence |
 | Welfare timers and check-ins | 1 year | Lone-worker safety, insurance |
 | Message metadata (who, when — not the content) | 180 days | Audit trail |
+| SMS/dial contact attempts, including the text sent | 180 days | Proof a reminder or alert was actually sent, and what it said |
 | Job assignments and outcomes | 2 years | Client reporting, disputes, insurance |
 | Emergency and welfare alarms | 1 year | Safety record |
+| A single location fix on a filed report (incident, use of force, etc.), if the device offers one | Kept with the report | Proof of where a report was filed from — evidential, not tracking; same category as the single fix already taken when raising an emergency, not continuous |
 
 This is the materially different privacy position the paragraph below used
 to warn about before it was built: continuous personal location tracking

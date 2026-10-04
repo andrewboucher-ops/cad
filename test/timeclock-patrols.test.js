@@ -40,7 +40,7 @@ after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 async function shiftFor(startOffsetMin, lengthH = 8, siteId = site.id) {
   const type = (await call('GET', '/api/shift-types', undefined, dispT)).body[0];
   const st = new Date(Date.now() + startOffsetMin * 60000);
-  const s = (await call('POST', '/api/shifts', { shift_type_id: type.id, site_id: siteId, starts_at: st.toISOString(), ends_at: new Date(st.getTime() + lengthH * 3600e3).toISOString(), personnel: dan.id }, dispT)).body;
+  const s = (await call('POST', '/api/shifts', { shift_type_id: type.id, site_id: siteId, starts_at: st.toISOString(), ends_at: new Date(st.getTime() + lengthH * 3600e3).toISOString(), personnel: dan.id }, adminT)).body; // shift editing is admin-only
   const shift = app.db.shifts.find((x) => x.id === s.id);
   const a = app.db.shift_assignments.find((x) => x.shift_id === s.id && x.personnel_id === dan.id);
   return { s: shift, a };
@@ -132,9 +132,11 @@ test('a shift with an hourly patrol: each patrol goes to the officer on shift; o
   patrolShift = s;
   const url = `/api/shifts/${s.id}/patrol`;
   assert.equal((await call('PUT', url, { every_min: 60, beat_id: beat.id }, danT)).status, 403);
-  assert.equal((await call('PUT', url, { every_min: 5 }, dispT)).status, 400);
-  assert.equal((await call('PUT', url, { every_min: 60, beat_id: otherBeat.id }, dispT)).status, 400, 'the route must be at this site');
-  assert.equal((await call('PUT', url, { every_min: 60, beat_id: beat.id }, dispT)).status, 200);
+  assert.equal((await call('PUT', url, { every_min: 60, beat_id: beat.id }, dispT)).status, 403, 'admin only, like shift editing');
+  assert.equal((await call('PUT', url, { every_min: 5 }, adminT)).status, 400);
+  assert.equal((await call('PUT', url, { every_min: 60, beat_id: otherBeat.id }, adminT)).status, 400, 'the route must be at this site');
+  assert.equal((await call('PUT', url, { every_min: 60, beat_id: beat.id }, adminT)).status, 200);
+  assert.equal(s.detail.patrol_interval_min, 60, 'the officer app\'s shift note stays in step');
   await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { reason: 'test' }, danT);
 
   app.shiftPatrols.tick();

@@ -174,7 +174,7 @@
   <!-- My shift -->
   <section class="screen" data-screen="shift"><div class="narrow">
     <div class="card"><h3>My shift</h3><div id="shiftBody"><p class="dim">No shift scheduled.</p></div></div>
-    <div class="card"><h3>My details</h3><div id="whoBody"></div></div>
+    <div class="card"><h3>My HR profile</h3><div id="whoBody"></div></div>
   </div></section>
 
   <!-- Rota -->
@@ -536,15 +536,51 @@ document.addEventListener('visibilitychange', () => {
 const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 document.addEventListener('cccs:sections', () => { if (screenKey === 'home') paintHome(); });
 
+const EMPLOYMENT_STATUS_LABEL = { ACTIVE: 'Active', LEAVE: 'On leave', TERMINATED: 'Terminated' };
+const EMPLOYMENT_TYPE_LABEL_O = { EMPLOYED: 'Employed', SUBCONTRACTOR: 'Subcontractor' };
 function paintWho() {
   if (!person) { el('#whoBody').innerHTML = '<p class="dim">No officer record is linked to this login.</p>'; return; }
+  const sia = (person.sia_licences || []);
+  const ec = person.emergency_contact, bank = person.bank_details;
   el('#whoBody').innerHTML = `
     <div class="field"><span>Name</span><div>${esc(person.name)}</div></div>
     <div class="field"><span>Call sign</span><div>${esc(person.callsign || '—')}</div></div>
     <div class="field"><span>Rank</span><div>${esc(person.rank || '—')}</div></div>
-    <div class="field"><span>Vehicle</span><div>${esc(person.vehicle || '—')}</div></div>`;
+    <div class="field"><span>Vehicle</span><div>${esc(person.vehicle || '—')}</div></div>
+    <div class="field"><span>Employment</span><div>${esc(EMPLOYMENT_STATUS_LABEL[person.employment_status] || person.employment_status)} · ${esc(EMPLOYMENT_TYPE_LABEL_O[person.employment_type] || person.employment_type)}</div></div>
+    <div class="field"><span>SIA licences</span><div>${sia.length ? sia.map((l) => `${esc(l.licence_type)} ${esc(l.licence_no)}${l.expiry ? ` — expires ${esc(new Date(l.expiry).toLocaleDateString('en-GB'))}` : ''}`).join('<br>') : '—'}${person.compliance && person.compliance.sia === 'expired' ? ' <span class="err">expired</span>' : person.compliance && person.compliance.sia === 'expiring' ? ' <span class="err">expiring soon</span>' : ''}</div></div>
+    <div class="field"><span>DBS check</span><div>${person.dbs_certificate_no ? `${esc(person.dbs_certificate_type || '')} ${esc(person.dbs_certificate_no)}` : '—'}${person.dbs_last_checked_at ? ` · last checked ${esc(new Date(person.dbs_last_checked_at).toLocaleDateString('en-GB'))}` : ''}${person.compliance && person.compliance.dbs === 'overdue' ? ' <span class="err">recheck overdue</span>' : ''}</div></div>
+    <div class="field"><span>Emergency contact</span><div>${ec ? `${esc(ec.name || '—')}${ec.relationship ? ` (${esc(ec.relationship)})` : ''}${ec.phone ? ` · ${esc(ec.phone)}` : ''}${ec.email ? ` · ${esc(ec.email)}` : ''}` : 'Not set'}</div></div>
+    <div class="btn-row" style="margin:0 0 10px"><button class="btn" id="bEditEc" style="padding:6px 12px;font-size:12px">${ec ? 'Update' : 'Add'} emergency contact</button></div>
+    <div class="field"><span>Bank details on file</span><div>${bank && (bank.account_number || bank.sort_code) ? `${esc(bank.bank_name || '—')} · sort code ${esc(bank.sort_code || '—')} · account ending ${esc(String(bank.account_number || '').slice(-4) || '—')}` : 'Not set'}</div></div>
+    <p class="dim" style="font-size:12px;margin:0">To change your bank details, contact an admin directly — this is kept admin-only to protect your pay.</p>`;
+  if (el('#bEditEc')) el('#bEditEc').onclick = () => openEmergencyContactModal();
   paintWelfare();
   if (screenKey === 'home') paintHome();
+}
+function openEmergencyContactModal() {
+  const ec = person.emergency_contact || {};
+  modal('Emergency contact', `
+    <label>Name</label>
+    <input id="necName" autocomplete="off" value="${esc(ec.name || '')}">
+    <label>Relationship</label>
+    <input id="necRelationship" autocomplete="off" value="${esc(ec.relationship || '')}">
+    <label>Phone</label>
+    <input id="necPhone" autocomplete="off" value="${esc(ec.phone || '')}">
+    <label>Email (optional)</label>
+    <input id="necEmail" type="email" autocomplete="off" value="${esc(ec.email || '')}">
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="necSave">Save</button></div>
+    <p class="err" id="necError"></p>`, () => {
+    el('#necSave').onclick = async () => {
+      try {
+        person = await api('PATCH', `/api/personnel/${person.id}/emergency-contact`, {
+          name: el('#necName').value.trim(), relationship: el('#necRelationship').value.trim(),
+          phone: el('#necPhone').value.trim(), email: el('#necEmail').value.trim(),
+        });
+        closeModal(); paintWho(); toast('Emergency contact saved.');
+      } catch (e) { el('#necError').textContent = e.message; }
+    };
+  });
 }
 
 /* ---- Welfare ------------------------------------------------------------ */
@@ -697,10 +733,47 @@ async function clockOut(s, reason) {
 }
 function paintRotaList(list) {
   el('#rotaList').innerHTML = list.length ? list.slice(0, 30).map((s) => `
-    <div class="field" style="border-bottom:1px solid var(--line-soft);padding-bottom:8px">
+    <div class="field clickable" data-rotashift="${s.id}" style="border-bottom:1px solid var(--line-soft);padding-bottom:8px">
       <span>${esc(fmtShiftTime(s.starts_at))} – ${esc(hhmm(s.ends_at))}${clockedIn(s) ? ' · clocked in' : ''}</span>
       <div>${esc(s.site_name || '—')}${s.shift_type_name ? ` <span class="dim">· ${esc(s.shift_type_name)}</span>` : ''}</div>
     </div>`).join('') : '<p class="dim">No upcoming shifts.</p>';
+  els('#rotaList [data-rotashift]').forEach((row) => (row.onclick = () => openShiftDetail(list.find((s) => s.id === Number(row.dataset.rotashift)))));
+}
+/** Everything the web rota's shift modal shows, read-only here — editing a
+ * shift is admin-only now anyway, and this is a FIELD_USER's own rota tap,
+ * not a dispatcher's editor. Site info loads the same way rota.html's
+ * siteInfoSection does: the shift only carries site_id, not the site's
+ * documents, so that's a second, async fetch once the modal is open. */
+function openShiftDetail(s) {
+  if (!s) return;
+  const STATUS_LABEL = { DRAFT: 'Draft', PUBLISHED: 'Published', IN_PROGRESS: 'In progress', COMPLETED: 'Completed', CANCELLED: 'Cancelled' };
+  const active = (s.assignments || []).filter((a) => a.status !== 'REMOVED');
+  const patrolMin = s.detail && s.detail.patrol_interval_min;
+  modal(`Shift — ${s.site_name || s.shift_type_name || 'Shift'}`, `
+    <div class="field"><span>When</span><div>${esc(fmtShiftTime(s.starts_at))} – ${esc(fmtShiftTime(s.ends_at))}</div></div>
+    <div class="field"><span>Site</span><div>${esc(s.site_name || '—')}</div></div>
+    <div class="field"><span>Type</span><div>${esc(s.shift_type_name || '—')}</div></div>
+    <div class="field"><span>Status</span><div>${esc(STATUS_LABEL[s.status] || s.status)}</div></div>
+    <div class="field"><span>Coverage</span><div>${s.assigned_count} of ${s.required_headcount} assigned${s.coverage_gap > 0 ? ' · needs staff' : ''}</div></div>
+    ${patrolMin ? `<div class="field"><span>Patrol requirement</span><div>Checkpoint patrol every ${esc(String(patrolMin))} minutes</div></div>` : ''}
+    ${s.notes ? `<div class="field"><span>Notes</span><div>${esc(s.notes)}</div></div>` : ''}
+    <div class="field"><span>On this shift</span><div>${active.length ? esc(active.map((a) => a.personnel_name).join(', ')) : 'Nobody assigned yet'}</div></div>
+    <div id="rsSiteInfo" class="field hide"><span>Site information</span><div id="rsSiteInfoBody" class="dim">Loading…</div></div>
+    ${s.site_id ? `<div class="btn-row" style="margin-top:4px">${siteDocsButton(s.site_id)}</div>` : ''}
+  `, () => {
+    if (el('[data-sitedocs]')) el('[data-sitedocs]').onclick = () => openSiteDocsModal(s.site_id);
+  });
+  if (s.site_id) loadRotaSiteInfo(s.site_id);
+}
+async function loadRotaSiteInfo(siteId) {
+  try {
+    if (!allSites) allSites = await api('GET', '/api/sites');
+    const site = allSites.find((x) => x.id === siteId);
+    const box = el('#rsSiteInfo'), body = el('#rsSiteInfoBody');
+    if (!box || !body) return;
+    box.classList.remove('hide');
+    body.textContent = (site && site.address) || 'No address on file.';
+  } catch {}
 }
 async function refreshShifts() {
   if (!person) { el('#rotaList').innerHTML = '<p class="dim">No officer record is linked to this login.</p>'; return; }
@@ -749,7 +822,7 @@ async function openSiteDocsModal(siteId) {
   modal('Site documents', '<p class="dim">Loading…</p>', async () => {
     try {
       const docs = await api('GET', `/api/sites/${siteId}/documents`);
-      const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map' };
+      const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map', INDUCTION: 'Induction' };
       el('#modalHost .content').innerHTML = docs.length
         ? docs.map((d) => `<div class="field"><span>${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</span>
             <div><a href="/api/documents/${d.id}/file?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(d.filename)}</a></div></div>`).join('')
@@ -760,6 +833,7 @@ async function openSiteDocsModal(siteId) {
 function siteDocsButton(siteId) {
   return siteId ? `<button type="button" class="btn" data-sitedocs="${siteId}" style="padding:4px 10px;font-size:11px">Site documents</button>` : '';
 }
+
 function paintJob() {
   if (!job) {
     el('#jobBody').innerHTML = '<p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>';

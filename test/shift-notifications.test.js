@@ -49,7 +49,7 @@ after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 
 function future(hours) { return new Date(Date.now() + hours * 3600000).toISOString(); }
 async function shift(startHour, endHour, extra) {
-  const r = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, starts_at: future(startHour), ends_at: future(endHour), ...extra }, dispT);
+  const r = await call('POST', '/api/shifts', { shift_type_id: patrolTypeId, starts_at: future(startHour), ends_at: future(endHour), ...extra }, adminT);
   return r.body;
 }
 function notifyLogsFor(personnelId, sinceId) {
@@ -60,7 +60,7 @@ const maxLogId = () => app.db.dial_log.reduce((m, r) => Math.max(m, r.id), 0);
 test('assigning a published shift notifies by SMS and email, with an audit row each', async () => {
   const mark = maxLogId();
   const s = await shift(24, 32);
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, dispT);
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, adminT);
   const logs = notifyLogsFor(danPersonnelId, mark);
   assert.equal(logs.filter((r) => r.channel === 'SMS').length, 1);
   assert.equal(logs.filter((r) => r.channel === 'EMAIL').length, 1);
@@ -73,16 +73,16 @@ test('assigning a published shift notifies by SMS and email, with an audit row e
 test('a draft shift never notifies its assignee', async () => {
   const mark = maxLogId();
   const s = await shift(50, 58, { status: 'DRAFT' });
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, dispT);
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, adminT);
   assert.equal(notifyLogsFor(danPersonnelId, mark).length, 0);
 });
 
 test('changing a published shift\'s time notifies, and bumps its revision', async () => {
   const s = await shift(60, 68);
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, dispT);
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, adminT);
   const revBefore = app.db.shifts.find((x) => x.id === s.id).revision;
   const mark = maxLogId();
-  await call('PATCH', `/api/shifts/${s.id}`, { starts_at: future(61) }, dispT);
+  await call('PATCH', `/api/shifts/${s.id}`, { starts_at: future(61) }, adminT);
   const logs = notifyLogsFor(danPersonnelId, mark);
   assert.ok(logs.some((r) => r.channel === 'SMS' && /Shift updated/.test(r.body)));
   assert.ok(app.db.shifts.find((x) => x.id === s.id).revision > revBefore);
@@ -90,22 +90,22 @@ test('changing a published shift\'s time notifies, and bumps its revision', asyn
 
 test('cancelling a shift notifies its assignee once, not on an unrelated field edit', async () => {
   const s = await shift(70, 78);
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, dispT);
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, adminT);
   let mark = maxLogId();
-  await call('PATCH', `/api/shifts/${s.id}`, { notes: 'just a note, not a time/site change' }, dispT);
+  await call('PATCH', `/api/shifts/${s.id}`, { notes: 'just a note, not a time/site change' }, adminT);
   assert.equal(notifyLogsFor(danPersonnelId, mark).length, 0, 'an unrelated field edit does not notify');
   mark = maxLogId();
-  await call('PATCH', `/api/shifts/${s.id}`, { status: 'CANCELLED' }, dispT);
+  await call('PATCH', `/api/shifts/${s.id}`, { status: 'CANCELLED' }, adminT);
   const logs = notifyLogsFor(danPersonnelId, mark);
   assert.ok(logs.some((r) => r.channel === 'SMS' && /cancelled/i.test(r.body)));
 });
 
 test('removing someone from a shift (control-initiated) notifies them', async () => {
   const s = await shift(80, 88);
-  const assignR = await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, dispT);
+  const assignR = await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, adminT);
   const assignmentId = assignR.body.assignments.find((a) => a.personnel_id === danPersonnelId).id;
   const mark = maxLogId();
-  await call('PATCH', `/api/shift-assignments/${assignmentId}`, { status: 'REMOVED' }, dispT);
+  await call('PATCH', `/api/shift-assignments/${assignmentId}`, { status: 'REMOVED' }, adminT);
   const logs = notifyLogsFor(danPersonnelId, mark);
   assert.ok(logs.some((r) => r.channel === 'SMS' && /Removed from shift/.test(r.body)));
 });
@@ -114,7 +114,7 @@ test('sms_opt_out suppresses the text but not the email', async () => {
   await call('PATCH', `/api/personnel/${danPersonnelId}`, { sms_opt_out: true }, adminT);
   const mark = maxLogId();
   const s = await shift(90, 98);
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, dispT);
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, adminT);
   const logs = notifyLogsFor(danPersonnelId, mark);
   assert.equal(logs.filter((r) => r.channel === 'SMS').length, 0);
   assert.equal(logs.filter((r) => r.channel === 'EMAIL').length, 1);
@@ -127,7 +127,7 @@ test('a rejected shift application notifies the applicant', async () => {
   const rcolePersonnelId = app.db.users.find((u) => u.username === 'rcole').personnel_id;
   await call('PATCH', `/api/personnel/${rcolePersonnelId}`, { contact_phone: '+447700900111' }, adminT);
   const mark = maxLogId();
-  await call('PATCH', `/api/shift-applications/${appR.body.id}`, { status: 'REJECTED', rejection_reason: 'shift filled' }, dispT);
+  await call('PATCH', `/api/shift-applications/${appR.body.id}`, { status: 'REJECTED', rejection_reason: 'shift filled' }, adminT);
   const logs = notifyLogsFor(rcolePersonnelId, mark);
   assert.ok(logs.some((r) => r.channel === 'SMS' && /not successful/.test(r.body)));
 });
@@ -139,7 +139,7 @@ test('personal iCal feed: own assignments only, cancelled shift keeps its UID bu
   const token = feed1.body.url.split('/').pop().replace('.ics', '');
 
   const s = await shift(120, 128);
-  const assignR = await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, dispT);
+  const assignR = await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, adminT);
   const assignmentId = assignR.body.assignments.find((a) => a.personnel_id === danPersonnelId).id;
 
   let ics = await callRaw('GET', `/api/rota/ical/${token}.ics`);
@@ -149,7 +149,7 @@ test('personal iCal feed: own assignments only, cancelled shift keeps its UID bu
   assert.ok(ics.text.includes(`UID:${uid}`), 'feed includes this assignment');
   assert.ok(ics.text.includes('STATUS:CONFIRMED'));
 
-  await call('PATCH', `/api/shifts/${s.id}`, { status: 'CANCELLED' }, dispT);
+  await call('PATCH', `/api/shifts/${s.id}`, { status: 'CANCELLED' }, adminT);
   ics = await callRaw('GET', `/api/rota/ical/${token}.ics`);
   const block = ics.text.split('BEGIN:VEVENT').find((b) => b.includes(uid));
   assert.ok(block.includes('STATUS:CANCELLED'), 'the same UID now shows cancelled, rather than vanishing');

@@ -344,3 +344,128 @@ test('a site service report aggregates alarm response against SLA, patrol visits
 
   assert.equal((await call('GET', '/api/sites/999999/report', undefined, dispT)).status, 404);
 });
+
+/* ---------------- severity, geo-tagging, PDF export ---------------- */
+test('the incident report requires a severity, rejects a bad one, and a HIGH/CRITICAL one files without error', async () => {
+  const incidentDef = def('incident-report');
+  assert.ok(incidentDef.fields.some((f) => f.id === 'severity' && f.type === 'severity'), 'the default incident-report form carries a severity field');
+
+  const missing = await call('POST', '/api/form-submissions', {
+    definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date().toISOString(), incident_type: 'Other', description: 'No severity given.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(missing.status, 400, 'severity is required');
+
+  const bad = await call('POST', '/api/form-submissions', {
+    definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date().toISOString(), severity: 'APOCALYPTIC', incident_type: 'Other', description: 'Bad severity.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(bad.status, 400);
+
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date().toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', description: 'Smoke reported in plant room.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+  assert.equal(filed.body.values.severity, 'CRITICAL');
+});
+
+test('a best-effort device fix is kept with a submission and returned with it; an absent or invalid one is silently dropped', async () => {
+  const withGeo = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'Geo test', advised_at: new Date().toISOString(), narrative: 'n/a', officer_signature: sig('Dan Whitfield') },
+    geo: { lat: 53.5675, lon: -0.0776, accuracy: 12.4 },
+  }, danT);
+  assert.equal(withGeo.status, 201, JSON.stringify(withGeo.body));
+  assert.deepEqual(withGeo.body.geo, { lat: 53.5675, lon: -0.0776, accuracy: 12 });
+
+  const bogus = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'Geo test 2', advised_at: new Date().toISOString(), narrative: 'n/a', officer_signature: sig('Dan Whitfield') },
+    geo: { lat: 'nowhere', lon: -0.0776 },
+  }, danT);
+  assert.equal(bogus.status, 201);
+  assert.equal(bogus.body.geo, null, 'an invalid fix is dropped, not rejected — a report is never blocked on it');
+
+  const none = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'Geo test 3', advised_at: new Date().toISOString(), narrative: 'n/a', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(none.body.geo, null);
+});
+
+test('a brand-styled PDF can be built for a report exactly like an invoice or contract, and is still gated by canRead()', async () => {
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'PDF test', advised_at: new Date().toISOString(), narrative: 'Advised and left.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(filed.status, 201);
+
+  const pdf = await call('GET', `/api/form-submissions/${filed.body.id}/pdf`, undefined, dispT);
+  assert.equal(pdf.status, 200);
+  assert.equal(pdf.headers.get('content-type'), 'application/pdf');
+  assert.ok(pdf.raw.startsWith('%PDF-'), 'produces a real PDF, not an error body');
+
+  // A safeguarding report's PDF is gated exactly like any other read of it.
+  const restricted = await call('POST', '/api/form-submissions', {
+    definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: job.id,
+    values: {
+      concern_about: 'someone', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      what_happened: 'detail', action_taken: 'notified', officer_signature: sig('Dan Whitfield'),
+    },
+  }, danT);
+  assert.equal(restricted.status, 201);
+  assert.equal((await call('GET', `/api/form-submissions/${restricted.body.id}/pdf`, undefined, dispT)).status, 404, 'a dispatcher without a grant cannot pull the PDF either');
+  assert.equal((await call('GET', `/api/form-submissions/${restricted.body.id}/pdf`, undefined, danT)).status, 200, 'the filer can');
+});
+
+/* ---------------- severity escalation reminder (one-shot, like attendance's late_alert_at) ---------------- */
+test('a HIGH/CRITICAL report still open after the reminder window pushes once more; actioning it first stops that', async () => {
+  const filedAt = Date.now();
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'HIGH', incident_type: 'Fire or alarm', description: 'Reminder test.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+  const raw = () => app.db.form_submissions.find((s) => s.id === filed.body.id);
+
+  app.forms.severityEscalationTick(filedAt + 10 * 60000);
+  assert.ok(!raw().severity_reminded_at, 'too soon');
+
+  app.forms.severityEscalationTick(filedAt + 16 * 60000);
+  assert.ok(raw().severity_reminded_at, 'reminded once the window has passed');
+  const reminders = () => app.db.audit_logs.filter((e) => e.type === 'form.severity_reminder' && e.data.submission_id === filed.body.id);
+  assert.equal(reminders().length, 1);
+
+  app.forms.severityEscalationTick(filedAt + 25 * 60000);
+  assert.equal(reminders().length, 1, 'one-shot — never reminds twice for the same report');
+
+  // Actioned before the window closes: no reminder, ever.
+  const second = await call('POST', '/api/form-submissions', {
+    definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', description: 'Reminder test 2 — actioned promptly.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  await call('POST', `/api/form-submissions/${second.body.id}/action`, { outcome: 'NOTED' }, adminT);
+  app.forms.severityEscalationTick(filedAt + 20 * 60000);
+  assert.equal(app.db.audit_logs.filter((e) => e.data && e.data.submission_id === second.body.id && String(e.type).startsWith('form.severity_reminder')).length, 0, 'already actioned — no reminder needed');
+});
+
+test('a RESTRICTED HIGH/CRITICAL report reminds its named readers only, content-free, never CONTROL at large', async () => {
+  const filedAt = Date.now();
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: def('use-of-force').id, subject_type: 'JOB', subject_id: job.id,
+    values: {
+      occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL',
+      reason: 'Self-defence', force_type: 'Physical restraint or control',
+      narrative: 'Confidential restricted narrative that must never appear in a broadcastable log line.',
+      officer_signature: sig('Dan Whitfield'),
+    },
+  }, danT);
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+
+  app.forms.severityEscalationTick(filedAt + 16 * 60000);
+  const restrictedReminders = app.db.audit_logs.filter((e) => e.type === 'form.severity_reminder_restricted' && e.data.submission_id === filed.body.id);
+  assert.equal(restrictedReminders.length, 1);
+  assert.ok(!JSON.stringify(restrictedReminders[0]).includes('Confidential'), 'content-free, same as the original filing push');
+  assert.equal(app.db.audit_logs.filter((e) => e.type === 'form.severity_reminder' && e.data.submission_id === filed.body.id).length, 0, 'never the non-restricted variant for a restricted report');
+});

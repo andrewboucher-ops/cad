@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — patrol schedules</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Patrols">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { display: flex; height: 100vh; overflow: hidden; padding-left: 228px; }
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .page-body { flex: 1; overflow: auto; padding: 24px 28px; }
+  .page-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+  .page-head h1 { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 14px; }
+  form.stack { display: flex; flex-direction: column; gap: 12px; }
+  form.stack label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: -6px; }
+  .foot-split { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+</style>
+</head>
+<body>
+
+<div class="icon-rail"></div>
+
+<main>
+  <div class="topbar">
+    <span class="link-net" id="net">link down</span>
+    <span class="spacer"></span>
+    <span class="clock" id="clock">--:--:--</span>
+    <div class="user-block">
+      <span class="avatar" id="avatar"></span>
+      <span class="who">
+        <span class="name" id="whoName"></span>
+        <span class="role" id="whoRole"></span>
+      </span>
+    </div>
+    <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
+  </div>
+
+  <div class="page-body">
+    <div class="page-head">
+      <h1>Patrol schedules</h1>
+      <button class="btn primary" id="btnNewSchedule" style="padding:7px 14px;font-size:13px">New patrol schedule</button>
+    </div>
+    <p class="dim" style="margin:0 0 14px;font-size:13px">Recurring patrol visits that are created automatically — either every N hours, or on specific days at a set time. A visit it generates still has to be dispatched to someone, same as one you create by hand.</p>
+    <div class="toolbar">
+      <input id="pSearch" placeholder="Search label, site…">
+    </div>
+    <div id="pTableWrap"></div>
+  </div>
+</main>
+
+<div id="modalHost"></div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script>
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+
+el('#whoName').textContent = me.display_name;
+el('#whoRole').textContent = me.role.replace('_', ' ');
+el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
+el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
+
+function modal(title, html, onMount) {
+  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"></div></div></div>`;
+  onMount && onMount();
+}
+const closeModal = () => (el('#modalHost').innerHTML = '');
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+let allSchedules = [], allSites = [], allBeats = [];
+async function load() {
+  [allSchedules, allSites, allBeats] = await Promise.all([
+    api('GET', '/api/patrol-schedules'), api('GET', '/api/sites'), api('GET', '/api/beats'),
+  ]);
+  paintSchedules();
+}
+
+/* ---------- patrol schedules (moved out of Admin so control, not just
+ * admin, can manage them — the server routes were already control-level;
+ * only the page was admin-only) ---------- */
+const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function cadenceLabel(s) {
+  if (s.interval_hours) return `Every ${s.interval_hours}h`;
+  if (s.days_of_week && s.time_of_day) return `${s.days_of_week.map((d) => DAY_LABELS[d]).join('/')} at ${s.time_of_day}`;
+  return '—';
+}
+function paintSchedules() {
+  const q = el('#pSearch').value.trim().toLowerCase();
+  let rows = allSchedules.slice().sort((a, b) => a.label.localeCompare(b.label));
+  if (q) rows = rows.filter((s) => s.label.toLowerCase().includes(q) || (s.site_name || '').toLowerCase().includes(q));
+  el('#pTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Label</th><th>Site</th><th>Beat</th><th style="width:160px">Cadence</th><th style="width:90px">Active</th><th style="width:70px"></th></tr></thead>
+      <tbody>${rows.map((s) => `<tr class="clickable" data-schedule="${s.id}">
+        <td>${esc(s.label)}</td>
+        <td class="dim">${esc(s.site_name || '—')}</td>
+        <td class="dim">${esc(s.beat_name || '—')}</td>
+        <td class="dim mono">${esc(cadenceLabel(s))}</td>
+        <td class="dim">${s.active ? 'Yes' : 'Paused'}</td>
+        <td><button class="btn danger" data-delschedule="${s.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No patrol schedules yet.</p>';
+  els('#pTableWrap [data-schedule]').forEach((row) => row.addEventListener('click', (e) => {
+    if (e.target.closest('[data-delschedule]')) return;
+    scheduleModal(allSchedules.find((s) => s.id === Number(row.dataset.schedule)));
+  }));
+  els('#pTableWrap [data-delschedule]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteSchedule(Number(b.dataset.delschedule)); }));
+}
+el('#pSearch').addEventListener('input', paintSchedules);
+
+async function deleteSchedule(id) {
+  const s = allSchedules.find((x) => x.id === id);
+  if (!s || !confirm(`Delete patrol schedule "${s.label}"? This cannot be undone.`)) return;
+  try { await api('DELETE', `/api/patrol-schedules/${id}`); closeModal(); await load(); }
+  catch (e) { alert(e.message); }
+}
+
+function scheduleForm(s) {
+  const isNew = !s;
+  const cadence = isNew ? 'interval' : (s.interval_hours ? 'interval' : 'weekly');
+  return `
+    <form class="stack" id="pForm">
+      <label>Label</label>
+      <input id="npLabel" autocomplete="off" value="${isNew ? '' : esc(s.label)}">
+      <label>Site</label>
+      <select id="npSite">${allSites.map((x) => `<option value="${x.id}" ${!isNew && s.site_id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <label>Beat (optional)</label>
+      <select id="npBeat"></select>
+      <label>Cadence</label>
+      <select id="npCadence">
+        <option value="interval" ${cadence === 'interval' ? 'selected' : ''}>Every N hours</option>
+        <option value="weekly" ${cadence === 'weekly' ? 'selected' : ''}>Specific days and time</option>
+      </select>
+      <div id="npIntervalRow" style="${cadence === 'interval' ? '' : 'display:none'}">
+        <label>Interval (hours)</label>
+        <input id="npInterval" type="number" min="1" value="${!isNew && s.interval_hours ? s.interval_hours : '4'}">
+      </div>
+      <div id="npWeeklyRow" style="${cadence === 'weekly' ? '' : 'display:none'}">
+        <label>Days</label>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          ${DAY_LABELS.map((d, i) => `<label style="display:flex;align-items:center;gap:4px;text-transform:none;font-size:12.5px;font-weight:500;letter-spacing:0"><input type="checkbox" data-npday="${i}" ${!isNew && s.days_of_week && s.days_of_week.includes(i) ? 'checked' : ''}> ${d}</label>`).join('')}
+        </div>
+        <label>Time of day</label>
+        <input id="npTime" type="time" value="${!isNew && s.time_of_day ? s.time_of_day : '22:00'}">
+      </div>
+      <label>Expected duration (minutes)</label>
+      <input id="npDuration" type="number" min="5" value="${!isNew && s.duration_expected_min ? s.duration_expected_min : '30'}">
+      <label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;font-weight:500;letter-spacing:0">
+        <input type="checkbox" id="npActive" ${isNew || s.active ? 'checked' : ''}> Active
+      </label>
+      <p class="dim" id="pError" style="min-height:16px;margin:0"></p>
+    </form>`;
+}
+function scheduleModal(s) {
+  modal(s ? `Edit — ${s.label}` : 'New patrol schedule', scheduleForm(s), () => {
+    el('#npCadence').onchange = () => {
+      const interval = el('#npCadence').value === 'interval';
+      el('#npIntervalRow').style.display = interval ? '' : 'none';
+      el('#npWeeklyRow').style.display = interval ? 'none' : '';
+    };
+    const paintBeatOptions = () => {
+      const siteId = Number(el('#npSite').value);
+      const beats = allBeats.filter((b) => b.site_id === siteId);
+      el('#npBeat').innerHTML = '<option value="">— none —</option>' + beats.map((b) => `<option value="${b.id}" ${s && s.beat_id === b.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('');
+    };
+    el('#npSite').onchange = paintBeatOptions;
+    paintBeatOptions();
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `
+      <div class="foot-split">
+        <span>${s ? '<button class="btn danger" id="pDelete">Delete schedule</button>' : ''}</span>
+        <span class="btn-row" style="margin:0">
+          <button class="btn" id="pCancel">Cancel</button>
+          <button class="btn primary" id="pSave">${s ? 'Save changes' : 'Create schedule'}</button>
+        </span>
+      </div>`;
+    el('#pCancel').onclick = closeModal;
+    if (el('#pDelete')) el('#pDelete').onclick = () => deleteSchedule(s.id);
+    el('#pSave').onclick = async () => {
+      const label = el('#npLabel').value.trim();
+      if (!label) { el('#pError').textContent = 'label is required'; return; }
+      const interval = el('#npCadence').value === 'interval';
+      const body = {
+        label, site_id: Number(el('#npSite').value), beat_id: el('#npBeat').value ? Number(el('#npBeat').value) : null,
+        duration_expected_min: Number(el('#npDuration').value) || 30,
+        active: el('#npActive').checked,
+        interval_hours: interval ? Number(el('#npInterval').value) || null : null,
+        days_of_week: interval ? null : els('[data-npday]:checked').map((c) => Number(c.dataset.npday)),
+        time_of_day: interval ? null : el('#npTime').value,
+      };
+      try {
+        if (s) await api('PATCH', `/api/patrol-schedules/${s.id}`, body);
+        else await api('POST', '/api/patrol-schedules', body);
+        closeModal(); await load();
+      } catch (e) { el('#pError').textContent = e.message; }
+    };
+  });
+}
+el('#btnNewSchedule').onclick = () => scheduleModal(null);
+
+CCCS.bus((up) => {
+  const n = el('#net');
+  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
+});
+
+load();
+</script>
+</body>
+</html>

@@ -92,9 +92,15 @@
           <div class="body" id="systemBody"></div>
         </div>
       </div>
-      <div class="section-card">
-        <header>Recent activity</header>
-        <div class="body" id="activityBody"></div>
+      <div>
+        <div class="section-card">
+          <header>Recent activity</header>
+          <div class="body" id="activityBody"></div>
+        </div>
+        <div class="section-card">
+          <header>Recent reports</header>
+          <div class="body" id="reportsBody"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -145,10 +151,14 @@ function statCard(label, num, sub, opts = {}) {
 function pct(n, total) { return total ? Math.round((n / total) * 1000) / 10 : 0; }
 
 async function load() {
-  const [state, vehicles, shifts] = await Promise.all([
+  const [state, vehicles, shifts, reports] = await Promise.all([
     api('GET', '/api/state'),
     api('GET', '/api/vehicles'),
     api('GET', `/api/shifts?from=${encodeURIComponent(new Date(new Date().setHours(0, 0, 0, 0)).toISOString())}&to=${encodeURIComponent(new Date(new Date().setHours(23, 59, 59, 999)).toISOString())}`),
+    // Already scoped to what this viewer may read (routes-forms.js's
+    // canRead()) — a RESTRICTED report this viewer isn't named on is simply
+    // absent from the list, not merely unrendered.
+    api('GET', '/api/form-submissions?status=ALL&limit=500').catch(() => []),
   ]);
   const users = isAdmin ? await api('GET', '/api/users') : [];
 
@@ -165,6 +175,15 @@ async function load() {
   const mdtByStatus = { online: 0, offline: 0 };
   state.mdts.forEach((m) => { m.connected ? mdtByStatus.online++ : mdtByStatus.offline++; });
 
+  const since30 = Date.now() - 30 * 86400000;
+  const recentReports = reports.filter((r) => Date.parse(r.submitted_at) >= since30);
+  const openReports = reports.filter((r) => r.status === 'OPEN');
+  const restrictedOpen = openReports.filter((r) => r.visibility === 'RESTRICTED').length;
+  const byType = {};
+  recentReports.forEach((r) => { byType[r.definition_name] = (byType[r.definition_name] || 0) + 1; });
+  const TYPE_COLOR = ['var(--accent)', 'var(--available)', 'var(--priority)', 'var(--emergency)', 'var(--offline)'];
+  const topTypes = Object.entries(byType).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
   el('#statGrid').innerHTML = [
     statCard('Open jobs', openJobs.length, `${state.emergencies.length ? state.emergencies.length + ' emergency' : 'none critical'}`, {
       breakdown: ['RED', 'AMBER', 'GREEN', 'ROUTINE'].filter((k) => jobsByPri[k]).map((k) => ({ color: jobColor[k], pct: pct(jobsByPri[k], openJobs.length) || 2, label: k, value: jobsByPri[k] })),
@@ -172,6 +191,10 @@ async function load() {
     statCard('Active emergencies', state.emergencies.length, state.emergencies.length ? 'needs acknowledgement' : 'all clear', { crit: state.emergencies.length > 0 }),
     statCard('Open patrol visits', openVisits.length, missedVisits.length ? `${missedVisits.length} missed` : 'on schedule', { crit: missedVisits.length > 0 }),
     statCard('Personnel', personnelActive.length, `${state.mdts.length} MDTs · ${mdtByStatus.online} online`),
+    statCard('Reports (30d)', recentReports.length, openReports.length ? `${openReports.length} awaiting review${restrictedOpen ? `, ${restrictedOpen} restricted` : ''}` : 'review queue is empty', {
+      crit: openReports.length > 0,
+      breakdown: topTypes.map(([label, value], i) => ({ color: TYPE_COLOR[i % TYPE_COLOR.length], pct: pct(value, recentReports.length) || 2, label, value })),
+    }),
   ].join('');
 
   el('#fleetBody').innerHTML = `
@@ -187,6 +210,17 @@ async function load() {
   el('#activityBody').innerHTML = state.events.length
     ? state.events.slice(-10).reverse().map((e) => `<div class="list-row"><span class="t">${esc(new Date(e.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}</span><span>${esc(e.summary)}</span></div>`).join('')
     : '<p class="empty-note">Nothing logged yet today.</p>';
+
+  const SEVERITY_PRI = { LOW: 'ROUTINE', MEDIUM: 'GREEN', HIGH: 'AMBER', CRITICAL: 'RED' };
+  el('#reportsBody').innerHTML = reports.length
+    ? reports.slice(0, 10).map((r) => `<a class="list-row" href="/forms.html?id=${r.id}" style="text-decoration:none;color:inherit">
+        <span class="t">${esc(new Date(r.submitted_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }))}</span>
+        <span style="flex:1">${esc(r.definition_name)} <span style="color:var(--ink-dim)">— ${esc(r.subject_label)}</span></span>
+        ${r.severity ? `<span class="pri pri-${SEVERITY_PRI[r.severity] || 'ROUTINE'}" style="font-size:10px">${esc(r.severity)}</span>` : ''}
+        ${r.visibility === 'RESTRICTED' ? '<span class="pri pri-RED" style="font-size:10px">R</span>' : ''}
+        <span style="color:${r.status === 'OPEN' ? 'var(--priority)' : 'var(--ink-dim)'};font-size:11px;font-weight:700">${r.status === 'OPEN' ? 'OPEN' : esc(r.outcome || 'DONE')}</span>
+      </a>`).join('')
+    : '<p class="empty-note">No reports filed yet.</p>';
 
   if (isAdmin) {
     el('#systemCard').style.display = '';
@@ -206,6 +240,14 @@ async function load() {
     const trainingOverdue = state.personnel.filter((p) => (p.training || []).some((t) => t.status === 'overdue'));
     if (trainingOverdue.length) {
       el('#systemBody').innerHTML += `<div class="list-row"><span style="flex:1;color:var(--emergency)">Training overdue</span><b style="color:var(--emergency)">${trainingOverdue.length}</b></div>`;
+    }
+    // /api/state's personnel list doesn't carry the onboarding checklist
+    // (it's gated the same as emergency_contact/bank_details, which that
+    // endpoint doesn't resolve a viewer for) — a direct call does.
+    const personnelDetailed = await api('GET', '/api/personnel').catch(() => []);
+    const onboardingIncomplete = personnelDetailed.filter((p) => p.employment_status === 'ACTIVE' && p.onboarding && !p.onboarding.complete).length;
+    if (onboardingIncomplete) {
+      el('#systemBody').innerHTML += `<div class="list-row"><span style="flex:1">Onboarding incomplete</span><b><a href="/admin.html#onboarding">${onboardingIncomplete}</a></b></div>`;
     }
   }
 }

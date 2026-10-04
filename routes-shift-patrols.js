@@ -30,7 +30,8 @@ module.exports = function registerShiftPatrols({
   const OPEN = ['SCHEDULED', 'DISPATCHED', 'ACKNOWLEDGED', 'EN_ROUTE', 'ON_SCENE'];
   const hhmm = (t) => new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
 
-  route('PUT', '/api/shifts/:id/patrol', CONTROL, ({ params, body, user }) => {
+  // Admin only, like the rest of shift editing (PATCH /api/shifts/:id).
+  route('PUT', '/api/shifts/:id/patrol', ADMIN, ({ params, body, user }) => {
     const s = findShift(params.id);
     if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
     if (body.every_min == null || body.every_min === '' || Number(body.every_min) === 0) {
@@ -47,6 +48,9 @@ module.exports = function registerShiftPatrols({
       }
       s.patrol = { every_min: every, beat_id: beatId, set_at: s.patrol && s.patrol.every_min === every && s.patrol.beat_id === beatId ? s.patrol.set_at : new Date().toISOString(), set_by: user.display_name };
     }
+    // Keep the plain "patrol every N minutes" note on the shift in step —
+    // the officer app's shift details show it.
+    s.detail = { ...(s.detail || {}), patrol_interval_min: s.patrol ? s.patrol.every_min : null };
     logEvent('shift.patrol_set', s.patrol ? `PATROL EVERY ${s.patrol.every_min} MIN SET ON SHIFT ${s.id}` : `PATROLS REMOVED FROM SHIFT ${s.id}`, { shift_id: s.id });
     flushNow();
     return publicShift(s);
@@ -126,26 +130,7 @@ module.exports = function registerShiftPatrols({
     return db.site_visits.filter((v) => v.site_id === siteId && Date.parse(v.scheduled_for) >= from && Date.parse(v.scheduled_for) <= to && v.status !== 'CANCELLED')
       .sort((a, b) => b.scheduled_for.localeCompare(a.scheduled_for)).slice(0, 300).map(clientPatrol);
   });
-  route('GET', '/api/client/shifts', CLIENT_OR_ADMIN, ({ user, query }) => {
-    const { siteId, from, to } = clientSite(user, query);
-    const now = Date.now();
-    return db.shifts.filter((s) => s.site_id === siteId && !['DRAFT', 'CANCELLED'].includes(s.status) && Date.parse(s.ends_at) >= from && Date.parse(s.starts_at) <= to)
-      .sort((a, b) => a.starts_at.localeCompare(b.starts_at)).map((s) => {
-        const as = db.shift_assignments.filter((a) => a.shift_id === s.id && a.status !== 'REMOVED' && !a.time_rejected);
-        const ins = as.map((a) => a.clocked_in_at).filter(Boolean).sort(), outs = as.map((a) => a.clocked_out_at).filter(Boolean).sort();
-        const onNow = as.filter((a) => a.clocked_in_at && !a.clocked_out_at).length;
-        const patrols = db.site_visits.filter((v) => v.shift_id === s.id);
-        const state = onNow ? 'ON_SITE' : ins.length ? 'COMPLETED'
-          : now < Date.parse(s.starts_at) ? (as.filter((a) => ['ASSIGNED', 'CONFIRMED'].includes(a.status)).length >= (s.required_headcount || 1) ? 'BOOKED' : 'NOT_YET_COVERED')
-          : now > Date.parse(s.ends_at) ? 'NOT_ATTENDED' : 'DUE';
-        return {
-          id: s.id, starts_at: s.starts_at, ends_at: s.ends_at, officers_required: s.required_headcount || 1, officers_booked: as.filter((a) => ['ASSIGNED', 'CONFIRMED'].includes(a.status)).length,
-          officers_on_site: onNow, arrived_at: ins[0] || null, left_at: !onNow && outs.length ? outs[outs.length - 1] : null, state, ad_hoc: Boolean(s.ad_hoc),
-          patrol_every_min: s.patrol ? s.patrol.every_min : null,
-          patrols: { total: patrols.length, completed: patrols.filter((v) => v.status === 'COMPLETED').length, missed: patrols.filter((v) => v.status === 'MISSED').length },
-        };
-      });
-  });
+  // The shifts themselves are GET /api/client/shifts in routes-client.js.
 
   return { tick };
 };

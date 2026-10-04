@@ -37,9 +37,9 @@ after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 async function shiftFor(startOffsetMin, lengthH = 8, siteId = site.id) {
   const type = (await call('GET', '/api/shift-types', undefined, dispT)).body[0];
   const st = new Date(Date.now() + startOffsetMin * 60000);
-  const s = (await call('POST', '/api/shifts', { shift_type_id: type.id, site_id: siteId, starts_at: st.toISOString(), ends_at: new Date(st.getTime() + lengthH * 3600e3).toISOString() }, dispT)).body;
-  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: dan.id }, dispT);
-  await call('POST', `/api/shifts/${s.id}/publish`, {}, dispT);
+  const s = (await call('POST', '/api/shifts', { shift_type_id: type.id, site_id: siteId, starts_at: st.toISOString(), ends_at: new Date(st.getTime() + lengthH * 3600e3).toISOString() }, adminT)).body;
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: dan.id }, adminT);
+  await call('POST', `/api/shifts/${s.id}/publish`, {}, adminT);
   const shift = app.db.shifts.find((x) => x.id === s.id);
   shift.status = 'PUBLISHED';
   const a = app.db.shift_assignments.find((x) => x.shift_id === s.id && x.personnel_id === dan.id);
@@ -125,6 +125,45 @@ test('5 minutes late: an SMS; 15 minutes: an alert to control; end of shift: tha
   app.attendance.tick(Date.parse(s2.ends_at) + 60000);
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(app.db.dial_log.some((d) => d.shift_id === s2.id && /remember to clock out/.test(d.body)));
+});
+
+test('10 minutes late is a real alarm, not another reminder — an emergency with the person\'s name on it, a RED job, and it fires once', async () => {
+  const { a, s } = await shiftFor(-6);
+  const start = Date.parse(s.starts_at);
+  // Earlier tests in this file also drive the tick well past 10 minutes for
+  // their own shifts, so Dan may already have other NOT_CLOCKED_IN rows —
+  // scope every assertion to new ones raised by THIS shift, not to there
+  // being none at all for him file-wide.
+  const matching = () => app.db.emergency_events.filter((e) => e.kind === 'NOT_CLOCKED_IN' && e.personnel_id === dan.id);
+  const seenBefore = new Set(matching().map((e) => e.id));
+  const newOnes = () => matching().filter((e) => !seenBefore.has(e.id));
+
+  app.attendance.tick(start + 9 * 60000);
+  assert.ok(!a.not_clocked_in_alarm_at, 'not yet');
+  assert.equal(newOnes().length, 0);
+
+  app.attendance.tick(start + 11 * 60000);
+  assert.ok(a.not_clocked_in_alarm_at, 'one-shot flag set');
+  assert.equal(newOnes().length, 1);
+  const ev = newOnes()[0];
+  assert.equal(ev.state, 'ACTIVE');
+  assert.equal(ev.callsign, 'Dan Whitfield', 'the person\'s actual name, not a radio callsign');
+
+  const job = app.db.jobs.find((j) => j.emergency_id === ev.id);
+  assert.ok(job, 'a RED job was raised for it, same as any other emergency');
+  assert.equal(job.priority, 'RED');
+  assert.equal(job.incident_type, 'NOT CLOCKED IN');
+  assert.equal(job.location, site.name, 'no GPS fix, but the site is known and used instead of "location unknown"');
+
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'shift.not_clocked_in_alarm' && e.data.shift_id === s.id));
+
+  app.attendance.tick(start + 12 * 60000);
+  assert.equal(newOnes().length, 1, 'one-shot — never raises a second alarm for the same lateness');
+
+  // The existing 15-minute control alert still fires on top of this — the
+  // new alarm is additive, not a replacement.
+  app.attendance.tick(start + 16 * 60000);
+  assert.ok(a.late_alert_at);
 });
 
 /* ---------------- kit on vehicles ---------------- */

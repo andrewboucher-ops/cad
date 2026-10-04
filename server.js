@@ -582,20 +582,68 @@ function normalizedSiteIds(raw) {
  * or an overdue vehicle service. */
 const SIA_EXPIRY_WARN_DAYS = 30;
 const DBS_RECHECK_DUE_DAYS = 365; // DBS sets no fixed frequency; a year is a common risk-based default, not a legal requirement
+/** A person can hold more than one SIA licence (Door Supervision and CCTV
+ * are both common). sia_licences is the canonical list; the original
+ * single sia_licence_no/sia_licence_expiry fields are kept on the record
+ * for backward compatibility (nothing deletes them) and, for a person who
+ * predates this and has never been re-saved with a licences array, are
+ * synthesised into one here rather than needing a one-off migration pass. */
+function siaLicencesOf(p) {
+  if (Array.isArray(p.sia_licences)) return p.sia_licences;
+  return p.sia_licence_no ? [{ id: 1, licence_type: 'Door Supervision', licence_no: p.sia_licence_no, expiry: p.sia_licence_expiry || null }] : [];
+}
 function personnelCompliance(p) {
   const now = Date.now();
+  // Worst case across every licence held: one expired licence matters more
+  // than another being fine.
   let sia = 'unset';
-  if (p.sia_licence_expiry) {
-    const expiry = Date.parse(p.sia_licence_expiry);
-    if (expiry < now) sia = 'expired';
-    else if (expiry - now < SIA_EXPIRY_WARN_DAYS * 86400000) sia = 'expiring';
-    else sia = 'ok';
+  for (const l of siaLicencesOf(p)) {
+    if (!l.expiry) continue;
+    const expiry = Date.parse(l.expiry);
+    const state = expiry < now ? 'expired' : expiry - now < SIA_EXPIRY_WARN_DAYS * 86400000 ? 'expiring' : 'ok';
+    if (state === 'expired') { sia = 'expired'; break; }
+    if (state === 'expiring' && sia !== 'expired') sia = 'expiring';
+    else if (state === 'ok' && sia === 'unset') sia = 'ok';
   }
   let dbs = 'unset';
   if (p.dbs_last_checked_at) {
     dbs = (now - Date.parse(p.dbs_last_checked_at)) > DBS_RECHECK_DUE_DAYS * 86400000 ? 'overdue' : 'ok';
   }
   return { sia, dbs };
+}
+
+/** Structural "are they actually set up yet" items, distinct from the
+ * ongoing compliance checks above (SIA/DBS renewal, training currency) —
+ * this is a one-time gap to close when someone joins, not a recurring one
+ * to keep renewing. Deliberately built from data this codebase already
+ * tracks (personnel files, SIA/DBS fields, emergency contact, bank
+ * details, a login, an asset checkout) rather than a new form to fill in.
+ * bank_details is skipped for a subcontractor (they invoice for their own
+ * time — same gate leave entitlement already uses) and kit_issued only
+ * appears at all once the business actually has assets on file, so an
+ * install that doesn't use asset tracking never shows an uncompletable
+ * item. An admin can mark onboarding complete regardless of what's still
+ * outstanding (onboarding_completed_at) for the real exceptions a fixed
+ * checklist can't anticipate — logged, like every other override here. */
+function onboardingStatusForPerson(p) {
+  const checks = [
+    ['id_document', 'Identity / right-to-work document on file', (p.files || []).some((f) => f.kind === 'ID')],
+    ['sia_licence', 'SIA licence recorded', siaLicencesOf(p).length > 0],
+    ['dbs_check', 'DBS check recorded', Boolean(p.dbs_certificate_no || p.dbs_last_checked_at)],
+    ['contract', 'Signed contract on file', (p.files || []).some((f) => f.kind === 'CONTRACT')],
+    ['emergency_contact', 'Emergency contact recorded', Boolean(p.emergency_contact && (p.emergency_contact.name || p.emergency_contact.phone))],
+    ...(p.employment_type === 'SUBCONTRACTOR' ? [] : [['bank_details', 'Bank details recorded', Boolean(p.bank_details && (p.bank_details.account_number || p.bank_details.sort_code))]]),
+    ['login_account', 'System login created', Boolean(p.user_id)],
+    ...(db.assets.length ? [['kit_issued', 'Uniform / equipment issued', db.asset_checkouts.some((c) => c.personnel_id === p.id)]] : []),
+  ];
+  const items = checks.map(([key, label, done]) => ({ key, label, done }));
+  const outstanding = items.filter((i) => !i.done).length;
+  return {
+    items, outstanding,
+    complete: Boolean(p.onboarding_completed_at) || outstanding === 0,
+    overridden: Boolean(p.onboarding_completed_at) && outstanding > 0,
+    completed_at: p.onboarding_completed_at || null, completed_by: p.onboarding_completed_by || null,
+  };
 }
 
 const TRAINING_EXPIRY_WARN_DAYS = 30;
@@ -658,9 +706,39 @@ function leaveBalanceForPerson(p) {
     .reduce((sum, r) => sum + r.days, 0);
   return { allowance, taken, remaining: Math.round((allowance - taken) * 10) / 10 };
 }
-function publicPersonnel(p) {
+function cleanEmergencyContact(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const name = String(raw.name || '').trim().slice(0, 120);
+  const relationship = String(raw.relationship || '').trim().slice(0, 60);
+  const phone = String(raw.phone || '').trim().slice(0, 30);
+  const email = String(raw.email || '').trim().slice(0, 160);
+  if (!name && !relationship && !phone && !email) return null;
+  return { name, relationship, phone, email };
+}
+function cleanBankDetails(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const account_name = String(raw.account_name || '').trim().slice(0, 120);
+  const bank_name = String(raw.bank_name || '').trim().slice(0, 120);
+  let sort_code = String(raw.sort_code || '').trim().replace(/\s/g, '');
+  if (sort_code && !/^\d{2}-?\d{2}-?\d{2}$/.test(sort_code)) throw httpError(400, 'sort code should be 6 digits, e.g. 12-34-56');
+  let account_number = String(raw.account_number || '').trim().replace(/\s/g, '');
+  if (account_number && !/^\d{6,10}$/.test(account_number)) throw httpError(400, 'account number should be 8 digits');
+  if (!account_name && !bank_name && !sort_code && !account_number) return null;
+  return { account_name, bank_name, sort_code, account_number };
+}
+/** `user` is optional and new: every existing call site that doesn't pass
+ * it (chiefly broadcasts, which go to many recipients at once and can't
+ * sensibly be redacted for one viewer) simply never gets emergency_contact
+ * or bank_details in the payload — stricter than before adding them, never
+ * laxer, so nothing already relying on the old (always-called-with-no-
+ * user) shape changes behaviour. Only a direct, per-viewer read — today
+ * just GET /api/personnel — passes `user`, and only then does a control
+ * role or the person themself see their own emergency contact or bank
+ * details; colleagues never do. */
+function publicPersonnel(p, user) {
   const cs = db.callsigns.find((c) => c.id === p.callsign_id);
   const veh = db.vehicles.find((v) => v.id === p.vehicle_id);
+  const canSeeSensitive = user && (isControlRole(user.role) || user.personnel_id === p.id);
   return {
     id: p.id, employee_no: p.employee_no, name: p.name, rank: p.rank,
     contact_phone: p.contact_phone || '', contact_email: p.contact_email || '',
@@ -672,6 +750,7 @@ function publicPersonnel(p) {
     welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
     welfare_note: p.welfare_note || null,
     sia_licence_no: p.sia_licence_no || null, sia_licence_expiry: p.sia_licence_expiry || null,
+    sia_licences: siaLicencesOf(p),
     dbs_certificate_no: p.dbs_certificate_no || null, dbs_certificate_type: p.dbs_certificate_type || null,
     dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
     compliance: personnelCompliance(p),
@@ -681,6 +760,11 @@ function publicPersonnel(p) {
     employment_type: p.employment_type || 'EMPLOYED',
     annual_leave_allowance_days: p.annual_leave_allowance_days ?? null,
     leave_balance: leaveBalanceForPerson(p),
+    start_date: p.start_date || null,
+    // Same audience as emergency_contact/bank_details above: onboarding
+    // status is an HR-chasing concern, not something a colleague needs to
+    // see about another officer, even as a boolean checklist with no detail.
+    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, onboarding: onboardingStatusForPerson(p) } : {}),
   };
 }
 function publicMdt(m) {
@@ -1110,6 +1194,28 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   const token = sign({ sub: user.id, role: user.role, exp: Date.now() + ttl });
   logEvent('auth.login', `${user.username} signed in (${user.role})`, { user_id: user.id });
   return { token, user: publicUser(user) };
+});
+/** A "create your password" link — reuses the existing sign()/verifyToken()
+ * HMAC mechanism (already used for session tokens) rather than inventing a
+ * second token scheme: stateless, self-expiring, and never a valid session
+ * itself since this payload carries user_id, not the `sub` a session token
+ * needs (authFrom() only ever looks up payload.sub). One-time use is
+ * enforced without a token store too: the issue time (iat) is stamped into
+ * the token, and is rejected once it is older than the user's own
+ * password_set_at — so a second click after the link was already used, or
+ * an older email after a newer one was sent, both fail cleanly rather than
+ * silently letting an intercepted old link still work. */
+route('POST', '/api/auth/set-password', null, ({ body }) => {
+  const payload = verifyToken(body.token);
+  if (!payload || payload.purpose !== 'set_password') throw httpError(400, 'this link is invalid or has expired — ask for a new one');
+  const u = db.users.find((x) => x.id === payload.user_id);
+  if (!u) throw httpError(404, 'account not found');
+  if (u.password_set_at && payload.iat < u.password_set_at) throw httpError(400, 'this link has already been used — ask for a new one');
+  if (!body.password || String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
+  u.password_hash = hashPassword(String(body.password));
+  u.password_set_at = Date.now();
+  logEvent('auth.password_set_via_link', `${u.username} SET THEIR PASSWORD VIA EMAIL LINK`, { user_id: u.id });
+  return { ok: true };
 });
 route('PATCH', '/api/me/preferences', ALL, ({ body, user }) => {
   const u = db.users.find((x) => x.id === user.id); if (!u) throw httpError(404, 'account not found');
@@ -1769,8 +1875,8 @@ route('POST', '/api/assets/:id/return', ALL, ({ params, body, user }) => {
   logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
   return publicAsset(a);
 });
-route('GET', '/api/personnel', ALL, ({ user }) => db.personnel.filter((p) => visibleToUser(p, user)).map(publicPersonnel));
-route('POST', '/api/personnel', ADMIN, ({ body }) => {
+route('GET', '/api/personnel', ALL, ({ user }) => db.personnel.filter((p) => visibleToUser(p, user)).map((p) => publicPersonnel(p, user)));
+route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');
   const employeeNo = body.employee_no ? String(body.employee_no).trim() : null;
@@ -1778,6 +1884,7 @@ route('POST', '/api/personnel', ADMIN, ({ body }) => {
   const cs = body.callsign_id ? findCallsign(body.callsign_id) : null;
   const veh = body.vehicle_id ? db.vehicles.find((v) => v.id === Number(body.vehicle_id)) : null;
   const employmentType = EMPLOYMENT_TYPES.includes(body.employment_type) ? body.employment_type : 'EMPLOYED';
+  if (body.start_date && isNaN(Date.parse(body.start_date))) throw httpError(400, 'invalid start_date');
   const p = {
     id: nextId('personnel'), employee_no: employeeNo, name, rank: body.rank || '',
     contact_phone: body.contact_phone || '', contact_email: body.contact_email || '',
@@ -1785,6 +1892,11 @@ route('POST', '/api/personnel', ADMIN, ({ body }) => {
     employment_status: ['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status) ? body.employment_status : 'ACTIVE',
     employment_type: employmentType,
     annual_leave_allowance_days: employmentType === 'EMPLOYED' && body.annual_leave_allowance_days ? Number(body.annual_leave_allowance_days) : null,
+    // Defaults to today, not null: the onboarding checklist needs an anchor
+    // to measure "how long has this person been waiting on paperwork" from,
+    // and a record with no explicit date almost always means they start now.
+    start_date: body.start_date ? String(body.start_date).slice(0, 10) : new Date().toISOString().slice(0, 10),
+    onboarding_completed_at: null, onboarding_completed_by: null,
     callsign_id: cs ? cs.id : null, user_id: null, vehicle_id: veh ? veh.id : null,
     welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: null,
     notes: body.notes || '', branch_id: normalizedBranchId(body.branch_id),
@@ -1792,9 +1904,9 @@ route('POST', '/api/personnel', ADMIN, ({ body }) => {
   };
   db.personnel.push(p);
   logEvent('personnel.created', `PERSONNEL ${name} ADDED`, { personnel_id: p.id });
-  return { __status: 201, __body: publicPersonnel(p) };
+  return { __status: 201, __body: publicPersonnel(p, user) };
 });
-route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
+route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
   const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
   if ('name' in body) { const name = String(body.name || '').trim(); if (!name) throw httpError(400, 'name required'); p.name = name; }
   if ('employee_no' in body) {
@@ -1810,6 +1922,10 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
   if ('employment_status' in body) {
     if (!['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status)) throw httpError(400, 'invalid employment_status');
     p.employment_status = body.employment_status;
+  }
+  if ('start_date' in body) {
+    if (body.start_date && isNaN(Date.parse(body.start_date))) throw httpError(400, 'invalid start_date');
+    p.start_date = body.start_date ? String(body.start_date).slice(0, 10) : null;
   }
   if ('callsign_id' in body) { const cs = body.callsign_id ? findCallsign(body.callsign_id) : null; p.callsign_id = cs ? cs.id : null; }
   if ('vehicle_id' in body) { const veh = body.vehicle_id ? db.vehicles.find((v) => v.id === Number(body.vehicle_id)) : null; p.vehicle_id = veh ? veh.id : null; }
@@ -1844,6 +1960,33 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
   // Update Service check, which does not happen just because someone typed
   // in a certificate number.
   if ('dbs_checked_now' in body && body.dbs_checked_now) p.dbs_last_checked_at = new Date().toISOString();
+  // Several SIA licences are normal — Door Supervision and CCTV together is
+  // the common case this was added for. The old single sia_licence_no/
+  // sia_licence_expiry fields are left exactly as they were (untouched,
+  // never cleared by this) — siaLicencesOf() only falls back to them for a
+  // record that has never been saved with a licences array at all.
+  if ('sia_licences' in body) {
+    if (!Array.isArray(body.sia_licences)) throw httpError(400, 'sia_licences must be an array');
+    if (body.sia_licences.length > 8) throw httpError(400, 'too many SIA licences');
+    p.sia_licences = body.sia_licences.map((l, i) => {
+      const licence_type = String((l && l.licence_type) || '').trim().slice(0, 80);
+      if (!licence_type) throw httpError(400, `licence ${i + 1}: type required`);
+      const licence_no = String((l && l.licence_no) || '').trim().slice(0, 40);
+      if (!licence_no) throw httpError(400, `licence ${i + 1}: licence number required`);
+      const expiry = l && l.expiry ? String(l.expiry).slice(0, 10) : null;
+      if (expiry && isNaN(Date.parse(expiry))) throw httpError(400, `licence ${i + 1}: invalid expiry date`);
+      return { id: i + 1, licence_type, licence_no, expiry };
+    });
+  }
+  // Next of kin — self-editable too, via PATCH /api/personnel/:id/emergency-
+  // contact below; this admin route can set it as well (e.g. HR entering it
+  // from a paper form on the person's behalf).
+  if ('emergency_contact' in body) p.emergency_contact = cleanEmergencyContact(body.emergency_contact);
+  // Payroll destination — admin-only to set, deliberately with no self-
+  // service write path: a staff member changing their own bank details
+  // unsupervised is exactly the fraud pattern (a compromised account
+  // redirecting its own pay) a real HR process checks before acting on.
+  if ('bank_details' in body) p.bank_details = cleanBankDetails(body.bank_details);
   if ('notes' in body) p.notes = body.notes || '';
   // Both fields are validated against the FULL intended result before either
   // is written — a request that sets both at once (e.g. SUBCONTRACTOR + an
@@ -1870,7 +2013,30 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body }) => {
     p.annual_leave_allowance_days = body.annual_leave_allowance_days == null ? null : Number(body.annual_leave_allowance_days);
   }
   logEvent('personnel.updated', `PERSONNEL ${p.name} UPDATED`, { personnel_id: p.id });
-  return publicPersonnel(p);
+  return publicPersonnel(p, user);
+});
+/** Marking onboarding complete by hand is for the real exceptions the fixed
+ * checklist can't anticipate (a control-room-only role with no SIA licence
+ * requirement, a TUPE transfer whose paperwork lives with a previous
+ * employer) — it overrides onboardingStatusForPerson()'s own computation
+ * regardless of what's still outstanding, which is exactly the point, so
+ * it's logged with who and, optionally, why. Reopening clears the override;
+ * it does not undo anything the checklist items themselves represent. */
+route('POST', '/api/personnel/:id/onboarding-complete', ADMIN, ({ params, body, user }) => {
+  const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
+  if (p.onboarding_completed_at) throw httpError(409, 'already marked complete');
+  p.onboarding_completed_at = new Date().toISOString();
+  p.onboarding_completed_by = user.display_name;
+  const note = String((body && body.note) || '').trim().slice(0, 300);
+  logEvent('personnel.onboarding_completed', `ONBOARDING MARKED COMPLETE FOR ${p.name} BY ${user.display_name}${note ? ` — ${note}` : ''}`, { personnel_id: p.id });
+  return publicPersonnel(p, user);
+});
+route('DELETE', '/api/personnel/:id/onboarding-complete', ADMIN, ({ params, user }) => {
+  const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
+  if (!p.onboarding_completed_at) throw httpError(409, 'not marked complete');
+  p.onboarding_completed_at = null; p.onboarding_completed_by = null;
+  logEvent('personnel.onboarding_reopened', `ONBOARDING REOPENED FOR ${p.name} BY ${user.display_name}`, { personnel_id: p.id });
+  return publicPersonnel(p, user);
 });
 route('DELETE', '/api/personnel/:id', ADMIN, ({ params }) => {
   const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
@@ -1888,6 +2054,22 @@ route('DELETE', '/api/personnel/:id', ADMIN, ({ params }) => {
   db.personnel = db.personnel.filter((x) => x.id !== p.id);
   logEvent('personnel.deleted', `PERSONNEL ${p.name} DELETED`, { personnel_id: p.id });
   return { ok: true };
+});
+/** A person keeping their own next-of-kin details current is routine
+ * self-service, unlike SIA/DBS/bank details above — nothing compliance- or
+ * payroll-critical hangs off it, and staff are the ones most likely to
+ * actually know when it's gone stale. Gated on isControlRole + personnel_id
+ * match, not `role === 'FIELD_USER'` — a role-name check here is exactly
+ * the bug test/access-review.test.js caught before (a role-named check let
+ * a shared MDT_USER terminal login act on any officer's own-record route;
+ * the fix was always comparing personnel_id, which has no meaning for a
+ * shared terminal login in the first place). */
+route('PATCH', '/api/personnel/:id/emergency-contact', ALL, ({ params, body, user }) => {
+  const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
+  if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not your record');
+  p.emergency_contact = cleanEmergencyContact(body);
+  logEvent('personnel.emergency_contact_updated', `${p.name} UPDATED THEIR EMERGENCY CONTACT`, { personnel_id: p.id });
+  return publicPersonnel(p, user);
 });
 
 // Call signs
@@ -2208,7 +2390,14 @@ async function sendGraphEmail(to, subject, html, opts = {}) {
   if (!to) return { ok: false, error: 'no recipient' };
   try {
     const token = await getGraphAppToken();
-    const attachments = (opts.attachments || []).map((f) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: f.name, contentType: f.contentType || 'application/octet-stream', contentBytes: Buffer.from(f.content).toString('base64') }));
+    // contentId/isInline are optional passthroughs for a cid: reference in
+    // the HTML (an inline logo, say) — omitted entirely for a plain
+    // attachment, same as before this existed.
+    const attachments = (opts.attachments || []).map((f) => ({
+      '@odata.type': '#microsoft.graph.fileAttachment', name: f.name, contentType: f.contentType || 'application/octet-stream',
+      contentBytes: Buffer.from(f.content).toString('base64'),
+      ...(f.contentId ? { contentId: f.contentId, isInline: Boolean(f.isInline) } : {}),
+    }));
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }], ...(attachments.length ? { attachments } : {}) } }),
@@ -2429,8 +2618,11 @@ route('POST', '/api/jobs/:id/stand-down', CONTROL, ({ params, body }) => {
 function createEmergencyJob(ev) {
   const j = {
     id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
-    incident_type: ev.kind === 'WELFARE' ? 'WELFARE ALARM' : 'OFFICER EMERGENCY', priority: 'RED',
-    location: ev.lat != null ? `${ev.lat.toFixed(5)}, ${ev.lon.toFixed(5)} (add details as received)` : 'Location unknown — add details as received',
+    incident_type: ev.kind === 'WELFARE' ? 'WELFARE ALARM' : ev.kind === 'NOT_CLOCKED_IN' ? 'NOT CLOCKED IN' : 'OFFICER EMERGENCY', priority: 'RED',
+    // No GPS fix for a not-clocked-in alarm, but the site is known — a
+    // location_hint (only ever set by that caller) beats the generic
+    // "add details as received" placeholder every other emergency gets.
+    location: ev.lat != null ? `${ev.lat.toFixed(5)}, ${ev.lon.toFixed(5)} (add details as received)` : (ev.location_hint || 'Location unknown — add details as received'),
     site_id: null, keyholder: '', lat: ev.lat, lon: ev.lon,
     description: '', caller: ev.callsign, required_resources: 2, what3words: '',
     notes: '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
@@ -2595,9 +2787,16 @@ function zoneFromCallsign(callsign) {
   const digits = String(callsign || '').replace(/\D/g, '');
   return (digits || '0').slice(-4).padStart(4, '0');
 }
+// ev.callsign is the human-readable label this emergency shows internally
+// (a radio callsign for an officer/MDT emergency, but a plain name for a
+// not-clocked-in alarm — see routes-attendance.js). The SIA zone is a
+// separate, strictly 4-digit field, so a caller whose internal label has no
+// usable digits in it (a name) sets ev.zone_source to whatever number
+// should identify them instead (e.g. an employee number); zoneFromCallsign's
+// own digit-extraction and 0000 fallback apply to it exactly the same way.
 function forwardEmergencyToAura(ev) {
   if (!MQTT_HOST || !MQTT_AURA_PUBLISH_ENABLED) return;
-  const zone = zoneFromCallsign(ev.callsign);
+  const zone = zoneFromCallsign(ev.zone_source || ev.callsign);
   const packet = buildSia({ acct: AURA_ACCT, data: `Nri0/PA${zone}` }); // PA = SIA panic alarm
   if (!mqttPublishNow(MQTT_TOPIC, packet)) console.warn(`[cccs] AURA MQTT publish skipped for emergency ${ev.id} — not connected to broker`);
 }
@@ -2741,6 +2940,12 @@ const RETENTION = {
   // Shift-handover notes — kept alongside the audit trail's horizon since
   // they carry the same "what happened at this site" evidentiary value.
   passdown: Number(process.env.RETAIN_PASSDOWN_DAYS || 365),
+  // Every dial/SMS attempt (writeNotifyLog) — unlike `messages` above, this
+  // carries the actual text sent, not just who/when, so it is at least as
+  // sensitive and gets the same horizon. Found missing a retention policy
+  // entirely while reviewing this list — every other per-contact collection
+  // already had one.
+  dial_log: Number(process.env.RETAIN_DIAL_LOG_DAYS || 180),
 };
 
 function pruneOlderThan(table, days, field) {
@@ -2760,6 +2965,7 @@ function retentionSweep() {
     audit_logs: pruneOlderThan('audit_logs', RETENTION.audit, 'at'),
     messages: pruneOlderThan('messages', RETENTION.messages, 'sent_at'),
     passdown_logs: pruneOlderThan('passdown_logs', RETENTION.passdown, 'created_at'),
+    dial_log: pruneOlderThan('dial_log', RETENTION.dial_log, 'attempted_at'),
   };
 
   // Jobs are only removed once they are finished — an open job is
@@ -2789,7 +2995,7 @@ function retentionSweep() {
 
 route('GET', '/api/retention', CONTROL, () => ({
   policy_days: RETENTION,
-  counts: Object.fromEntries(['locations', 'audit_logs', 'messages', 'jobs', 'site_visits']
+  counts: Object.fromEntries(['locations', 'audit_logs', 'messages', 'jobs', 'site_visits', 'dial_log', 'passdown_logs']
     .map((t) => [t, db[t].length])),
   note: 'Location history is the most intrusive data here and is kept for the shortest time.',
 }));
@@ -2982,18 +3188,18 @@ function welfareTick() {
 route('POST', '/api/personnel/:id/welfare', ALL, ({ params, body, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
   if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
-  return publicPersonnel(startWelfare(p, Number(body.interval_s), body.note, user));
+  return publicPersonnel(startWelfare(p, Number(body.interval_s), body.note, user), user);
 });
 route('POST', '/api/personnel/:id/welfare/check', ALL, ({ params, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
   if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
-  return publicPersonnel(checkInWelfare(p, user));
+  return publicPersonnel(checkInWelfare(p, user), user);
 });
 route('DELETE', '/api/personnel/:id/welfare', ALL, ({ params, user }) => {
   const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
   if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not you');
   if (!p.welfare_due_at) throw httpError(409, 'no welfare timer running');
-  return publicPersonnel(stopWelfare(p, user.role === 'FIELD_USER' ? 'cancelled by officer' : 'cancelled by control', user));
+  return publicPersonnel(stopWelfare(p, user.role === 'FIELD_USER' ? 'cancelled by officer' : 'cancelled by control', user), user);
 });
 
 /* Sites under contract — what alarm response jobs are attached to. */
@@ -3592,7 +3798,7 @@ route('GET', '/api/shifts', ALL, ({ query, user }) => {
   if (personnelId) for (const s of out) s.my = s.assignments.find((a) => a.personnel_id === personnelId) || null;
   return out;
 });
-route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
+route('POST', '/api/shifts', ADMIN, ({ body, user }) => {
   const startsAt = body.starts_at ? new Date(body.starts_at) : null;
   const endsAt = body.ends_at ? new Date(body.ends_at) : null;
   if (!startsAt || isNaN(startsAt) || !endsAt || isNaN(endsAt)) throw httpError(400, 'starts_at and ends_at (ISO timestamps) required');
@@ -3646,12 +3852,8 @@ route('POST', '/api/shifts', CONTROL, ({ body, user }) => {
   logEvent('shift.created', `SHIFT CREATED (${type.name}) ${s.starts_at} — ${s.ends_at}${firstAssignment ? ` FOR ${findPersonnel(firstAssignment.personnel_id).name}` : ''}`, { shift_id: s.id });
   return { __status: 201, __body: pub };
 });
-route('PATCH', '/api/shifts/:id', CONTROL, ({ params, body, user }) => {
+route('PATCH', '/api/shifts/:id', ADMIN, ({ params, body, user }) => {
   const s = findShift(params.id);
-  // A scoped SUPERVISOR can't edit a shift outside their patch, and can't
-  // use this route to move one of their own shifts to a site outside it
-  // either — checked against both the shift's current site and, if it's
-  // changing, the one it's moving to.
   if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   if ('site_id' in body && body.site_id && !siteVisibleTo(Number(body.site_id), user)) throw httpError(404, 'site not found');
   const wasDraft = s.status === 'DRAFT';
@@ -3716,7 +3918,7 @@ function assertAssignmentAccess(a, user) {
   if (user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id) return;
   throw httpError(403, 'not your shift');
 }
-route('POST', '/api/shifts/:id/assignments', CONTROL, ({ params, body, user }) => {
+route('POST', '/api/shifts/:id/assignments', ADMIN, ({ params, body, user }) => {
   const s = findShift(params.id);
   if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   const p = findPersonnel(body.personnel); if (!p) throw httpError(400, 'personnel required');
@@ -3741,22 +3943,26 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   const a = findAssignment(params.id);
   const s = findShift(a.shift_id);
   const isOwn = user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id;
-  const isControl = isControlRole(user.role);
-  if (!isOwn && !isControl) throw httpError(403, 'not your shift');
-  if (!isOwn && isControl && !siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
+  // Editing WHO is on a shift, and how, is admin-only now (dispatchers and
+  // officers are read-only on the rota) — confirming or declining your own
+  // offered shift is a different, self-service action and stays open to
+  // the assignee regardless.
+  const isAdmin = user.role === 'SYSTEM_ADMIN';
+  if (!isOwn && !isAdmin) throw httpError(403, 'not your shift');
+  if (!isOwn && isAdmin && !siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   let justRemoved = false;
   if ('status' in body) {
     const status = String(body.status || '').toUpperCase();
     if (!SHIFT_ASSIGNMENT_STATES.includes(status)) throw httpError(400, 'invalid status');
     if (isOwn && !['CONFIRMED', 'DECLINED'].includes(status)) throw httpError(403, 'you can only confirm or decline your own assignment');
-    if (status === 'REMOVED' && !isControl) throw httpError(403, 'insufficient role');
+    if (status === 'REMOVED' && !isAdmin) throw httpError(403, 'insufficient role');
     justRemoved = status === 'REMOVED' && a.status !== 'REMOVED';
     a.status = status;
     if (status === 'CONFIRMED') a.confirmed_at = new Date().toISOString();
   }
-  if ('role_on_shift' in body && isControl) a.role_on_shift = body.role_on_shift || '';
-  if ('is_duty_supervisor' in body && isControl) a.is_duty_supervisor = Boolean(body.is_duty_supervisor);
-  if ('attendance' in body && isControl) {
+  if ('role_on_shift' in body && isAdmin) a.role_on_shift = body.role_on_shift || '';
+  if ('is_duty_supervisor' in body && isAdmin) a.is_duty_supervisor = Boolean(body.is_duty_supervisor);
+  if ('attendance' in body && isAdmin) {
     if (body.attendance !== null && !ATTENDANCE_STATES.includes(body.attendance)) throw httpError(400, 'invalid attendance');
     a.attendance = body.attendance;
   }
@@ -3764,9 +3970,9 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   s.revision = (s.revision || 0) + 1;
   const pub = publicShift(s);
   broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [a.personnel_id] });
-  // A control-initiated removal is news to the officer; their own
+  // An admin-initiated removal is news to the officer; their own
   // confirm/decline is something they just did, so it needs no echo back.
-  if (justRemoved && isControl && s.status !== 'DRAFT') notifyShiftEvent('REMOVED', s, [a.personnel_id]);
+  if (justRemoved && isAdmin && s.status !== 'DRAFT') notifyShiftEvent('REMOVED', s, [a.personnel_id]);
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   logEvent('shift_assignment.updated', `${p ? p.name : 'PERSON'} ON SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
@@ -3808,6 +4014,20 @@ route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, body, user
   logEvent('shift.clocked_out', `${p ? p.name : 'PERSON'} CLOCKED OUT`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
 });
+
+/* Ad hoc clock-in — covering work nobody rostered (someone called in sick,
+ * a last-minute cover request). Rather than a parallel attendance system,
+ * this creates a genuine shift + assignment on the fly (status IN_PROGRESS,
+ * detail.adhoc true to flag it apart on the rota) and clocks the caller
+ * into it immediately, through the exact same geofence check as a normal
+ * clock-in — from here on it IS a normal shift: clock-out, breaks, hours,
+ * auto-clock-out-on-leaving-site, all the existing attendance machinery
+ * applies untouched. A generous 12h placeholder end time stands in for a
+ * real rostered end — the shift is still open until they clock out. */
+// Kept for the officer app's "Not rostered? Clock in anyway" — the same
+// ad-hoc clock-in as POST /api/timeclock/clock-in (a reason, and control
+// approves it; see routes-timeclock.js).
+route('POST', '/api/shifts/adhoc', ['FIELD_USER', ...CONTROL], ({ body, user }) => timeclock.clockInAdHoc(body, user));
 
 /* ---- Personal iCal feed — a long unguessable token stands in for a
  * login, the same trust model as a webhook URL, since a calendar client
@@ -3884,8 +4104,9 @@ require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, f
 
 // Breaks, hours, geofenced clock-in, reminders — see routes-attendance.js.
 const attendance = require('./routes-attendance.js')({
-  route, httpError, ALL, CONTROL, db, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
+  route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+  createEmergencyJob, forwardEmergencyToAura,
 });
 
 
@@ -3932,7 +4153,7 @@ require('./routes-mobile.js')({ route, httpError, db, sections, visibleToUser })
 // Configurable forms. Registrar pattern — see routes-forms.js for why.
 const forms = require('./routes-forms.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
-  assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
+  assertJobAccess, assertVisitAccess, pushToUsers, pushToRoles, CONTROL, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
   applyVehicleReport, reapplyVehicleReport, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html), publicBaseUrl: PUBLIC_BASE_URL,
   vehicleKit: (id) => inventory.vehicleKit(id), assetEvent: (e) => db.asset_events.push({ id: nextId('asset_events'), ...e }),
 });
@@ -3940,7 +4161,7 @@ const forms = require('./routes-forms.js')({
 // Client portal — see routes-client.js for the trust-boundary invariants.
 require('./routes-client.js')({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess,
+  isControlRole, assertPassdownAccess, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, sign, hashPassword, forms,
 });
 
 // Finance — a read-only view of cost/billing figures. See routes-finance.js.
@@ -3973,7 +4194,7 @@ const shiftApplications = require('./routes-shift-applications.js')({
 
 // Vehicle/asset allocation and the stock ledger — see routes-fleet-stock.js.
 require('./routes-fleet-stock.js')({
-  route, httpError, ALL, CONTROL, db, nextId, logEvent,
+  route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent,
   findShift, publicVehicleAllocation, publicAssetAllocation, publicAsset, stockLevel, recordStockMovement,
 });
 
@@ -4117,6 +4338,66 @@ route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
   db.users = db.users.filter((x) => x.id !== u.id);
   logEvent('user.deleted', `USER ${u.username} DELETED`, { user_id: u.id });
   return { ok: true };
+});
+/** Staff sign in with Microsoft 365, not a password — there's nothing to
+ * "reset" for them the way there is for a CLIENT login (see
+ * POST /api/clients/:id/send-password-link), just an explanation of how
+ * SSO works and which email it's matched against. Sends by whichever of
+ * email/SMS it can: `u.email` for email (the same field SSO matching
+ * already uses), the linked personnel record's contact_phone for SMS
+ * (respecting sms_opt_out, same as every other SMS in this codebase) —
+ * refuses outright only if neither is reachable at all. */
+route('POST', '/api/users/:id/send-welcome-link', ADMIN, async ({ params }) => {
+  const u = db.users.find((x) => x.id === Number(params.id));
+  if (!u) throw httpError(404, 'user not found');
+  const person = u.personnel_id ? db.personnel.find((p) => p.id === u.personnel_id) : null;
+  const email = u.email || (person && person.contact_email) || null;
+  const phone = person && !person.sms_opt_out ? sms.normalizeNumber(person.contact_phone) : null;
+  if (!email && !phone) throw httpError(400, 'this account has no email or phone number on file to send to');
+  const first = (u.display_name || u.username).split(/\s+/)[0];
+  const loginUrl = `${PUBLIC_BASE_URL}/index.html`;
+  const sent = { email: false, sms: false };
+  if (email) {
+    const NAVY = '#0c1624', AMBER = '#f2a93c';
+    const html = `<!doctype html><html><body style="margin:0;padding:0;background:#e2e5ea;font-family:Arial,Helvetica,sans-serif;color:#111827">
+      <div style="max-width:560px;margin:0 auto">
+        <div style="background:${NAVY};padding:30px 32px 26px">
+          <img src="cid:echelon-wordmark" height="24" alt="Echelon" style="display:block;margin:0 0 22px;border:0">
+          <p style="margin:0 0 10px;color:${AMBER};font-size:11px;font-weight:bold;letter-spacing:.14em;text-transform:uppercase">Your account</p>
+          <h1 style="margin:0 0 10px;color:#ffffff;font-size:21px;line-height:1.3">You're set up on CCCS, ${escHtml(first)}.</h1>
+          <p style="margin:0;color:#9fb0c3;font-size:14px;line-height:1.5">Sign in with your work Microsoft 365 account — there's no separate password to remember.</p>
+        </div>
+        <div style="background:#ffffff;padding:28px 32px">
+          <ol style="margin:0 0 20px;padding-left:20px;font-size:14px;line-height:1.8">
+            <li>Go to <a href="${loginUrl}">${PUBLIC_BASE_URL.replace(/^https?:\/\//, '')}</a></li>
+            <li>Choose <strong>Sign in with Microsoft</strong></li>
+            <li>Sign in with your work account${email ? ` (${escHtml(email)})` : ''}</li>
+          </ol>
+          <div style="text-align:center">
+            <a href="${loginUrl}" style="display:inline-block;background:${NAVY};color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-size:14px;font-weight:bold">Sign in &rarr;</a>
+          </div>
+        </div>
+        <div style="background:${NAVY};padding:18px 32px">
+          <p style="margin:0;color:#475569;font-size:10.5px;line-height:1.6">Sent automatically by CCCS &mdash; comms.echeloncic.com</p>
+        </div>
+      </div>
+    </body></html>`;
+    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark.png');
+    const attachments = fs.existsSync(logoFile)
+      ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
+      : [];
+    const r = await mailer.send(email, 'Your Echelon CCCS account', html, { attachments });
+    writeNotifyLog({ channel: 'EMAIL', personnel_id: person ? person.id : null, to_email: email, body: 'Welcome link sent', provider: r.ok ? 'graph' : 'none', outcome: r.ok ? 'QUEUED' : 'FAILED', error_code: r.ok ? null : r.error });
+    sent.email = Boolean(r.ok);
+  }
+  if (phone) {
+    const body = `Hi ${first}, your CCCS account is ready. Go to ${PUBLIC_BASE_URL.replace(/^https?:\/\//, '')} and choose "Sign in with Microsoft" using your work account. — Echelon`;
+    const r = await sms.send({ to: phone, body, label: u.display_name });
+    writeNotifyLog({ channel: 'SMS', personnel_id: person ? person.id : null, to_number: phone, body, provider: r.dryRun ? 'none' : 'twilio', provider_ref: r.sid || null, outcome: r.ok ? (r.dryRun ? 'ATTEMPTED' : 'QUEUED') : 'FAILED', error_code: r.ok ? null : (r.error || 'send failed') });
+    sent.sms = Boolean(r.ok);
+  }
+  logEvent('user.welcome_link_sent', `WELCOME LINK SENT TO ${u.username} (email: ${sent.email ? 'yes' : 'no'}, sms: ${sent.sms ? 'yes' : 'no'})`, { user_id: u.id });
+  return sent;
 });
 
 /* Branches — see the comment on BRANCH_SCOPED_ROLES for what this does and
@@ -4329,7 +4610,9 @@ function start() {
   if (installed) { logEvent('form.defaults_installed', `${installed} STANDARD FORMS INSTALLED`); store.flushNow(); }
   if (forms.ensureApplicationForm()) { logEvent('form.defaults_installed', 'PUBLIC JOB APPLICATION FORM INSTALLED'); store.flushNow(); }
   const vehicleForms = forms.ensureVehicleForms();
-  if (vehicleForms) { logEvent('form.defaults_installed', `${vehicleForms} VEHICLE FORM(S) INSTALLED (FUEL-UP / DEEP CLEAN)`); store.flushNow(); }
+  if (vehicleForms) { logEvent('form.defaults_installed', `${vehicleForms} FORM(S) INSTALLED (FUEL-UP / DEEP CLEAN / INCIDENT / USE OF FORCE)`); store.flushNow(); }
+  const severityAdded = forms.ensureIncidentSeverity();
+  if (severityAdded) { logEvent('form.defaults_installed', `SEVERITY FIELD ADDED TO ${severityAdded} INCIDENT-TYPE FORM(S)`); store.flushNow(); }
   // Same additive-and-idempotent shape as forms.installDefaults() — runs
   // once, only while the table is empty, so an admin's own edits (renaming
   // one, adding a sixth) are never overwritten on a later boot.

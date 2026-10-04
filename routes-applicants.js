@@ -168,7 +168,7 @@ module.exports = function registerApplicantRoutes({
    * candidate must be reopened deliberately (PATCH status back to an
    * earlier stage) before they can be hired, not hired past a decision
    * that was already made about them. */
-  route('POST', '/api/applicants/:id/hire', ADMIN, ({ params, body }) => {
+  route('POST', '/api/applicants/:id/hire', ADMIN, ({ params, body, user }) => {
     const a = findApplicant(params.id);
     if (!a) throw httpError(404, 'applicant not found');
     if (a.status === 'HIRED') throw httpError(409, 'already hired');
@@ -183,6 +183,8 @@ module.exports = function registerApplicantRoutes({
       employment_status: 'ACTIVE', callsign_id: null, user_id: null, vehicle_id: null,
       welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: null,
       notes: `Hired via applicant tracking — applicant #${a.id}.`, branch_id: a.branch_id || null,
+      start_date: body.start_date && !isNaN(Date.parse(body.start_date)) ? String(body.start_date).slice(0, 10) : new Date().toISOString().slice(0, 10),
+      onboarding_completed_at: null, onboarding_completed_by: null,
       lat: null, lon: null, location_at: null,
     };
     // Everything from the application goes onto their personnel file.
@@ -213,7 +215,7 @@ module.exports = function registerApplicantRoutes({
     if (body.notify !== false) emailApplicant(a, 'HIRED');
     flushNow();
     logEvent('applicant.hired', `${a.name} HIRED AS ${p.name} (personnel #${p.id})`, { applicant_id: a.id, personnel_id: p.id });
-    return { __status: 201, __body: { applicant: publicApplicant(a), personnel: publicPersonnel(p) } };
+    return { __status: 201, __body: { applicant: publicApplicant(a), personnel: publicPersonnel(p, user) } };
   });
 
   route('POST', '/api/applicants/:id/notes', CONTROL, ({ params, body, user }) => {
