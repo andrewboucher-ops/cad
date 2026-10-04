@@ -13,12 +13,16 @@
  *   2. CLIENT is deliberately NOT in server.js's ALL — see the comment on
  *      ROLES there. Nothing here, or anywhere, should widen that.
  *
- * V1 scope, on purpose: the client-facing site report omits the incident
- * list. routes-forms.js's canRead() is "control roles, or the filer, or a
- * named grant" — extending that to "or a client who owns the site" is a
- * real change to a security-critical invariant and deserves its own
- * careful pass, not a bolt-on here. Jobs/visits/response-time numbers carry
- * no personnel names and are safe to ship now; incidents are a follow-up.
+ * Incident visibility, deliberately NOT via routes-forms.js's canRead().
+ * canRead() answers "which staff may read this" (control roles, the filer,
+ * a named grant) — extending it to "or a client who owns the site" would
+ * change a security-critical invariant for every staff caller too, for a
+ * question canRead() was never asked. A client instead sees only a report an
+ * admin has explicitly released: routes-forms.js's client_share gate is a
+ * separate, opt-in, per-report decision with its own redacted copy (never
+ * raw values, never submitted_by, never a photo or signature) — see
+ * forms.clientVisibleSubmissions() there. Jobs/visits/response-time numbers
+ * carry no personnel names and were always safe to ship without this.
  *
  * Real-time push for the client dashboard is also a follow-up: broadcast()
  * in server.js only delivers to a CLIENT socket when a call explicitly
@@ -54,7 +58,7 @@ const CLIENT_REQUEST_STATUSES = ['OPEN', 'ACKNOWLEDGED', 'CLOSED'];
 
 module.exports = function registerClientRoutes({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl, sign, hashPassword,
+  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl, sign, hashPassword, forms,
 }) {
   for (const t of ['clients', 'documents', 'client_requests']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -493,6 +497,7 @@ module.exports = function registerClientRoutes({
     const { from, to, inRange } = parseRange(query);
     const jobs = db.jobs.filter((j) => j.site_id === site.id && inRange(j.created_at));
     const visits = db.site_visits.filter((v) => v.site_id === site.id && inRange(v.scheduled_for));
+    const incidents = forms.clientVisibleSubmissions([site.id]).filter((s) => inRange(s.occurred_at));
     const responseMinutes = jobs.filter((j) => j.on_scene_at).map((j) => (Date.parse(j.on_scene_at) - Date.parse(j.created_at)) / 60000);
     const avgResponseMinutes = responseMinutes.length ? Math.round((responseMinutes.reduce((a, b) => a + b, 0) / responseMinutes.length) * 10) / 10 : null;
     return {
@@ -506,7 +511,17 @@ module.exports = function registerClientRoutes({
         total: visits.length, completed: visits.filter((v) => v.status === 'COMPLETED').length,
         missed: visits.filter((v) => v.status === 'MISSED').length, cancelled: visits.filter((v) => v.status === 'CANCELLED').length,
       },
+      incidents: { total: incidents.length },
     };
+  });
+  /** The redacted reports an admin has explicitly released for this site —
+   * see routes-forms.js's client_share gate and clientVisibleSubmissions().
+   * Never raw values, never who filed it: only what an admin typed into the
+   * share request. */
+  route('GET', '/api/client/sites/:id/incidents', CLIENT_OR_ADMIN, ({ params, query, user }) => {
+    const client = requireClient(user, query);
+    const site = ownedSite(client, params.id);
+    return forms.clientVisibleSubmissions([site.id]);
   });
   route('GET', '/api/client/documents', CLIENT_OR_ADMIN, ({ user, query }) => {
     const client = requireClient(user, query);

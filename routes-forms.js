@@ -86,9 +86,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { Doc, A4 } = require('./pdf.js');
 
 const VISIBILITIES = ['STANDARD', 'RESTRICTED'];
 const SUBJECT_TYPES = ['JOB', 'SITE_VISIT', 'SITE', 'PERSONNEL', 'VEHICLE', 'APPLICATION'];
+const SUBJECT_LABEL = { JOB: 'Job', SITE_VISIT: 'Patrol visit', SITE: 'Site', PERSONNEL: 'Person', VEHICLE: 'Vehicle' };
 const REVIEW_OUTCOMES = ['APPROVED', 'REJECTED', 'NOTED'];
 const EFFECTS = ['FUEL_UP', 'DEEP_CLEAN', 'INSPECTION'];
 /** The fields each effect reads: [id, type, required]. */
@@ -98,11 +100,18 @@ const EFFECT_FIELDS = {
   INSPECTION: [['odometer', 'number', false]],
 };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const FIELD_TYPES = ['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime', 'signature', 'photo'];
+const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+const FIELD_TYPES = ['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime', 'signature', 'photo', 'severity'];
 const MAX_FIELDS = 60;
 const MAX_FILES = 10;
 const SIGNATURE_MAX_BYTES = 500e3;
 const PHOTO_MAX_BYTES = 8e6;
+// A report filed against one of these resolves to a real site, so it's the
+// only subject shape a redacted copy can be released to that site's client
+// portal — a VEHICLE report is a fleet matter and a PERSONNEL report is
+// about a specific staff member, neither of which is "about a client's site"
+// no matter how it's redacted.
+const CLIENT_SHAREABLE_SUBJECT_TYPES = ['JOB', 'SITE_VISIT', 'SITE'];
 
 // Magic bytes, checked rather than trusting the declared mimetype: these
 // files are served back to other people's browsers.
@@ -240,6 +249,7 @@ const DEFAULT_EXTRA_FORMS = [
     description: 'Anything that happened on duty that needs writing up.',
     fields: [
       { id: 'occurred_at', label: 'When it happened', type: 'datetime', required: true },
+      { id: 'severity', label: 'Severity', type: 'severity', required: true, help: 'HIGH or CRITICAL alerts control immediately.' },
       { id: 'incident_type', label: 'Type', type: 'select', required: true, options: ['Theft', 'Criminal damage', 'Anti-social behaviour', 'Trespass', 'Assault', 'Suspicious activity', 'Fire or alarm', 'Medical', 'Health and safety', 'Other'] },
       { id: 'location', label: 'Exact location', type: 'text' },
       { id: 'description', label: 'What happened', type: 'textarea', required: true },
@@ -260,6 +270,7 @@ const DEFAULT_EXTRA_FORMS = [
     description: 'Any physical force used on duty, including restraint — required whenever force is used, whether or not anyone was hurt.',
     fields: [
       { id: 'occurred_at', label: 'Time force was used', type: 'datetime', required: true },
+      { id: 'severity', label: 'Severity', type: 'severity', required: true, help: 'HIGH or CRITICAL alerts control immediately.' },
       { id: 'subject_name', label: 'Name of the person force was used against (if known)', type: 'text' },
       { id: 'subject_description', label: 'Description (if not known by name)', type: 'textarea' },
       { id: 'reason', label: 'Reason force was necessary', type: 'select', required: true, options: ['Self-defence', 'Defence of another person', 'Prevention of a crime', 'Effecting a lawful arrest or detention', 'Preventing escape', 'Other'] },
@@ -307,7 +318,8 @@ const DEFAULT_APPLICATION_FORM = {
 
 module.exports = function registerFormRoutes({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
-  assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow = () => {},
+  assertJobAccess, assertVisitAccess, pushToUsers, pushToRoles = () => {}, CONTROL = [],
+  UPLOADS_DIR, MIME, flushNow = () => {},
   applyVehicleReport = () => {}, reapplyVehicleReport = () => {}, sendEmail = null, publicBaseUrl = '',
   vehicleKit = null, assetEvent = () => {},
 }) {
@@ -359,13 +371,15 @@ module.exports = function registerFormRoutes({
       definition_name: sub.definition_name, definition_version: sub.definition_version,
       visibility: effectiveVisibility(sub),
       subject_type: sub.subject_type, subject_id: sub.subject_id, subject_label: sub.subject_label,
-      fields: sub.fields, values,
+      fields: sub.fields, values, geo: sub.geo || null,
       submitted_by: sub.submitted_by_name, submitted_by_user_id: sub.submitted_by_user_id,
       submitted_at: sub.submitted_at,
       status: sub.status || 'OPEN', outcome: sub.outcome || null, feedback: sub.feedback || null,
       actioned_by: sub.actioned_by || null, actioned_at: sub.actioned_at || null,
       amendments: sub.amendments || [],
       kit_check: sub.kit_check || null,
+      client_shareable: CLIENT_SHAREABLE_SUBJECT_TYPES.includes(sub.subject_type),
+      client_share: sub.client_share || null,
     };
   }
 
@@ -509,6 +523,27 @@ module.exports = function registerFormRoutes({
     return added;
   }
 
+  /** Adds the severity field to the two default incident-type forms if they
+   * exist and don't have it yet. Same additive-and-idempotent shape as
+   * ensureVehicleForms() above, for a database whose incident-report/
+   * use-of-force forms were installed before severity existed. Bumps the
+   * form's version like any other field change (PATCH /api/form-definitions
+   * already does this for an admin's own edits) — reports already filed keep
+   * the field list they were filled against. An admin's own edits to these
+   * forms since are respected: this only ever adds the one field, once. */
+  function ensureIncidentSeverity() {
+    const SEVERITY_FIELD = { id: 'severity', label: 'Severity', type: 'severity', required: true, help: 'HIGH or CRITICAL alerts control immediately.' };
+    let changed = 0;
+    for (const key of ['incident-report', 'use-of-force']) {
+      const d = db.form_definitions.find((x) => x.key === key);
+      if (!d || d.fields.some((f) => f.type === 'severity')) continue;
+      d.fields = [d.fields[0], SEVERITY_FIELD, ...d.fields.slice(1)];
+      d.version += 1;
+      changed++;
+    }
+    return changed;
+  }
+
   /** What the public page renders; null when applications are closed. */
   const activeApplicationForm = () => db.form_definitions.find((d) => d.active && isApplicationForm(d)) || null;
 
@@ -591,6 +626,9 @@ module.exports = function registerFormRoutes({
         }
         case 'select':
           if (!f.options.includes(String(v))) throw httpError(400, `${f.label}: not one of the options`);
+          values[f.id] = String(v); break;
+        case 'severity':
+          if (!SEVERITIES.includes(String(v))) throw httpError(400, `${f.label} must be one of ${SEVERITIES.join(', ')}`);
           values[f.id] = String(v); break;
         case 'checkbox':
           if (typeof v !== 'boolean') throw httpError(400, `${f.label} must be true or false`);
@@ -739,6 +777,18 @@ module.exports = function registerFormRoutes({
     if (!d.subject_types.includes(subjectType)) throw httpError(400, `"${d.name}" cannot be filed against a ${subjectType || 'missing subject'}`);
     const subjectLabel = resolveSubject(subjectType, body.subject_id, user);
     const { values, files } = validateValues(d.fields, body.values);
+    // Best-effort proof of presence: the device's own geolocation at the
+    // moment of filing, not a field anyone fills in. Silently absent when the
+    // browser didn't provide one (denied, unsupported, or indoors with no
+    // fix) — a report is never blocked on it.
+    let geo = null;
+    if (body.geo && typeof body.geo === 'object') {
+      const lat = Number(body.geo.lat), lon = Number(body.geo.lon);
+      if (Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+        const acc = Number(body.geo.accuracy);
+        geo = { lat, lon, accuracy: Number.isFinite(acc) ? Math.round(acc) : null };
+      }
+    }
     // A vehicle report can also say, item by item, whether the kit kept on
     // that vehicle is there (First aid bag 01: present / missing). Only the
     // vehicle's own kit, checked on the server — not whatever was sent.
@@ -762,9 +812,9 @@ module.exports = function registerFormRoutes({
       subject_type: subjectType, subject_id: Number(body.subject_id), subject_label: subjectLabel,
       values, files: files.map(({ file_id, field_id, mimetype }) => ({ file_id, field_id, mimetype, filename: `${file_id}${IMAGE_EXT[mimetype]}` })),
       submitted_by_user_id: user.id, submitted_by_name: user.display_name, submitted_by_personnel_id: user.personnel_id || null,
-      submitted_at: now.toISOString(),
+      submitted_at: now.toISOString(), geo,
       status: 'OPEN', outcome: null, feedback: null, actioned_by: null, actioned_at: null,
-      kit_check: kitCheck,
+      kit_check: kitCheck, client_share: null,
     };
     if (files.length) {
       const dir = formFilesDir(id);
@@ -785,6 +835,15 @@ module.exports = function registerFormRoutes({
       // Control-only (targeted with an empty officer list); officers see
       // their own via the list route.
       broadcast('form.submitted', submissionSummary(sub), { personnelIds: [] });
+      // A HIGH/CRITICAL severity answer is itself the signal to escalate —
+      // same push channel the dashboard's other alerts use, on top of (not
+      // instead of) the ordinary broadcast above, so control sees it land on
+      // the board too, not only in a notification.
+      const severityField = d.fields.find((f) => f.type === 'severity');
+      const severity = severityField ? values[severityField.id] : null;
+      if (severity === 'HIGH' || severity === 'CRITICAL') {
+        pushToRoles(CONTROL, { title: `${severity} severity — ${sub.reference}`, body: `${d.name}: ${subjectLabel}`, url: `/forms.html?id=${sub.id}`, tag: 'cccs-incident-severity' });
+      }
     }
     if (d.effect && subjectType === 'VEHICLE') {
       try { applyVehicleReport(d.effect, sub.subject_id, values, user, sub); sub.effect_applied = d.effect; }
@@ -922,6 +981,138 @@ module.exports = function registerFormRoutes({
   });
 
   /**
+   * Sharing a redacted copy with the client whose site the report is about.
+   * Deliberately separate from RESTRICTED/STANDARD, which governs STAFF
+   * read access: a RESTRICTED report can be shared too, once an admin has
+   * reviewed it and written a copy fit for an outsider to read — sharing is
+   * an admin decision about disclosure, not a side effect of visibility.
+   *
+   * There is no automatic redaction. A name can appear anywhere in a free
+   * narrative, not just in a field called "name", so the only values that
+   * ever leave for a client are the ones an admin typed into this request —
+   * never sub.values itself. Signatures and photos are never included in a
+   * shared copy at all (a signature IS a name; a photo may show a face) —
+   * stripped here regardless of what the request sends, not merely by
+   * instruction to the admin UI.
+   *
+   * Gated to ADMIN, the same bar as actioning a report and deleting an
+   * actioned one — the highest in this file, because this is the one action
+   * that sends a report's content outside the business.
+   */
+  function cleanSharedValues(fields, raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(400, 'values must be an object');
+    const known = new Set(fields.map((f) => f.id));
+    for (const k of Object.keys(raw)) if (!known.has(k)) throw httpError(400, `unknown field ${k}`);
+    const values = {};
+    for (const f of fields) {
+      if (f.type === 'signature' || f.type === 'photo') continue; // never shared, whatever is sent
+      const v = raw[f.id];
+      if (v === undefined || v === null || v === '') continue; // omitted = left out of the shared copy
+      switch (f.type) {
+        case 'text': values[f.id] = String(v).trim().slice(0, 500); break;
+        case 'textarea': values[f.id] = String(v).trim().slice(0, 5000); break;
+        case 'number': { const n = Number(v); if (!Number.isFinite(n)) throw httpError(400, `${f.label} must be a number`); values[f.id] = n; break; }
+        case 'select': if (!f.options.includes(String(v))) throw httpError(400, `${f.label}: not one of the options`); values[f.id] = String(v); break;
+        case 'severity': if (!SEVERITIES.includes(String(v))) throw httpError(400, `${f.label} must be one of ${SEVERITIES.join(', ')}`); values[f.id] = String(v); break;
+        case 'checkbox': values[f.id] = Boolean(v); break;
+        case 'date': values[f.id] = String(v).slice(0, 10); break;
+        case 'datetime': if (isNaN(Date.parse(v))) throw httpError(400, `${f.label} must be a date and time`); values[f.id] = new Date(v).toISOString(); break;
+        default: break;
+      }
+    }
+    return values;
+  }
+  route('POST', '/api/form-submissions/:id/share', ADMIN, ({ params, body, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if (!CLIENT_SHAREABLE_SUBJECT_TYPES.includes(sub.subject_type)) throw httpError(400, `a report about a ${sub.subject_type.toLowerCase()} cannot be shared with a client`);
+    const values = cleanSharedValues(sub.fields, (body && body.values) || {});
+    const subjectLabel = String((body && body.subject_label) || '').trim().slice(0, 200) || sub.subject_label;
+    sub.client_share = { values, subject_label: subjectLabel, shared_by: user.display_name, shared_by_user_id: user.id, shared_at: new Date().toISOString() };
+    logEvent('form.shared_with_client', `${sub.reference} SHARED WITH CLIENT BY ${user.username} (redacted copy)`, { submission_id: sub.id });
+    flushNow();
+    return publicSubmission(sub);
+  });
+  route('DELETE', '/api/form-submissions/:id/share', ADMIN, ({ params, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if (!sub.client_share) throw httpError(409, 'not currently shared with a client');
+    sub.client_share = null;
+    logEvent('form.unshared_with_client', `${sub.reference} UNSHARED FROM CLIENT BY ${user.username}`, { submission_id: sub.id });
+    flushNow();
+    return publicSubmission(sub);
+  });
+
+  /** Brand-styled single-report PDF — same navy/amber language and logo
+   * treatment as the invoice and contract PDFs (routes-invoices.js,
+   * routes-agreements.js), for printing or attaching a report to an email,
+   * a claim or a police reference. A photo is embedded only when it's a
+   * JPEG — pdf.js's Doc only embeds JPEG (DCTDecode); a PNG photo (none of
+   * the defaults produce one, but a custom form could) is noted instead of
+   * silently dropped. */
+  const FORM_NAVY = [0.047, 0.086, 0.141], FORM_AMBER = [0.949, 0.663, 0.235], FORM_WHITE = [1, 1, 1];
+  const fmtLong = (iso) => (iso ? new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
+  function submissionPdf(sub) {
+    const grey = [0.35, 0.38, 0.42];
+    const doc = new Doc({ footer: `Echelon — report ${sub.reference}` });
+    const bandH = 100;
+    doc.rect(0, A4.h - bandH, A4.w, bandH, { fill: FORM_NAVY, stroke: null });
+    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark-navy.jpg');
+    if (fs.existsSync(logoFile)) { doc.y = A4.h - 30; doc.image(fs.readFileSync(logoFile), { maxH: 20, maxW: 170, x: doc.margin }); }
+    else doc.text('ECHELON', doc.margin, A4.h - 40, { size: 17, bold: true, color: FORM_WHITE });
+    const label = effectiveVisibility(sub) === 'RESTRICTED' ? 'RESTRICTED REPORT' : 'FIELD REPORT';
+    const rightEdge = A4.w - doc.margin;
+    doc.text(label, rightEdge - doc.textWidth(label, 10, true), A4.h - 36, { size: 10, bold: true, color: FORM_AMBER });
+    doc.text(sub.reference, rightEdge - doc.textWidth(sub.reference, 14, true), A4.h - 54, { size: 14, bold: true, color: FORM_WHITE });
+    doc.y = A4.h - bandH - 26;
+
+    doc.heading(sub.definition_name, 13);
+    const severityField = sub.fields.find((f) => f.type === 'severity');
+    doc.pairs([
+      [SUBJECT_LABEL[sub.subject_type] || sub.subject_type, sub.subject_label],
+      ['Filed by', sub.submitted_by_name],
+      ['Filed at', fmtLong(sub.submitted_at)],
+      ...(severityField && sub.values[severityField.id] ? [['Severity', sub.values[severityField.id]]] : []),
+      ...(sub.geo ? [['Location', `${sub.geo.lat.toFixed(5)}, ${sub.geo.lon.toFixed(5)}${sub.geo.accuracy ? ` (±${sub.geo.accuracy}m)` : ''}`]] : []),
+      ['Status', sub.status === 'ACTIONED' ? `${sub.outcome} — by ${sub.actioned_by}, ${fmtLong(sub.actioned_at)}` : 'Open — not yet reviewed'],
+    ], { labelWidth: 110 });
+    doc.rule();
+
+    const valStr = (f) => {
+      const v = sub.values[f.id];
+      if (v === null || v === undefined || v === '') return '—';
+      if (f.type === 'checkbox') return v ? 'Yes' : 'No';
+      if (f.type === 'datetime') return fmtLong(v);
+      if (f.type === 'signature') return `Signed by ${v.signer_name} — ${fmtLong(v.signed_at)}`;
+      if (f.type === 'photo') return 'Photo on file — see below, or view in CCCS';
+      return String(v);
+    };
+    doc.pairs(sub.fields.filter((f) => f.type !== 'signature' && f.type !== 'photo').map((f) => [f.label, valStr(f)]), { labelWidth: 220 });
+
+    for (const f of sub.fields.filter((x) => x.type === 'photo')) {
+      const v = sub.values[f.id];
+      const fileRec = v && sub.files.find((x) => x.file_id === v.file_id);
+      if (!fileRec) continue;
+      doc.heading(f.label, 10);
+      if (fileRec.mimetype === 'image/jpeg') {
+        try {
+          const filePath = path.join(formFilesDir(sub.id), fileRec.filename);
+          doc.image(fs.readFileSync(filePath), { maxW: 260, maxH: 200, x: doc.margin });
+          continue;
+        } catch (e) { console.warn(`[forms] could not embed photo for ${sub.reference}:`, e.message); }
+      }
+      doc.para('Photo on file — not embedded in this PDF; view it in CCCS.', { size: 9, color: grey });
+    }
+    if (sub.feedback) { doc.heading('Review feedback', 11); doc.para(sub.feedback, { size: 9.5 }); }
+    return doc.toBuffer();
+  }
+  route('GET', '/api/form-submissions/:id/pdf', ALL, ({ params, user }) => {
+    const sub = readableSubmission(params.id, user);
+    return {
+      __body: submissionPdf(sub),
+      __headers: { 'content-type': 'application/pdf', 'content-disposition': `inline; filename="${sub.reference}.pdf"`, 'cache-control': effectiveVisibility(sub) === 'RESTRICTED' ? 'no-store' : 'private, max-age=0' },
+    };
+  });
+
+  /**
    * Correcting a vehicle report after it was filed — a mistyped odometer
    * reading, litres, the wrong clean date, a check ticked by mistake.
    *
@@ -996,7 +1187,39 @@ module.exports = function registerFormRoutes({
     return { ok: true, reference: sub.reference };
   });
 
-  return { installDefaults, ensureApplicationForm, ensureVehicleForms, activeApplicationForm, validateValues, IMAGE_EXT, canRead, effectiveVisibility };
+  /** The redacted, staff-released reports a client may see for their own
+   * site(s) — routes-client.js's own read path into this file, per the
+   * header comment there: extending canRead() itself to clients would widen
+   * a security-critical invariant for every staff caller too, so client
+   * visibility is this entirely separate, admin-opt-in gate instead. Never
+   * reads sub.values, sub.submitted_by_name or sub.files — only what an
+   * admin explicitly wrote into client_share. */
+  function clientVisibleSubmissions(siteIds) {
+    const wanted = new Set(siteIds);
+    const out = [];
+    for (const sub of db.form_submissions) {
+      if (!sub.client_share) continue;
+      let siteId = null;
+      if (sub.subject_type === 'SITE') siteId = sub.subject_id;
+      else if (sub.subject_type === 'JOB') { const j = db.jobs.find((x) => x.id === sub.subject_id); siteId = j ? j.site_id : null; }
+      else if (sub.subject_type === 'SITE_VISIT') { const v = db.site_visits.find((x) => x.id === sub.subject_id); siteId = v ? v.site_id : null; }
+      if (!siteId || !wanted.has(siteId)) continue;
+      const share = sub.client_share;
+      out.push({
+        id: sub.id, reference: sub.reference, definition_name: sub.definition_name,
+        site_id: siteId, subject_label: share.subject_label,
+        occurred_at: sub.submitted_at, shared_at: share.shared_at,
+        fields: sub.fields.filter((f) => f.type !== 'signature' && f.type !== 'photo' && share.values[f.id] !== undefined),
+        values: share.values,
+      });
+    }
+    return out.sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1));
+  }
+
+  return {
+    installDefaults, ensureApplicationForm, ensureVehicleForms, ensureIncidentSeverity, activeApplicationForm,
+    validateValues, IMAGE_EXT, canRead, effectiveVisibility, clientVisibleSubmissions,
+  };
 };
 
 module.exports.DEFAULT_FORMS = DEFAULT_FORMS;

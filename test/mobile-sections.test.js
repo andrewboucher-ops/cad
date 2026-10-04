@@ -152,7 +152,7 @@ test('only vehicle reports can be edited — statements stay as filed', async ()
   assert.ok(incident && incident.active, 'the incident report form is installed');
   const site = app.db.sites[0];
   const r = await call('POST', '/api/form-submissions', { definition_id: incident.id, subject_type: 'SITE', subject_id: site.id, values: {
-    occurred_at: new Date().toISOString(), incident_type: 'Trespass', description: 'Two people on the roof', officer_signature: sig('Dan Whitfield'),
+    occurred_at: new Date().toISOString(), severity: 'MEDIUM', incident_type: 'Trespass', description: 'Two people on the roof', officer_signature: sig('Dan Whitfield'),
   } }, danT);
   assert.equal(r.status, 201, JSON.stringify(r.body));
   assert.equal((await call('GET', `/api/form-submissions/${r.body.id}`, undefined, adminT)).body.editable, false);

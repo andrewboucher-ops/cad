@@ -344,3 +344,77 @@ test('a site service report aggregates alarm response against SLA, patrol visits
 
   assert.equal((await call('GET', '/api/sites/999999/report', undefined, dispT)).status, 404);
 });
+
+/* ---------------- severity, geo-tagging, PDF export ---------------- */
+test('the incident report requires a severity, rejects a bad one, and a HIGH/CRITICAL one files without error', async () => {
+  const incidentDef = def('incident-report');
+  assert.ok(incidentDef.fields.some((f) => f.id === 'severity' && f.type === 'severity'), 'the default incident-report form carries a severity field');
+
+  const missing = await call('POST', '/api/form-submissions', {
+    definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date().toISOString(), incident_type: 'Other', description: 'No severity given.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(missing.status, 400, 'severity is required');
+
+  const bad = await call('POST', '/api/form-submissions', {
+    definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date().toISOString(), severity: 'APOCALYPTIC', incident_type: 'Other', description: 'Bad severity.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(bad.status, 400);
+
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date().toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', description: 'Smoke reported in plant room.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+  assert.equal(filed.body.values.severity, 'CRITICAL');
+});
+
+test('a best-effort device fix is kept with a submission and returned with it; an absent or invalid one is silently dropped', async () => {
+  const withGeo = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'Geo test', advised_at: new Date().toISOString(), narrative: 'n/a', officer_signature: sig('Dan Whitfield') },
+    geo: { lat: 53.5675, lon: -0.0776, accuracy: 12.4 },
+  }, danT);
+  assert.equal(withGeo.status, 201, JSON.stringify(withGeo.body));
+  assert.deepEqual(withGeo.body.geo, { lat: 53.5675, lon: -0.0776, accuracy: 12 });
+
+  const bogus = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'Geo test 2', advised_at: new Date().toISOString(), narrative: 'n/a', officer_signature: sig('Dan Whitfield') },
+    geo: { lat: 'nowhere', lon: -0.0776 },
+  }, danT);
+  assert.equal(bogus.status, 201);
+  assert.equal(bogus.body.geo, null, 'an invalid fix is dropped, not rejected — a report is never blocked on it');
+
+  const none = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'Geo test 3', advised_at: new Date().toISOString(), narrative: 'n/a', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(none.body.geo, null);
+});
+
+test('a brand-styled PDF can be built for a report exactly like an invoice or contract, and is still gated by canRead()', async () => {
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'PDF test', advised_at: new Date().toISOString(), narrative: 'Advised and left.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(filed.status, 201);
+
+  const pdf = await call('GET', `/api/form-submissions/${filed.body.id}/pdf`, undefined, dispT);
+  assert.equal(pdf.status, 200);
+  assert.equal(pdf.headers.get('content-type'), 'application/pdf');
+  assert.ok(pdf.raw.startsWith('%PDF-'), 'produces a real PDF, not an error body');
+
+  // A safeguarding report's PDF is gated exactly like any other read of it.
+  const restricted = await call('POST', '/api/form-submissions', {
+    definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: job.id,
+    values: {
+      concern_about: 'someone', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      what_happened: 'detail', action_taken: 'notified', officer_signature: sig('Dan Whitfield'),
+    },
+  }, danT);
+  assert.equal(restricted.status, 201);
+  assert.equal((await call('GET', `/api/form-submissions/${restricted.body.id}/pdf`, undefined, dispT)).status, 404, 'a dispatcher without a grant cannot pull the PDF either');
+  assert.equal((await call('GET', `/api/form-submissions/${restricted.body.id}/pdf`, undefined, danT)).status, 200, 'the filer can');
+});

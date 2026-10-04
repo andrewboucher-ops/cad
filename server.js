@@ -4053,7 +4053,7 @@ require('./routes-mobile.js')({ route, httpError, db, sections, visibleToUser })
 // Configurable forms. Registrar pattern — see routes-forms.js for why.
 const forms = require('./routes-forms.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, broadcast, isControlRole,
-  assertJobAccess, assertVisitAccess, pushToUsers, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
+  assertJobAccess, assertVisitAccess, pushToUsers, pushToRoles, CONTROL, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
   applyVehicleReport, reapplyVehicleReport, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html), publicBaseUrl: PUBLIC_BASE_URL,
   vehicleKit: (id) => inventory.vehicleKit(id), assetEvent: (e) => db.asset_events.push({ id: nextId('asset_events'), ...e }),
 });
@@ -4061,7 +4061,7 @@ const forms = require('./routes-forms.js')({
 // Client portal — see routes-client.js for the trust-boundary invariants.
 require('./routes-client.js')({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, sign, hashPassword,
+  isControlRole, assertPassdownAccess, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, sign, hashPassword, forms,
 });
 
 // Finance — a read-only view of cost/billing figures. See routes-finance.js.
@@ -4511,6 +4511,8 @@ function start() {
   if (forms.ensureApplicationForm()) { logEvent('form.defaults_installed', 'PUBLIC JOB APPLICATION FORM INSTALLED'); store.flushNow(); }
   const vehicleForms = forms.ensureVehicleForms();
   if (vehicleForms) { logEvent('form.defaults_installed', `${vehicleForms} FORM(S) INSTALLED (FUEL-UP / DEEP CLEAN / INCIDENT / USE OF FORCE)`); store.flushNow(); }
+  const severityAdded = forms.ensureIncidentSeverity();
+  if (severityAdded) { logEvent('form.defaults_installed', `SEVERITY FIELD ADDED TO ${severityAdded} INCIDENT-TYPE FORM(S)`); store.flushNow(); }
   // Same additive-and-idempotent shape as forms.installDefaults() — runs
   // once, only while the table is empty, so an admin's own edits (renaming
   // one, adding a sixth) are never overwritten on a later boot.
