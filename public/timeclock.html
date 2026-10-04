@@ -14,6 +14,10 @@
   .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
   .sub { font-size: 11.5px; color: var(--ink-dim); }
   .reason { font-size: 13px; background: var(--panel-2); border-radius: 8px; padding: 6px 9px; margin-top: 4px; }
+  .mine { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .mine.on { border-color: var(--available); } .mine.brk { border-color: var(--busy); }
+  .mine .st { font-weight: 800; font-size: 15px; } .mine .grow { flex: 1; min-width: 200px; }
+  .mine .btn { padding: 9px 16px; font-size: 14px; font-weight: 700; }
   h3.sec { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); margin: 18px 0 8px; }
 </style>
 </head>
@@ -25,6 +29,7 @@
   <a class="btn" href="/rota.html">Rota</a>
 </div>
 <div class="k-body">
+  <div class="mine hide" id="mine"></div>
   <div class="tiles" id="tiles"></div>
   <div class="tabs" id="tabs"></div>
   <div id="main"><p class="dim">Loading…</p></div>
@@ -45,6 +50,85 @@ const EFFECT = { EARLY_IN: 'Reject = counted from the rostered start', LATE_OUT:
 let tab = location.hash.slice(1) || 'now', board = null, pending = [], sheet = null;
 const monday = () => { const d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
 let range = { from: monday(), to: new Date().toISOString().slice(0, 10), personnel_id: '' };
+
+/* ---- Your own clock (a controller working a shift) ----
+ * The same clock-in as the phone app: your location is checked at a site
+ * with a clock-in area, and away from your rostered time — or with no
+ * shift — you're asked why, for another controller or an admin to approve. */
+const me = CCCS.getSession().user;
+let myShifts = [];
+const fix = () => new Promise((ok) => { if (!navigator.geolocation) return ok(null); navigator.geolocation.getCurrentPosition((p) => ok({ lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy }), () => ok(null), { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }); });
+const isOn = (s) => s.my && s.my.clocked_in_at && !s.my.clocked_out_at;
+function myCurrent() {
+  const now = Date.now();
+  const list = myShifts.filter((s) => s.status !== 'CANCELLED').sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
+  return list.find(isOn) || list.find((s) => ['PUBLISHED', 'IN_PROGRESS'].includes(s.status) && !(s.my && s.my.clocked_out_at) && Date.parse(s.starts_at) - 3600000 <= now && Date.parse(s.ends_at) >= now) || null;
+}
+function reasonModal(why, extra = '') {
+  return new Promise((resolve) => {
+    modal('Reason needed', `<p style="margin-top:0">${esc(why)}.</p><div class="k-form">${extra}<div class="full"><label>Reason</label><input id="rWhy" placeholder="e.g. asked to start early to cover a handover"></div></div>
+      <p class="dim" style="font-size:12.5px">Another controller or an admin approves it under Approvals.</p>${foot('Continue')}`, (root) => {
+      root.querySelector('[data-k-cancel]').onclick = () => { close(); resolve(null); };
+      wire(root, async () => {
+        if (v(root, '#rWhy').length < 3) throw new Error('please say why');
+        const out = { reason: v(root, '#rWhy') }; root.querySelectorAll('[data-extra]').forEach((x) => { out[x.dataset.extra] = x.value; });
+        close(); resolve(out);
+      });
+    });
+  });
+}
+async function myAct(fn) {
+  const msg = el('#myMsg'); if (msg) { msg.textContent = 'Working…'; msg.className = 'dim'; }
+  try { await fn(); } catch (e) { if (el('#myMsg')) { el('#myMsg').textContent = e.message; el('#myMsg').className = 'err'; } return; }
+  await paintMine(); load();
+}
+async function clockMeIn(s, reason) {
+  const f = await fix();
+  try { await api('POST', `/api/shift-assignments/${s.my.id}/clock-in`, { ...(f || {}), ...(reason ? { reason } : {}) }); }
+  catch (e) {
+    if (e.status === 428 && !reason) { const r = await reasonModal(e.message.replace(/ — please give a reason$/, '')); if (r) return clockMeIn(s, r.reason); throw new Error('Not clocked in.'); }
+    throw new Error(!f && /location/i.test(e.message) ? 'Allow location for this site in your browser, then try again.' : e.message);
+  }
+}
+async function clockMeOut(s, reason) {
+  try { await api('POST', `/api/shift-assignments/${s.my.id}/clock-out`, reason ? { reason } : {}); }
+  catch (e) {
+    if (e.status === 428 && !reason) { const r = await reasonModal(e.message.replace(/ — please give a reason$/, '')); if (r) return clockMeOut(s, r.reason); throw new Error('Not clocked out.'); }
+    throw e;
+  }
+}
+async function paintMine() {
+  const box = el('#mine');
+  if (!me.personnel_id) { box.className = 'mine'; box.innerHTML = '<span class="grow dim">Your login isn\'t linked to a staff record, so you can\'t clock yourself in here. An admin can link it in Admin → Accounts.</span>'; return; }
+  try { myShifts = await api('GET', `/api/shifts?personnel_id=${me.personnel_id}&from=${encodeURIComponent(new Date(Date.now() - 16 * 3600000).toISOString())}`); } catch { myShifts = []; }
+  const c = myCurrent();
+  if (!c) {
+    box.className = 'mine';
+    box.innerHTML = `<span class="grow"><span class="st">You: not on shift</span> <span class="dim">— no shift booked now</span><br><span id="myMsg" class="dim"></span></span><button class="btn primary" id="myIn">Clock in</button>`;
+    el('#myIn').onclick = () => myAct(async () => {
+      const sites = await api('GET', '/api/timeclock/sites');
+      const r = await reasonModal('You have no shift booked now', `<div class="full"><label>Site</label><select data-extra="site_id">${options(sites.map((x) => [x.id, x.name]), sites[0] && sites[0].id)}</select></div>`);
+      if (!r) throw new Error('Not clocked in.');
+      const f = await fix();
+      await api('POST', '/api/timeclock/clock-in', { ...(f || {}), site_id: Number(r.site_id), reason: r.reason });
+    });
+    return;
+  }
+  const my = c.my || {};
+  if (!isOn(c)) {
+    box.className = 'mine';
+    box.innerHTML = `<span class="grow"><span class="st">You: ${Date.now() > Date.parse(c.starts_at) ? 'your shift has started' : 'your next shift'}</span> <span class="dim">— ${esc(c.site_name || '')} ${hm(c.starts_at)}–${hm(c.ends_at)}</span><br><span id="myMsg" class="dim">Your location is checked when you clock in.</span></span><button class="btn primary" id="myIn">Clock in</button>`;
+    el('#myIn').onclick = () => myAct(() => clockMeIn(c));
+    return;
+  }
+  const brk = (my.breaks || []).find((b) => !b.end);
+  const mins = Math.max(0, Math.floor((Date.now() - Date.parse(my.clocked_in_at) - (my.breaks || []).reduce((n, b) => n + ((b.end ? Date.parse(b.end) : Date.now()) - Date.parse(b.start)), 0)) / 60000));
+  box.className = `mine ${brk ? 'brk' : 'on'}`;
+  box.innerHTML = `<span class="grow"><span class="st">You: ${brk ? 'on break' : 'on shift'}</span> <span class="dim">— ${esc(c.site_name || '')} · clocked in ${hm(my.clocked_in_at)} · ${dur(mins)} worked${c.ad_hoc ? '' : ` · until ${hm(c.ends_at)}`}</span><br><span id="myMsg" class="dim"></span></span>
+    <button class="btn" id="myBrk">${brk ? 'End break' : 'Start break'}</button><button class="btn danger" id="myOut">End shift</button>`;
+  el('#myBrk').onclick = () => myAct(() => api('POST', `/api/shift-assignments/${my.id}/${brk ? 'break-end' : 'break-start'}`, {}));
+  el('#myOut').onclick = () => { if (confirm('Clock out now?')) myAct(() => clockMeOut(c)); };
+}
 
 async function load() {
   try { [board, pending] = await Promise.all([api('GET', '/api/timeclock/now'), api('GET', '/api/timeclock/pending')]); }
@@ -87,7 +171,7 @@ function timesModal(r) {
 
 function paintApprovals() {
   el('#main').innerHTML = pending.length ? pending.map((x) => `<div class="tile" style="cursor:default;margin-bottom:10px">
-      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><strong>${esc(x.name)}</strong><span class="pill warn">${esc(x.label)}${x.minutes ? ` · ${x.minutes} min` : ''}</span><span class="sub">${esc(x.site_name || '')} · ${esc(when(x.at))}</span></div>
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><strong>${esc(x.name)}</strong><span class="pill warn">${esc(x.label)}${x.minutes ? ` · ${x.minutes >= 60 ? `${Math.floor(x.minutes / 60)} h${x.minutes % 60 ? ` ${x.minutes % 60} min` : ''}` : `${x.minutes} min`}` : ''}</span><span class="sub">${esc(x.site_name || '')} · ${esc(when(x.at))}</span></div>
       <div class="sub" style="margin-top:4px">${x.ad_hoc ? 'No shift booked' : `Rostered ${hm(x.starts_at)}–${hm(x.ends_at)}`} · clocked ${hm(x.clocked_in_at)}–${x.clocked_out_at ? hm(x.clocked_out_at) : 'now'} · ${dur(x.worked_min)} worked</div>
       <div class="reason">“${esc(x.reason)}”</div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap"><button class="btn primary" data-ok="${x.assignment_id}|${x.id}">Approve</button><button class="btn danger" data-no="${x.assignment_id}|${x.id}">Reject</button><span class="sub">${EFFECT[x.kind]}</span></div>
@@ -137,7 +221,9 @@ el('#bIn').onclick = async () => {
   }));
 };
 
+paintMine();
 load();
+setInterval(() => { if (!document.querySelector('.modal-back')) paintMine(); }, 60000);
 setInterval(() => { if (tab !== 'sheet' && !document.querySelector('.modal-back')) load(); }, 30000);
 </script>
 </body>

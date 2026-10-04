@@ -94,6 +94,7 @@
       <h1>Admin</h1>
       <span>
         <button class="btn primary" id="btnNewUser" style="padding:7px 14px;font-size:13px">New account</button>
+        <button class="btn" id="btnTextStaff" style="padding:7px 14px;font-size:13px" hidden>Text staff</button>
         <button class="btn" id="btnStaffNumbers" style="padding:7px 14px;font-size:13px" hidden>Staff numbers</button>
         <button class="btn primary" id="btnNewPersonnel" style="padding:7px 14px;font-size:13px" hidden>New personnel</button>
         <button class="btn primary" id="btnNewMdt" style="padding:7px 14px;font-size:13px" hidden>New MDT</button>
@@ -419,6 +420,7 @@ function showTab(name) {
   el('#btnNewUser').hidden = name !== 'accounts';
   el('#btnNewPersonnel').hidden = name !== 'personnel';
   el('#btnStaffNumbers').hidden = name !== 'personnel';
+  el('#btnTextStaff').hidden = !['personnel', 'accounts'].includes(name);
   el('#btnNewMdt').hidden = name !== 'mdts';
   el('#btnNewVehicle').hidden = name !== 'vehicles';
   el('#btnNewSite').hidden = name !== 'sites';
@@ -1002,6 +1004,54 @@ function personnelModal(p) {
   });
 }
 el('#btnNewPersonnel').onclick = () => personnelModal(null);
+/* Text staff (routes-staff-sms.js): one SMS to everyone in the chosen roles.
+ * /admin.html?text=…&roles=DISPATCHER,SUPERVISOR opens it filled in. */
+const TEXT_ROLES = [['DISPATCHER', 'Dispatchers (controllers)'], ['SUPERVISOR', 'Supervisors'], ['SYSTEM_ADMIN', 'Admins'], ['FIELD_USER', 'Officers']];
+function textStaffModal(preset = {}) {
+  const roles = preset.roles || ['DISPATCHER', 'SUPERVISOR'];
+  modal('Text staff', `<form class="stack" id="tsForm">
+      <label>Send to</label>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">${TEXT_ROLES.map(([v, l]) => `<label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px;margin:0"><input type="checkbox" data-role="${v}" ${roles.includes(v) ? 'checked' : ''}> ${l}</label>`).join('')}</div>
+      <label>Message — <span class="dim" id="tsCount" style="text-transform:none;letter-spacing:0;font-weight:400"></span></label>
+      <textarea id="tsBody" rows="4">${esc(preset.text || '')}</textarea>
+      <label>Who it goes to</label>
+      <div id="tsList" class="dim" style="font-size:13px;max-height:220px;overflow:auto">Loading…</div>
+      <p class="dim" id="tsErr" style="min-height:16px;margin:0"></p></form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = '<div class="btn-row" style="margin:0;justify-content:flex-end"><button class="btn" id="tsCancel">Cancel</button><button class="btn primary" id="tsSend">Send</button></div>';
+    el('#tsCancel').onclick = closeModal;
+    const chosen = () => els('#tsForm [data-role]').filter((c) => c.checked).map((c) => c.dataset.role);
+    let preview = null;
+    const count = () => { const n = el('#tsBody').value.length; el('#tsCount').textContent = `${n} characters${n > 160 ? ` — ${Math.ceil(n / 153)} texts each` : ''}`; };
+    const refresh = async () => {
+      if (!chosen().length) { el('#tsList').textContent = 'Choose who to text.'; preview = null; return; }
+      try {
+        preview = await api('GET', `/api/admin/sms-broadcast/preview?roles=${chosen().join(',')}`);
+        el('#tsList').innerHTML = `${preview.live ? '' : '<p class="err" style="margin:0 0 6px">SMS is in test mode on this server (SMS_LIVE is not on) — nothing will actually be sent.</p>'}<strong>${preview.sending_to}</strong> will get it.<br>${preview.recipients.map((r) => `<div>${r.status === 'ok' ? '✓' : '✕'} ${esc(r.name)} <span class="dim">(${esc(r.role.toLowerCase().replace('_', ' '))})${r.status === 'ok' ? ` ${esc(r.to)}` : ` — ${esc(r.status)}`}</span></div>`).join('')}`;
+      } catch (e) { el('#tsList').textContent = e.message; }
+    };
+    el('#tsForm').addEventListener('change', refresh);
+    el('#tsBody').addEventListener('input', count);
+    count(); refresh();
+    el('#tsSend').onclick = async () => {
+      const text = el('#tsBody').value.trim();
+      if (!text) { el('#tsErr').textContent = 'write the message'; return; }
+      if (!preview || !preview.sending_to) { el('#tsErr').textContent = 'nobody to send to'; return; }
+      if (!confirm(`Text this to ${preview.sending_to} ${preview.sending_to === 1 ? 'person' : 'people'} now?`)) return;
+      el('#tsSend').disabled = true;
+      try {
+        const r = await api('POST', '/api/admin/sms-broadcast', { roles: chosen(), body: text });
+        closeModal();
+        alert(`${r.dry_run ? 'TEST MODE — nothing actually sent. ' : ''}Sent to ${r.sent}${r.failed ? `, ${r.failed} failed: ${r.results.filter((x) => !x.ok).map((x) => `${x.name} (${x.error})`).join(', ')}` : ''}.`);
+      } catch (e) { el('#tsErr').textContent = e.message; el('#tsSend').disabled = false; }
+    };
+  });
+}
+el('#btnTextStaff').onclick = () => textStaffModal();
+{
+  const q = new URLSearchParams(location.search);
+  if (q.get('text')) setTimeout(() => textStaffModal({ text: q.get('text'), roles: q.get('roles') ? q.get('roles').split(',') : undefined }), 600);
+}
 /* Staff numbers (routes-staff-id.js): the prefix and next number given to
  * anyone added without one, and numbering existing staff who have none. */
 el('#btnStaffNumbers').onclick = async () => {

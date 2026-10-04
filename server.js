@@ -1013,7 +1013,7 @@ function authFrom(req, url) {
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp',
-  '.apk': 'application/vnd.android.package-archive',
+  '.apk': 'application/vnd.android.package-archive', '.pdf': 'application/pdf',
 };
 
 /* Paths that accept an x-www-form-urlencoded body. Only Twilio's status
@@ -4118,6 +4118,9 @@ const attendance = require('./routes-attendance.js')({
   createEmergencyJob, forwardEmergencyToAura,
 });
 
+
+// Admin → Text staff: one SMS to everyone in chosen roles — see routes-staff-sms.js.
+require('./routes-staff-sms.js')({ route, httpError, ADMIN, db, logEvent, sms, notifyLog: writeNotifyLog, flushNow: () => store.flushNow() });
 
 // Staff numbers, ID photos and the ID card's QR check — see routes-staff-id.js.
 const staffId = require('./routes-staff-id.js')({

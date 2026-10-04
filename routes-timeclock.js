@@ -53,6 +53,7 @@ module.exports = function registerTimeclock({
     }
     return ex;
   }
+  const span = (m) => (m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`);
   const needReason = (what) => httpError(428, `${what} — please give a reason`);
 
   /** Called by the clock-in / clock-out routes before they change anything.
@@ -66,7 +67,7 @@ module.exports = function registerTimeclock({
     if (Math.abs(diff) <= TOLERANCE_MIN) return;
     const kind = direction === 'IN' ? (diff < 0 ? 'EARLY_IN' : 'LATE_IN') : (diff < 0 ? 'EARLY_OUT' : 'LATE_OUT');
     if (!reason && !onBehalf(a, user)) {
-      throw needReason(`You're ${direction === 'IN' ? 'clocking in' : 'clocking out'} ${Math.abs(diff)} min ${diff < 0 ? 'before' : 'after'} the rostered ${direction === 'IN' ? 'start' : 'finish'} (${new Date(target).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })})`);
+      throw needReason(`You're ${direction === 'IN' ? 'clocking in' : 'clocking out'} ${span(Math.abs(diff))} ${diff < 0 ? 'before' : 'after'} the rostered ${direction === 'IN' ? 'start' : 'finish'} (${new Date(target).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })})`);
     }
     // Recorded once the clock action itself has gone through (see record()).
     return { kind, mins: Math.abs(diff), reason };
