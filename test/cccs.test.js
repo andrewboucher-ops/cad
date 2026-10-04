@@ -652,11 +652,12 @@ test('a shift is created with an initial assignment, and only that officer or co
   const assignmentId = shift.body.assignments[0].id;
 
   assert.equal((await call('POST', `/api/shift-assignments/${assignmentId}/clock-in`, {}, ellieT)).status, 403);
-  const in1 = await call('POST', `/api/shift-assignments/${assignmentId}/clock-in`, {}, danT);
+  assert.equal((await call('POST', `/api/shift-assignments/${assignmentId}/clock-in`, {}, danT)).status, 428, 'away from the rostered start, a reason is needed');
+  const in1 = await call('POST', `/api/shift-assignments/${assignmentId}/clock-in`, { reason: 'test' }, danT);
   assert.equal(in1.body.status, 'IN_PROGRESS', 'clocking in moves the whole shift into progress');
   assert.ok(in1.body.assignments[0].clocked_in_at);
 
-  const out1 = await call('POST', `/api/shift-assignments/${assignmentId}/clock-out`, {}, danT);
+  const out1 = await call('POST', `/api/shift-assignments/${assignmentId}/clock-out`, { reason: 'test' }, danT);
   assert.ok(out1.body.assignments[0].clocked_out_at);
   assert.equal(out1.body.assignments[0].attendance, 'ATTENDED');
   assert.equal((await call('POST', `/api/shift-assignments/${assignmentId}/clock-out`, {}, danT)).status, 409, 'cannot clock out twice');

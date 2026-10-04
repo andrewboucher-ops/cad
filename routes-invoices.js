@@ -150,8 +150,10 @@ module.exports = function registerInvoices({
         if (contract.billing_basis === 'ROSTERED') {
           hours = Math.max(0, (Date.parse(s.ends_at) - Date.parse(s.starts_at)) / 3600000 - (Number(s.break_minutes) || 0) / 60);
           source = 'rostered';
+        } else if (a.time_rejected) {
+          source = 'not approved';
         } else if (a.clocked_in_at && a.clocked_out_at) {
-          hours = attendance.worked(a).worked_min / 60; source = 'clocked';
+          hours = attendance.worked(a).worked_min / 60; source = (a.exceptions || []).some((x) => x.status === 'PENDING') ? 'awaiting approval' : 'clocked';
         } else if (a.attendance === 'NO_SHOW') {
           source = 'no-show';
         } else {
@@ -180,6 +182,7 @@ module.exports = function registerInvoices({
         const rows = hoursFor(c, l, from, to);
         const hours = r2(rows.reduce((n, x) => n + x.hours, 0));
         for (const x of rows) if (x.source === 'to check') checks.push(`${x.person} on ${x.date}: no clock-out — counted as 0 hours`);
+        for (const x of rows) if (x.source === 'awaiting approval') checks.push(`${x.person} on ${x.date}: clock time waiting for approval in Timeclock`);
         lines.push({ id: crypto.randomUUID(), description: `${l.description}${l.shift_type_name ? ` (${l.shift_type_name})` : ''} — hours, ${span(from, to)}`, kind: 'HOURLY', quantity: hours, unit_amount: l.rate, shifts: rows });
       } else if (l.kind === 'FIXED_PERIOD') {
         lines.push({ id: crypto.randomUUID(), description: `${l.description}, ${span(from, to)}`, kind: l.kind, quantity: 1, unit_amount: l.rate });

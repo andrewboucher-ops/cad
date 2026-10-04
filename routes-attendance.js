@@ -93,6 +93,8 @@ module.exports = function registerAttendance({
   }
   /** Called by the clock-out route: an open break ends with the shift. */
   function closeBreaks(a, at) { for (const b of a.breaks || []) if (!b.end) b.end = at; }
+  /** An ad-hoc shift (routes-timeclock.js) ends when its officer clocks out. */
+  function finishAdHoc(a, s) { if (s.ad_hoc && a.clocked_out_at) { s.ends_at = a.clocked_out_at; s.status = 'COMPLETED'; } }
 
   /* ---- hours ---- */
   function worked(a, now = Date.now()) {
@@ -180,7 +182,7 @@ module.exports = function registerAttendance({
     if (!Array.isArray(a.time_edits)) a.time_edits = [];
     a.time_edits.push({ at: new Date().toISOString(), by: user.display_name, reason, from: { in: a.clocked_in_at || null, out: a.clocked_out_at || null }, to: { in: inAt, out: outAt } });
     a.clocked_in_at = inAt; a.clocked_out_at = outAt;
-    if (outAt) { closeBreaks(a, outAt); if (!a.attendance) a.attendance = 'ATTENDED'; a.outside_since = null; }
+    if (outAt) { closeBreaks(a, outAt); finishAdHoc(a, s); if (!a.attendance) a.attendance = 'ATTENDED'; a.outside_since = null; }
     a.clock_out_needs_review = false;
     return done(a, s, 'shift.times_corrected', `${user.display_name} CORRECTED THE CLOCK TIMES OF ${nameOf(a)} — ${reason.toUpperCase()}`);
   });
@@ -206,6 +208,7 @@ module.exports = function registerAttendance({
     a.clocked_out_at = a.outside_since; a.auto_clocked_out = true; a.outside_since = null; a.outside_unseen = false;
     if (unseen) a.clock_out_needs_review = true;
     closeBreaks(a, a.clocked_out_at);
+    finishAdHoc(a, s);
     if (!a.attendance) a.attendance = 'ATTENDED';
     done(a, s, 'shift.auto_clocked_out', unseen
       ? `${nameOf(a)} AUTO CLOCKED OUT — FOUND OFF SITE WHEN THE APP REOPENED; CLOCK-OUT SET TO ${hhmm(a.clocked_out_at)}, LAST SEEN ON SITE — CHECK THE TIME`
@@ -267,5 +270,5 @@ module.exports = function registerAttendance({
   const timer = setInterval(() => { try { tick(); } catch (e) { console.warn('[attendance] tick failed:', e.message); } }, 30000);
   if (timer.unref) timer.unref();
 
-  return { checkClockIn, closeBreaks, worked, tick, distanceM, fenceFor };
+  return { checkClockIn, closeBreaks, finishAdHoc, worked, tick, distanceM, fenceFor };
 };

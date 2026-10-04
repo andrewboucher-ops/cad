@@ -47,6 +47,7 @@ const SECTIONS = [
   { key: 'deep_clean', label: 'Deep clean', group: 'Fleet & people', icon: 'clean', mobile: '#clean', home: true, allowed: STAFF, default: STAFF },
   { key: 'fleet', label: 'Fleet', group: 'Fleet & people', icon: 'fleet', desktop: '/fleet.html', mobile: '/fleet.html', allowed: CONTROL, default: CONTROL },
   { key: 'rota', label: 'Rota', group: 'Fleet & people', icon: 'rota', desktop: '/rota.html', mobile: '#rota', home: true, allowed: STAFF, default: STAFF },
+  { key: 'timeclock', label: 'Timeclock', group: 'Fleet & people', icon: 'clock', desktop: '/timeclock.html', mobile: '/timeclock.html', allowed: CONTROL, default: CONTROL },
   { key: 'leave', label: 'Leave', group: 'Fleet & people', icon: 'leave', mobile: '#leave', needs_person: true, allowed: STAFF, default: STAFF },
   { key: 'training', label: 'Training', group: 'Fleet & people', icon: 'training', mobile: '#training', needs_person: true, allowed: STAFF, default: STAFF },
   { key: 'equipment', label: 'My equipment', group: 'Fleet & people', icon: 'equipment', mobile: '#equipment', needs_person: true, allowed: STAFF, default: STAFF },

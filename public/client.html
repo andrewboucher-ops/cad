@@ -90,6 +90,16 @@
   </div>
 
   <div class="section-card">
+    <header>Shifts &amp; patrols</header>
+    <div class="body">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px" id="spRange">
+        <button type="button" class="btn" data-sp="today">Today</button><button type="button" class="btn" data-sp="week">Last 7 days</button><button type="button" class="btn" data-sp="next">Next 7 days</button>
+      </div>
+      <div id="shiftsBody"><p class="empty-note">Loading…</p></div>
+    </div>
+  </div>
+
+  <div class="section-card">
     <header>Quotes &amp; contracts</header>
     <div class="body" id="agreementsBody"><p class="empty-note">Loading…</p></div>
   </div>
@@ -256,6 +266,40 @@ async function paintAgreements() {
   document.querySelectorAll('[data-ag-decline]').forEach((b) => (b.onclick = () => agDecline(agreements.find((a) => a.id === Number(b.dataset.agDecline)))));
   document.querySelectorAll('[data-ag-sign]').forEach((b) => (b.onclick = () => agSign(agreements.find((a) => a.id === Number(b.dataset.agSign)))));
 }
+/* Shifts at this site and the patrols on them, with each checkpoint's scan
+ * time. No staff names — counts and times only. */
+let spRange = 'today';
+const SHIFT_STATE = { BOOKED: ['Booked', 'open'], NOT_YET_COVERED: ['Being arranged', 'open'], DUE: ['Due to start', 'open'], ON_SITE: ['On site now', 'completed'], COMPLETED: ['Completed', 'completed'], NOT_ATTENDED: ['Not attended', 'closed'] };
+const hhmm = (iso) => (iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '—');
+async function paintShifts() {
+  const now = new Date(), day = 86400000;
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const [from, to] = spRange === 'today' ? [start, new Date(start.getTime() + day)] : spRange === 'week' ? [new Date(start.getTime() - 6 * day), new Date(start.getTime() + day)] : [now, new Date(start.getTime() + 8 * day)];
+  document.querySelectorAll('[data-sp]').forEach((b) => { b.classList.toggle('primary', b.dataset.sp === spRange); b.onclick = () => { spRange = b.dataset.sp; paintShifts(); }; });
+  const q = `site_id=${currentSiteId}&from=${from.toISOString()}&to=${to.toISOString()}`;
+  let shifts, patrols;
+  try { [shifts, patrols] = await Promise.all([api('GET', withAs(`/api/client/shifts?${q}`)), api('GET', withAs(`/api/client/patrols?${q}`))]); }
+  catch (e) { el('#shiftsBody').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  if (!shifts.length && !patrols.length) { el('#shiftsBody').innerHTML = '<p class="empty-note">No shifts in this period.</p>'; return; }
+  const patrolRow = (p) => {
+    const done = p.checkpoints.filter((c) => c.scanned_at).length;
+    const pill = p.status === 'COMPLETED' ? ['Done', 'completed'] : p.status === 'MISSED' ? ['Missed', 'closed'] : ['In progress', 'open'];
+    return `<details style="border-top:1px solid var(--line-soft);padding:6px 0 6px 12px"><summary style="cursor:pointer;font-size:13px;display:flex;gap:8px;align-items:center">
+        <span class="mono">${hhmm(p.scheduled_for)}</span><span style="flex:1">Patrol${p.route ? ` — ${esc(p.route)}` : ''}${p.checkpoints.length ? ` <span class="dim">· ${done}/${p.checkpoints.length} checkpoints</span>` : ''}${p.completed_at ? ` <span class="dim">· finished ${hhmm(p.completed_at)}</span>` : ''}</span><span class="pill ${pill[1]}">${pill[0]}</span></summary>
+      ${p.checkpoints.length ? `<ul style="margin:4px 0 0 18px;padding:0;font-size:12.5px">${p.checkpoints.map((c) => `<li>${esc(c.title)} — ${c.scanned_at ? `scanned ${hhmm(c.scanned_at)}` : '<span style="color:var(--emergency)">not scanned</span>'}</li>`).join('')}</ul>` : ''}</details>`;
+  };
+  el('#shiftsBody').innerHTML = shifts.map((s) => {
+    const [label, cls] = SHIFT_STATE[s.state] || [s.state, 'open'];
+    const mine = patrols.filter((p) => p.shift_id === s.id);
+    return `<div style="border:1px solid var(--line-soft);border-radius:10px;padding:10px 12px;margin-bottom:8px">
+      <div class="list-row" style="border:none;padding:0"><span class="t">${esc(fmtDate(s.starts_at))} ${hhmm(s.starts_at)}–${hhmm(s.ends_at)}</span>
+        <span style="flex:1;font-size:13px">${s.officers_required} officer${s.officers_required === 1 ? '' : 's'}${s.state === 'ON_SITE' ? ` · ${s.officers_on_site} on site` : ''}${s.arrived_at ? ` · arrived ${hhmm(s.arrived_at)}` : ''}${s.left_at ? ` · left ${hhmm(s.left_at)}` : ''}
+          ${s.patrol_every_min ? `<span class="dim"> · patrol every ${s.patrol_every_min % 60 === 0 ? `${s.patrol_every_min / 60} h` : `${s.patrol_every_min} min`}${s.patrols.total ? ` — ${s.patrols.completed} done${s.patrols.missed ? `, ${s.patrols.missed} missed` : ''}` : ''}</span>` : ''}</span>
+        <span class="pill ${cls}">${label}</span></div>
+      ${mine.map(patrolRow).join('')}</div>`;
+  }).join('') + (patrols.some((p) => !p.shift_id) ? `<div style="margin-top:6px"><strong style="font-size:13px">Other patrol visits</strong>${patrols.filter((p) => !p.shift_id).map(patrolRow).join('')}</div>` : '');
+}
+
 async function paintInvoices() {
   const rows = await api('GET', withAs('/api/client/invoices')).catch(() => []);
   const t = encodeURIComponent(getSession().token);
@@ -326,7 +370,7 @@ async function loadSite() {
   const today = new Date(), monthAgo = new Date(today.getTime() - 30 * 86400000);
   el('#repFrom').value = monthAgo.toISOString().slice(0, 10);
   el('#repTo').value = today.toISOString().slice(0, 10);
-  await Promise.all([paintActivity(), runReport(), paintDocs(), paintRequests()]);
+  await Promise.all([paintActivity(), runReport(), paintDocs(), paintRequests(), paintShifts()]);
 }
 
 (async function init() {

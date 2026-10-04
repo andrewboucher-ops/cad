@@ -451,9 +451,39 @@ function resourcesSection(s) {
       </div>` : ''}
     </div>`;
 }
+/** Patrols while this shift runs (routes-shift-patrols.js): how often,
+ * and which patrol route (a beat — its checkpoints are the QR/NFC tags). */
+function patrolSection(s) {
+  if (!s.site_id) return '';
+  const p = s.patrol || {};
+  const opts = [['', 'No patrols'], [30, 'Every 30 min'], [60, 'Every hour'], [90, 'Every 1½ hours'], [120, 'Every 2 hours'], [180, 'Every 3 hours'], [240, 'Every 4 hours']];
+  if (p.every_min && !opts.some(([v]) => v === p.every_min)) opts.push([p.every_min, `Every ${p.every_min} min`]);
+  return `
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+      <label>Patrols on this shift</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px">
+        <select id="ptEvery">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(p.every_min || '') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <select id="ptBeat"><option value="">Loading routes…</option></select>
+      </div>
+      <p class="dim" style="font-size:12px;margin:6px 0">The officer on shift is sent each patrol as it falls due and scans the route's checkpoints (QR or NFC). Not done within the interval = missed, and control is alerted. Checkpoints are set up in Admin → Beats.</p>
+      <button type="button" class="btn" id="ptSave" style="padding:5px 12px;font-size:12px">Save patrols</button> <span class="dim" id="ptMsg" style="font-size:12px"></span>
+    </div>`;
+}
+async function wirePatrol(s, reopen) {
+  if (!el('#ptBeat')) return;
+  const beats = await api('GET', `/api/beats?site_id=${s.site_id}`).catch(() => []);
+  const cur = s.patrol && s.patrol.beat_id;
+  el('#ptBeat').innerHTML = `<option value="">No checkpoints — just a patrol</option>${beats.filter((b) => b.active !== false).map((b) => `<option value="${b.id}" ${b.id === cur ? 'selected' : ''}>${esc(b.name)} (${(b.waypoints || []).length} checkpoints)</option>`).join('')}`;
+  el('#ptSave').onclick = async () => {
+    try {
+      await api('PUT', `/api/shifts/${s.id}/patrol`, { every_min: el('#ptEvery').value ? Number(el('#ptEvery').value) : null, beat_id: el('#ptBeat').value || null });
+      el('#ptMsg').textContent = 'Saved.'; await reopen();
+    } catch (e) { el('#ptMsg').textContent = e.message; }
+  };
+}
 function shiftModal(s, defaults) {
   const isNew = !s;
-  modal(isNew ? 'New shift' : `Shift — ${s.site_name || s.shift_type_name}`, shiftForm(s, defaults) + (isNew ? '' : assignmentsSection(s) + resourcesSection(s)), () => {
+  modal(isNew ? 'New shift' : `Shift — ${s.site_name || s.shift_type_name}`, shiftForm(s, defaults) + (isNew ? '' : assignmentsSection(s) + patrolSection(s) + resourcesSection(s)), () => {
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
@@ -472,6 +502,7 @@ function shiftModal(s, defaults) {
     // Reopens the same shift fresh from the server after a row action, so
     // several adds/removes/clock-ins in one sitting never act on stale data.
     const reopen = async () => { await load(); shiftModal(allShifts.find((x) => x.id === s.id)); };
+    wirePatrol(s, reopen);
     els('[data-times]').forEach((b) => (b.onclick = () => el(`[data-times-form="${b.dataset.times}"]`).classList.toggle('hide')));
     els('[data-t-save]').forEach((b) => (b.onclick = async () => {
       const f = el(`[data-times-form="${b.dataset.tSave}"]`), val = (sel) => f.querySelector(sel).value;

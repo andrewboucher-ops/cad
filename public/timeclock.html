@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — timeclock</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .sub { font-size: 11.5px; color: var(--ink-dim); }
+  .reason { font-size: 13px; background: var(--panel-2); border-radius: 8px; padding: 6px 9px; margin-top: 4px; }
+  h3.sec { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); margin: 18px 0 8px; }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>Timeclock</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary" id="bIn">Clock someone in</button>
+  <a class="btn" href="/rota.html">Rota</a>
+</div>
+<div class="k-body">
+  <div class="tiles" id="tiles"></div>
+  <div class="tabs" id="tabs"></div>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const { modal, close, foot, wire, v, date, when, options } = KIT;
+const hm = (iso) => (iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '—');
+const dur = (min) => `${Math.floor(min / 60)}h ${String(min % 60).padStart(2, '0')}m`;
+const localDT = (iso) => (iso ? new Date(Date.parse(iso) - new Date(iso).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '');
+const EFFECT = { EARLY_IN: 'Reject = counted from the rostered start', LATE_OUT: 'Reject = counted to the rostered finish', UNSCHEDULED: 'Reject = no hours counted for this shift', LATE_IN: 'Recorded either way — the hours are what they were', EARLY_OUT: 'Recorded either way — the hours are what they were' };
+let tab = location.hash.slice(1) || 'now', board = null, pending = [], sheet = null;
+const monday = () => { const d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
+let range = { from: monday(), to: new Date().toISOString().slice(0, 10), personnel_id: '' };
+
+async function load() {
+  try { [board, pending] = await Promise.all([api('GET', '/api/timeclock/now'), api('GET', '/api/timeclock/pending')]); }
+  catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${hm(new Date().toISOString())}`;
+  const late = board.due.filter((r) => r.late_min > board.tolerance_min);
+  const t = (n, l, cls, k) => `<button class="tile ${cls}" data-tab="${k}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
+  el('#tiles').innerHTML = [t(board.on.length, 'Clocked in now', 'good', 'now'), t(late.length, 'Late — not clocked in', late.length ? 'bad' : '', 'now'),
+    t(pending.length, 'Waiting for approval', pending.length ? 'warn' : '', 'approvals'), t('—', 'Timesheet', '', 'sheet')].join('');
+  el('#tabs').innerHTML = [['now', 'Now'], ['approvals', `Approvals${pending.length ? ` (${pending.length})` : ''}`], ['sheet', 'Timesheet']].map(([k, l]) => `<button class="chip ${tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('');
+  els('[data-tab]').forEach((b) => (b.onclick = () => { tab = b.dataset.tab; history.replaceState(null, '', `#${tab}`); load(); }));
+  if (tab === 'now') paintNow(); else if (tab === 'approvals') paintApprovals(); else paintSheet();
+}
+const flags = (r) => [r.ad_hoc ? '<span class="pill info">Ad hoc</span>' : '', r.approval === 'PENDING' ? '<span class="pill warn">Needs approval</span>' : '', r.rejected ? '<span class="pill bad">Not approved</span>' : '',
+  r.needs_review ? '<span class="pill warn" title="Clocked out automatically after the app was closed — the time is when they were last seen on site">Check time</span>' : '', r.auto_clocked_out && !r.needs_review ? '<span class="pill off">Auto out</span>' : '', r.on_break ? '<span class="pill warn">On break</span>' : ''].join(' ');
+
+function paintNow() {
+  const on = board.on, due = board.due;
+  el('#main').innerHTML = `<h3 class="sec">Clocked in now (${on.length})</h3>${on.length ? `<div style="overflow-x:auto"><table class="k"><thead><tr><th>Who</th><th>Site</th><th>Rostered</th><th>In</th><th class="num">Worked</th><th></th></tr></thead><tbody>
+    ${on.map((r) => `<tr><td><strong>${esc(r.name)}</strong> ${flags(r)}</td><td>${esc(r.site_name || '—')}</td><td class="dim">${r.ad_hoc ? 'no shift' : `${hm(r.starts_at)}–${hm(r.ends_at)}`}</td><td>${hm(r.clocked_in_at)}</td><td class="num">${dur(r.worked_min)}${r.break_min ? `<div class="sub">${r.break_min} min break</div>` : ''}</td>
+      <td><div class="acts"><button class="btn" data-times="${r.assignment_id}">Times</button><button class="btn primary" data-out="${r.assignment_id}">Clock out</button></div></td></tr>`).join('')}</tbody></table></div>` : '<p class="dim">Nobody is clocked in.</p>'}
+    <h3 class="sec">Due now, not clocked in (${due.length})</h3>${due.length ? `<div style="overflow-x:auto"><table class="k"><thead><tr><th>Who</th><th>Site</th><th>Rostered</th><th></th></tr></thead><tbody>
+    ${due.map((r) => `<tr><td><strong>${esc(r.name)}</strong> ${r.late_min > board.tolerance_min ? `<span class="pill bad">${r.late_min} min late</span>` : r.late_min > 0 ? '<span class="pill warn">starting</span>' : '<span class="pill off">soon</span>'}</td><td>${esc(r.site_name || '—')}</td><td>${hm(r.starts_at)}–${hm(r.ends_at)}</td>
+      <td><div class="acts"><button class="btn primary" data-in="${r.assignment_id}">Clock in</button></div></td></tr>`).join('')}</tbody></table></div>` : '<p class="dim">Nobody is due.</p>'}
+    <p class="dim" style="font-size:12.5px;margin-top:14px">Officers clocking in or out more than ${board.tolerance_min} minutes either side of their rostered time, or with no shift, give a reason and it waits under Approvals. When you clock someone in or out here, it is approved automatically.</p>`;
+  els('[data-out]').forEach((b) => (b.onclick = async () => { if (!confirm('Clock them out now?')) return; try { await api('POST', `/api/shift-assignments/${b.dataset.out}/clock-out`, {}); load(); } catch (e) { alert(e.message); } }));
+  els('[data-in]').forEach((b) => (b.onclick = async () => { try { await api('POST', `/api/shift-assignments/${b.dataset.in}/clock-in`, {}); load(); } catch (e) { alert(e.message); } }));
+  els('[data-times]').forEach((b) => (b.onclick = () => timesModal(on.find((r) => r.assignment_id === Number(b.dataset.times)))));
+}
+
+function timesModal(r) {
+  modal(`Change times — ${r.name}`, `<p style="margin-top:0;font-size:13px">${esc(r.site_name || '')}${r.ad_hoc ? ' · ad-hoc shift' : ` · rostered ${hm(r.starts_at)}–${hm(r.ends_at)}`}</p>
+    <div class="k-form"><div><label>Clocked in</label><input type="datetime-local" id="tIn" value="${localDT(r.clocked_in_at)}"></div>
+    <div><label>Clocked out</label><input type="datetime-local" id="tOut" value="${localDT(r.clocked_out_at)}"></div>
+    <div class="full"><label>Reason</label><input id="tWhy" placeholder="e.g. forgot to clock out — left 22:00, confirmed by supervisor"></div></div>${foot('Save times')}`, (root) => wire(root, async () => {
+    await api('PATCH', `/api/shift-assignments/${r.assignment_id}/times`, { clocked_in_at: v(root, '#tIn') ? new Date(v(root, '#tIn')).toISOString() : null, clocked_out_at: v(root, '#tOut') ? new Date(v(root, '#tOut')).toISOString() : null, reason: v(root, '#tWhy') });
+    close(); load();
+  }));
+}
+
+function paintApprovals() {
+  el('#main').innerHTML = pending.length ? pending.map((x) => `<div class="tile" style="cursor:default;margin-bottom:10px">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><strong>${esc(x.name)}</strong><span class="pill warn">${esc(x.label)}${x.minutes ? ` · ${x.minutes} min` : ''}</span><span class="sub">${esc(x.site_name || '')} · ${esc(when(x.at))}</span></div>
+      <div class="sub" style="margin-top:4px">${x.ad_hoc ? 'No shift booked' : `Rostered ${hm(x.starts_at)}–${hm(x.ends_at)}`} · clocked ${hm(x.clocked_in_at)}–${x.clocked_out_at ? hm(x.clocked_out_at) : 'now'} · ${dur(x.worked_min)} worked</div>
+      <div class="reason">“${esc(x.reason)}”</div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap"><button class="btn primary" data-ok="${x.assignment_id}|${x.id}">Approve</button><button class="btn danger" data-no="${x.assignment_id}|${x.id}">Reject</button><span class="sub">${EFFECT[x.kind]}</span></div>
+    </div>`).join('') : '<p class="dim">Nothing waiting for approval.</p>';
+  const decide = async (key, decision) => {
+    const [a, id] = key.split('|');
+    const note = decision === 'REJECT' ? prompt('Reason for rejecting (optional)') : '';
+    if (note === null) return;
+    try { const r = await api('POST', `/api/timeclock/exceptions/${a}/${id}`, { decision, note }); if (r.effect) alert(`Rejected — ${r.effect}.`); load(); } catch (e) { alert(e.message); }
+  };
+  els('[data-ok]').forEach((b) => (b.onclick = () => decide(b.dataset.ok, 'APPROVE')));
+  els('[data-no]').forEach((b) => (b.onclick = () => decide(b.dataset.no, 'REJECT')));
+}
+
+async function paintSheet() {
+  const people = await api('GET', '/api/personnel').catch(() => []);
+  el('#main').innerHTML = `<div class="bar"><input type="date" id="sFrom" value="${range.from}"><input type="date" id="sTo" value="${range.to}">
+    <select id="sWho">${options(people.map((p) => [p.id, p.name]), range.personnel_id, 'Everyone')}</select><button class="btn" id="sGo">Show</button><button class="btn" id="sCsv">Export CSV</button></div><div id="sheet"><p class="dim">Loading…</p></div>`;
+  const run = async () => {
+    range = { from: el('#sFrom').value, to: el('#sTo').value, personnel_id: el('#sWho').value };
+    try { sheet = await api('GET', `/api/timeclock/timesheet?from=${range.from}&to=${range.to}${range.personnel_id ? `&personnel_id=${range.personnel_id}` : ''}`); } catch (e) { el('#sheet').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    const tot = {};
+    for (const r of sheet) if (!r.rejected) tot[r.name] = (tot[r.name] || 0) + r.worked_min;
+    el('#sheet').innerHTML = sheet.length ? `<div style="overflow-x:auto"><table class="k"><thead><tr><th>Date</th><th>Who</th><th>Site</th><th>Rostered</th><th>In – out</th><th class="num">Break</th><th class="num">Worked</th><th></th></tr></thead><tbody>
+      ${sheet.map((r) => `<tr><td style="white-space:nowrap">${esc(date(r.clocked_in_at))}</td><td>${esc(r.name)}</td><td>${esc(r.site_name || '—')}</td><td class="dim">${r.ad_hoc ? 'no shift' : `${hm(r.starts_at)}–${hm(r.ends_at)}`}</td>
+        <td style="white-space:nowrap">${hm(r.clocked_in_at)}–${r.clocked_out_at ? hm(r.clocked_out_at) : 'now'}</td><td class="num">${r.break_min ? `${r.break_min}m` : ''}</td><td class="num">${r.rejected ? '<s>' : ''}${dur(r.worked_min)}${r.rejected ? '</s>' : ''}</td>
+        <td>${flags(r)} ${r.clocked_out_at ? `<button class="btn" data-st="${r.assignment_id}" style="padding:2px 8px;font-size:11.5px">Times</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
+      <h3 class="sec">Totals (approved and waiting; rejected left out)</h3><table class="k"><tbody>${Object.entries(tot).map(([n, m]) => `<tr><td>${esc(n)}</td><td class="num"><strong>${dur(m)}</strong> <span class="sub">(${(m / 60).toFixed(2)} h)</span></td></tr>`).join('')}</tbody></table>`
+      : '<p class="dim">No clocked time in this period.</p>';
+    els('[data-st]').forEach((b) => (b.onclick = () => timesModal(sheet.find((r) => r.assignment_id === Number(b.dataset.st)))));
+  };
+  el('#sGo').onclick = run;
+  el('#sCsv').onclick = () => sheet && KIT.csv(`timesheet-${range.from}-to-${range.to}.csv`, ['Date', 'Name', 'Site', 'Ad hoc', 'Rostered start', 'Rostered finish', 'Clocked in', 'Clocked out', 'Break min', 'Worked hours', 'Approval', 'Reasons'],
+    sheet.map((r) => [r.clocked_in_at.slice(0, 10), r.name, r.site_name, r.ad_hoc ? 'yes' : '', r.ad_hoc ? '' : r.starts_at, r.ad_hoc ? '' : r.ends_at, r.clocked_in_at, r.clocked_out_at, r.break_min, r.rejected ? 0 : (r.worked_min / 60).toFixed(2), r.rejected ? 'REJECTED' : r.approval, r.exceptions.map((x) => `${x.label}: ${x.reason} (${x.status.toLowerCase()})`).join('; ')]));
+  run();
+}
+
+el('#bIn').onclick = async () => {
+  const [people, sites] = await Promise.all([api('GET', '/api/personnel'), api('GET', '/api/timeclock/sites')]);
+  const busy = new Set(board.on.map((r) => r.personnel_id));
+  modal('Clock someone in', `<p style="margin-top:0;font-size:13px">For someone with no shift booked (an ad-hoc shift). If they are on the rota now, use <strong>Clock in</strong> next to their shift under "Due now".</p>
+    <div class="k-form"><div><label>Who</label><select id="cWho">${options(people.filter((p) => !busy.has(p.id)).map((p) => [p.id, p.name]), '', '— choose —')}</select></div>
+    <div><label>Site</label><select id="cSite">${options(sites.map((s) => [s.id, s.name]), '', '— choose —')}</select></div>
+    <div class="full"><label>Reason</label><input id="cWhy" placeholder="e.g. called in to cover sickness"></div></div>${foot('Clock in')}`, (root) => wire(root, async () => {
+    await api('POST', '/api/timeclock/clock-in', { personnel_id: Number(v(root, '#cWho')) || null, site_id: Number(v(root, '#cSite')) || null, reason: v(root, '#cWhy') });
+    close(); tab = 'now'; load();
+  }));
+};
+
+load();
+setInterval(() => { if (tab !== 'sheet' && !document.querySelector('.modal-back')) load(); }, 30000);
+</script>
+</body>
+</html>

@@ -79,7 +79,7 @@ test('breaks come off the hours worked, and clocking out ends an open break', as
   assert.equal(h.break_min, 30);
   assert.ok(Math.abs(h.worked_min - 210) <= 1, `4h less a 30 min break, got ${h.worked_min}`);
   await call('POST', `/api/shift-assignments/${a.id}/break-start`, {}, danT);
-  await call('POST', `/api/shift-assignments/${a.id}/clock-out`, {}, danT);
+  await call('POST', `/api/shift-assignments/${a.id}/clock-out`, { reason: 'test: finishing early' }, danT);
   assert.ok(a.breaks.every((b) => b.end), 'the open break closed with the shift');
 });
 
@@ -121,7 +121,7 @@ test('5 minutes late: an SMS; 15 minutes: an alert to control; end of shift: tha
   assert.ok(app.db.audit_logs.some((e) => e.type === 'shift.not_clocked_in' && e.data.shift_id === s.id), 'control alerted');
 
   const { a: b, s: s2 } = await shiftFor(-60, 1);
-  await call('POST', `/api/shift-assignments/${b.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+  await call('POST', `/api/shift-assignments/${b.id}/clock-in`, { lat: 53.5, lon: -0.1, reason: 'test: late' }, danT);
   app.attendance.tick(Date.parse(s2.ends_at) + 60000);
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(app.db.dial_log.some((d) => d.shift_id === s2.id && /remember to clock out/.test(d.body)));
@@ -169,7 +169,7 @@ test('a first aid bag kept in a vehicle: the vehicle shows the bag and the plast
 
 test('app closed: a reminder push, and when it reopens off site they are clocked out at the last time seen on site, flagged for control', async () => {
   const { a } = await shiftFor(-60);
-  await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+  await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1, reason: 'test: late' }, danT);
   await call('POST', `/api/shift-assignments/${a.id}/presence`, { lat: 53.5, lon: -0.1 }, danT);
   // The phone goes quiet: last report 40 minutes ago, on site.
   const seen = new Date(Date.now() - 40 * 60000).toISOString();

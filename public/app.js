@@ -51,7 +51,7 @@ const CCCS = (() => {
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
-    if (!res.ok) throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
+    if (!res.ok) { const err = new Error((data && data.error) || `${res.status} ${res.statusText}`); err.status = res.status; throw err; }
     return data;
   }
 

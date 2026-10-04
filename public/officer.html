@@ -446,13 +446,17 @@ function paintShiftBar() {
       const next = shifts.filter((x) => x.status !== 'CANCELLED' && x.status !== 'DRAFT' && Date.parse(x.starts_at) > Date.now()).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at))[0];
       bar.className = 'shiftbar';
       bar.innerHTML = `<div class="sb-top"><span class="sb-state">Not on shift</span><span class="sb-where">${next ? `next: ${esc(fmtShiftTime(next.starts_at))}${next.site_name ? ' · ' + esc(next.site_name) : ''}` : 'no shifts booked'}</span></div>
-        <div class="sb-sub">${next ? 'Clock in opens here an hour before your shift starts.' : 'When you are rostered, your clock-in appears here.'}</div>`;
+        <div class="sb-acts"><button class="btn ok wide" id="sbAdhoc">Clock in</button></div>
+        <div class="sb-sub" id="sbMsg" style="margin-top:6px">No shift now — you can still clock in; you'll be asked which site and why, and control approves it.</div>`;
+      el('#sbAdhoc').onclick = clockInAdHoc;
       return;
     }
     const h = hoursOf(f.my);
     bar.className = 'shiftbar';
     bar.innerHTML = `<div class="sb-top"><span class="sb-state">Shift finished</span><span class="sb-where">${esc(f.site_name || '')}</span></div>
-      <div class="sb-hours">${dur(h.worked)}</div><div class="sb-sub">${hhmm(f.my.clocked_in_at)}–${hhmm(f.my.clocked_out_at)}${h.brk ? ` · ${h.brk} min break` : ''}${f.my.auto_clocked_out ? ' · clocked out automatically when you left site' : ''}</div>`;
+      <div class="sb-hours">${dur(h.worked)}</div><div class="sb-sub">${hhmm(f.my.clocked_in_at)}–${hhmm(f.my.clocked_out_at)}${h.brk ? ` · ${h.brk} min break` : ''}${f.my.auto_clocked_out ? ' · clocked out automatically when you left site' : ''}</div>
+      <div class="sb-acts"><button class="btn wide" id="sbAdhoc">Clock in again</button></div><div class="sb-sub" id="sbMsg"></div>`;
+    el('#sbAdhoc').onclick = clockInAdHoc;
     return;
   }
   const my = c.my || {};
@@ -467,10 +471,11 @@ function paintShiftBar() {
     return;
   }
   bar.className = `shiftbar ${h.onBreak ? 'brk' : 'on'}`;
-  bar.innerHTML = `<div class="sb-top"><span class="sb-state">${h.onBreak ? 'On break' : 'On shift'}</span><span class="sb-where">${esc(c.site_name || '')} · until ${hhmm(c.ends_at)}</span></div>
+  bar.innerHTML = `<div class="sb-top"><span class="sb-state">${h.onBreak ? 'On break' : 'On shift'}</span><span class="sb-where">${esc(c.site_name || '')} · ${c.ad_hoc ? `no shift booked${(my.exceptions || []).some((x) => x.status === 'PENDING') ? ' — waiting for approval' : ''}` : `until ${hhmm(c.ends_at)}`}</span></div>
     <div class="sb-hours">${dur(h.worked)}</div>
     <div class="sb-sub">Clocked in ${hhmm(my.clocked_in_at)}${h.brk ? ` · ${h.brk} min break so far` : ''}${h.onBreak ? ` · break started ${hhmm(h.onBreak.start)}` : ''}</div>
     ${presence && presence.enforced && !presence.inside ? `<div class="sb-warn">You're outside ${esc(presence.site)} (${presence.distance_m} m away). Go back within 5 minutes or you'll be clocked out.</div>` : ''}
+    ${visit && visit.shift_id && visit.shift_id === c.id ? `<a href="#visit" class="sb-warn" style="display:block;text-decoration:none;color:inherit"><strong>Patrol due</strong> — ${(visit.waypoints || []).length ? `${new Set((visit.checkpoint_scans || []).map((x) => x.waypoint_id)).size} of ${visit.waypoints.length} checkpoints scanned` : 'tap to open'} · finish by ${hhmm(Date.parse(visit.scheduled_for) + ((c.patrol && c.patrol.every_min) || 60) * 60000)}</a>` : c.patrol && c.patrol.every_min ? `<div class="sb-sub" style="margin-top:6px">Patrol every ${c.patrol.every_min >= 60 && c.patrol.every_min % 60 === 0 ? `${c.patrol.every_min / 60} h` : `${c.patrol.every_min} min`} on this shift.</div>` : ''}
     <div class="sb-acts">${h.onBreak ? '<button class="btn ok" id="sbBrk">End break</button>' : '<button class="btn" id="sbBrk">Start break</button>'}<button class="btn danger" id="sbOut">End shift</button></div>
     ${presence && presence.enforced ? `<div class="sb-sub" style="margin-top:8px">Keep this app open during your shift — your phone can only confirm you're on site while it's open.${pushState === 'available' ? ' <a href="#" id="sbPush">Turn on reminders</a>' : ''}</div>` : ''}`;
   const pl = el('#sbPush');
@@ -638,21 +643,56 @@ function paintShift() {
   if (el('#shClockOut')) el('#shClockOut').onclick = () => clockOut(current);
   refreshPassdown();
 }
-async function clockIn(s) {
+/** Asks why (clocking in/out away from the rostered time, or with no
+ * shift). Resolves to the reason, or null if they cancel. */
+function askReason(why, extraHtml = '') {
+  return new Promise((resolve) => {
+    let done = false;
+    modal('Reason needed', `<p style="margin-top:0">${esc(why)}.</p>${extraHtml}
+      <label>Reason</label><textarea id="rsText" rows="3" style="width:100%" placeholder="e.g. asked to start early by the site manager"></textarea>
+      <p class="dim" style="font-size:12.5px">Control or an admin will check and approve it.</p>
+      <p class="err" id="rsErr"></p><button class="btn ok" id="rsGo" style="width:100%;padding:14px;font-size:16px">Continue</button>`, () => {
+      el('#mClose').onclick = () => { if (!done) { done = true; closeModal(); resolve(null); } };
+      el('#rsGo').onclick = () => {
+        const t = el('#rsText').value.trim();
+        if (t.length < 3) { el('#rsErr').textContent = 'Please say why.'; return; }
+        const extra = {}; document.querySelectorAll('#modalHost [data-extra]').forEach((x) => { extra[x.dataset.extra] = x.value; });
+        done = true; closeModal(); resolve({ reason: t, ...extra });
+      };
+    });
+  });
+}
+async function clockInAdHoc() {
+  let sites = [];
+  try { sites = await api('GET', '/api/timeclock/sites'); } catch (e) { alert(e.message); return; }
+  if (!sites.length) { alert('There are no sites you can clock in at — ask control.'); return; }
+  const r = await askReason('You have no shift booked now', `<label>Site</label><select data-extra="site_id" style="width:100%;margin-bottom:10px">${sites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>`);
+  if (!r) return;
+  const msg = el('#sbMsg'); if (msg) msg.textContent = 'Checking your location…';
+  const f = await getFix(15000, 0);
+  try { await api('POST', '/api/timeclock/clock-in', { ...(f || {}), site_id: Number(r.site_id), reason: r.reason }); startFootTracking(); toast('Clocked in — waiting for approval.'); }
+  catch (e) { if (el('#sbMsg')) { el('#sbMsg').textContent = e.message; el('#sbMsg').style.color = 'var(--emergency)'; } else alert(e.message); return; }
+  await refreshShifts();
+}
+async function clockIn(s, reason) {
   const msg = el('#sbMsg'); if (msg) msg.textContent = 'Checking your location…';
   const f = await getFix(15000, 0); // always a fresh position for clock-in
-  try { await api('POST', `/api/shift-assignments/${s.my.id}/clock-in`, f || {}); startFootTracking(); toast('Clocked in.'); }
+  try { await api('POST', `/api/shift-assignments/${s.my.id}/clock-in`, { ...(f || {}), ...(reason ? { reason } : {}) }); startFootTracking(); toast(reason ? 'Clocked in — reason sent for approval.' : 'Clocked in.'); }
   catch (e) {
+    if (e.status === 428 && !reason) { if (msg) msg.textContent = ''; const r = await askReason(e.message.replace(/ — please give a reason$/, '')); if (r) return clockIn(s, r.reason); return; }
     const text = !f && /location/i.test(e.message) ? 'Turn on location for this app (and allow it in your browser), then try again.' : e.message;
     if (el('#sbMsg')) { el('#sbMsg').textContent = text; el('#sbMsg').style.color = 'var(--emergency)'; } else alert(text);
     return;
   }
   await refreshShifts();
 }
-async function clockOut(s) {
-  if (!confirm('Clock out now?')) return;
-  try { const r = await api('POST', `/api/shift-assignments/${s.my.id}/clock-out`, {}); stopFootTracking(); const mine = r.assignments && r.assignments.find((x) => x.id === s.my.id); toast(mine ? `Clocked out — ${dur(hoursOf(mine).worked)} worked.` : 'Clocked out.'); }
-  catch (e) { alert(e.message); }
+async function clockOut(s, reason) {
+  if (!reason && !confirm('Clock out now?')) return;
+  try { const r = await api('POST', `/api/shift-assignments/${s.my.id}/clock-out`, reason ? { reason } : {}); stopFootTracking(); const mine = r.assignments && r.assignments.find((x) => x.id === s.my.id); toast(mine ? `Clocked out — ${dur(hoursOf(mine).worked)} worked.` : 'Clocked out.'); }
+  catch (e) {
+    if (e.status === 428 && !reason) { const r = await askReason(e.message.replace(/ — please give a reason$/, '')); if (r) return clockOut(s, r.reason); return; }
+    alert(e.message);
+  }
   await refreshShifts();
 }
 function paintRotaList(list) {
@@ -879,7 +919,7 @@ function openScanModal() {
   modal('Scan checkpoint', `
     <p class="dim">Use whichever the site has — a QR code, an NFC tag, or the printed fallback code under either.</p>
     <div class="btn-row" style="margin-top:10px;flex-direction:column;align-items:stretch;gap:8px">
-      ${'BarcodeDetector' in window ? '<button class="btn" id="scanQr">Scan QR code</button>' : ''}
+      <button class="btn" id="scanQr">Scan QR code</button>
       ${'NDEFReader' in window ? '<button class="btn" id="scanNfc">Scan NFC tag</button>' : ''}
       <button class="btn" id="scanManual">Enter code by hand</button>
     </div>
@@ -901,17 +941,25 @@ async function scanViaCamera() {
     video.srcObject = stream;
     const stop = () => stream.getTracks().forEach((t) => t.stop());
     el('#mClose').onclick = () => { stop(); closeModal(); };
-    const detector = new BarcodeDetector({ formats: ['qr_code'] });
+    // The browser's own QR reader where there is one (Android); otherwise
+    // (iPhone) jsQR, loaded on first use.
+    const detector = 'BarcodeDetector' in window ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
+    const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const ready = detector || window.jsQR ? Promise.resolve() : new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js'; sc.onload = ok; sc.onerror = () => bad(new Error('could not load the QR reader — enter the code by hand')); document.head.appendChild(sc); });
     let done = false;
+    const read = async () => {
+      if (detector) { const codes = await detector.detect(video); return codes.length ? codes[0].rawValue : null; }
+      if (!video.videoWidth) return null;
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight; ctx.drawImage(video, 0, 0);
+      const r = window.jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height);
+      return r ? r.data : null;
+    };
     const tick = async () => {
       if (done) return;
-      try {
-        const codes = await detector.detect(video);
-        if (codes.length) { done = true; stop(); closeModal(); submitScan(codes[0].rawValue); return; }
-      } catch {}
+      try { const code = await read(); if (code) { done = true; stop(); closeModal(); submitScan(code); return; } } catch {}
       requestAnimationFrame(tick);
     };
-    tick();
+    ready.then(tick).catch((e) => { el('#scanErr').textContent = e.message; });
   });
 }
 function scanViaNfc() {
@@ -1449,6 +1497,13 @@ bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === pe
      visit = v; paintVisit();
      el('#alertHost').innerHTML = `<a href="#visit" class="err" style="display:block;border:1px solid var(--priority);border-radius:10px;padding:12px;text-decoration:none">New patrol visit ${esc(v.reference)} — ${esc(v.site_name || '')} · tap to open</a>`;
    })
+   .on('site_visit.created', (v) => {
+     // A patrol on this officer's shift has fallen due (routes-shift-patrols.js).
+     if (!person || !v.shift_id || !v.resources.some((r) => r.personnel === person.name) || v.status !== 'ON_SCENE') return;
+     visit = v; paintVisit(); if (screenKey === 'home') paintShiftBar();
+     el('#alertHost').innerHTML = `<a href="#visit" class="err" style="display:block;border:1px solid var(--priority);border-radius:10px;padding:12px;text-decoration:none">Patrol due — ${esc(v.site_name || '')}${v.waypoints.length ? ` · ${v.waypoints.length} checkpoints` : ''} · tap to start</a>`;
+   })
+   .on('site_visit.missed', (v) => { if (visit && v.id === visit.id) { visit = null; paintVisit(); el('#alertHost').innerHTML = ''; if (screenKey === 'home') paintShiftBar(); } })
    .on('site_visit.status_changed', (v) => {
      if (!visit || v.id !== visit.id) {
        if (person && v.resources.some((r) => r.personnel === person.name) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) { visit = v; paintVisit(); }

@@ -190,7 +190,7 @@ function checkAutoProgressForPerson(personnelId, lat, lon) {
       }
     }
   }
-  const v = db.site_visits.find((x) => x.personnel_id === personnelId || (x.additional_personnel || []).includes(personnelId));
+  const v = db.site_visits.find((x) => (x.personnel_id === personnelId || (x.additional_personnel || []).includes(personnelId)) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(x.status));
   if (v) {
     const site = db.sites.find((s) => s.id === v.site_id);
     if (site && site.lat != null && !['ON_SCENE', 'COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) {
@@ -3335,7 +3335,9 @@ route('PATCH', '/api/site-visits/:id', ALL, ({ params, body, user }) => {
         checklist: v.checklist, media: v.media,
         extraRows: waypoints.length ? [['Checkpoints', `${waypoints.filter((w) => scannedIds.has(w.id)).length} / ${waypoints.length} scanned` + (waypoints.some((w) => !scannedIds.has(w.id)) ? ` (missing: ${waypoints.filter((w) => !scannedIds.has(w.id)).map((w) => w.title).join(', ')})` : '')]] : [],
       });
-      sendResolutionReportEmail({
+      // An hourly shift patrol would mean a dozen emails a shift — those are
+      // in the client portal (routes-shift-patrols.js) instead.
+      if (!v.shift_id) sendResolutionReportEmail({
         reference: v.reference, siteId: v.site_id, media: v.media, mediaDir: visitMediaDir(v.id),
         logType: 'site_visit.report_emailed', logIdKey: 'site_visit_id', logId: v.id,
       }, v.report_html);
@@ -3472,6 +3474,26 @@ function createSiteVisitFromSchedule(schedule, scheduledFor) {
   db.site_visits.push(v);
   broadcast('site_visit.created', publicSiteVisit(v));
   logEvent('site_visit.created', `VISIT ${v.reference} SCHEDULED FOR ${site.name} (${schedule.label})`, { site_visit_id: v.id, patrol_schedule_id: schedule.id });
+  return v;
+}
+/** A patrol on a shift (routes-shift-patrols.js). The officers are already
+ * on site and clocked in, so it starts ON_SCENE: scan, then complete. */
+function createPatrolVisit({ shift, seq, dueAt, personnelIds }) {
+  const site = db.sites.find((s) => s.id === shift.site_id);
+  const now = new Date().toISOString();
+  const on = personnelIds && personnelIds.length;
+  const v = {
+    id: nextId('site_visits'), reference: nextVisitReference(), site_id: site ? site.id : shift.site_id, schedule_id: null, beat_id: shift.patrol.beat_id || null,
+    shift_id: shift.id, patrol_seq: seq,
+    personnel_id: on ? personnelIds[0] : null, additional_personnel: on ? personnelIds.slice(1) : [], status: on ? 'ON_SCENE' : 'SCHEDULED',
+    scheduled_for: dueAt.toISOString(),
+    dispatched_at: on ? now : null, acknowledged_at: on ? now : null, en_route_at: null, on_scene_at: on ? now : null, completed_at: null, cancelled_at: null, missed_at: null,
+    notes: '', checklist: [], media: [], report_html: null, checkpoint_scans: [],
+    created_by: null, created_at: now, updated_at: now,
+  };
+  db.site_visits.push(v);
+  broadcast('site_visit.created', publicSiteVisit(v));
+  logEvent('site_visit.created', `PATROL ${v.reference} DUE ${dueAt.toISOString()} AT ${site ? site.name : 'SITE'} (SHIFT ${shift.id}, NO. ${seq})`, { site_visit_id: v.id, shift_id: shift.id });
   return v;
 }
 function patrolScheduleTick() {
@@ -3755,9 +3777,12 @@ route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user 
   const s = findShift(a.shift_id);
   if (a.clocked_in_at) return publicShift(s);
   if (a.status === 'REMOVED') throw httpError(409, 'no longer on this shift');
-  // On-site check (routes-attendance.js): throws if they are not there.
+  // Outside the rostered time needs a reason (routes-timeclock.js), and
+  // the on-site check (routes-attendance.js) — each throws if not met.
+  const pending = timeclock.check(a, s, body || {}, user, 'IN');
   attendance.checkClockIn(a, s, body || {}, user);
   a.clocked_in_at = new Date().toISOString(); a.updated_at = a.clocked_in_at;
+  timeclock.record(a, pending, user);
   if (s.status === 'PUBLISHED') { s.status = 'IN_PROGRESS'; }
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   const pub = publicShift(s);
@@ -3765,14 +3790,17 @@ route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user 
   logEvent('shift.clocked_in', `${p ? p.name : 'PERSON'} CLOCKED IN`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
 });
-route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, user }) => {
+route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, body, user }) => {
   const a = findAssignment(params.id);
   assertAssignmentAccess(a, user);
   const s = findShift(a.shift_id);
   if (!a.clocked_in_at) throw httpError(409, 'not clocked in');
   if (a.clocked_out_at) throw httpError(409, 'already clocked out');
+  const pending = timeclock.check(a, s, body || {}, user, 'OUT');
   a.clocked_out_at = new Date().toISOString(); a.updated_at = a.clocked_out_at;
   attendance.closeBreaks(a, a.clocked_out_at);
+  attendance.finishAdHoc(a, s);
+  timeclock.record(a, pending, user);
   if (!a.attendance) a.attendance = 'ATTENDED';
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   const pub = publicShift(s);
@@ -3860,6 +3888,18 @@ const attendance = require('./routes-attendance.js')({
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
 
+
+// Clocking in/out off-rota, reasons and approvals — see routes-timeclock.js.
+const timeclock = require('./routes-timeclock.js')({
+  route, httpError, CONTROL, db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift, isControlRole, siteVisibleTo,
+  flushNow: () => store.flushNow(),
+});
+
+// Patrols on shifts, and shifts/patrols in the client portal — see routes-shift-patrols.js.
+const shiftPatrols = require('./routes-shift-patrols.js')({
+  route, httpError, CONTROL, CLIENT, ADMIN, db, logEvent, broadcast, pushToUsers, pushToRoles, findShift, siteVisibleTo,
+  createPatrolVisit, publicSiteVisit, publicShift, flushNow: () => store.flushNow(),
+});
 
 // Stock and asset management — see routes-inventory.js.
 const inventory = require('./routes-inventory.js')({
@@ -4337,4 +4377,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, shiftPatrols, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
