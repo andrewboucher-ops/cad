@@ -61,6 +61,9 @@ const TABLES = [
   'rentals',
   // Quotes/contracts (signed by clients) and the invoices made from them.
   'agreements', 'invoices',
+  // Payroll runs and the payslips they produce — an issued payslip is a
+  // legal record, same evidentiary weight as a filed form submission.
+  'payroll_runs', 'payslips',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

@@ -120,6 +120,7 @@
       <button id="tabOnboarding" data-tab="onboarding" data-desc="Active staff still missing paperwork, a licence, DBS check, contract, bank details, a login or kit before they're fully set up to work.">Onboarding</button>
       <button id="tabTraining" data-tab="training" data-desc="Training courses and assessments staff complete in the app.">Training</button>
       <button id="tabLeave" data-tab="leave" data-desc="Leave requests and balances.">Leave</button>
+      <button id="tabPayroll" data-tab="payroll" data-desc="Monthly payroll runs — generate, review and issue payslips. ADMIN only.">Payroll</button>
       <div class="an-group">Reports &amp; forms</div>
       <button id="tabForms" data-tab="forms" data-desc="Every report officers fill in — incident, vehicle check, fuel-up, deep clean, safeguarding and the job application. Click a form to edit its questions, who can read it, and who is emailed.">Forms</button>
       <div class="an-group">Sites &amp; rota</div>
@@ -283,6 +284,12 @@
       <div id="lvTableWrap"></div>
     </div>
 
+    <div id="viewPayroll" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">A payroll run is draft until approved — reviewable, re-calculable, deletable. Once issued it's permanent: the payslip is the record, nothing about it changes again. A correction to an issued payslip goes on the next run instead.</p>
+      <div class="toolbar"><button type="button" class="btn primary" id="btnNewPayrollRun">New payroll run</button></div>
+      <div id="prTableWrap"></div>
+    </div>
+
     <div id="viewShiftTypes" class="hide">
       <p class="dim" style="margin:0 0 10px;font-size:13px">What a shift's type is, for rota colour-coding and the type-specific detail a shift carries (console/radio channel, patrol route, etc.). Retiring a type hides it from new shifts without touching ones that already use it.</p>
       <div id="stTableWrap"></div>
@@ -404,6 +411,9 @@ function showTab(name) {
   el('#tabLeave').classList.toggle('active', name === 'leave');
   el('#viewLeave').classList.toggle('hide', name !== 'leave');
   el('#btnNewLeave').hidden = name !== 'leave';
+  el('#tabPayroll').classList.toggle('active', name === 'payroll');
+  el('#viewPayroll').classList.toggle('hide', name !== 'payroll');
+  if (name === 'payroll') paintPayroll();
   el('#tabShiftTypes').classList.toggle('active', name === 'shiftTypes');
   el('#viewShiftTypes').classList.toggle('hide', name !== 'shiftTypes');
   el('#btnNewShiftType').hidden = name !== 'shiftTypes';
@@ -460,6 +470,7 @@ el('#tabTraining').onclick = () => showTab('training');
 el('#tabApplicants').onclick = () => showTab('applicants');
 el('#tabOnboarding').onclick = () => showTab('onboarding');
 el('#tabLeave').onclick = () => showTab('leave');
+el('#tabPayroll').onclick = () => showTab('payroll');
 el('#tabShiftTypes').onclick = () => showTab('shiftTypes');
 el('#tabMenu').onclick = () => showTab('menu');
 el('#tabRetention').onclick = () => showTab('retention');
@@ -609,6 +620,10 @@ const EMPLOYMENT_LABEL = { ACTIVE: 'Active', LEAVE: 'On leave', TERMINATED: 'Ter
 // Supervision and CCTV together is the common case this was added for).
 const SIA_LICENCE_TYPES = ['Door Supervision', 'Security Guarding', 'CCTV (Public Space Surveillance)', 'Close Protection', 'Cash and Valuables in Transit', 'Key Holding', 'Vehicle Immobilisation'];
 const EMPLOYMENT_TYPE_LABEL = { EMPLOYED: 'Employed', SUBCONTRACTOR: 'Subcontractor' };
+const NI_CATEGORY_LABEL = {
+  A: 'A — Standard', B: "B — Married woman's reduced rate", C: 'C — Over state pension age',
+  H: 'H — Apprentice under 25', J: 'J — Deferment', M: 'M — Under 21', V: 'V — Veteran (first 12 months)',
+};
 function paintPersonnel() {
   const q = el('#pnSearch').value.trim().toLowerCase();
   const status = el('#pnStatus').value;
@@ -747,6 +762,33 @@ function personnelForm(p) {
         <input id="npnAllowance" type="number" min="0" step="0.5" value="${!isNew && p.annual_leave_allowance_days != null ? p.annual_leave_allowance_days : ''}">
       </div>
       ${!isNew && p.leave_balance ? `<p class="dim" style="margin:0">Leave balance: <strong>${p.leave_balance.remaining}</strong> of ${p.leave_balance.allowance} days remaining this leave year (${p.leave_balance.taken} taken)</p>` : ''}
+      <div id="npnPayrollRow" style="${!isNew && p.employment_type === 'SUBCONTRACTOR' ? 'display:none' : ''}">
+        <label>Payroll — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">a rate is required before this person can be included in a payroll run</span></label>
+        <div style="display:flex;gap:8px">
+          <input id="npnHourlyRate" type="number" min="0" step="0.01" placeholder="Hourly rate (£)" value="${!isNew && p.payroll && p.payroll.hourly_rate != null ? p.payroll.hourly_rate : ''}" style="flex:1">
+          <select id="npnPayBasis" style="width:160px">
+            <option value="WORKED" ${!(!isNew && p.payroll && p.payroll.pay_basis === 'ROSTERED') ? 'selected' : ''}>Hours worked</option>
+            <option value="ROSTERED" ${!isNew && p.payroll && p.payroll.pay_basis === 'ROSTERED' ? 'selected' : ''}>Hours rostered</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:8px">
+          <input id="npnTaxCode" autocomplete="off" placeholder="Tax code" value="${!isNew && p.payroll ? esc(p.payroll.tax_code || '1257L') : '1257L'}" style="width:110px">
+          <select id="npnNiCategory" style="width:220px">${Object.entries(NI_CATEGORY_LABEL).map(([v, label]) => `<option value="${v}" ${(!isNew && p.payroll ? p.payroll.ni_category : 'A') === v ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select>
+          <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;flex:1;white-space:nowrap"><input type="checkbox" id="npnScottish" style="width:auto" ${!isNew && p.payroll && p.payroll.scottish_taxpayer ? 'checked' : ''}> Scottish taxpayer</label>
+        </div>
+        <label>Pension — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">statutory minimum is 3% employer / 5% employee of qualifying earnings</span></label>
+        <div style="display:flex;gap:8px">
+          <input id="npnPensionScheme" autocomplete="off" placeholder="Scheme name, e.g. NEST" value="${!isNew && p.payroll ? esc(p.payroll.pension_scheme_name || '') : ''}" style="flex:1">
+          <input id="npnPensionEmployeePct" type="number" min="0" max="100" step="0.1" placeholder="Employee %" value="${!isNew && p.payroll && p.payroll.pension_employee_pct != null ? p.payroll.pension_employee_pct : 5}" style="width:110px">
+          <input id="npnPensionEmployerPct" type="number" min="0" max="100" step="0.1" placeholder="Employer %" value="${!isNew && p.payroll && p.payroll.pension_employer_pct != null ? p.payroll.pension_employer_pct : 3}" style="width:110px">
+        </div>
+        <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400"><input type="checkbox" id="npnPensionOptedOut" style="width:auto" ${!isNew && p.payroll && p.payroll.pension_opted_out ? 'checked' : ''}> Opted out of the pension</label>
+        <label>Student loan</label>
+        <select id="npnStudentLoanPlan">
+          <option value="" ${!(!isNew && p.payroll && p.payroll.student_loan_plan) ? 'selected' : ''}>None</option>
+          ${['PLAN1', 'PLAN2', 'PLAN4', 'PLAN5', 'POSTGRAD'].map((v) => `<option value="${v}" ${!isNew && p.payroll && p.payroll.student_loan_plan === v ? 'selected' : ''}>${v === 'POSTGRAD' ? 'Postgraduate' : 'Plan ' + v.slice(4)}</option>`).join('')}
+        </select>
+      </div>
       <label>Call sign (optional)</label>
       <select id="npnCallsign"><option value="">— none —</option>${allCallsigns.map((c) => `<option value="${c.id}" ${!isNew && p.callsign_id === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <label>Line manager — who the console phones when no duty supervisor is rostered</label>
@@ -900,7 +942,9 @@ function personnelModal(p) {
     if (el('#pnViewOnboarding')) el('#pnViewOnboarding').onclick = (e) => { e.preventDefault(); onboardingModal(p); };
     if (el('#pnDelete')) el('#pnDelete').onclick = () => deletePersonnel(p.id);
     el('#npnEmpType').addEventListener('change', () => {
-      el('#npnAllowanceRow').style.display = el('#npnEmpType').value === 'SUBCONTRACTOR' ? 'none' : '';
+      const hide = el('#npnEmpType').value === 'SUBCONTRACTOR';
+      el('#npnAllowanceRow').style.display = hide ? 'none' : '';
+      el('#npnPayrollRow').style.display = hide ? 'none' : '';
     });
     // Repeatable SIA licence rows — a plain array in JS, re-rendered on add/
     // remove (reading the DOM's current values first so an in-progress edit
@@ -966,6 +1010,16 @@ function personnelModal(p) {
         branch_id: el('#npnBranch').value ? Number(el('#npnBranch').value) : null,
         employment_type: empType,
         annual_leave_allowance_days: empType === 'SUBCONTRACTOR' ? null : (el('#npnAllowance').value ? Number(el('#npnAllowance').value) : null),
+        payroll: empType === 'SUBCONTRACTOR' ? null : {
+          tax_code: el('#npnTaxCode').value.trim() || '1257L', ni_category: el('#npnNiCategory').value, scottish_taxpayer: el('#npnScottish').checked,
+          student_loan_plan: el('#npnStudentLoanPlan').value || null,
+          pension_scheme_name: el('#npnPensionScheme').value.trim(),
+          pension_employee_pct: el('#npnPensionEmployeePct').value ? Number(el('#npnPensionEmployeePct').value) : 5,
+          pension_employer_pct: el('#npnPensionEmployerPct').value ? Number(el('#npnPensionEmployerPct').value) : 3,
+          pension_opted_out: el('#npnPensionOptedOut').checked,
+          hourly_rate: el('#npnHourlyRate').value ? Number(el('#npnHourlyRate').value) : null,
+          pay_basis: el('#npnPayBasis').value, standard_daily_hours: 8,
+        },
       };
       const supervisorId = el('#npnSupervisor').value ? Number(el('#npnSupervisor').value) : null;
       try {
@@ -2821,6 +2875,144 @@ function shiftTypeModal(t) {
   });
 }
 el('#btnNewShiftType').onclick = () => shiftTypeModal(null);
+
+/* ---------- Payroll ---------- */
+const gbpPr = (n) => `£${Number(n || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+async function paintPayroll() {
+  el('#prTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  let runs;
+  try { runs = await api('GET', '/api/payroll/runs'); } catch (e) { el('#prTableWrap').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#prTableWrap').innerHTML = runs.length ? `
+    <table class="log-table">
+      <thead><tr><th>Period</th><th style="width:90px">Status</th><th style="width:70px">People</th><th style="width:110px">Net pay</th><th style="width:130px">Employer cost</th></tr></thead>
+      <tbody>${runs.map((r) => `<tr class="clickable" data-run="${r.id}">
+        <td>${esc(new Date(r.period_start).toLocaleDateString('en-GB'))} – ${esc(new Date(r.period_end).toLocaleDateString('en-GB'))}</td>
+        <td class="dim">${r.status === 'ISSUED' ? '<span style="color:var(--available)">Issued</span>' : 'Draft'}</td>
+        <td class="dim">${r.totals.payslip_count}</td>
+        <td class="dim">${gbpPr(r.totals.net_pay)}</td>
+        <td class="dim">${gbpPr(r.totals.employer_cost)}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No payroll runs yet.</p>';
+  els('#prTableWrap [data-run]').forEach((row) => (row.onclick = () => payrollRunModal(Number(row.dataset.run))));
+}
+el('#btnNewPayrollRun').onclick = () => {
+  const today = new Date(), monthStart = new Date(today.getFullYear(), today.getMonth() - 1, 1), monthEnd = new Date(today.getFullYear(), today.getMonth(), 0);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  modal('New payroll run', `
+    <form class="stack" onsubmit="return false">
+      <label>Period start</label><input id="prStart" type="date" value="${iso(monthStart)}">
+      <label>Period end</label><input id="prEnd" type="date" value="${iso(monthEnd)}">
+      <label>Pay date</label><input id="prPayDate" type="date" value="${iso(monthEnd)}">
+      <p class="err" id="prError" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `<div class="btn-row" style="justify-content:flex-end"><button class="btn" data-x>Cancel</button><button class="btn primary" id="prGenerate">Generate</button></div>`;
+    foot.querySelector('[data-x]').onclick = closeModal;
+    el('#prGenerate').onclick = async () => {
+      try {
+        const res = await api('POST', '/api/payroll/runs', { period_start: el('#prStart').value, period_end: el('#prEnd').value, pay_date: el('#prPayDate').value });
+        closeModal(); await paintPayroll(); payrollRunModal(res.run.id, res.skipped);
+      } catch (e) { el('#prError').textContent = e.message; }
+    };
+  });
+};
+/** The run-detail view: every payslip, editable while DRAFT, with the
+ * totals that answer "what's due to whom" — net pay is the bank-transfer
+ * total, employer cost is net + employer NI + employer pension on top. */
+async function payrollRunModal(runId, justSkipped) {
+  let run;
+  try { run = await api('GET', `/api/payroll/runs/${runId}`); } catch (e) { alert(e.message); return; }
+  const draft = run.status === 'DRAFT';
+  const t = encodeURIComponent(CCCS.getSession().token);
+  const blockerText = (ps) => {
+    const bits = [];
+    if (ps.unresolved_hours.length) bits.push(`${ps.unresolved_hours.length} shift(s) with no clock-out`);
+    const person = allPersonnel.find((p) => p.id === ps.personnel_id);
+    if (!person || !person.bank_details || !person.bank_details.account_number) bits.push('no bank details on file');
+    return bits;
+  };
+  const allBlockers = run.payslips.flatMap(blockerText);
+  modal(`Payroll — ${new Date(run.period_start).toLocaleDateString('en-GB')} – ${new Date(run.period_end).toLocaleDateString('en-GB')}`, `
+    <div class="stack">
+      ${justSkipped && justSkipped.length ? `<p class="dim" style="margin:0">Not included (no hourly rate set): ${justSkipped.map((s) => esc(s.name)).join(', ')}. Set a rate on their Personnel record, then Recalculate.</p>` : ''}
+      <table class="log-table">
+        <thead><tr><th>Name</th><th style="width:60px">Hours</th><th style="width:80px">Gross</th><th style="width:70px">Tax</th><th style="width:70px">NI</th><th style="width:70px">Pension</th><th style="width:80px">Net</th><th style="width:90px"></th></tr></thead>
+        <tbody>${run.payslips.map((ps) => {
+          const blockers = blockerText(ps);
+          return `<tr>
+            <td>${esc(ps.employee_name)}${blockers.length ? `<div class="err" style="font-size:11px">${esc(blockers.join(', '))}</div>` : ''}</td>
+            <td class="dim">${ps.hours_worked}</td>
+            <td class="dim">${gbpPr(ps.gross_pay)}</td>
+            <td class="dim">${gbpPr(ps.tax_this_period)}</td>
+            <td class="dim">${gbpPr(ps.ni_employee)}</td>
+            <td class="dim">${gbpPr(ps.pension_employee)}</td>
+            <td><strong>${gbpPr(ps.net_pay)}</strong></td>
+            <td>${draft ? `<button class="btn" data-adjust="${ps.id}" style="padding:3px 8px;font-size:11px">Adjust</button>` : `<a class="btn" target="_blank" href="/api/payslips/${ps.id}/pdf?token=${t}" style="padding:3px 8px;font-size:11px">PDF</a>`}</td>
+          </tr>${ps.other_lines.length ? `<tr><td colspan="8" class="dim" style="font-size:11.5px">${ps.other_lines.map((l) => `${esc(l.description)}: ${gbpPr(l.amount)}`).join(' · ')}</td></tr>` : ''}`;
+        }).join('')}</tbody>
+      </table>
+      <div style="display:flex;gap:16px;font-size:13px">
+        <span>Net pay total: <strong>${gbpPr(run.totals.net_pay)}</strong></span>
+        <span>Employer cost: <strong>${gbpPr(run.totals.employer_cost)}</strong></span>
+      </div>
+      ${draft && allBlockers.length ? `<p class="err" style="margin:0">Cannot issue yet — ${esc(allBlockers.join('; '))}</p>` : ''}
+      <p class="err" id="prmError" style="min-height:16px;margin:0"></p>
+    </div>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `<div class="foot-split">
+      <span>${draft ? '<button class="btn danger" id="prmDelete">Delete run</button>' : ''}</span>
+      <span class="btn-row" style="margin:0">
+        <button class="btn" data-x>Close</button>
+        ${draft ? `<button class="btn" id="prmRecalc">Recalculate</button><button class="btn primary" id="prmApprove" ${allBlockers.length ? 'disabled' : ''}>Approve &amp; issue</button>` : ''}
+      </span>
+    </div>`;
+    foot.querySelector('[data-x]').onclick = closeModal;
+    els('[data-adjust]').forEach((b) => (b.onclick = () => payslipAdjustModal(run.payslips.find((ps) => ps.id === Number(b.dataset.adjust)), () => payrollRunModal(runId))));
+    if (el('#prmDelete')) el('#prmDelete').onclick = async () => {
+      if (!confirm('Delete this draft payroll run? This cannot be undone.')) return;
+      try { await api('DELETE', `/api/payroll/runs/${runId}`); closeModal(); await paintPayroll(); } catch (e) { el('#prmError').textContent = e.message; }
+    };
+    if (el('#prmRecalc')) el('#prmRecalc').onclick = async () => {
+      try { await api('POST', `/api/payroll/runs/${runId}/recalculate`, {}); closeModal(); payrollRunModal(runId); } catch (e) { el('#prmError').textContent = e.message; }
+    };
+    if (el('#prmApprove')) el('#prmApprove').onclick = async () => {
+      if (!confirm('Issue this payroll run? Once issued, every payslip on it is permanent.')) return;
+      try { await api('POST', `/api/payroll/runs/${runId}/approve`, {}); closeModal(); await paintPayroll(); } catch (e) { el('#prmError').textContent = e.message; }
+    };
+  });
+}
+function payslipAdjustModal(ps, onSaved) {
+  modal(`Adjust — ${ps.employee_name}`, `
+    <form class="stack" onsubmit="return false">
+      <p class="dim" style="margin:0 0 6px;font-size:13px">Added to gross pay — taxed, NI'd and pensioned like any other pay. For a correction to a past issued payslip, add it to the next run instead.</p>
+      <div id="paLines"></div>
+      <button type="button" class="btn" id="paAdd" style="align-self:flex-start;padding:5px 12px;font-size:12px">+ Add line</button>
+      <p class="err" id="paError" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    let lines = ps.other_lines.map((l) => ({ ...l }));
+    const paint = () => {
+      el('#paLines').innerHTML = lines.length ? lines.map((l, i) => `
+        <div style="display:flex;gap:8px;margin-bottom:6px" data-i="${i}">
+          <input class="pa-desc" placeholder="Description" value="${esc(l.description)}" style="flex:1">
+          <input class="pa-amount" type="number" step="0.01" placeholder="Amount (£)" value="${l.amount}" style="width:120px">
+          <button type="button" class="btn danger pa-remove" style="padding:4px 8px;font-size:11px">Remove</button>
+        </div>`).join('') : '<p class="dim" style="margin:0 0 6px">No adjustments.</p>';
+      els('#paLines .pa-remove').forEach((b) => (b.onclick = () => { lines = readLines(); lines.splice(Number(b.closest('[data-i]').dataset.i), 1); paint(); }));
+    };
+    const readLines = () => els('#paLines [data-i]').map((row) => ({ description: row.querySelector('.pa-desc').value, amount: Number(row.querySelector('.pa-amount').value) || 0 }));
+    paint();
+    el('#paAdd').onclick = () => { lines = readLines(); lines.push({ description: '', amount: 0 }); paint(); };
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `<div class="btn-row" style="justify-content:flex-end"><button class="btn" data-x>Cancel</button><button class="btn primary" id="paSave">Save</button></div>`;
+    foot.querySelector('[data-x]').onclick = closeModal;
+    el('#paSave').onclick = async () => {
+      try {
+        await api('PATCH', `/api/payroll/runs/${ps.run_id}/payslips/${ps.id}`, { other_lines: readLines().filter((l) => l.description.trim()) });
+        closeModal(); onSaved();
+      } catch (e) { el('#paError').textContent = e.message; }
+    };
+  });
+}
 
 /* ---------- Data retention ---------- */
 const RETENTION_LABEL = {

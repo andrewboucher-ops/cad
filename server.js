@@ -35,6 +35,7 @@ const { verifyMicrosoftIdToken } = require('./msauth.js');
 const webpush = require('./webpush.js');
 const sms = require('./sms.js');
 const ami = require('./asterisk.js');
+const payrollCalc = require('./payroll-calc.js');
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@echeloncic.com';
 
 let SECRET = process.env.AUTH_SECRET;
@@ -96,6 +97,7 @@ const db = {
   ui_settings: [],
   stock_locations: [], asset_events: [], stocktakes: [], rentals: [],
   agreements: [], invoices: [],
+  payroll_runs: [], payslips: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -726,6 +728,48 @@ function cleanBankDetails(raw) {
   if (!account_name && !bank_name && !sort_code && !account_number) return null;
   return { account_name, bank_name, sort_code, account_number };
 }
+const PAY_BASES = ['WORKED', 'ROSTERED'];
+// Sensible starting point for a new EMPLOYED record, not a promise it's
+// right for this specific person — same "default, override per person"
+// stance as DEFAULT_ANNUAL_LEAVE_DAYS above. hourly_rate stays null: the
+// one field with no sensible default, and the hard gate on being included
+// in a payroll run at all (routes-payroll.js).
+const DEFAULT_PAYROLL = {
+  tax_code: '1257L', ni_category: 'A', scottish_taxpayer: false, student_loan_plan: null,
+  pension_scheme_name: '', pension_employee_pct: 5, pension_employer_pct: 3, pension_opted_out: false,
+  hourly_rate: null, pay_basis: 'WORKED', standard_daily_hours: 8,
+};
+/** Payroll setup for one person, validated as a whole (defaults filled in
+ * for anything omitted) — the admin form submits every field together, so
+ * this doesn't need routes-forms.js-style field-by-field `'x' in body`
+ * checks. NI category and tax-code shape are shared with payroll-calc.js
+ * (NI_CATEGORIES/TAX_CODE_RE) so the two can never silently disagree about
+ * what's valid. */
+function cleanPayroll(raw, existing) {
+  const r = { ...DEFAULT_PAYROLL, ...(existing || {}), ...(raw && typeof raw === 'object' ? raw : {}) };
+  const tax_code = String(r.tax_code || '1257L').trim().toUpperCase();
+  if (!payrollCalc.TAX_CODE_RE.test(tax_code)) throw httpError(400, `invalid tax code: ${r.tax_code}`);
+  if (!payrollCalc.NI_CATEGORIES.includes(r.ni_category)) throw httpError(400, `NI category must be one of ${payrollCalc.NI_CATEGORIES.join(', ')}`);
+  if (r.student_loan_plan != null && !payrollCalc.STUDENT_LOAN_PLANS.includes(r.student_loan_plan)) {
+    throw httpError(400, `student loan plan must be one of ${payrollCalc.STUDENT_LOAN_PLANS.join(', ')}, or null`);
+  }
+  if (!PAY_BASES.includes(r.pay_basis)) throw httpError(400, `pay basis must be one of ${PAY_BASES.join(', ')}`);
+  const hourly_rate = r.hourly_rate === null || r.hourly_rate === '' ? null : Number(r.hourly_rate);
+  if (hourly_rate != null && (!Number.isFinite(hourly_rate) || hourly_rate < 0)) throw httpError(400, 'hourly rate must be a non-negative number, or null');
+  const pension_employee_pct = Number(r.pension_employee_pct) || 0, pension_employer_pct = Number(r.pension_employer_pct) || 0;
+  if (pension_employee_pct < 0 || pension_employee_pct > 100 || pension_employer_pct < 0 || pension_employer_pct > 100) {
+    throw httpError(400, 'pension percentages must be between 0 and 100');
+  }
+  const standard_daily_hours = Number(r.standard_daily_hours) || 8;
+  if (standard_daily_hours <= 0 || standard_daily_hours > 24) throw httpError(400, 'standard daily hours must be between 0 and 24');
+  return {
+    tax_code, ni_category: r.ni_category, scottish_taxpayer: Boolean(r.scottish_taxpayer),
+    student_loan_plan: r.student_loan_plan || null,
+    pension_scheme_name: String(r.pension_scheme_name || '').trim().slice(0, 120),
+    pension_employee_pct, pension_employer_pct, pension_opted_out: Boolean(r.pension_opted_out),
+    hourly_rate, pay_basis: r.pay_basis, standard_daily_hours,
+  };
+}
 /** `user` is optional and new: every existing call site that doesn't pass
  * it (chiefly broadcasts, which go to many recipients at once and can't
  * sensibly be redacted for one viewer) simply never gets emergency_contact
@@ -739,6 +783,14 @@ function publicPersonnel(p, user) {
   const cs = db.callsigns.find((c) => c.id === p.callsign_id);
   const veh = db.vehicles.find((v) => v.id === p.vehicle_id);
   const canSeeSensitive = user && (isControlRole(user.role) || user.personnel_id === p.id);
+  // Stricter than canSeeSensitive above, deliberately — not even the person
+  // themselves sees their own live tax code/NI category/pension/rate here.
+  // admin.html is already hard-gated to SYSTEM_ADMIN and nothing else
+  // reaches it, so this costs nothing extra to enforce and avoids a second,
+  // looser path to tax-code-grade data. An employee's own visibility into
+  // what they're actually paid is their own ISSUED payslips (routes-payroll.js),
+  // never this live, mutable object.
+  const canSeePayroll = user && user.role === 'SYSTEM_ADMIN';
   return {
     id: p.id, employee_no: p.employee_no, name: p.name, rank: p.rank,
     contact_phone: p.contact_phone || '', contact_email: p.contact_email || '',
@@ -766,6 +818,7 @@ function publicPersonnel(p, user) {
     // status is an HR-chasing concern, not something a colleague needs to
     // see about another officer, even as a boolean checklist with no detail.
     ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, onboarding: onboardingStatusForPerson(p) } : {}),
+    ...(canSeePayroll ? { payroll: p.payroll || null } : {}),
   };
 }
 function publicMdt(m) {
@@ -1893,6 +1946,10 @@ route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
     employment_status: ['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status) ? body.employment_status : 'ACTIVE',
     employment_type: employmentType,
     annual_leave_allowance_days: employmentType === 'EMPLOYED' && body.annual_leave_allowance_days ? Number(body.annual_leave_allowance_days) : null,
+    // Sensible defaults, not whatever the base POST was sent — SIA/DBS/
+    // bank_details/payroll could never be set at creation either, only via
+    // the follow-up PATCH. hourly_rate stays null until an admin sets it.
+    payroll: employmentType === 'EMPLOYED' ? { ...DEFAULT_PAYROLL } : null,
     // Defaults to today, not null: the onboarding checklist needs an anchor
     // to measure "how long has this person been waiting on paperwork" from,
     // and a record with no explicit date almost always means they start now.
@@ -2017,9 +2074,21 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
     // to SUBCONTRACTOR clears any allowance on file rather than leaving a
     // stale number that no longer means anything.
     if (body.employment_type !== 'EMPLOYED' && !('annual_leave_allowance_days' in body)) p.annual_leave_allowance_days = null;
+    // Same reasoning, same pattern, for payroll: a subcontractor invoices
+    // for their own time and was never in a payroll run in the first place.
+    if (body.employment_type !== 'EMPLOYED' && !('payroll' in body)) p.payroll = null;
   }
   if ('annual_leave_allowance_days' in body) {
     p.annual_leave_allowance_days = body.annual_leave_allowance_days == null ? null : Number(body.annual_leave_allowance_days);
+  }
+  // Payroll setup — tax code, NI category, pension, pay rate/basis. Only
+  // ever lands via this PATCH, never the base POST (same as SIA/DBS/bank
+  // details — "POST only accepts the base fields" below). Validated as a
+  // whole against the FULL intended employment_type, same ordering
+  // discipline as annual_leave_allowance_days just above.
+  if ('payroll' in body) {
+    if (nextEmploymentType !== 'EMPLOYED' && body.payroll) throw httpError(400, 'only an employed person can have payroll settings');
+    p.payroll = nextEmploymentType === 'EMPLOYED' ? cleanPayroll(body.payroll, p.payroll) : null;
   }
   logEvent('personnel.updated', `PERSONNEL ${p.name} UPDATED`, { personnel_id: p.id });
   return publicPersonnel(p, user);
@@ -4201,6 +4270,12 @@ require('./routes-applicants.js')({
 // Leave management — see routes-leave.js for the design.
 require('./routes-leave.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, visibleToUser, findPersonnel,
+});
+
+// Payroll — see routes-payroll.js for the design, and payroll-calc.js for
+// the calculation engine itself.
+require('./routes-payroll.js')({
+  route, httpError, ALL, ADMIN, db, nextId, logEvent, attendance, flushNow: () => store.flushNow(),
 });
 
 // Shift applications — see routes-shift-applications.js for the design.
