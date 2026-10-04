@@ -94,6 +94,7 @@
       <h1>Admin</h1>
       <span>
         <button class="btn primary" id="btnNewUser" style="padding:7px 14px;font-size:13px">New account</button>
+        <button class="btn" id="btnStaffNumbers" style="padding:7px 14px;font-size:13px" hidden>Staff numbers</button>
         <button class="btn primary" id="btnNewPersonnel" style="padding:7px 14px;font-size:13px" hidden>New personnel</button>
         <button class="btn primary" id="btnNewMdt" style="padding:7px 14px;font-size:13px" hidden>New MDT</button>
         <button class="btn primary" id="btnNewSite" style="padding:7px 14px;font-size:13px" hidden>New site</button>
@@ -417,6 +418,7 @@ function showTab(name) {
   el('#viewPatrols').classList.toggle('hide', name !== 'patrols');
   el('#btnNewUser').hidden = name !== 'accounts';
   el('#btnNewPersonnel').hidden = name !== 'personnel';
+  el('#btnStaffNumbers').hidden = name !== 'personnel';
   el('#btnNewMdt').hidden = name !== 'mdts';
   el('#btnNewVehicle').hidden = name !== 'vehicles';
   el('#btnNewSite').hidden = name !== 'sites';
@@ -718,8 +720,17 @@ function personnelForm(p) {
     <form class="stack" id="pnForm">
       <label>Name</label>
       <input id="npnName" autocomplete="off" value="${isNew ? '' : esc(p.name)}">
-      <label>Employee number (optional)</label>
-      <input id="npnEmpNo" autocomplete="off" value="${isNew ? '' : esc(p.employee_no || '')}">
+      <label>Staff number — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">leave blank and the next number is given automatically</span></label>
+      <input id="npnEmpNo" autocomplete="off" value="${isNew ? '' : esc(p.employee_no || '')}" placeholder="next: …">
+      ${!isNew ? `<label>ID photo — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">head and shoulders, plain background; it goes on their ID card and the card's check page</span></label>
+      <div style="display:flex;gap:12px;align-items:center">
+        ${p.has_photo ? `<img id="pnPhotoImg" src="/api/personnel/${p.id}/photo?token=${encodeURIComponent(CCCS.getSession().token)}&v=${encodeURIComponent(p.photo_updated_at || '')}" alt="" style="width:72px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">` : '<div style="width:72px;height:90px;border-radius:8px;border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--ink-dim);text-align:center">No photo</div>'}
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label class="btn" style="padding:5px 12px;font-size:12px;text-transform:none;letter-spacing:0;margin:0;cursor:pointer">${p.has_photo ? 'Change photo' : 'Add photo'}<input type="file" id="pnPhotoFile" accept="image/*" capture="user" hidden></label>
+          ${p.has_photo ? '<button type="button" class="btn" id="pnPhotoDel" style="padding:5px 12px;font-size:12px">Remove</button>' : ''}
+        </div>
+        <span class="dim" id="pnPhotoMsg" style="font-size:12px"></span>
+      </div>` : ''}
       <label>Rank</label>
       <input id="npnRank" autocomplete="off" value="${isNew ? '' : esc(p.rank || '')}">
       <label>Employment status</label>
@@ -858,13 +869,32 @@ function personnelModal(p) {
       <div class="foot-split">
         <span>${p ? '<button class="btn danger" id="pnDelete">Delete personnel</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
-          ${p ? '<button class="btn" id="pnFile">Personnel file</button>' : ''}
+          ${p ? '<button class="btn" id="pnFile">Personnel file</button><a class="btn" id="pnIdCard" href="/id-card.html?id=' + p.id + '">ID card</a>' : ''}
           <button class="btn" id="pnCancel">Cancel</button>
           <button class="btn primary" id="pnSave">${p ? 'Save changes' : 'Create personnel'}</button>
         </span>
       </div>`;
     el('#pnCancel').onclick = closeModal;
     if (el('#pnFile')) el('#pnFile').onclick = () => personnelFileModal(p);
+    if (!p) api('GET', '/api/admin/staff-numbers').then((r) => { el('#npnEmpNo').placeholder = `next: ${r.example}`; }).catch(() => {});
+    else if (!p.employee_no) el('#npnEmpNo').placeholder = 'none yet — Staff numbers → number everyone without one';
+    if (el('#pnPhotoFile')) el('#pnPhotoFile').onchange = async () => {
+      const f = el('#pnPhotoFile').files[0]; if (!f) return;
+      el('#pnPhotoMsg').textContent = 'Uploading…';
+      try {
+        // Shrunk in the browser to 600 px on the long side — plenty for a card.
+        const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error('that file is not a photo')); i.src = URL.createObjectURL(f); });
+        const k = Math.min(1, 600 / Math.max(img.width, img.height));
+        const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        await api('POST', `/api/personnel/${p.id}/photo`, { data: c.toDataURL('image/jpeg', 0.88) });
+        await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id));
+      } catch (e) { el('#pnPhotoMsg').textContent = e.message; }
+    };
+    if (el('#pnPhotoDel')) el('#pnPhotoDel').onclick = async () => {
+      if (!confirm('Remove their ID photo?')) return;
+      try { await api('DELETE', `/api/personnel/${p.id}/photo`); await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id)); } catch (e) { el('#pnPhotoMsg').textContent = e.message; }
+    };
     if (el('#pnViewOnboarding')) el('#pnViewOnboarding').onclick = (e) => { e.preventDefault(); onboardingModal(p); };
     if (el('#pnDelete')) el('#pnDelete').onclick = () => deletePersonnel(p.id);
     el('#npnEmpType').addEventListener('change', () => {
@@ -873,7 +903,9 @@ function personnelModal(p) {
     // Repeatable SIA licence rows — a plain array in JS, re-rendered on add/
     // remove (reading the DOM's current values first so an in-progress edit
     // to another row survives), read fresh from the DOM again at save time.
-    let siaRows = (p && Array.isArray(p.sia_licences) ? p.sia_licences : []).map((l) => ({ ...l }));
+    // saved: the row as it is on the server — only then can it be marked
+    // verified (a changed number or expiry is saved first, then checked).
+    let siaRows = (p && Array.isArray(p.sia_licences) ? p.sia_licences : []).map((l) => ({ ...l, saved: true }));
     function readSiaRowsFromDom() {
       return els('#pnSiaRows .sia-row').map((row) => ({
         licence_type: row.querySelector('.sia-type').value,
@@ -888,7 +920,16 @@ function personnelModal(p) {
           <input class="sia-no" autocomplete="off" placeholder="Licence number" value="${esc(l.licence_no || '')}" style="flex:1">
           <input class="sia-expiry" type="date" value="${l.expiry ? String(l.expiry).slice(0, 10) : ''}" style="width:150px">
           <button type="button" class="btn danger sia-remove" style="padding:4px 8px;font-size:11px">Remove</button>
-        </div>`).join('') : '<p class="dim" style="margin:0 0 6px">No licences recorded yet.</p>';
+        </div>
+        ${p && l.id && l.saved ? `<div style="margin:-2px 0 8px;font-size:12px;display:flex;gap:8px;align-items:center">${l.verified_at
+          ? `<span style="color:var(--available)">✓ Verified on the SIA register ${esc(new Date(l.verified_at).toLocaleDateString('en-GB'))} by ${esc(l.verified_by || '')}</span><button type="button" class="btn sia-verify" data-lid="${l.id}" data-v="0" style="padding:2px 8px;font-size:11px">Undo</button>`
+          : `<span class="dim">Not verified yet —</span><button type="button" class="btn sia-verify" data-lid="${l.id}" data-v="1" style="padding:2px 8px;font-size:11px">I've checked it on the SIA register</button>`}</div>` : ''}`).join('') : '<p class="dim" style="margin:0 0 6px">No licences recorded yet.</p>';
+      els('#pnSiaRows .sia-verify').forEach((b) => (b.onclick = async () => {
+        try {
+          await api('POST', `/api/personnel/${p.id}/sia-licences/${b.dataset.lid}/verify`, { verified: b.dataset.v === '1' });
+          await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id));
+        } catch (e) { el('#pnError').textContent = e.message; }
+      }));
       els('#pnSiaRows .sia-remove').forEach((b) => (b.onclick = () => {
         siaRows = readSiaRowsFromDom();
         siaRows.splice(Number(b.closest('.sia-row').dataset.i), 1);
@@ -961,6 +1002,33 @@ function personnelModal(p) {
   });
 }
 el('#btnNewPersonnel').onclick = () => personnelModal(null);
+/* Staff numbers (routes-staff-id.js): the prefix and next number given to
+ * anyone added without one, and numbering existing staff who have none. */
+el('#btnStaffNumbers').onclick = async () => {
+  let r;
+  try { r = await api('GET', '/api/admin/staff-numbers'); } catch (e) { alert(e.message); return; }
+  modal('Staff numbers', `<form class="stack" id="snForm">
+      <p class="dim" style="margin:0;font-size:13px">Anyone added without a staff number — in Admin or by hiring an applicant — gets the next one. Numbers already in use are skipped.</p>
+      <div style="display:flex;gap:8px"><div style="flex:1"><label>Prefix</label><input id="snPrefix" value="${esc(r.prefix)}"></div>
+        <div style="flex:1"><label>Next number</label><input id="snNext" type="number" min="1" value="${r.next}"></div>
+        <div style="width:110px"><label>Digits</label><input id="snDigits" type="number" min="1" max="8" value="${r.digits}"></div></div>
+      <p style="margin:0;font-size:13px">Next staff number: <strong id="snEg">${esc(r.example)}</strong></p>
+      ${r.without_number ? `<p style="margin:8px 0 0;font-size:13px"><strong>${r.without_number}</strong> member${r.without_number === 1 ? '' : 's'} of staff have no number yet. <button type="button" class="btn" id="snAssign" style="padding:4px 10px;font-size:12px">Number them now</button></p>` : '<p class="dim" style="margin:8px 0 0;font-size:13px">Everyone has a staff number.</p>'}
+      <p class="dim" id="snErr" style="min-height:16px;margin:0"></p></form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = '<div class="btn-row" style="margin:0;justify-content:flex-end"><button class="btn" id="snCancel">Close</button><button class="btn primary" id="snSave">Save</button></div>';
+    const eg = () => { el('#snEg').textContent = `${el('#snPrefix').value.trim()}${String(el('#snNext').value || 1).padStart(Number(el('#snDigits').value) || 4, '0')}`; };
+    el('#snForm').addEventListener('input', eg);
+    el('#snCancel').onclick = closeModal;
+    const save = () => api('PUT', '/api/admin/staff-numbers', { prefix: el('#snPrefix').value.trim(), next: Number(el('#snNext').value), digits: Number(el('#snDigits').value) });
+    el('#snSave').onclick = async () => { try { await save(); closeModal(); } catch (e) { el('#snErr').textContent = e.message; } };
+    if (el('#snAssign')) el('#snAssign').onclick = async () => {
+      if (!confirm(`Give ${r.without_number} member${r.without_number === 1 ? '' : 's'} of staff the next numbers, oldest record first?`)) return;
+      try { await save(); const out = await api('POST', '/api/admin/staff-numbers/assign-missing'); closeModal(); await load(); showTab('personnel'); alert(`${out.assigned.length} numbered: ${out.assigned.map((x) => `${x.name} ${x.employee_no}`).join(', ')}`); }
+      catch (e) { el('#snErr').textContent = e.message; }
+    };
+  });
+};
 
 /* ---------- MDTs ---------- */
 function paintMdts() {

@@ -18,6 +18,8 @@ review it, particularly the legitimate interest assessment.
 | Job assignments and outcomes | 2 years | Client reporting, disputes, insurance |
 | Emergency and welfare alarms | 1 year | Safety record |
 | A single location fix on a filed report (incident, use of force, etc.), if the device offers one | Kept with the report | Proof of where a report was filed from — evidential, not tracking; same category as the single fix already taken when raising an emergency, not continuous |
+| ID photo | While employed (delete it on leaving) | Their ID card, and so whoever scans the card can see it is the same person |
+| Clock-in/out reasons (outside the rostered time, or with no shift) and who approved them | With the shift record | Paying and billing the right hours |
 
 This is the materially different privacy position the paragraph below used
 to warn about before it was built: continuous personal location tracking
@@ -42,6 +44,23 @@ policy and record counts; `RETAIN_LOCATIONS_DAYS` and friends change it.
 Continuous location tracking is the most intrusive thing here, so it is kept for
 the shortest time. If you lengthen it, write down why in terms you would be
 comfortable saying to the officer being tracked.
+
+### The ID card check page
+
+Each staff ID card carries a QR code. Anyone who scans it — a client, a
+venue, the police, a member of the public — sees a page **without logging
+in** showing: the person's name, ID photo, staff number and role; whether
+they are currently employed (or on leave); for each SIA licence its type,
+whether an admin has checked it on the SIA register, and whether it is in
+date; and whether their DBS has been checked, its level and when. It does
+**not** show licence or certificate numbers, contact details, address,
+date of birth or anything else. The code in the QR is long and random (not
+their staff number), so cards cannot be guessed; re-issuing a lost card
+makes the old one stop working. When someone leaves, set them to
+"Terminated": the page then says, in red, that they are not currently
+employed and the card should not be accepted. Tell staff about this page in
+your notice to them — it is the one place their name and photo are shown
+to people outside the business.
 
 ## What is not collected
 

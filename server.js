@@ -751,6 +751,7 @@ function publicPersonnel(p, user) {
     welfare_note: p.welfare_note || null,
     sia_licence_no: p.sia_licence_no || null, sia_licence_expiry: p.sia_licence_expiry || null,
     sia_licences: siaLicencesOf(p),
+    has_photo: Boolean(p.id_photo), photo_updated_at: p.id_photo ? p.id_photo.uploaded_at : null, id_card_issued_at: p.id_card_issued_at || null,
     dbs_certificate_no: p.dbs_certificate_no || null, dbs_certificate_type: p.dbs_certificate_type || null,
     dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
     compliance: personnelCompliance(p),
@@ -1902,6 +1903,7 @@ route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
     notes: body.notes || '', branch_id: normalizedBranchId(body.branch_id),
     lat: null, lon: null, location_at: null,
   };
+  staffId.assignNumber(p); // left blank → the next staff number (routes-staff-id.js)
   db.personnel.push(p);
   logEvent('personnel.created', `PERSONNEL ${name} ADDED`, { personnel_id: p.id });
   return { __status: 201, __body: publicPersonnel(p, user) };
@@ -1912,7 +1914,10 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
   if ('employee_no' in body) {
     const employeeNo = body.employee_no ? String(body.employee_no).trim() : null;
     if (employeeNo && db.personnel.some((x) => x.id !== p.id && x.employee_no === employeeNo)) throw httpError(409, 'employee number already in use');
-    p.employee_no = employeeNo;
+    // Blank means "no change": a staff number, once given, is on their ID
+    // card and payroll — the admin form's save sends the field blank on a
+    // new record straight after the number was assigned.
+    if (employeeNo) p.employee_no = employeeNo;
   }
   if ('rank' in body) p.rank = body.rank || '';
   if ('contact_phone' in body) p.contact_phone = body.contact_phone || '';
@@ -1975,7 +1980,11 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
       if (!licence_no) throw httpError(400, `licence ${i + 1}: licence number required`);
       const expiry = l && l.expiry ? String(l.expiry).slice(0, 10) : null;
       if (expiry && isNaN(Date.parse(expiry))) throw httpError(400, `licence ${i + 1}: invalid expiry date`);
-      return { id: i + 1, licence_type, licence_no, expiry };
+      // "Verified on the SIA register" (routes-staff-id.js) stays with the
+      // same licence across a re-save; a changed number or expiry needs
+      // checking again.
+      const was = siaLicencesOf(p).find((x) => x.licence_no === licence_no && x.licence_type === licence_type && (x.expiry || null) === expiry);
+      return { id: i + 1, licence_type, licence_no, expiry, verified_at: (was && was.verified_at) || null, verified_by: (was && was.verified_by) || null };
     });
   }
   // Next of kin — self-editable too, via PATCH /api/personnel/:id/emergency-
@@ -4110,6 +4119,11 @@ const attendance = require('./routes-attendance.js')({
 });
 
 
+// Staff numbers, ID photos and the ID card's QR check — see routes-staff-id.js.
+const staffId = require('./routes-staff-id.js')({
+  route, httpError, ADMIN, CONTROL, db, logEvent, UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, isControlRole, flushNow: () => store.flushNow(),
+});
+
 // Clocking in/out off-rota, reasons and approvals — see routes-timeclock.js.
 const timeclock = require('./routes-timeclock.js')({
   route, httpError, CONTROL, db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift, isControlRole, siteVisibleTo,
@@ -4178,7 +4192,7 @@ require('./routes-applicants.js')({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
   forms, pushToRoles, flushNow: () => store.flushNow(),
   sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html),
-  personnelFiles, publicBaseUrl: PUBLIC_BASE_URL,
+  personnelFiles, publicBaseUrl: PUBLIC_BASE_URL, assignStaffNumber: (p) => staffId.assignNumber(p),
 });
 
 // Leave management — see routes-leave.js for the design.

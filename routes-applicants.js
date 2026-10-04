@@ -71,7 +71,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 module.exports = function registerApplicantRoutes({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, UPLOADS_DIR, MIME, visibleToUser, normalizedBranchId, publicPersonnel,
-  forms, pushToRoles = () => {}, flushNow = () => {}, sendEmail = null, personnelFiles = null, publicBaseUrl = '',
+  forms, pushToRoles = () => {}, flushNow = () => {}, sendEmail = null, personnelFiles = null, publicBaseUrl = '', assignStaffNumber = () => {},
 }) {
   for (const t of ['applicants']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -210,6 +210,7 @@ module.exports = function registerApplicantRoutes({
         if (x.file) copy(path.join(infoDir(a.id, r.id), x.file.stored_name), { kind: 'INFO', label: x.label, mimetype: x.file.mimetype, filename: x.file.filename });
       }
     }
+    assignStaffNumber(p); // no number given → the next staff number
     db.personnel.push(p);
     a.status = 'HIRED'; a.hired_personnel_id = p.id; a.updated_at = new Date().toISOString();
     if (body.notify !== false) emailApplicant(a, 'HIRED');

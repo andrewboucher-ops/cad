@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — ID card</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  /* CR80 — the standard ID / bank card size, 85.6 × 54 mm. Printed at
+   * 100% scale on card stock or a card printer; front and back. */
+  .page { padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .cards { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; }
+  .idc { width: 85.6mm; height: 54mm; border-radius: 3.2mm; background: #fff; color: #0b1f3a; box-shadow: 0 1px 6px rgba(0,0,0,.18); overflow: hidden; position: relative; font-family: Inter, sans-serif; }
+  .front { display: grid; grid-template-columns: 24mm 1fr; gap: 3mm; padding: 3.5mm; }
+  .front .logo { grid-column: 1 / -1; height: 7mm; display: flex; align-items: center; justify-content: space-between; border-bottom: .4mm solid #0b1f3a; padding-bottom: 1.5mm; }
+  .front .logo img { height: 6mm; }
+  .front .logo span { font-size: 2.4mm; font-weight: 700; letter-spacing: .3mm; text-transform: uppercase; }
+  .front .ph { width: 24mm; height: 30mm; border-radius: 1.5mm; object-fit: cover; background: #e2e8f0; display: flex; align-items: center; justify-content: center; font-size: 2.2mm; color: #64748b; text-align: center; }
+  .front .nm { font-size: 4.2mm; font-weight: 800; line-height: 1.1; margin-top: 1mm; }
+  .front .rl { font-size: 2.9mm; margin-top: 1.2mm; color: #334155; }
+  .front .no { font-size: 2.6mm; margin-top: 2.5mm; } .front .no b { font-size: 3.4mm; letter-spacing: .2mm; }
+  .front .sia { font-size: 2.3mm; color: #334155; margin-top: 1.5mm; }
+  .back { display: flex; gap: 3.5mm; padding: 4mm; align-items: center; }
+  .back .qr { width: 30mm; height: 30mm; flex: none; }
+  .back .qr svg { width: 30mm; height: 30mm; display: block; }
+  .back .tx { font-size: 2.6mm; line-height: 1.45; }
+  .back .tx b { font-size: 3.1mm; display: block; margin-bottom: 1mm; }
+  .back .found { position: absolute; left: 4mm; right: 4mm; bottom: 3mm; font-size: 2.1mm; color: #64748b; border-top: .2mm solid #cbd5e1; padding-top: 1mm; }
+  .note { max-width: 560px; font-size: 13px; text-align: center; }
+  @media print {
+    @page { size: auto; margin: 10mm; }
+    body { background: #fff !important; }
+    .bar, .note, nav, .nav, #navHost, .sidenav { display: none !important; }
+    .idc { box-shadow: none; border: .2mm solid #cbd5e1; }
+    .page { padding: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="bar"><button class="btn primary" id="bPrint">Print</button><a class="btn" id="bVerify" target="_blank">Open the check page</a><button class="btn danger" id="bReissue">Card lost — re-issue</button><a class="btn" href="/admin.html#personnel">Back to personnel</a></div>
+  <div class="cards" id="cards"><p class="dim">Loading…</p></div>
+  <p class="dim note" id="note"></p>
+</div>
+<script src="/app.js"></script>
+<!-- qrcode-generator 1.4.4 (MIT, Kazuhiko Arase), shipped with the app so printing a card never depends on a CDN -->
+<script src="/vendor/qrcode-generator.js"></script>
+<script>
+'use strict';
+const { api, el, esc } = CCCS;
+if (!CCCS.requireAuth(['SYSTEM_ADMIN'])) throw new Error('auth');
+const id = Number(new URLSearchParams(location.search).get('id'));
+const token = () => encodeURIComponent(CCCS.getSession().token);
+async function paint() {
+  let card, people, company = {};
+  try { [card, people] = await Promise.all([api('GET', `/api/personnel/${id}/id-card`), api('GET', '/api/personnel')]); }
+  catch (e) { el('#cards').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  try { company = await api('GET', '/api/rentals/settings'); } catch {}
+  const p = people.find((x) => x.id === id) || {};
+  const lic = (p.sia_licences || []).filter((l) => !l.expiry || Date.parse(l.expiry) > Date.now()).map((l) => l.licence_type).join(' · ');
+  el('#cards').innerHTML = `
+    <div class="idc front">
+      <div class="logo"><img src="/assets/echelon-wordmark-navy.jpg" alt=""><span>Staff ID</span></div>
+      ${p.has_photo ? `<img class="ph" src="/api/personnel/${id}/photo?token=${token()}&v=${encodeURIComponent(p.photo_updated_at || '')}" alt="">` : '<div class="ph">No photo — add one on their record</div>'}
+      <div><div class="nm">${esc(card.name)}</div><div class="rl">${esc(card.rank || '')}</div>
+        <div class="no">Staff no.<br><b>${esc(card.employee_no || '—')}</b></div>${lic ? `<div class="sia">SIA: ${esc(lic)}</div>` : ''}</div>
+    </div>
+    <div class="idc back">
+      <div class="qr" id="qr"></div>
+      <div class="tx"><b>Check this card</b>Scan the code with a phone camera to see if this person is currently employed, their role, SIA licence and DBS status, and their photo.</div>
+      <div class="found">Property of ${esc(company.company_name || 'Echelon')}. If found, please return${company.company_phone ? ` or call ${esc(company.company_phone)}` : ''}.</div>
+    </div>`;
+  const qr = qrcode(0, 'M'); qr.addData(card.verify_url); qr.make();
+  el('#qr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+  el('#bVerify').href = card.verify_url;
+  el('#note').innerHTML = `Card issued ${card.issued_at ? new Date(card.issued_at).toLocaleDateString('en-GB') : 'today'}. Print at 100% (no "fit to page") for a standard 85.6 × 54 mm card.${!p.has_photo ? ' <strong>Add an ID photo on their record first.</strong>' : ''}`;
+}
+el('#bPrint').onclick = () => window.print();
+el('#bReissue').onclick = async () => {
+  if (!confirm('Re-issue this card? The QR code on the old card will stop working straight away — print and hand over the new one.')) return;
+  try { await api('POST', `/api/personnel/${id}/id-card/reissue`); await paint(); } catch (e) { alert(e.message); }
+};
+paint();
+</script>
+</body>
+</html>
