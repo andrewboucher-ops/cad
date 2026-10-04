@@ -241,6 +241,14 @@ async function load() {
     if (trainingOverdue.length) {
       el('#systemBody').innerHTML += `<div class="list-row"><span style="flex:1;color:var(--emergency)">Training overdue</span><b style="color:var(--emergency)">${trainingOverdue.length}</b></div>`;
     }
+    // /api/state's personnel list doesn't carry the onboarding checklist
+    // (it's gated the same as emergency_contact/bank_details, which that
+    // endpoint doesn't resolve a viewer for) — a direct call does.
+    const personnelDetailed = await api('GET', '/api/personnel').catch(() => []);
+    const onboardingIncomplete = personnelDetailed.filter((p) => p.employment_status === 'ACTIVE' && p.onboarding && !p.onboarding.complete).length;
+    if (onboardingIncomplete) {
+      el('#systemBody').innerHTML += `<div class="list-row"><span style="flex:1">Onboarding incomplete</span><b><a href="/admin.html#onboarding">${onboardingIncomplete}</a></b></div>`;
+    }
   }
 }
 load().catch((e) => { el('#activityBody').innerHTML = `<p class="empty-note">${esc(e.message)}</p>`; });

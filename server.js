@@ -612,6 +612,40 @@ function personnelCompliance(p) {
   return { sia, dbs };
 }
 
+/** Structural "are they actually set up yet" items, distinct from the
+ * ongoing compliance checks above (SIA/DBS renewal, training currency) —
+ * this is a one-time gap to close when someone joins, not a recurring one
+ * to keep renewing. Deliberately built from data this codebase already
+ * tracks (personnel files, SIA/DBS fields, emergency contact, bank
+ * details, a login, an asset checkout) rather than a new form to fill in.
+ * bank_details is skipped for a subcontractor (they invoice for their own
+ * time — same gate leave entitlement already uses) and kit_issued only
+ * appears at all once the business actually has assets on file, so an
+ * install that doesn't use asset tracking never shows an uncompletable
+ * item. An admin can mark onboarding complete regardless of what's still
+ * outstanding (onboarding_completed_at) for the real exceptions a fixed
+ * checklist can't anticipate — logged, like every other override here. */
+function onboardingStatusForPerson(p) {
+  const checks = [
+    ['id_document', 'Identity / right-to-work document on file', (p.files || []).some((f) => f.kind === 'ID')],
+    ['sia_licence', 'SIA licence recorded', siaLicencesOf(p).length > 0],
+    ['dbs_check', 'DBS check recorded', Boolean(p.dbs_certificate_no || p.dbs_last_checked_at)],
+    ['contract', 'Signed contract on file', (p.files || []).some((f) => f.kind === 'CONTRACT')],
+    ['emergency_contact', 'Emergency contact recorded', Boolean(p.emergency_contact && (p.emergency_contact.name || p.emergency_contact.phone))],
+    ...(p.employment_type === 'SUBCONTRACTOR' ? [] : [['bank_details', 'Bank details recorded', Boolean(p.bank_details && (p.bank_details.account_number || p.bank_details.sort_code))]]),
+    ['login_account', 'System login created', Boolean(p.user_id)],
+    ...(db.assets.length ? [['kit_issued', 'Uniform / equipment issued', db.asset_checkouts.some((c) => c.personnel_id === p.id)]] : []),
+  ];
+  const items = checks.map(([key, label, done]) => ({ key, label, done }));
+  const outstanding = items.filter((i) => !i.done).length;
+  return {
+    items, outstanding,
+    complete: Boolean(p.onboarding_completed_at) || outstanding === 0,
+    overridden: Boolean(p.onboarding_completed_at) && outstanding > 0,
+    completed_at: p.onboarding_completed_at || null, completed_by: p.onboarding_completed_by || null,
+  };
+}
+
 const TRAINING_EXPIRY_WARN_DAYS = 30;
 /** Same "make the gap visible" idea as SIA/DBS, but for a variable admin-
  * defined set of courses rather than two fixed checks: for every active
@@ -726,7 +760,11 @@ function publicPersonnel(p, user) {
     employment_type: p.employment_type || 'EMPLOYED',
     annual_leave_allowance_days: p.annual_leave_allowance_days ?? null,
     leave_balance: leaveBalanceForPerson(p),
-    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null } : {}),
+    start_date: p.start_date || null,
+    // Same audience as emergency_contact/bank_details above: onboarding
+    // status is an HR-chasing concern, not something a colleague needs to
+    // see about another officer, even as a boolean checklist with no detail.
+    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, onboarding: onboardingStatusForPerson(p) } : {}),
   };
 }
 function publicMdt(m) {
@@ -1846,6 +1884,7 @@ route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
   const cs = body.callsign_id ? findCallsign(body.callsign_id) : null;
   const veh = body.vehicle_id ? db.vehicles.find((v) => v.id === Number(body.vehicle_id)) : null;
   const employmentType = EMPLOYMENT_TYPES.includes(body.employment_type) ? body.employment_type : 'EMPLOYED';
+  if (body.start_date && isNaN(Date.parse(body.start_date))) throw httpError(400, 'invalid start_date');
   const p = {
     id: nextId('personnel'), employee_no: employeeNo, name, rank: body.rank || '',
     contact_phone: body.contact_phone || '', contact_email: body.contact_email || '',
@@ -1853,6 +1892,11 @@ route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
     employment_status: ['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status) ? body.employment_status : 'ACTIVE',
     employment_type: employmentType,
     annual_leave_allowance_days: employmentType === 'EMPLOYED' && body.annual_leave_allowance_days ? Number(body.annual_leave_allowance_days) : null,
+    // Defaults to today, not null: the onboarding checklist needs an anchor
+    // to measure "how long has this person been waiting on paperwork" from,
+    // and a record with no explicit date almost always means they start now.
+    start_date: body.start_date ? String(body.start_date).slice(0, 10) : new Date().toISOString().slice(0, 10),
+    onboarding_completed_at: null, onboarding_completed_by: null,
     callsign_id: cs ? cs.id : null, user_id: null, vehicle_id: veh ? veh.id : null,
     welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: null,
     notes: body.notes || '', branch_id: normalizedBranchId(body.branch_id),
@@ -1878,6 +1922,10 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
   if ('employment_status' in body) {
     if (!['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status)) throw httpError(400, 'invalid employment_status');
     p.employment_status = body.employment_status;
+  }
+  if ('start_date' in body) {
+    if (body.start_date && isNaN(Date.parse(body.start_date))) throw httpError(400, 'invalid start_date');
+    p.start_date = body.start_date ? String(body.start_date).slice(0, 10) : null;
   }
   if ('callsign_id' in body) { const cs = body.callsign_id ? findCallsign(body.callsign_id) : null; p.callsign_id = cs ? cs.id : null; }
   if ('vehicle_id' in body) { const veh = body.vehicle_id ? db.vehicles.find((v) => v.id === Number(body.vehicle_id)) : null; p.vehicle_id = veh ? veh.id : null; }
@@ -1965,6 +2013,29 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
     p.annual_leave_allowance_days = body.annual_leave_allowance_days == null ? null : Number(body.annual_leave_allowance_days);
   }
   logEvent('personnel.updated', `PERSONNEL ${p.name} UPDATED`, { personnel_id: p.id });
+  return publicPersonnel(p, user);
+});
+/** Marking onboarding complete by hand is for the real exceptions the fixed
+ * checklist can't anticipate (a control-room-only role with no SIA licence
+ * requirement, a TUPE transfer whose paperwork lives with a previous
+ * employer) — it overrides onboardingStatusForPerson()'s own computation
+ * regardless of what's still outstanding, which is exactly the point, so
+ * it's logged with who and, optionally, why. Reopening clears the override;
+ * it does not undo anything the checklist items themselves represent. */
+route('POST', '/api/personnel/:id/onboarding-complete', ADMIN, ({ params, body, user }) => {
+  const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
+  if (p.onboarding_completed_at) throw httpError(409, 'already marked complete');
+  p.onboarding_completed_at = new Date().toISOString();
+  p.onboarding_completed_by = user.display_name;
+  const note = String((body && body.note) || '').trim().slice(0, 300);
+  logEvent('personnel.onboarding_completed', `ONBOARDING MARKED COMPLETE FOR ${p.name} BY ${user.display_name}${note ? ` — ${note}` : ''}`, { personnel_id: p.id });
+  return publicPersonnel(p, user);
+});
+route('DELETE', '/api/personnel/:id/onboarding-complete', ADMIN, ({ params, user }) => {
+  const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
+  if (!p.onboarding_completed_at) throw httpError(409, 'not marked complete');
+  p.onboarding_completed_at = null; p.onboarding_completed_by = null;
+  logEvent('personnel.onboarding_reopened', `ONBOARDING REOPENED FOR ${p.name} BY ${user.display_name}`, { personnel_id: p.id });
   return publicPersonnel(p, user);
 });
 route('DELETE', '/api/personnel/:id', ADMIN, ({ params }) => {

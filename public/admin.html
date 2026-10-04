@@ -115,6 +115,7 @@
       <button class="active" id="tabAccounts" data-tab="accounts" data-desc="Logins — who can sign in and with what role.">Accounts</button>
       <button id="tabPersonnel" data-tab="personnel" data-desc="Staff records: call signs, licences, vetting, line managers, welfare timers.">Personnel</button>
       <button id="tabApplicants" data-tab="applicants" data-desc="Job applications from the public form, and moving people through hiring.">Applicants</button>
+      <button id="tabOnboarding" data-tab="onboarding" data-desc="Active staff still missing paperwork, a licence, DBS check, contract, bank details, a login or kit before they're fully set up to work.">Onboarding</button>
       <button id="tabTraining" data-tab="training" data-desc="Training courses and assessments staff complete in the app.">Training</button>
       <button id="tabLeave" data-tab="leave" data-desc="Leave requests and balances.">Leave</button>
       <div class="an-group">Reports &amp; forms</div>
@@ -254,6 +255,11 @@
       <div id="apTableWrap"></div>
     </div>
 
+    <div id="viewOnboarding" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">Active personnel whose onboarding checklist isn't complete yet, oldest start date first. Mark one complete by hand if an item genuinely doesn't apply to them — that's logged, and the checklist itself still shows what's outstanding.</p>
+      <div id="obTableWrap"></div>
+    </div>
+
     <div id="viewLeave" class="hide">
       <div class="toolbar">
         <select id="lvStatus">
@@ -344,7 +350,7 @@ async function load() {
   ]);
   const painters = { Accounts: paint, Personnel: paintPersonnel, MDTs: paintMdts, Vehicles: paintVehicles, Sites: paintSites, Beats: paintBeats,
     'Patrol schedules': paintSchedules, Forms: paintForms, Clients: paintClients, 'Client requests': paintClientRequests, Branches: paintBranches,
-    Training: paintCourses, Applicants: paintApplicants, Leave: paintLeaveRequests, 'Shift types': paintShiftTypes };
+    Training: paintCourses, Applicants: paintApplicants, Onboarding: paintOnboarding, Leave: paintLeaveRequests, 'Shift types': paintShiftTypes };
   for (const [name, fn] of Object.entries(painters)) {
     try { fn(); } catch (e) { console.error(name, e); failed.push(`${name} tab — ${e.message}`); }
   }
@@ -380,6 +386,8 @@ function showTab(name) {
   el('#tabApplicants').classList.toggle('active', name === 'applicants');
   el('#viewApplicants').classList.toggle('hide', name !== 'applicants');
   el('#btnNewApplicant').hidden = name !== 'applicants';
+  el('#tabOnboarding').classList.toggle('active', name === 'onboarding');
+  el('#viewOnboarding').classList.toggle('hide', name !== 'onboarding');
   el('#tabLeave').classList.toggle('active', name === 'leave');
   el('#viewLeave').classList.toggle('hide', name !== 'leave');
   el('#btnNewLeave').hidden = name !== 'leave';
@@ -435,6 +443,7 @@ el('#tabClients').onclick = () => showTab('clients');
 el('#tabBranches').onclick = () => showTab('branches');
 el('#tabTraining').onclick = () => showTab('training');
 el('#tabApplicants').onclick = () => showTab('applicants');
+el('#tabOnboarding').onclick = () => showTab('onboarding');
 el('#tabLeave').onclick = () => showTab('leave');
 el('#tabShiftTypes').onclick = () => showTab('shiftTypes');
 el('#tabMenu').onclick = () => showTab('menu');
@@ -602,6 +611,7 @@ function paintPersonnel() {
         }
         const overdueTraining = (p.training || []).filter((t) => t.status === 'overdue').length;
         if (overdueTraining) flags.push(`${overdueTraining} training overdue`);
+        if (p.onboarding && !p.onboarding.complete) flags.push(`onboarding: ${p.onboarding.outstanding} item${p.onboarding.outstanding === 1 ? '' : 's'}`);
         return `<tr class="clickable" data-personnel="${p.id}">
         <td>${esc(p.name)}</td>
         <td class="dim">${esc(p.rank || '—')}</td>
@@ -629,6 +639,67 @@ async function deletePersonnel(id) {
   catch (e) { alert(e.message); }
 }
 
+/* ---------- onboarding ---------- */
+/** Active personnel whose checklist isn't complete, oldest start date
+ * first — the point is "who needs chasing", not a record of everyone. */
+function paintOnboarding() {
+  const rows = allPersonnel.filter((p) => p.employment_status === 'ACTIVE' && p.onboarding && !p.onboarding.complete)
+    .sort((a, b) => (a.start_date || '9999').localeCompare(b.start_date || '9999'));
+  el('#obTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Name</th><th style="width:110px">Started</th><th style="width:70px">Days</th><th>Outstanding</th><th style="width:140px"></th></tr></thead>
+      <tbody>${rows.map((p) => {
+        const days = p.start_date ? Math.max(0, Math.round((Date.now() - Date.parse(p.start_date)) / 86400000)) : null;
+        const missing = p.onboarding.items.filter((i) => !i.done).map((i) => i.label).join(', ');
+        return `<tr class="clickable" data-onboard="${p.id}">
+        <td>${esc(p.name)}</td>
+        <td class="dim">${p.start_date ? esc(new Date(p.start_date).toLocaleDateString('en-GB')) : '—'}</td>
+        <td class="dim">${days ?? '—'}</td>
+        <td class="err">${esc(missing)}</td>
+        <td><button class="btn" data-obcomplete="${p.id}" style="padding:4px 10px;font-size:11px">Mark complete</button></td>
+      </tr>`;
+      }).join('')}</tbody>
+    </table>` : '<p class="empty-note">Nobody active has outstanding onboarding items.</p>';
+  els('#obTableWrap [data-onboard]').forEach((row) => row.addEventListener('click', (e) => {
+    if (e.target.closest('[data-obcomplete]')) return;
+    onboardingModal(allPersonnel.find((p) => p.id === Number(row.dataset.onboard)));
+  }));
+  els('#obTableWrap [data-obcomplete]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); onboardingComplete(Number(b.dataset.obcomplete)); }));
+}
+async function onboardingComplete(id, note) {
+  try { await api('POST', `/api/personnel/${id}/onboarding-complete`, { note: note || undefined }); closeModal(); await load(); showTab('onboarding'); }
+  catch (e) { alert(e.message); }
+}
+async function onboardingReopen(id) {
+  try { await api('DELETE', `/api/personnel/${id}/onboarding-complete`); closeModal(); await load(); showTab('onboarding'); }
+  catch (e) { alert(e.message); }
+}
+/** The checklist for one person — reused from both the Onboarding tab and
+ * the "view checklist" link inside their own personnel record. */
+function onboardingModal(p) {
+  const ob = p.onboarding;
+  const status = ob.overridden
+    ? `Marked complete by ${esc(ob.completed_by || '')} on ${esc(new Date(ob.completed_at).toLocaleDateString('en-GB'))}, despite the items still outstanding below.`
+    : ob.complete ? `Complete.` : `${ob.outstanding} item${ob.outstanding === 1 ? '' : 's'} outstanding.`;
+  modal(`Onboarding — ${p.name}`, `
+    <form class="stack" onsubmit="return false">
+      <p class="dim" style="margin:0 0 6px;font-size:13px">${p.start_date ? `Started ${esc(new Date(p.start_date).toLocaleDateString('en-GB'))}. ` : ''}${status}</p>
+      <table class="log-table"><tbody>
+        ${ob.items.map((i) => `<tr><td>${esc(i.label)}</td><td style="text-align:right" class="${i.done ? '' : 'err'}">${i.done ? 'Done' : 'Outstanding'}</td></tr>`).join('')}
+      </tbody></table>
+      ${!ob.complete ? '<label>Note (optional — kept in the audit log)</label><input id="obNote" placeholder="e.g. control-room only, no SIA needed">' : ''}
+    </form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `<div class="btn-row" style="justify-content:flex-end">
+      <button class="btn" id="obClose">Close</button>
+      ${ob.complete ? '<button class="btn danger" id="obReopen">Reopen</button>' : '<button class="btn primary" id="obGo">Mark onboarding complete</button>'}
+    </div>`;
+    el('#obClose').onclick = closeModal;
+    if (el('#obGo')) el('#obGo').onclick = () => onboardingComplete(p.id, el('#obNote').value.trim());
+    if (el('#obReopen')) el('#obReopen').onclick = () => onboardingReopen(p.id);
+  });
+}
+
 function personnelForm(p) {
   const isNew = !p;
   return `
@@ -641,6 +712,9 @@ function personnelForm(p) {
       <input id="npnRank" autocomplete="off" value="${isNew ? '' : esc(p.rank || '')}">
       <label>Employment status</label>
       <select id="npnStatus">${Object.entries(EMPLOYMENT_LABEL).map(([v, label]) => `<option value="${v}" ${!isNew && p.employment_status === v ? 'selected' : ''}>${label}</option>`).join('')}</select>
+      <label>Start date — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">what the onboarding checklist measures from; defaults to today if left blank on a new record</span></label>
+      <input id="npnStartDate" type="date" value="${isNew ? '' : (p.start_date || '')}">
+      ${!isNew && p.onboarding ? `<p class="dim" style="margin:0">Onboarding: ${p.onboarding.complete ? (p.onboarding.overridden ? `<span>marked complete by ${esc(p.onboarding.completed_by || '')}</span>` : '<span style="color:var(--available)">complete</span>') : `<span class="err">${p.onboarding.outstanding} item${p.onboarding.outstanding === 1 ? '' : 's'} outstanding</span>`} — <a href="#" id="pnViewOnboarding">view checklist</a></p>` : ''}
       <label>Employment type — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">leave management only applies to employed staff; a subcontractor invoices for their own time</span></label>
       <select id="npnEmpType">${Object.entries(EMPLOYMENT_TYPE_LABEL).map(([v, label]) => `<option value="${v}" ${(isNew ? 'EMPLOYED' : (p.employment_type || 'EMPLOYED')) === v ? 'selected' : ''}>${label}</option>`).join('')}</select>
       <div id="npnAllowanceRow" style="${!isNew && p.employment_type === 'SUBCONTRACTOR' ? 'display:none' : ''}">
@@ -779,6 +853,7 @@ function personnelModal(p) {
       </div>`;
     el('#pnCancel').onclick = closeModal;
     if (el('#pnFile')) el('#pnFile').onclick = () => personnelFileModal(p);
+    if (el('#pnViewOnboarding')) el('#pnViewOnboarding').onclick = (e) => { e.preventDefault(); onboardingModal(p); };
     if (el('#pnDelete')) el('#pnDelete').onclick = () => deletePersonnel(p.id);
     el('#npnEmpType').addEventListener('change', () => {
       el('#npnAllowanceRow').style.display = el('#npnEmpType').value === 'SUBCONTRACTOR' ? 'none' : '';
@@ -820,6 +895,11 @@ function personnelModal(p) {
       const empType = el('#npnEmpType').value;
       const body = {
         name, employee_no: el('#npnEmpNo').value.trim() || null, rank: el('#npnRank').value.trim(),
+        // Omitted entirely when blank (not sent as null): a new record's
+        // POST→PATCH save round-trip would otherwise have the follow-up
+        // PATCH immediately clear the default-to-today start_date the POST
+        // itself just set.
+        start_date: el('#npnStartDate').value || undefined,
         employment_status: el('#npnStatus').value, callsign_id: el('#npnCallsign').value ? Number(el('#npnCallsign').value) : null,
         contact_phone: el('#npnPhone').value.trim(), contact_email: el('#npnEmail').value.trim(), notes: el('#npnNotes').value.trim(),
         sms_opt_out: el('#npnSmsOptOut').checked, email_opt_out: el('#npnEmailOptOut').checked,
