@@ -185,6 +185,11 @@ module.exports = function registerApplicantRoutes({
       notes: `Hired via applicant tracking — applicant #${a.id}.`, branch_id: a.branch_id || null,
       start_date: body.start_date && !isNaN(Date.parse(body.start_date)) ? String(body.start_date).slice(0, 10) : new Date().toISOString().slice(0, 10),
       onboarding_completed_at: null, onboarding_completed_by: null,
+      // Set up from their own Personnel record (Payroll section) before
+      // they can be included in a run — a hire through this route has no
+      // tax code/NI category/rate on file yet, same as one created through
+      // POST /api/personnel has none until the follow-up PATCH sets them.
+      payroll: null,
       lat: null, lon: null, location_at: null,
     };
     // Everything from the application goes onto their personnel file.
