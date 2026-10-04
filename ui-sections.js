@@ -50,6 +50,7 @@ const SECTIONS = [
   { key: 'timeclock', label: 'Timeclock', group: 'Fleet & people', icon: 'clock', desktop: '/timeclock.html', mobile: '/timeclock.html', allowed: CONTROL, default: CONTROL },
   { key: 'patrol_schedules', label: 'Patrol schedules', group: 'Fleet & people', icon: 'patrol', desktop: '/patrol-schedules.html', allowed: CONTROL, default: CONTROL },
   { key: 'leave', label: 'Leave', group: 'Fleet & people', icon: 'leave', mobile: '#leave', needs_person: true, allowed: STAFF, default: STAFF },
+  { key: 'payslips', label: 'My payslips', group: 'Fleet & people', icon: 'invoice', mobile: '#payslips', needs_person: true, allowed: STAFF, default: STAFF },
   { key: 'training', label: 'Training', group: 'Fleet & people', icon: 'training', mobile: '#training', needs_person: true, allowed: STAFF, default: STAFF },
   { key: 'equipment', label: 'My equipment', group: 'Fleet & people', icon: 'equipment', mobile: '#equipment', needs_person: true, allowed: STAFF, default: STAFF },
   // Stock & assets

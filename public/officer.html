@@ -286,6 +286,12 @@
     <p class="empty-note dim">Leave is booked here by employed staff.</p>
   </div></section>
 
+  <!-- Payslips -->
+  <section class="screen" data-screen="payslips"><div class="narrow">
+    <div class="card"><div id="payslipsList"><p class="dim">Loading…</p></div></div>
+    <p class="empty-note dim">Only issued payslips appear here — a payroll run still in draft is not shown.</p>
+  </div></section>
+
   <!-- Training -->
   <section class="screen" data-screen="training"><div class="narrow">
     <div class="card"><div id="trainingList"><p class="dim">Loading…</p></div></div>
@@ -345,6 +351,7 @@ const SCREENS = {
   reports: { title: 'Reports', show: () => refreshReports() },
   passdown: { title: 'Site handover', show: () => refreshPassdown() },
   leave: { title: 'Leave', show: () => refreshLeave() },
+  payslips: { title: 'My payslips', show: () => refreshPayslips() },
   training: { title: 'Training', show: () => refreshTraining() },
   equipment: { title: 'My equipment', show: () => refreshEquipment() },
 };
@@ -1268,6 +1275,23 @@ async function refreshLeave() {
       catch (e) { alert(e.message); }
     }));
   } catch (e) { el('#leaveList').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
+/* ---- Payslips (issued only — a draft run is never visible here) ------- */
+async function refreshPayslips() {
+  if (!person) return;
+  try {
+    const mine = await api('GET', `/api/payslips?personnel_id=${person.id}`);
+    const tok = encodeURIComponent(CCCS.getSession().token);
+    el('#payslipsList').innerHTML = mine.length ? mine.map((ps) => `
+      <div class="field" style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line-soft);padding-bottom:8px;margin-bottom:8px">
+        <div style="flex:1">
+          <div>${esc(ps.period_start)} → ${esc(ps.period_end)}</div>
+          <div class="dim" style="font-size:12px">Pay date ${esc(ps.pay_date)} · net £${ps.net_pay.toFixed(2)}</div>
+        </div>
+        <a class="btn" target="_blank" href="/api/payslips/${ps.id}/pdf?token=${tok}" style="padding:6px 12px;font-size:12px">PDF</a>
+      </div>`).join('') : '<p class="dim">No payslips issued yet.</p>';
+  } catch (e) { el('#payslipsList').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 el('#bRequestLeave').onclick = () => {
   modal('Request leave', `
