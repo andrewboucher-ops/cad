@@ -211,10 +211,12 @@ async function load() {
     ? state.events.slice(-10).reverse().map((e) => `<div class="list-row"><span class="t">${esc(new Date(e.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}</span><span>${esc(e.summary)}</span></div>`).join('')
     : '<p class="empty-note">Nothing logged yet today.</p>';
 
+  const SEVERITY_PRI = { LOW: 'ROUTINE', MEDIUM: 'GREEN', HIGH: 'AMBER', CRITICAL: 'RED' };
   el('#reportsBody').innerHTML = reports.length
     ? reports.slice(0, 10).map((r) => `<a class="list-row" href="/forms.html?id=${r.id}" style="text-decoration:none;color:inherit">
         <span class="t">${esc(new Date(r.submitted_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }))}</span>
         <span style="flex:1">${esc(r.definition_name)} <span style="color:var(--ink-dim)">— ${esc(r.subject_label)}</span></span>
+        ${r.severity ? `<span class="pri pri-${SEVERITY_PRI[r.severity] || 'ROUTINE'}" style="font-size:10px">${esc(r.severity)}</span>` : ''}
         ${r.visibility === 'RESTRICTED' ? '<span class="pri pri-RED" style="font-size:10px">R</span>' : ''}
         <span style="color:${r.status === 'OPEN' ? 'var(--priority)' : 'var(--ink-dim)'};font-size:11px;font-weight:700">${r.status === 'OPEN' ? 'OPEN' : esc(r.outcome || 'DONE')}</span>
       </a>`).join('')

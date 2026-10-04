@@ -407,6 +407,7 @@ const CCCSForms = (() => {
       <div class="row clickable" data-ff-open="${s.id}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line-soft);cursor:pointer">
         <span class="mono" style="font-size:12px">${esc(s.reference)}</span>
         <span style="flex:1">${esc(s.definition_name)} <span class="dim">— ${esc(s.subject_label)}</span></span>
+        ${s.severity ? `<span class="pri pri-${SEVERITY_PRI[s.severity] || 'ROUTINE'}" style="font-size:10px">${esc(s.severity)}</span>` : ''}
         ${s.visibility === 'RESTRICTED' ? '<span class="pri pri-RED" style="font-size:10px">R</span>' : ''}
         ${s.status === 'ACTIONED' ? `<span style="font-size:10px;font-weight:700;color:${OUTCOME_COLOUR[s.outcome] || 'inherit'}">${esc(OUTCOME_LABEL[s.outcome] || s.outcome)}</span>` : ''}
         <span class="dim" style="font-size:11px">${esc(fmt(s.submitted_at))}</span>

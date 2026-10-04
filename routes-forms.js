@@ -355,6 +355,14 @@ module.exports = function registerFormRoutes({
     return sub;
   }
 
+  /** The value of a submission's own severity field, if its form has one —
+   * a convenience top-level copy so list/summary views (and the control
+   * room's attention strip) can show it without digging into fields/values. */
+  function severityOf(sub) {
+    const f = sub.fields.find((x) => x.type === 'severity');
+    return f ? sub.values[f.id] || null : null;
+  }
+
   /** The shape a submission leaves the server in. Only ever called on a
    * submission canRead() has already passed. */
   function publicSubmission(sub) {
@@ -369,7 +377,7 @@ module.exports = function registerFormRoutes({
       id: sub.id, reference: sub.reference,
       definition_id: sub.definition_id, definition_key: sub.definition_key,
       definition_name: sub.definition_name, definition_version: sub.definition_version,
-      visibility: effectiveVisibility(sub),
+      visibility: effectiveVisibility(sub), severity: severityOf(sub),
       subject_type: sub.subject_type, subject_id: sub.subject_id, subject_label: sub.subject_label,
       fields: sub.fields, values, geo: sub.geo || null,
       submitted_by: sub.submitted_by_name, submitted_by_user_id: sub.submitted_by_user_id,
@@ -387,7 +395,7 @@ module.exports = function registerFormRoutes({
    * for submissions canRead() passed — a list is a read like any other. */
   const submissionSummary = (sub) => ({
     id: sub.id, reference: sub.reference, definition_id: sub.definition_id, definition_name: sub.definition_name,
-    visibility: effectiveVisibility(sub), subject_type: sub.subject_type, subject_id: sub.subject_id,
+    visibility: effectiveVisibility(sub), severity: severityOf(sub), subject_type: sub.subject_type, subject_id: sub.subject_id,
     subject_label: sub.subject_label, submitted_by: sub.submitted_by_name, submitted_at: sub.submitted_at,
     status: sub.status || 'OPEN', outcome: sub.outcome || null,
   });
@@ -839,8 +847,7 @@ module.exports = function registerFormRoutes({
       // same push channel the dashboard's other alerts use, on top of (not
       // instead of) the ordinary broadcast above, so control sees it land on
       // the board too, not only in a notification.
-      const severityField = d.fields.find((f) => f.type === 'severity');
-      const severity = severityField ? values[severityField.id] : null;
+      const severity = severityOf(sub);
       if (severity === 'HIGH' || severity === 'CRITICAL') {
         pushToRoles(CONTROL, { title: `${severity} severity — ${sub.reference}`, body: `${d.name}: ${subjectLabel}`, url: `/forms.html?id=${sub.id}`, tag: 'cccs-incident-severity' });
       }
@@ -1065,12 +1072,12 @@ module.exports = function registerFormRoutes({
     doc.y = A4.h - bandH - 26;
 
     doc.heading(sub.definition_name, 13);
-    const severityField = sub.fields.find((f) => f.type === 'severity');
+    const severity = severityOf(sub);
     doc.pairs([
       [SUBJECT_LABEL[sub.subject_type] || sub.subject_type, sub.subject_label],
       ['Filed by', sub.submitted_by_name],
       ['Filed at', fmtLong(sub.submitted_at)],
-      ...(severityField && sub.values[severityField.id] ? [['Severity', sub.values[severityField.id]]] : []),
+      ...(severity ? [['Severity', severity]] : []),
       ...(sub.geo ? [['Location', `${sub.geo.lat.toFixed(5)}, ${sub.geo.lon.toFixed(5)}${sub.geo.accuracy ? ` (±${sub.geo.accuracy}m)` : ''}`]] : []),
       ['Status', sub.status === 'ACTIONED' ? `${sub.outcome} — by ${sub.actioned_by}, ${fmtLong(sub.actioned_at)}` : 'Open — not yet reviewed'],
     ], { labelWidth: 110 });
