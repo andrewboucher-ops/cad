@@ -2618,8 +2618,11 @@ route('POST', '/api/jobs/:id/stand-down', CONTROL, ({ params, body }) => {
 function createEmergencyJob(ev) {
   const j = {
     id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
-    incident_type: ev.kind === 'WELFARE' ? 'WELFARE ALARM' : 'OFFICER EMERGENCY', priority: 'RED',
-    location: ev.lat != null ? `${ev.lat.toFixed(5)}, ${ev.lon.toFixed(5)} (add details as received)` : 'Location unknown — add details as received',
+    incident_type: ev.kind === 'WELFARE' ? 'WELFARE ALARM' : ev.kind === 'NOT_CLOCKED_IN' ? 'NOT CLOCKED IN' : 'OFFICER EMERGENCY', priority: 'RED',
+    // No GPS fix for a not-clocked-in alarm, but the site is known — a
+    // location_hint (only ever set by that caller) beats the generic
+    // "add details as received" placeholder every other emergency gets.
+    location: ev.lat != null ? `${ev.lat.toFixed(5)}, ${ev.lon.toFixed(5)} (add details as received)` : (ev.location_hint || 'Location unknown — add details as received'),
     site_id: null, keyholder: '', lat: ev.lat, lon: ev.lon,
     description: '', caller: ev.callsign, required_resources: 2, what3words: '',
     notes: '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
@@ -2784,9 +2787,16 @@ function zoneFromCallsign(callsign) {
   const digits = String(callsign || '').replace(/\D/g, '');
   return (digits || '0').slice(-4).padStart(4, '0');
 }
+// ev.callsign is the human-readable label this emergency shows internally
+// (a radio callsign for an officer/MDT emergency, but a plain name for a
+// not-clocked-in alarm — see routes-attendance.js). The SIA zone is a
+// separate, strictly 4-digit field, so a caller whose internal label has no
+// usable digits in it (a name) sets ev.zone_source to whatever number
+// should identify them instead (e.g. an employee number); zoneFromCallsign's
+// own digit-extraction and 0000 fallback apply to it exactly the same way.
 function forwardEmergencyToAura(ev) {
   if (!MQTT_HOST || !MQTT_AURA_PUBLISH_ENABLED) return;
-  const zone = zoneFromCallsign(ev.callsign);
+  const zone = zoneFromCallsign(ev.zone_source || ev.callsign);
   const packet = buildSia({ acct: AURA_ACCT, data: `Nri0/PA${zone}` }); // PA = SIA panic alarm
   if (!mqttPublishNow(MQTT_TOPIC, packet)) console.warn(`[cccs] AURA MQTT publish skipped for emergency ${ev.id} — not connected to broker`);
 }
@@ -4095,8 +4105,9 @@ require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, f
 
 // Breaks, hours, geofenced clock-in, reminders — see routes-attendance.js.
 const attendance = require('./routes-attendance.js')({
-  route, httpError, ALL, CONTROL, db, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
+  route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+  createEmergencyJob, forwardEmergencyToAura,
 });
 
 

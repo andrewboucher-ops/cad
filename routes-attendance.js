@@ -43,12 +43,17 @@
 const DEFAULT_RADIUS = Number(process.env.GEOFENCE_METRES || 250);
 const AUTO_OUT_MS = Number(process.env.AUTO_CLOCK_OUT_MIN || 5) * 60000;
 const LATE_SMS_MS = 5 * 60000, LATE_ALERT_MS = 15 * 60000;
+// A genuine alarm, not another reminder — see the block in tick() below for
+// why this escalates all the way to the emergency mechanism rather than
+// another push notification.
+const NOT_CLOCKED_IN_ALARM_MS = 10 * 60000;
 const NUDGE_AFTER_MS = 15 * 60000, NUDGE_EVERY_MS = 30 * 60000;
 const REMINDERS_ON = process.env.SHIFT_REMINDERS !== 'off';
 
 module.exports = function registerAttendance({
-  route, httpError, ALL, CONTROL, db, logEvent, broadcast, pushToRoles, pushToUsers = () => {}, sms, notifyLog, publicShift,
+  route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers = () => {}, sms, notifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl = '', flushNow = () => {},
+  createEmergencyJob, forwardEmergencyToAura = () => {},
 }) {
   /* ---- geofence ---- */
   function distanceM(a, b) {
@@ -249,6 +254,33 @@ module.exports = function registerAttendance({
         a.late_sms_at = new Date(now).toISOString(); changed = true;
         text(p, `Hi ${first}, your shift${where} started at ${hhmm(s.starts_at)}. Please clock in on the CCCS app: ${publicBaseUrl}/officer.html`, s.id).catch(() => {});
         logEvent('shift.late_reminder', `${nameOf(a)} NOT CLOCKED IN 5 MIN AFTER START — REMINDER SENT`, { shift_id: s.id, personnel_id: a.personnel_id });
+      }
+      // A real alarm, not another notification: the same emergency_events +
+      // RED job + siren mechanism a welfare timer or an officer emergency
+      // uses, one-shot like the reminders above, and — same as an officer
+      // emergency — forwarded out to GuardM8/AURA (forwardEmergencyToAura;
+      // a no-op today unless MQTT_AURA_PUBLISH_ENABLED=1). The identifying
+      // label inside CCCS is deliberately the person's actual name
+      // (callsign: p.name), not callsignOf(p) — control needs to recognise
+      // who this is about at a glance, not decode a radio callsign. The
+      // outbound SIA zone is a separate, strictly 4-digit field a name
+      // can't go in, so zone_source carries their employee number instead
+      // (falls back to the same 0000 zoneFromCallsign already uses when
+      // there's nothing numeric to extract).
+      if (!a.clocked_in_at && now >= start + NOT_CLOCKED_IN_ALARM_MS && now < end && !a.not_clocked_in_alarm_at) {
+        a.not_clocked_in_alarm_at = new Date(now).toISOString(); changed = true;
+        const ev = {
+          id: nextId('emergency_events'), kind: 'NOT_CLOCKED_IN', personnel_id: a.personnel_id,
+          callsign: p ? p.name : nameOf(a), zone_source: p ? p.employee_no : null, lat: null, lon: null, state: 'ACTIVE',
+          note: `Not clocked in — shift${where} was due to start ${hhmm(s.starts_at)}`,
+          activated_at: new Date(now).toISOString(), acknowledged_at: null, acknowledged_by: null, resolved_at: null, resolved_by: null,
+        };
+        db.emergency_events.push(ev);
+        createEmergencyJob({ ...ev, location_hint: site ? site.name : null });
+        broadcast('emergency.activated', ev);
+        pushToRoles(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'], { title: 'ALARM — not clocked in', body: `${nameOf(a)}${where} has not clocked in`, url: '/control.html', tag: `cccs-notclockedin-${a.id}` });
+        logEvent('shift.not_clocked_in_alarm', `!!! ${nameOf(a)} NOT CLOCKED IN — ALARM RAISED${site ? ' AT ' + site.name.toUpperCase() : ''}`, { shift_id: s.id, personnel_id: a.personnel_id, emergency_id: ev.id });
+        forwardEmergencyToAura(ev);
       }
       if (!a.clocked_in_at && now >= start + LATE_ALERT_MS && now < end && !a.late_alert_at) {
         a.late_alert_at = new Date(now).toISOString(); changed = true;
