@@ -136,6 +136,7 @@
       <div class="an-group">System</div>
       <button id="tabMenu" data-tab="menu" data-desc="Which roles see which parts of the site, on desktop and on phones.">Menu &amp; sections</button>
       <button id="tabBranches" data-tab="branches" data-desc="Branches, if you split staff and sites between offices.">Branches</button>
+      <button id="tabRetention" data-tab="retention" data-desc="How long each kind of record is kept, and how many there are right now. A sweep runs automatically every 6 hours.">Data retention</button>
     </nav>
     <select id="adminNavSelect" class="admin-nav-select" aria-label="Admin section"></select>
     <div class="admin-content">
@@ -231,6 +232,13 @@
     <div id="viewBranches" class="hide">
       <p class="dim" style="margin:0 0 10px;font-size:13px">A branch scopes what supervisors and field/MDT users see — dispatchers and admins always see every branch. A site, person, vehicle or asset with no branch set is shared and visible to everyone.</p>
       <div id="brTableWrap"></div>
+    </div>
+
+    <div id="viewRetention" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">A sweep runs automatically every 6 hours and removes anything past its window below. Open jobs and patrol visits are never removed however old they are — only closed ones, once they're past the window. Change a limit with its environment variable and restart the service; there's no setting here for it.</p>
+      <div id="rtTableWrap"></div>
+      <div class="btn-row" style="margin-top:12px"><button type="button" class="btn" id="rtSweepNow">Run sweep now</button></div>
+      <p class="dim" id="rtSweepResult" style="margin:8px 0 0"></p>
     </div>
 
     <div id="viewTraining" class="hide">
@@ -380,6 +388,9 @@ function showTab(name) {
   el('#tabBranches').classList.toggle('active', name === 'branches');
   el('#viewBranches').classList.toggle('hide', name !== 'branches');
   el('#btnNewBranch').hidden = name !== 'branches';
+  el('#tabRetention').classList.toggle('active', name === 'retention');
+  el('#viewRetention').classList.toggle('hide', name !== 'retention');
+  if (name === 'retention') paintRetention();
   el('#tabTraining').classList.toggle('active', name === 'training');
   el('#viewTraining').classList.toggle('hide', name !== 'training');
   el('#btnNewCourse').hidden = name !== 'training';
@@ -447,6 +458,7 @@ el('#tabOnboarding').onclick = () => showTab('onboarding');
 el('#tabLeave').onclick = () => showTab('leave');
 el('#tabShiftTypes').onclick = () => showTab('shiftTypes');
 el('#tabMenu').onclick = () => showTab('menu');
+el('#tabRetention').onclick = () => showTab('retention');
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }
   if (u.mdt_id) { const m = allMdts.find((x) => x.id === u.mdt_id); return m ? `MDT ${esc(m.mdt_code)}` : '—'; }
@@ -2691,6 +2703,50 @@ function shiftTypeModal(t) {
   });
 }
 el('#btnNewShiftType').onclick = () => shiftTypeModal(null);
+
+/* ---------- Data retention ---------- */
+const RETENTION_LABEL = {
+  locations: 'Vehicle / foot officer location fixes', audit_logs: 'Event log', messages: 'Message metadata',
+  dial_log: 'SMS / dial contact attempts', jobs: 'Closed jobs', site_visits: 'Closed patrol visits', passdown_logs: 'Passdown notes',
+};
+// The counts row names (server.js's `counts`) and the policy names (its
+// `RETENTION` object) don't always share a key — audit_logs's policy is
+// called `audit`, site_visits shares jobs's policy rather than having its
+// own, passdown_logs's is `passdown`. This is the one place that mapping
+// needs to be known, so the table can show each row its real policy.
+const RETENTION_POLICY_KEY = { locations: 'locations', audit_logs: 'audit', messages: 'messages', dial_log: 'dial_log', jobs: 'jobs', site_visits: 'jobs', passdown_logs: 'passdown' };
+async function paintRetention() {
+  el('#rtTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  let r;
+  try { r = await api('GET', '/api/retention'); } catch (e) { el('#rtTableWrap').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const rows = Object.keys(r.counts);
+  el('#rtTableWrap').innerHTML = `
+    <table class="log-table">
+      <thead><tr><th>Record</th><th style="width:170px">Kept for</th><th style="width:100px">Count now</th></tr></thead>
+      <tbody>${rows.map((k) => {
+        const policyKey = RETENTION_POLICY_KEY[k];
+        const days = policyKey && r.policy_days[policyKey];
+        const openEnded = k === 'jobs' || k === 'site_visits';
+        return `<tr>
+        <td>${esc(RETENTION_LABEL[k] || k)}</td>
+        <td class="dim">${days ? `${openEnded ? 'while open, then ' : ''}${days} days${openEnded ? ' after closing' : ''}` : '—'}</td>
+        <td class="dim">${r.counts[k].toLocaleString('en-GB')}</td>
+      </tr>`;
+      }).join('')}</tbody>
+    </table>
+    <p class="dim" style="margin:10px 0 0;font-size:12.5px">${esc(r.note)}</p>`;
+}
+el('#rtSweepNow').onclick = async () => {
+  el('#rtSweepNow').disabled = true;
+  el('#rtSweepResult').textContent = 'Running…';
+  try {
+    const removed = await api('POST', '/api/retention/sweep', {});
+    const total = Object.values(removed).reduce((a, b) => a + b, 0);
+    el('#rtSweepResult').textContent = total ? `Removed ${total} record${total === 1 ? '' : 's'}: ${Object.entries(removed).filter(([, n]) => n).map(([k, n]) => `${n} ${RETENTION_LABEL[k] || k}`).join(', ')}.` : 'Nothing was past its retention window.';
+    await paintRetention();
+  } catch (e) { el('#rtSweepResult').textContent = e.message; }
+  el('#rtSweepNow').disabled = false;
+};
 
 /* ---------- Menu & sections (ui-sections.js) ---------- */
 let menuData = null;

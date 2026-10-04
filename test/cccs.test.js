@@ -1314,6 +1314,18 @@ test('the retention sweep removes old location history but keeps recent fixes', 
   assert.ok(app.db.locations.some((l) => l.id === 900002), 'a 2-day-old fix is kept');
 });
 
+test('the retention sweep also covers dial_log, which carries actual message text, not just metadata like `messages`', async () => {
+  const old = new Date(Date.now() - 200 * 86400000).toISOString();
+  const recent = new Date(Date.now() - 2 * 86400000).toISOString();
+  app.db.dial_log.push({ id: 900030, channel: 'SMS', personnel_id: ellieId, to_number: '+447700900000', body: 'old reminder', outcome: 'SENT', attempted_at: old, settled_at: null });
+  app.db.dial_log.push({ id: 900031, channel: 'SMS', personnel_id: ellieId, to_number: '+447700900000', body: 'recent reminder', outcome: 'SENT', attempted_at: recent, settled_at: null });
+
+  app.retentionSweep();
+
+  assert.ok(!app.db.dial_log.some((d) => d.id === 900030), 'a 200-day-old contact attempt is gone — past the 180-day default');
+  assert.ok(app.db.dial_log.some((d) => d.id === 900031), 'a 2-day-old one is kept');
+});
+
 test('an open job is never swept away, however old it is', async () => {
   const ancient = new Date(Date.now() - 5 * 365 * 86400000).toISOString();
   const openJob = { id: 900010, reference: 'OLD-OPEN', status: 'DISPATCHED', priority: 'GREEN', location: 'Site', created_at: ancient, updated_at: ancient };

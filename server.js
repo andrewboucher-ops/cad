@@ -2930,6 +2930,12 @@ const RETENTION = {
   // Shift-handover notes — kept alongside the audit trail's horizon since
   // they carry the same "what happened at this site" evidentiary value.
   passdown: Number(process.env.RETAIN_PASSDOWN_DAYS || 365),
+  // Every dial/SMS attempt (writeNotifyLog) — unlike `messages` above, this
+  // carries the actual text sent, not just who/when, so it is at least as
+  // sensitive and gets the same horizon. Found missing a retention policy
+  // entirely while reviewing this list — every other per-contact collection
+  // already had one.
+  dial_log: Number(process.env.RETAIN_DIAL_LOG_DAYS || 180),
 };
 
 function pruneOlderThan(table, days, field) {
@@ -2949,6 +2955,7 @@ function retentionSweep() {
     audit_logs: pruneOlderThan('audit_logs', RETENTION.audit, 'at'),
     messages: pruneOlderThan('messages', RETENTION.messages, 'sent_at'),
     passdown_logs: pruneOlderThan('passdown_logs', RETENTION.passdown, 'created_at'),
+    dial_log: pruneOlderThan('dial_log', RETENTION.dial_log, 'attempted_at'),
   };
 
   // Jobs are only removed once they are finished — an open job is
@@ -2978,7 +2985,7 @@ function retentionSweep() {
 
 route('GET', '/api/retention', CONTROL, () => ({
   policy_days: RETENTION,
-  counts: Object.fromEntries(['locations', 'audit_logs', 'messages', 'jobs', 'site_visits']
+  counts: Object.fromEntries(['locations', 'audit_logs', 'messages', 'jobs', 'site_visits', 'dial_log', 'passdown_logs']
     .map((t) => [t, db[t].length])),
   note: 'Location history is the most intrusive data here and is kept for the shortest time.',
 }));
