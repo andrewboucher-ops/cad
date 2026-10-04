@@ -101,6 +101,14 @@ const EFFECT_FIELDS = {
 };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+// A HIGH/CRITICAL report pushes once on filing (see the POST route below).
+// If nobody has actioned it within this long, it pushes exactly once more —
+// the same "still not dealt with" shape as routes-attendance.js's
+// LATE_ALERT_MS, not a repeating siren. The control room's own attention
+// strip already shows it continuously the whole time it's open; this
+// reminder is for whoever stepped away from the screen or missed the first
+// push.
+const SEVERITY_REMIND_MS = 15 * 60000;
 const FIELD_TYPES = ['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime', 'signature', 'photo', 'severity'];
 const MAX_FIELDS = 60;
 const MAX_FILES = 10;
@@ -1223,9 +1231,43 @@ module.exports = function registerFormRoutes({
     return out.sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1));
   }
 
+  /**
+   * A HIGH/CRITICAL report still OPEN SEVERITY_REMIND_MS after filing pushes
+   * once more — `severity_reminded_at` makes it one-shot, same shape as
+   * routes-attendance.js's `late_alert_at`. RESTRICTED stays RESTRICTED: the
+   * reminder goes out content-free, to that form's named readers only, never
+   * to CONTROL at large — exactly the same split the original filing push
+   * already makes. Actioning a report (or it simply no longer qualifying)
+   * just means this never finds it again; nothing to cancel.
+   */
+  function severityEscalationTick(now = Date.now()) {
+    let changed = false;
+    for (const sub of db.form_submissions) {
+      if ((sub.status || 'OPEN') !== 'OPEN') continue;
+      if (sub.severity_reminded_at) continue;
+      const severity = severityOf(sub);
+      if (severity !== 'HIGH' && severity !== 'CRITICAL') continue;
+      if (now - Date.parse(sub.submitted_at) < SEVERITY_REMIND_MS) continue;
+      sub.severity_reminded_at = new Date(now).toISOString();
+      changed = true;
+      const mins = Math.round(SEVERITY_REMIND_MS / 60000);
+      if (effectiveVisibility(sub) === 'RESTRICTED') {
+        const readers = db.form_grants.filter((g) => g.definition_id === sub.definition_id).map((g) => g.user_id);
+        pushToUsers(readers, { title: 'Still awaiting review', body: `${sub.reference} was filed ${mins} min ago and is still open`, url: `/forms.html?id=${sub.id}`, tag: 'cccs-restricted' });
+        logEvent('form.severity_reminder_restricted', `RESTRICTED REPORT ${sub.reference} STILL UNREVIEWED ${mins} MIN AFTER FILING`, { submission_id: sub.id });
+      } else {
+        pushToRoles(CONTROL, { title: `Still open — ${severity} severity`, body: `${sub.reference} (${sub.definition_name}) has not been reviewed`, url: `/forms.html?id=${sub.id}`, tag: 'cccs-incident-severity' });
+        logEvent('form.severity_reminder', `${sub.definition_name.toUpperCase()} ${sub.reference} (${severity}) STILL OPEN ${mins} MIN AFTER FILING`, { submission_id: sub.id });
+      }
+    }
+    if (changed) flushNow();
+  }
+  const severityTimer = setInterval(() => { try { severityEscalationTick(); } catch (e) { console.warn('[forms] severity escalation tick failed:', e.message); } }, 60000);
+  if (severityTimer.unref) severityTimer.unref();
+
   return {
     installDefaults, ensureApplicationForm, ensureVehicleForms, ensureIncidentSeverity, activeApplicationForm,
-    validateValues, IMAGE_EXT, canRead, effectiveVisibility, clientVisibleSubmissions,
+    validateValues, IMAGE_EXT, canRead, effectiveVisibility, clientVisibleSubmissions, severityEscalationTick,
   };
 };
 

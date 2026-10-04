@@ -418,3 +418,54 @@ test('a brand-styled PDF can be built for a report exactly like an invoice or co
   assert.equal((await call('GET', `/api/form-submissions/${restricted.body.id}/pdf`, undefined, dispT)).status, 404, 'a dispatcher without a grant cannot pull the PDF either');
   assert.equal((await call('GET', `/api/form-submissions/${restricted.body.id}/pdf`, undefined, danT)).status, 200, 'the filer can');
 });
+
+/* ---------------- severity escalation reminder (one-shot, like attendance's late_alert_at) ---------------- */
+test('a HIGH/CRITICAL report still open after the reminder window pushes once more; actioning it first stops that', async () => {
+  const filedAt = Date.now();
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'HIGH', incident_type: 'Fire or alarm', description: 'Reminder test.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+  const raw = () => app.db.form_submissions.find((s) => s.id === filed.body.id);
+
+  app.forms.severityEscalationTick(filedAt + 10 * 60000);
+  assert.ok(!raw().severity_reminded_at, 'too soon');
+
+  app.forms.severityEscalationTick(filedAt + 16 * 60000);
+  assert.ok(raw().severity_reminded_at, 'reminded once the window has passed');
+  const reminders = () => app.db.audit_logs.filter((e) => e.type === 'form.severity_reminder' && e.data.submission_id === filed.body.id);
+  assert.equal(reminders().length, 1);
+
+  app.forms.severityEscalationTick(filedAt + 25 * 60000);
+  assert.equal(reminders().length, 1, 'one-shot — never reminds twice for the same report');
+
+  // Actioned before the window closes: no reminder, ever.
+  const second = await call('POST', '/api/form-submissions', {
+    definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
+    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', description: 'Reminder test 2 — actioned promptly.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  await call('POST', `/api/form-submissions/${second.body.id}/action`, { outcome: 'NOTED' }, adminT);
+  app.forms.severityEscalationTick(filedAt + 20 * 60000);
+  assert.equal(app.db.audit_logs.filter((e) => e.data && e.data.submission_id === second.body.id && String(e.type).startsWith('form.severity_reminder')).length, 0, 'already actioned — no reminder needed');
+});
+
+test('a RESTRICTED HIGH/CRITICAL report reminds its named readers only, content-free, never CONTROL at large', async () => {
+  const filedAt = Date.now();
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: def('use-of-force').id, subject_type: 'JOB', subject_id: job.id,
+    values: {
+      occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL',
+      reason: 'Self-defence', force_type: 'Physical restraint or control',
+      narrative: 'Confidential restricted narrative that must never appear in a broadcastable log line.',
+      officer_signature: sig('Dan Whitfield'),
+    },
+  }, danT);
+  assert.equal(filed.status, 201, JSON.stringify(filed.body));
+
+  app.forms.severityEscalationTick(filedAt + 16 * 60000);
+  const restrictedReminders = app.db.audit_logs.filter((e) => e.type === 'form.severity_reminder_restricted' && e.data.submission_id === filed.body.id);
+  assert.equal(restrictedReminders.length, 1);
+  assert.ok(!JSON.stringify(restrictedReminders[0]).includes('Confidential'), 'content-free, same as the original filing push');
+  assert.equal(app.db.audit_logs.filter((e) => e.type === 'form.severity_reminder' && e.data.submission_id === filed.body.id).length, 0, 'never the non-restricted variant for a restricted report');
+});
