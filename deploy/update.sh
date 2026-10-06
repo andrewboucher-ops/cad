@@ -29,6 +29,9 @@ APP_DIR="${APP_DIR:-/opt/cccs}"
 ENV_FILE="${ENV_FILE:-/etc/cccs/cccs.env}"
 SERVICE="${SERVICE:-cccs}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/cccs}"
+# Unlike deploy/backup.sh's own scheduled backups, nothing was pruning
+# these predeploy ones — every deploy added a pair and never removed one.
+KEEP_DAYS="${KEEP_DAYS:-30}"
 DRY_RUN="${DRY_RUN:-}"
 # MIGRATE=1: convert radio-era accounts (RADIO_USER) as part of this deploy.
 # Never implied — review the dry run it prints first.
@@ -115,6 +118,7 @@ if [ -f "$DATA_FILE" ]; then
 fi
 APP_BACKUP="$BACKUP_DIR/app-predeploy-$STAMP.tar.gz"
 run tar -czf "$APP_BACKUP" -C "$(dirname "$APP_DIR")" "$(basename "$APP_DIR")"
+run find "$BACKUP_DIR" -maxdepth 1 \( -name 'cccs-predeploy-*.db' -o -name 'app-predeploy-*.tar.gz' \) -mtime "+$KEEP_DAYS" -delete
 echo "   code     → $APP_BACKUP"
 
 rollback() {
