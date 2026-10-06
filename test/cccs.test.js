@@ -367,14 +367,18 @@ test('GuardM8 can push a job with a shared secret, and retries are idempotent', 
  * feature, 2026-10-06) — deeply nested, keyed by body.message rather than
  * GuardM8's flat single-purpose body. auraCallout() builds a minimal but
  * realistic payload matching that capture. */
-function auraCallout(message, calloutId, { location = 'Meridian Point Retail & Leisure Park, Kings Road, Cleethorpes, UK', lat = '53.5456326', lon = '-0.0138012', emergencyType = 'Test Callout', internalTest = false } = {}) {
+function auraCallout(message, calloutId, { location = 'Meridian Point Retail & Leisure Park, Kings Road, Cleethorpes, UK', lat = '53.5456326', lon = '-0.0138012', emergencyType = 'Test Callout', internalTest = true, classification = 'REAL' } = {}) {
+  // internalTest: true is Echelon's own job, kept off AURA's open responder
+  // network — confirmed as the live path CCCS should dispatch (2026-10-06),
+  // so that is the default here; a test that wants the open-network path
+  // (internalTest: false — not Echelon's job) passes it explicitly.
   return {
     message, calloutExternalRefId: null, siteExternalRefId: null,
     callout: {
       id: calloutId, status: 'created', internalTest, verified: false,
       incidentInformation: [{
         calloutId, status: 'created', createdAt: new Date().toISOString(),
-        calloutClassification: { id: 1, value: 'REAL' },
+        calloutClassification: { id: 1, value: classification },
         responseType: { id: 1, value: 'SECURITY' },
         typeOfEmergency: { id: 5, description: emergencyType },
         incidentcategory: { id: 24, description: emergencyType },
@@ -412,24 +416,37 @@ test('AURA can push a NEW_CALLOUT with a shared secret, and resending the same c
   assert.equal(retry.status, 200);
   assert.equal(retryBody.id, goodBody.id, 'the same callout id does not create a second job');
 });
-test('AURA\'s own internal test callouts are acknowledged but never create a job on the board', async () => {
+test('AURA\'s open-network callouts (internalTest: false) are acknowledged but never create a job on the board', async () => {
+  // internalTest: false means AURA's own open responder network, not
+  // Echelon, already has (or may have) a responder on this one — Echelon
+  // does not want a second, CCCS-dispatched officer also turning up.
   process.env.AURA_SECRET = 'test-aura-secret';
   const before = await fetch(BASE + '/api/integrations/aura/jobs', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
-    body: JSON.stringify(auraCallout('NEW_CALLOUT', 9099, { internalTest: true })),
+    body: JSON.stringify(auraCallout('NEW_CALLOUT', 9099, { internalTest: false })),
   });
   const beforeBody = await before.json();
   assert.equal(before.status, 200);
   assert.equal(beforeBody.ok, true);
-  assert.equal(beforeBody.note, 'internal test callout — logged only, no job created');
+  assert.match(beforeBody.note, /internalTest is false/);
 
-  // A later status event for that same (never-created) test callout is
-  // the ordinary "no matching job" path — still just acknowledged.
+  // A later status event for that same (never-created) callout is the
+  // ordinary "no matching job" path — still just acknowledged.
   const after = await fetch(BASE + '/api/integrations/aura/jobs', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
-    body: JSON.stringify(auraCallout('CALLOUT_EVENTS_CHANGED', 9099, { internalTest: true })),
+    body: JSON.stringify(auraCallout('CALLOUT_EVENTS_CHANGED', 9099, { internalTest: false })),
   });
   assert.equal(after.status, 200);
+});
+test('a TEST-classification callout (nested under incidentInformation, as AURA really sends it) is acknowledged but creates no job', async () => {
+  process.env.AURA_SECRET = 'test-aura-secret';
+  const r = await fetch(BASE + '/api/integrations/aura/jobs', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
+    body: JSON.stringify(auraCallout('NEW_CALLOUT', 9098, { classification: 'TEST' })),
+  });
+  const body = await r.json();
+  assert.equal(r.status, 200);
+  assert.match(body.note, /TEST classification/);
 });
 test('a later AURA status event for a known callout appends a note instead of creating a job; for an unknown one it is only logged', async () => {
   process.env.AURA_SECRET = 'test-aura-secret';

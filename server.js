@@ -2415,8 +2415,23 @@ route('POST', '/api/integrations/guardm8/jobs', null, ({ body: b, req }) => {
  *
  * Classification: calloutClassification.value is REAL or TEST (there is no
  * false-alarm classification). Per AURA (2026-10-06), TEST "should be
- * treated as non-live" until a person verifies it — same treatment as
- * internalTest: logged in full, but no job put in front of a controller. */
+ * treated as non-live" until a person verifies it — logged in full, no
+ * job put in front of a controller.
+ *
+ * internalTest — corrected 2026-10-06, having first been built backwards.
+ * It does NOT mean "a connectivity test"; it means "stays with your
+ * supplier, not dispatched onto AURA's open responder network" (AURA's own
+ * wording). Echelon's Control Centre callouts are raised as internal —
+ * confirmed directly: "it will work as a live internal callout, not to
+ * the AURA network, which is correct — I don't want AURA responders
+ * turning up to my jobs." So internalTest: true is Echelon's real, live
+ * incident path and DOES create a job; internalTest: false would mean
+ * AURA's open network already has a responder on it independently of
+ * CCCS — not something this supplier setup is expected to raise, so no
+ * job is created for it either (dispatching an Echelon officer on top of
+ * an AURA-network responder already en route is the exact double-up the
+ * quote above is ruling out) — instead control gets a push so a human
+ * notices an unexpected one rather than it only existing in the log. */
 const AURA_NEW_CALLOUT_MESSAGES = ['NEW_CALLOUT', 'NEW_CALLOUT_FOR_INSTANCE'];
 function auraCalloutFields(callout) {
   const info = (callout.incidentInformation || [])[0] || {};
@@ -2451,13 +2466,21 @@ route('POST', '/api/integrations/aura/jobs', null, ({ body: b, req }) => {
   const externalRef = String(callout.id);
 
   if (AURA_NEW_CALLOUT_MESSAGES.includes(b.message)) {
-    // AURA's own connectivity/test-send feature (internalTest: true) should
-    // not put a job on a real control room's board for someone to notice
-    // and dismiss — it is logged above like everything else, but nothing
-    // dispatchable is created from it.
-    if (callout.internalTest) return { __status: 200, __body: { ok: true, note: 'internal test callout — logged only, no job created' } };
-    if (callout.calloutClassification && callout.calloutClassification.value === 'TEST') {
+    // calloutClassification sits inside incidentInformation[0] on a real
+    // captured payload (2026-10-06), not on callout itself — checked both
+    // places in case AURA's shape varies between callout types.
+    const info0 = (callout.incidentInformation || [])[0] || {};
+    const classification = info0.calloutClassification || callout.calloutClassification;
+    if (classification && classification.value === 'TEST') {
       return { __status: 200, __body: { ok: true, note: 'TEST classification — not yet verified as a live callout, logged only' } };
+    }
+    // internalTest: false would mean AURA's open network, not Echelon,
+    // already has a responder on this one — see the block comment above.
+    // Not expected from this supplier setup; surfaced rather than silently
+    // dropped, in case it ever is.
+    if (!callout.internalTest) {
+      pushToRoles(CONTROL, { title: 'Unexpected AURA callout', body: `Callout ${callout.id} arrived as internalTest:false — AURA's open network may already be responding. No job created.`, url: '/control.html', tag: `cccs-aura-${callout.id}` });
+      return { __status: 200, __body: { ok: true, note: 'internalTest is false — not Echelon’s own job, flagged to control, no job created' } };
     }
     const fields = auraCalloutFields(callout);
     // AMBER — see the block comment above this route.
