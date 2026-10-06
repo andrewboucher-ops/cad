@@ -2386,7 +2386,8 @@ route('POST', '/api/integrations/guardm8/jobs', null, ({ body: b, req }) => {
  * shape. Confirmed against a real captured payload (2026-10-06):
  *   { message, callout: { id, incidentInformation: [{ typeOfEmergency,
  *     incidentcategory, calloutCurrentLocation: { formattedAddress, lat,
- *     lon }, ... }], ... } }
+ *     lon }, predefinedLocationId, calloutClassification, internalTest },
+ *     ... ], ... } }
  * callout.id is the natural idempotency key — the same callout resends on
  * every status change, always with the same id.
  *
@@ -2396,25 +2397,50 @@ route('POST', '/api/integrations/guardm8/jobs', null, ({ body: b, req }) => {
  * changing the job's status — an officer already en route should not be
  * stood down just because a webhook said so with nobody at CCCS deciding
  * that. A status update for a callout.id with no matching job is logged
- * (logInboundAlarmPayload already did that) and otherwise ignored.
+ * (logInboundAlarmPayload already did that) and otherwise ignored. Each
+ * message is recorded once per job (external_events_seen) so a resent
+ * webhook — AURA's delivery is "at most once" but the same event can still
+ * be published more than once on their end — doesn't double a notes line.
  *
- * No severity field has been seen on any payload yet (confirmed only on a
- * Test Callout) — defaults to AMBER rather than GREEN/ROUTINE until AURA
- * confirms what, if anything, carries urgency. Revisit once a real (non-
- * test) callout has been seen, or AURA answers the question. */
+ * Severity: confirmed by AURA (2026-10-06) that NEW_CALLOUT carries no
+ * urgency field at all — their internal P1–P4 medical triage is never
+ * copied onto the webhook. AMBER-for-every-new-callout is therefore the
+ * permanent default here, not a placeholder pending more information.
+ *
+ * Site mapping: incidentInformation[].predefinedLocationId is the stable
+ * key AURA's side uses for a Fixed Location — set a site's aura_location_id
+ * (Admin → Sites) to the same value to have a callout land straight on
+ * that site. Address text (calloutCurrentLocation.formattedAddress) is
+ * only ever a fallback for a callout with no predefined location.
+ *
+ * Classification: calloutClassification.value is REAL or TEST (there is no
+ * false-alarm classification). Per AURA (2026-10-06), TEST "should be
+ * treated as non-live" until a person verifies it — same treatment as
+ * internalTest: logged in full, but no job put in front of a controller. */
 const AURA_NEW_CALLOUT_MESSAGES = ['NEW_CALLOUT', 'NEW_CALLOUT_FOR_INSTANCE'];
 function auraCalloutFields(callout) {
   const info = (callout.incidentInformation || [])[0] || {};
   const loc = info.calloutCurrentLocation || {};
   const lat = loc.latitude != null ? Number(loc.latitude) : null;
   const lon = loc.longitude != null ? Number(loc.longitude) : null;
+  // AURA's own written description of the pair spells it incidentCategory;
+  // the real payload captured 2026-10-06 had it lower-case — accept either
+  // rather than trust one source over the other.
+  const category = info.incidentCategory || info.incidentcategory;
+  const site = info.predefinedLocationId
+    ? db.sites.find((s) => s.aura_location_id && String(s.aura_location_id) === String(info.predefinedLocationId))
+    : null;
+  const location = site ? null
+    : loc.formattedAddress || (info.predefinedLocationId
+      ? `AURA site ref ${info.predefinedLocationId} — no site mapped to this ref yet (set aura_location_id on a site)`
+      : 'Location unknown — add details as received');
   return {
+    site, location,
     external_ref: String(callout.id),
-    location: loc.formattedAddress || null,
     lat: Number.isFinite(lat) ? lat : null,
     lon: Number.isFinite(lon) ? lon : null,
     incident_type: (info.typeOfEmergency && info.typeOfEmergency.description) || 'ALARM',
-    description: [info.responseType && info.responseType.value, info.incidentcategory && info.incidentcategory.description].filter(Boolean).join(' — '),
+    description: [info.responseType && info.responseType.value, category && category.description].filter(Boolean).join(' — '),
   };
 }
 route('POST', '/api/integrations/aura/jobs', null, ({ body: b, req }) => {
@@ -2430,13 +2456,21 @@ route('POST', '/api/integrations/aura/jobs', null, ({ body: b, req }) => {
     // and dismiss — it is logged above like everything else, but nothing
     // dispatchable is created from it.
     if (callout.internalTest) return { __status: 200, __body: { ok: true, note: 'internal test callout — logged only, no job created' } };
+    if (callout.calloutClassification && callout.calloutClassification.value === 'TEST') {
+      return { __status: 200, __body: { ok: true, note: 'TEST classification — not yet verified as a live callout, logged only' } };
+    }
     const fields = auraCalloutFields(callout);
-    // AMBER placeholder — see the block comment above this route.
+    // AMBER — see the block comment above this route.
     return createExternalJob({ source: 'aura', label: 'AURA', priority: 'AMBER', ...fields });
   }
 
   const existing = db.jobs.find((x) => x.external_source === 'aura' && x.external_ref === externalRef);
   if (!existing) return { __status: 200, __body: { ok: true, note: 'status update for a callout CCCS has no job for — logged only' } };
+  if (!existing.external_events_seen) existing.external_events_seen = [];
+  if (existing.external_events_seen.includes(b.message)) {
+    return { __status: 200, __body: { ok: true, note: 'duplicate webhook delivery of an already-recorded event — logged only' } };
+  }
+  existing.external_events_seen.push(b.message);
   const stamp = `[AURA ${b.message || 'update'} — ${new Date().toISOString()}]`;
   existing.notes = existing.notes ? `${existing.notes}\n${stamp}` : stamp;
   existing.updated_at = new Date().toISOString();
@@ -3478,6 +3512,9 @@ route('POST', '/api/sites', CONTROL, ({ body }) => {
     geofence_m: body.geofence_m === undefined || body.geofence_m === null || body.geofence_m === '' ? null : Math.min(Math.max(Number(body.geofence_m) || 0, 0), 5000),
     branch_id: normalizedBranchId(body.branch_id),
     code: String(body.code || '').trim(), postcode: String(body.postcode || '').trim(),
+    // The stable key AURA's callout webhook carries as incidentInformation[].predefinedLocationId
+    // — maps an inbound callout straight to this site without guessing from address text.
+    aura_location_id: String(body.aura_location_id || '').trim(),
     // Not validated against the IANA database — a typo here shows up as a
     // visibly wrong time on the rota rather than failing closed, which is
     // the safer failure mode for a field with no live-consequence default.
@@ -3517,6 +3554,7 @@ route('PATCH', '/api/sites/:id', ADMIN, ({ params, body }) => {
     site.geofence_m = body.geofence_m === null || body.geofence_m === '' ? null : Number(body.geofence_m);
   }
   if ('postcode' in body) site.postcode = String(body.postcode || '').trim();
+  if ('aura_location_id' in body) site.aura_location_id = String(body.aura_location_id || '').trim();
   if ('timezone' in body) site.timezone = String(body.timezone || '').trim() || 'Europe/London';
   if ('risk_level' in body) {
     if (body.risk_level && !RISK_LEVELS.includes(body.risk_level)) throw httpError(400, `risk_level must be one of ${RISK_LEVELS.join(', ')}`);

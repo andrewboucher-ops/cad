@@ -1533,6 +1533,9 @@ function siteForm(s) {
         <div style="flex:1"><label>Code (optional)</label><input id="nsCode" autocomplete="off" value="${isNew ? '' : esc(s.code || '')}"></div>
         <div style="flex:1"><label>Postcode (optional)</label><input id="nsPostcode" autocomplete="off" value="${isNew ? '' : esc(s.postcode || '')}"></div>
       </div>
+      <label>AURA site reference (optional)</label>
+      <p class="dim" style="margin:-4px 0 0;font-size:12.5px">Matches incidentInformation[].predefinedLocationId on an AURA callout webhook straight to this site, instead of falling back to address text.</p>
+      <input id="nsAuraLocationId" autocomplete="off" value="${isNew ? '' : esc(s.aura_location_id || '')}">
       <label>Address</label>
       <input id="nsAddress" autocomplete="off" value="${isNew ? '' : esc(s.address || '')}">
       <label>Timezone</label>
@@ -1776,6 +1779,7 @@ function siteModal(s) {
         response_sla_minutes: el('#nsSla').value ? Number(el('#nsSla').value) : null,
         branch_id: el('#nsBranch').value ? Number(el('#nsBranch').value) : null,
         code: el('#nsCode').value.trim(), postcode: el('#nsPostcode').value.trim(),
+        aura_location_id: el('#nsAuraLocationId').value.trim(),
         timezone: el('#nsTimezone').value.trim(), risk_level: el('#nsRisk').value || null,
         access_instructions: el('#nsAccessInstructions').value.trim(), is_control_room: el('#nsControlRoom').checked,
         lat: el('#nsLat').value === '' ? null : Number(el('#nsLat').value), lon: el('#nsLon').value === '' ? null : Number(el('#nsLon').value),
