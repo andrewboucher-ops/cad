@@ -11,7 +11,14 @@ const CCCS = (() => {
   // with windows opened via window.open(). That's what a GoldenLayout
   // "popout" panel is: without this, the new window has no session and its
   // auth check fails before it ever renders anything, i.e. a blank window.
-  function setSession(s) { session = s; sessionStorage.setItem(KEY, JSON.stringify(s)); try { localStorage.setItem(KEY + '.mirror', JSON.stringify(s)); } catch {} applyTheme(s && s.user && s.user.ui_prefs); }
+  function setSession(s) {
+    session = s; sessionStorage.setItem(KEY, JSON.stringify(s)); try { localStorage.setItem(KEY + '.mirror', JSON.stringify(s)); } catch {} applyTheme(s && s.user && s.user.ui_prefs);
+    // The right person being signed in is itself a trigger: a secure item
+    // left queued because it belonged to someone else may now be sendable,
+    // independent of the 'online' event, which may have already fired
+    // while the wrong person was still signed in on this device.
+    flushSecureOutbox();
+  }
   function clearSession() { session = null; sessionStorage.removeItem(KEY); try { localStorage.removeItem(KEY + '.mirror'); } catch {} }
   function getSession() { return session; }
 
@@ -128,6 +135,98 @@ const CCCS = (() => {
     flush: flushOutbox,
     onChange(fn) { outboxListeners.add(fn); fn(readOutbox().length); },
     clear() { writeOutbox([]); },
+  };
+
+  /* ---- Secure offline outbox (reports, checkpoint scans) ---------------
+     Same idea as the outbox above, but for a write where WHO made it
+     matters, and which may carry a photo:
+       - IndexedDB instead of localStorage, whose quota a single queued
+         photo can overflow on its own.
+       - Stamped with who queued it (their personnel_id), and only ever
+         replayed while that same person is signed in on this device. A
+         shared handset (an MDT, mainly — most officer handsets are
+         personal) changing hands before the link returns must never
+         submit a safeguarding report, or attribute a checkpoint scan to
+         the wrong officer, just because someone else is now signed in.
+         A mismatched item is left queued, visible, and unsent. */
+  const SECURE_DB = 'cccs-secure-outbox', SECURE_STORE = 'items';
+  function openSecureDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(SECURE_DB, 1);
+      req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains(SECURE_STORE)) req.result.createObjectStore(SECURE_STORE, { keyPath: 'key' }); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  function idbReq(req) { return new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); }); }
+  async function secureAll() { const db = await openSecureDB(); return idbReq(db.transaction(SECURE_STORE, 'readonly').objectStore(SECURE_STORE).getAll()); }
+  async function securePut(item) { const db = await openSecureDB(); await idbReq(db.transaction(SECURE_STORE, 'readwrite').objectStore(SECURE_STORE).put(item)); }
+  async function secureDelete(key) { const db = await openSecureDB(); await idbReq(db.transaction(SECURE_STORE, 'readwrite').objectStore(SECURE_STORE).delete(key)); }
+
+  const secureListeners = new Set();
+  function notifySecure() { secureAll().then((items) => secureListeners.forEach((fn) => fn(items))).catch(() => {}); }
+  const myId = () => session && session.user && session.user.personnel_id;
+
+  // A promise, not a boolean guard: setSession() below triggers a flush
+  // without awaiting it (login itself must not block on network replay),
+  // so a caller that does await secureOutbox.flush() right after needs to
+  // wait for that same in-progress run to actually finish, not bounce off
+  // a guard and resolve before the real work is done.
+  async function doFlushSecure() {
+    const mine = myId();
+    if (!mine) return; // nobody with a staff record signed in — nothing can safely send
+    let items;
+    try { items = await secureAll(); } catch { return; } // IndexedDB unavailable — leave the queue for next time
+    for (const item of items) {
+      if (item.queued_by !== mine) continue; // someone else's — stays queued, never sent under this session
+      try {
+        await api(item.method, item.path, item.body, { idempotencyKey: item.key });
+        await secureDelete(item.key);
+      } catch (e) {
+        if (isOffline(e)) break; // still down — keep the rest of the queue intact
+        console.warn('dropping unreplayable secure write', item.path, e.message);
+        await secureDelete(item.key);
+      }
+    }
+  }
+  let secureFlushPromise = null;
+  function flushSecureOutbox() {
+    if (secureFlushPromise) return secureFlushPromise;
+    // .finally() is always deferred to a microtask, even on an already-
+    // settled promise — unlike resetting secureFlushPromise from inside
+    // doFlushSecure itself, which (when it returns before any await, e.g.
+    // nobody signed in) runs synchronously while this very assignment is
+    // still being evaluated, and the assignment completing last would
+    // silently clobber the reset back to a stale, already-resolved promise.
+    const p = doFlushSecure().finally(() => { secureFlushPromise = null; notifySecure(); });
+    secureFlushPromise = p;
+    return p;
+  }
+
+  /** Write that must never be sent under the wrong identity: queued locally
+   * (IndexedDB) stamped with who made it, replayed only while they are
+   * still signed in on this device. */
+  async function sendSecure(method, path, body, label) {
+    const key = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
+    try {
+      return await api(method, path, body, { idempotencyKey: key });
+    } catch (e) {
+      if (!isOffline(e)) throw e;
+      const entry = { key, method, path, body, label: label || path, queued_by: myId(), at: new Date().toISOString() };
+      try { await securePut(entry); } catch (e2) { throw e; } // IndexedDB unavailable too — surface the original offline error, nothing was queued
+      notifySecure();
+      return { queued: true, key };
+    }
+  }
+  window.addEventListener('online', flushSecureOutbox);
+
+  const secureOutbox = {
+    pending: () => secureAll().catch(() => []),
+    count: () => secureAll().then((items) => items.length).catch(() => 0),
+    mine: () => secureAll().then((items) => items.filter((x) => x.queued_by === myId()).length).catch(() => 0),
+    othersWaiting: () => secureAll().then((items) => items.some((x) => x.queued_by !== myId())).catch(() => false),
+    flush: flushSecureOutbox,
+    onChange(fn) { secureListeners.add(fn); secureAll().then(fn).catch(() => fn([])); },
   };
 
   /* ---- WebSocket bus with auto-reconnect ---- */
@@ -530,5 +629,5 @@ const CCCS = (() => {
     catch (e) { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }
 
-  return { api, send, outbox, login, getSession, setSession, clearSession, applyTheme, bus, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth, deviceKind, detectedDevice, isMobile, viewPreference, setViewPreference, calendarSync };
+  return { api, send, outbox, sendSecure, secureOutbox, login, getSession, setSession, clearSession, applyTheme, bus, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth, deviceKind, detectedDevice, isMobile, viewPreference, setViewPreference, calendarSync };
 })();

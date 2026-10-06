@@ -194,14 +194,23 @@ const CCCSForms = (() => {
       if (extra) { try { more = extra.collect(host) || {}; } catch (e) { errEl.textContent = e.message; return; } }
       submitBtn.disabled = true; submitBtn.textContent = 'Sending…';
       try {
+        // CCCS.sendSecure: tries the real submission first, same as before;
+        // only on a genuine connectivity failure does it save the answers
+        // on this device (IndexedDB — handles a photo, unlike localStorage)
+        // instead of discarding them. Queued under this officer's own id,
+        // it is never sent under someone else's name if the device changes
+        // hands before the link returns — see app.js for the full reasoning.
         const sub = submit ? await submit(values)
-          : await api('POST', '/api/form-submissions', { definition_id: def.id, subject_type: subject.type, subject_id: subject.id, values, geo: await bestEffortGeo(), ...more });
+          : await CCCS.sendSecure('POST', '/api/form-submissions', { definition_id: def.id, subject_type: subject.type, subject_id: subject.id, values, geo: await bestEffortGeo(), ...more }, def.name || 'report');
+        if (sub && sub.queued) {
+          errEl.className = 'dim';
+          errEl.textContent = 'Saved on this device — no signal right now. It will send by itself once you\'re back online.';
+          submitBtn.textContent = 'Saved — will send automatically';
+        }
         onDone && onDone(sub);
       } catch (e) {
-        const offline = e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(e.message || '');
-        errEl.textContent = offline
-          ? 'NOT SENT — no connection. Your answers are still here; keep this screen open and press Submit again when you have signal.'
-          : e.message;
+        errEl.className = 'err';
+        errEl.textContent = e.message;
         submitBtn.disabled = false; submitBtn.textContent = submitLabel;
       }
     };

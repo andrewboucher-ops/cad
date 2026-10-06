@@ -713,15 +713,27 @@ async function clockInAdHoc() {
   if (!r) return;
   const msg = el('#sbMsg'); if (msg) msg.textContent = 'Checking your location…';
   const f = await getFix(15000, 0);
-  try { await api('POST', '/api/timeclock/clock-in', { ...(f || {}), site_id: Number(r.site_id), reason: r.reason }); startFootTracking(); toast('Clocked in — waiting for approval.'); }
-  catch (e) { if (el('#sbMsg')) { el('#sbMsg').textContent = e.message; el('#sbMsg').style.color = 'var(--emergency)'; } else alert(e.message); return; }
+  // CCCS.sendSecure: an ad-hoc clock-in is created for whoever's session
+  // makes the request, with no pre-existing assignment to check against —
+  // unlike the two below, a queued one replayed under the wrong officer
+  // would silently clock THEM in, not fail. See app.js for the reasoning.
+  try {
+    const r2 = await CCCS.sendSecure('POST', '/api/timeclock/clock-in', { ...(f || {}), site_id: Number(r.site_id), reason: r.reason }, 'ad hoc clock-in');
+    startFootTracking(); toast(r2.queued ? 'Saved — will clock you in automatically when you have signal.' : 'Clocked in — waiting for approval.');
+  } catch (e) { if (el('#sbMsg')) { el('#sbMsg').textContent = e.message; el('#sbMsg').style.color = 'var(--emergency)'; } else alert(e.message); return; }
   await refreshShifts();
 }
 async function clockIn(s, reason) {
   const msg = el('#sbMsg'); if (msg) msg.textContent = 'Checking your location…';
   const f = await getFix(15000, 0); // always a fresh position for clock-in
-  try { await api('POST', `/api/shift-assignments/${s.my.id}/clock-in`, { ...(f || {}), ...(reason ? { reason } : {}) }); startFootTracking(); toast(reason ? 'Clocked in — reason sent for approval.' : 'Clocked in.'); }
-  catch (e) {
+  // CCCS.send, not sendSecure: tied to s.my.id, an assignment already
+  // given to this specific officer — the server rejects a mismatched
+  // identity outright (403 "not your shift") rather than misattributing
+  // it, so the plain queue is safe here.
+  try {
+    const r = await CCCS.send('POST', `/api/shift-assignments/${s.my.id}/clock-in`, { ...(f || {}), ...(reason ? { reason } : {}) }, 'clock in');
+    startFootTracking(); toast(r.queued ? 'Saved — will clock you in automatically when you have signal.' : (reason ? 'Clocked in — reason sent for approval.' : 'Clocked in.'));
+  } catch (e) {
     if (e.status === 428 && !reason) { if (msg) msg.textContent = ''; const r = await askReason(e.message.replace(/ — please give a reason$/, '')); if (r) return clockIn(s, r.reason); return; }
     const text = !f && /location/i.test(e.message) ? 'Turn on location for this app (and allow it in your browser), then try again.' : e.message;
     if (el('#sbMsg')) { el('#sbMsg').textContent = text; el('#sbMsg').style.color = 'var(--emergency)'; } else alert(text);
@@ -731,7 +743,15 @@ async function clockIn(s, reason) {
 }
 async function clockOut(s, reason) {
   if (!reason && !confirm('Clock out now?')) return;
-  try { const r = await api('POST', `/api/shift-assignments/${s.my.id}/clock-out`, reason ? { reason } : {}); stopFootTracking(); const mine = r.assignments && r.assignments.find((x) => x.id === s.my.id); toast(mine ? `Clocked out — ${dur(hoursOf(mine).worked)} worked.` : 'Clocked out.'); }
+  // CCCS.send, not sendSecure: same reasoning as clockIn above — tied to
+  // s.my.id, safe for the server to reject outright if replayed under the
+  // wrong identity.
+  try {
+    const r = await CCCS.send('POST', `/api/shift-assignments/${s.my.id}/clock-out`, reason ? { reason } : {}, 'clock out');
+    stopFootTracking();
+    if (r.queued) { toast('Saved — will clock you out automatically when you have signal.'); }
+    else { const mine = r.assignments && r.assignments.find((x) => x.id === s.my.id); toast(mine ? `Clocked out — ${dur(hoursOf(mine).worked)} worked.` : 'Clocked out.'); }
+  }
   catch (e) {
     if (e.status === 428 && !reason) { const r = await askReason(e.message.replace(/ — please give a reason$/, '')); if (r) return clockOut(s, r.reason); return; }
     alert(e.message);
@@ -945,7 +965,7 @@ function paintVisit() {
         <div class="ci-body">
           <div class="ci-title">${esc(w.title)}</div>
           ${w.instructions ? `<div class="ci-instr">${esc(w.instructions)}</div>` : ''}
-          <div class="ci-instr">${last ? `Scanned ${new Date(last.scanned_at).toLocaleTimeString()}` : 'Not yet scanned'}</div>
+          <div class="ci-instr">${last ? `Scanned ${new Date(last.scanned_at).toLocaleTimeString()}${last.pending ? ' — not sent yet' : ''}` : 'Not yet scanned'}</div>
         </div>
       </div>`;
     }).join('');
@@ -1068,7 +1088,17 @@ async function submitScan(rawCode) {
   if (!waypoint) { alert('That code does not match a checkpoint on this visit.'); return; }
   try {
     const fix = await freshFix(1500);
-    visit = await api('POST', `/api/site-visits/${visit.id}/checkpoint-scan`, { waypoint_id: waypoint.id, lat: fix && fix.lat, lon: fix && fix.lon });
+    // CCCS.sendSecure, not plain api(): a scan records WHO walked the
+    // route, so a queued one must only ever send under the same officer
+    // who actually scanned it — see app.js for the full reasoning.
+    const r = await CCCS.sendSecure('POST', `/api/site-visits/${visit.id}/checkpoint-scan`, { waypoint_id: waypoint.id, lat: fix && fix.lat, lon: fix && fix.lon }, `checkpoint ${waypoint.title}`);
+    if (r.queued) {
+      // No server response to merge in while offline: show the scan as
+      // done locally so the officer is not told to scan it again, with
+      // its own pending flag so paintVisit() can mark it as not yet sent.
+      visit.checkpoint_scans = [...(visit.checkpoint_scans || []), { waypoint_id: waypoint.id, scanned_at: new Date().toISOString(), lat: fix && fix.lat, lon: fix && fix.lon, pending: true }];
+      toast('Scan saved — will send automatically when you have signal.');
+    } else { visit = r; }
     paintVisit();
   } catch (e) { alert(e.message); }
 }
@@ -1373,7 +1403,7 @@ el('#bFileReport').onclick = async () => {
       ['#rDef', '#rSubject', '#rNext'].forEach((q) => (el(q).disabled = true));
       CCCSForms.fill(el('#rFill'), d, subject, {
         signerName: (person && person.name) || me.display_name,
-        onDone: (sub) => { closeModal(); toast(`Report ${sub.reference} filed.`); refreshReports(); },
+        onDone: (sub) => { closeModal(); toast(sub.queued ? 'Saved — will send automatically when you have signal.' : `Report ${sub.reference} filed.`); refreshReports(); },
       });
     };
   });
@@ -1503,7 +1533,7 @@ async function openIncident() {
   if (!subjects.length) { host.innerHTML = '<p class="dim">There is no site to file this against yet.</p>'; return; }
   const fill = (s) => CCCSForms.fill(host, def, s, {
     signerName: signer(), onCancel: () => go(''),
-    onDone: (sub) => { toast(`Incident report ${sub.reference} filed.`); refreshReports(); go(''); },
+    onDone: (sub) => { toast(sub.queued ? 'Saved — will send automatically when you have signal.' : `Incident report ${sub.reference} filed.`); refreshReports(); go(''); },
   });
   // Already on a job or visit: that is what it is about — no need to ask.
   if (subjects[0].type === 'JOB' || subjects[0].type === 'SITE_VISIT') {
@@ -1539,7 +1569,7 @@ async function openVehicleForm(key) {
     const extra = key === 'vehicle-inspection' ? await CCCSForms.vehicleKitExtra(v.id) : null;
     CCCSForms.fill(host, def, { type: 'VEHICLE', id: v.id, label: v.registration }, {
       extra, signerName: signer(), onCancel: () => openVehicleForm(key),
-      onDone: (sub) => { vehicles = null; toast(`${def.name} ${sub.reference} filed for ${v.registration}.`); go(''); },
+      onDone: (sub) => { vehicles = null; toast(sub.queued ? 'Saved — will send automatically when you have signal.' : `${def.name} ${sub.reference} filed for ${v.registration}.`); go(''); },
     });
     window.scrollTo(0, 0);
   }));
