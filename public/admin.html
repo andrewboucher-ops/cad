@@ -50,8 +50,9 @@
   .foot-split { display: flex; justify-content: space-between; align-items: center; width: 100%; }
   .admin-layout { display: grid; grid-template-columns: 200px 1fr; gap: 24px; align-items: start; }
   .admin-nav { display: flex; flex-direction: column; gap: 0; border: none; margin: 0; position: sticky; top: 0; }
-  .admin-nav .an-group { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); padding: 14px 10px 4px; }
-  .admin-nav .an-group:first-child { padding-top: 0; }
+  .admin-nav .an-group { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); padding: 20px 10px 6px; border-top: 1px solid var(--line-soft); margin-top: 6px; }
+  .admin-nav .an-group:first-child { padding-top: 0; border-top: none; margin-top: 0; }
+  .admin-nav .an-hidden { display: none; }
   .admin-nav button { text-align: left; margin: 0; padding: 8px 10px; border-radius: 8px; font-size: 13.5px; }
   .admin-nav button:hover { background: var(--panel-2); color: var(--ink); }
   .admin-nav button.active { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
@@ -113,15 +114,23 @@
     </div>
     <div class="admin-layout">
     <nav class="tabs admin-nav" aria-label="Admin sections">
+      <!-- Accounts, Personnel, Applicants, Onboarding, Compliance and
+           Payroll now also have a one-click entry in the main sidebar's
+           HR group (ui-sections.js) — still the exact same tabs
+           underneath (showTab() reads location.hash either way), just
+           an.hidden here so they are not duplicated in this list too.
+           Kept in the DOM rather than deleted: showTab()'s title/
+           description lookup and each button's own onclick are both
+           keyed off these elements existing. -->
       <div class="an-group">People</div>
-      <button class="active" id="tabAccounts" data-tab="accounts" data-desc="Logins — who can sign in and with what role.">Accounts</button>
-      <button id="tabPersonnel" data-tab="personnel" data-desc="Staff records: call signs, licences, vetting, line managers, welfare timers.">Personnel</button>
-      <button id="tabApplicants" data-tab="applicants" data-desc="Job applications from the public form, and moving people through hiring.">Applicants</button>
-      <button id="tabOnboarding" data-tab="onboarding" data-desc="Active staff still missing paperwork, a licence, DBS check, contract, bank details, a login or kit before they're fully set up to work.">Onboarding</button>
-      <button id="tabCompliance" data-tab="compliance" data-desc="Everyone with an expired, expiring or overdue SIA licence, DBS check or right-to-work check — the renewals to chase, in one place.">Compliance</button>
+      <button class="an-hidden" id="tabAccounts" data-tab="accounts" data-desc="Logins — who can sign in and with what role.">Accounts</button>
+      <button class="an-hidden" id="tabPersonnel" data-tab="personnel" data-desc="Staff records: call signs, licences, vetting, line managers, welfare timers.">Personnel</button>
+      <button class="an-hidden" id="tabApplicants" data-tab="applicants" data-desc="Job applications from the public form, and moving people through hiring.">Applicants</button>
+      <button class="an-hidden" id="tabOnboarding" data-tab="onboarding" data-desc="Active staff still missing paperwork, a licence, DBS check, contract, bank details, a login or kit before they're fully set up to work.">Onboarding</button>
+      <button class="an-hidden" id="tabCompliance" data-tab="compliance" data-desc="Everyone with an expired, expiring or overdue SIA licence, DBS check or right-to-work check — the renewals to chase, in one place.">Compliance</button>
       <button id="tabTraining" data-tab="training" data-desc="Training courses and assessments staff complete in the app.">Training</button>
       <button id="tabLeave" data-tab="leave" data-desc="Leave requests and balances.">Leave</button>
-      <button id="tabPayroll" data-tab="payroll" data-desc="Monthly payroll runs — generate, review and issue payslips. ADMIN only.">Payroll</button>
+      <button class="an-hidden" id="tabPayroll" data-tab="payroll" data-desc="Monthly payroll runs — generate, review and issue payslips. ADMIN only.">Payroll</button>
       <div class="an-group">Reports &amp; forms</div>
       <button id="tabForms" data-tab="forms" data-desc="Every report officers fill in — incident, vehicle check, fuel-up, deep clean, safeguarding and the job application. Click a form to edit its questions, who can read it, and who is emailed.">Forms</button>
       <div class="an-group">Sites &amp; rota</div>
@@ -459,6 +468,7 @@ function showTab(name) {
 {
   let html = '', open = false;
   for (const n of document.querySelectorAll('.admin-nav > *')) {
+    if (n.classList.contains('an-hidden')) continue; // also reachable from the sidebar's HR group
     if (n.classList.contains('an-group')) { html += `${open ? '</optgroup>' : ''}<optgroup label="${esc(n.textContent)}">`; open = true; }
     else html += `<option value="${n.dataset.tab}">${esc(n.textContent)}</option>`;
   }
@@ -3154,6 +3164,14 @@ load().then(() => {
   showTab(document.querySelector(`.admin-nav [data-tab="${start}"]`) ? start : 'accounts');
   const f = q.get('form') && allForms.find((x) => x.id === Number(q.get('form')));
   if (f) formModal(f);
+});
+// A same-page hash link (the sidebar's HR shortcuts into this page) does
+// not reload the script, so the one-time read of location.hash above
+// never fires again on its own — without this, the URL and the sidebar's
+// active state update but the tab shown does not.
+window.addEventListener('hashchange', () => {
+  const name = location.hash.slice(1);
+  if (document.querySelector(`.admin-nav [data-tab="${name}"]`)) showTab(name);
 });
 </script>
 </body>

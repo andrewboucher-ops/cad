@@ -109,6 +109,21 @@
   }
   const linkHtml = (s) => `<a href="${esc(s.href)}" title="${esc(s.label)}"${isHere(s.href) ? ' class="active" aria-current="page"' : ''}>${svg(s.icon)}<span>${esc(s.label)}</span></a>`;
 
+  /** Collapsible groups on the desktop rail — "less there until it's
+   * needed". Opt-in only: every group starts open (so nothing already
+   * using the menu loses an item without asking for that), and only a
+   * group someone has actually collapsed is remembered, per browser, so
+   * it does not affect anyone else or follow them to another device. A
+   * group holding the current page always forces open regardless of its
+   * stored state — collapsing never hides where you already are. */
+  const collapseKey = 'cccs.nav.collapsedGroups';
+  function collapsedGroups() { try { return new Set(JSON.parse(localStorage.getItem(collapseKey) || '[]')); } catch { return new Set(); } }
+  function setGroupCollapsed(name, collapsed) {
+    const set = collapsedGroups();
+    collapsed ? set.add(name) : set.delete(name);
+    try { localStorage.setItem(collapseKey, JSON.stringify([...set])); } catch {}
+  }
+
   function paintRail() {
     let rail = document.querySelector('.icon-rail');
     if (!rail) {
@@ -118,8 +133,22 @@
       document.body.classList.add('with-nav');
     }
     rail.setAttribute('aria-label', 'Main menu');
+    const collapsed = collapsedGroups();
     rail.innerHTML = '<div class="rail-brand"><img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon"></div>'
-      + grouped().map((g) => `<div class="rail-section">${esc(g.name)}</div>${g.items.map(linkHtml).join('')}`).join('');
+      + grouped().map((g) => {
+        const hasActive = g.items.some((s) => isHere(s.href));
+        const isCollapsed = collapsed.has(g.name) && !hasActive;
+        return `<button type="button" class="rail-section" data-group="${esc(g.name)}" aria-expanded="${!isCollapsed}">`
+          + `<span>${esc(g.name)}</span><svg class="rail-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`
+          + `<div class="rail-group${isCollapsed ? ' hide' : ''}">${g.items.map(linkHtml).join('')}</div>`;
+      }).join('');
+    rail.querySelectorAll('.rail-section').forEach((btn) => (btn.onclick = () => {
+      const name = btn.dataset.group;
+      const nowCollapsed = btn.getAttribute('aria-expanded') === 'true';
+      btn.setAttribute('aria-expanded', String(!nowCollapsed));
+      btn.nextElementSibling.classList.toggle('hide', nowCollapsed);
+      setGroupCollapsed(name, nowCollapsed);
+    }));
   }
 
   let drawer = null;

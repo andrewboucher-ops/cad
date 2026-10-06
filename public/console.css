@@ -251,10 +251,19 @@ a { color: var(--accent); }
 .brand-logo { width: 30px; height: 30px; border-radius: 8px; flex: none; object-fit: contain; }
 .brand-logo-lg { width: 40px; height: 40px; border-radius: 10px; }
 .brand-wordmark { width: 100%; height: auto; object-fit: contain; }
-.rail-section {
+/* .icon-rail .rail-section (two classes) beats the plainer .icon-rail
+   button rule below (one class + one element) on specificity, so a
+   section header does not inherit that rule's row padding/hover/cursor
+   meant for actual links. */
+.icon-rail .rail-section {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
   font-size: 10px; font-weight: 700; letter-spacing: .1em; color: var(--ink-dim); text-transform: uppercase;
-  padding: 16px 18px 6px;
+  padding: 16px 18px 6px; background: none; border: none; cursor: pointer; font-family: var(--font);
 }
+.icon-rail .rail-section:hover { color: var(--ink); }
+.rail-chevron { width: 12px; height: 12px; flex: none; transition: transform .15s var(--ease); }
+.icon-rail .rail-section[aria-expanded="false"] .rail-chevron { transform: rotate(-90deg); }
+.rail-group.hide { display: none; }
 .icon-rail button, .icon-rail a {
   position: relative; display: flex; align-items: center; gap: 12px; width: 100%;
   background: none; border: none; color: var(--ink-dim); padding: 9px 18px; text-align: left;

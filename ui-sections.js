@@ -64,6 +64,17 @@ const SECTIONS = [
   { key: 'contracts', label: 'Quotes & contracts', group: 'Finance', icon: 'contract', desktop: '/contracts.html', mobile: '/contracts.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'invoices', label: 'Invoices', group: 'Finance', icon: 'invoice', desktop: '/invoices.html', mobile: '/invoices.html', allowed: ['SYSTEM_ADMIN', 'FINANCE'], default: ['SYSTEM_ADMIN', 'FINANCE'] },
   { key: 'finance', label: 'Finance', group: 'Finance', icon: 'finance', desktop: '/finance.html', mobile: '/finance.html', allowed: [...CONTROL, 'FINANCE'], default: [...CONTROL, 'FINANCE'] },
+  // HR — one-click shortcuts straight into the matching tab of admin.html
+  // (it reads location.hash on load) rather than separate pages, so there
+  // is exactly one implementation of each to keep in sync. The highest-
+  // frequency admin tasks: everything else stays reachable via the plain
+  // Admin entry below, which still opens the full console.
+  { key: 'hr_personnel', label: 'Personnel', group: 'HR', icon: 'people', desktop: '/admin.html#personnel', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'], locked: ['SYSTEM_ADMIN'] },
+  { key: 'hr_compliance', label: 'Compliance', group: 'HR', icon: 'check', desktop: '/admin.html#compliance', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'], locked: ['SYSTEM_ADMIN'] },
+  { key: 'hr_onboarding', label: 'Onboarding', group: 'HR', icon: 'training', desktop: '/admin.html#onboarding', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'], locked: ['SYSTEM_ADMIN'] },
+  { key: 'hr_applicants', label: 'Applicants', group: 'HR', icon: 'people', desktop: '/admin.html#applicants', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'], locked: ['SYSTEM_ADMIN'] },
+  { key: 'hr_payroll', label: 'Payroll', group: 'HR', icon: 'invoice', desktop: '/admin.html#payroll', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'], locked: ['SYSTEM_ADMIN'] },
+  { key: 'hr_accounts', label: 'Accounts', group: 'HR', icon: 'admin', desktop: '/admin.html#accounts', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'], locked: ['SYSTEM_ADMIN'] },
   // System
   { key: 'admin', label: 'Admin', group: 'System', icon: 'admin', desktop: '/admin.html', mobile: '/admin.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'], locked: ['SYSTEM_ADMIN'] },
   { key: 'client_portals', label: 'Client portals', group: 'System', icon: 'portal', desktop: '/client.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
