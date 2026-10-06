@@ -2262,6 +2262,12 @@ function externalAlarmJob({ secretHeader, secretEnv, source, label }) {
     const secret = process.env[secretEnv];
     if (!secret || req.headers[secretHeader] !== secret) throw httpError(401, `bad ${label} secret`);
 
+    // Logged before any validation, so a payload shape we don't yet expect
+    // (new source, or a field integration-testing has not seen before)
+    // still leaves a full record to read back rather than vanishing as a
+    // silent 400 — remove once the integration is confirmed working.
+    logEvent('integration.alarm_payload_received', `${label} INBOUND PAYLOAD`, { source, raw: reqBody });
+
     const b = reqBody;
     const externalRef = b.external_ref !== undefined && b.external_ref !== null ? String(b.external_ref) : null;
     if (externalRef) {
