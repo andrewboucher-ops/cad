@@ -80,7 +80,13 @@ let statusFilter = isAdmin ? 'OPEN' : 'ALL';
 let defs = [];
 
 /* ---------------- viewing and reviewing ---------------- */
-async function open(id) {
+// Named openReport, not open — a bare top-level `function open` becomes
+// window.open (global function declarations attach to window), which
+// silently swallowed forms-ui.js's window.open(blobUrl, '_blank') for a
+// report's PDF: instead of a new tab, it called this function with the
+// blob: URL as if it were a submission id, loading "no such endpoint"
+// into the panel. Confirmed live 2026-10-06.
+async function openReport(id) {
   el('#detailTitle').textContent = 'Report';
   el('#detail').innerHTML = '<p class="dim">Loading…</p>';
   let sub;
@@ -91,7 +97,7 @@ async function open(id) {
   history.replaceState(null, '', `?id=${id}`);
   if (isAdmin && sub.status === 'OPEN') paintAction(sub);
   if (isAdmin && sub.status === 'ACTIONED') paintDelete(sub);
-  if (isAdmin) CCCSForms.shareEditor(el('#shareHost'), sub, { onChanged: () => { refresh(); open(sub.id); } });
+  if (isAdmin) CCCSForms.shareEditor(el('#shareHost'), sub, { onChanged: () => { refresh(); openReport(sub.id); } });
 }
 
 /** Permanent delete of a reviewed report. Two steps, with a reason the
@@ -137,7 +143,7 @@ function paintAction(sub) {
     el('#aGo').disabled = true;
     try {
       await api('POST', `/api/form-submissions/${sub.id}/action`, { outcome: el('#aOutcome').value, feedback: el('#aFeedback').value });
-      await refresh(); open(sub.id);
+      await refresh(); openReport(sub.id);
     } catch (e) { el('#aErr').textContent = e.message; el('#aGo').disabled = false; }
   };
 }
@@ -149,7 +155,7 @@ async function refresh() {
   if (el('#fSubject').value) q.set('subject_type', el('#fSubject').value);
   try {
     const rows = await api('GET', `/api/form-submissions?${q}`);
-    CCCSForms.list(el('#list'), rows, open, statusFilter === 'OPEN' ? 'Nothing waiting for review.' : 'No reports match.');
+    CCCSForms.list(el('#list'), rows, openReport, statusFilter === 'OPEN' ? 'Nothing waiting for review.' : 'No reports match.');
   } catch (e) { el('#list').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 CCCS.els('#statusChips [data-status]').forEach((b) => (b.onclick = () => { statusFilter = b.dataset.status; refresh(); }));
@@ -209,7 +215,7 @@ async function startFiling(preKey, preType, preId) {
     CCCSForms.fill(el('#nFill'), d, subject, {
       extra, signerName: me.display_name,
       onCancel: () => startFiling(),
-      onDone: async (sub) => { await refresh(); open(sub.id); },
+      onDone: async (sub) => { await refresh(); openReport(sub.id); },
     });
   };
   el('#nDef').onchange = paint;
@@ -230,7 +236,7 @@ el('#newReport').onclick = () => startFiling();
   // /forms.html?new=vehicle-inspection&subject_type=VEHICLE&subject_id=3 — how
   // the fleet dashboard (and any other page) links straight to a form.
   if (qs.get('new')) startFiling(qs.get('new'), (qs.get('subject_type') || '').toUpperCase(), qs.get('subject_id'));
-  else if (qs.get('id')) open(Number(qs.get('id')));
+  else if (qs.get('id')) openReport(Number(qs.get('id')));
 })();
 </script>
 </body>

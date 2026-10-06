@@ -742,10 +742,19 @@ function renderVisit(body) {
     </div>
     <div class="dsec"><div class="t">Reports</div><div id="vReports"><p class="dim">Loading…</p></div></div>
     ${active ? `<div class="btn-row" style="margin-top:12px"><button class="btn ok" id="vDone">Mark completed</button><button class="btn danger" id="vCancel">Cancel visit</button></div>` : ''}
+    ${v.status === 'MISSED' ? `<div class="dsec">
+      <div class="t">Correct this record</div>
+      <p class="dim" style="margin:0 0 6px;font-size:12.5px">Auto-marked missed because nobody closed it out in time. If the patrol actually happened, record that here instead of leaving it missed.</p>
+      <div class="btn-row"><button class="btn ok" id="vCorrectDone">Mark completed after all</button><button class="btn" id="vCorrectCancel">Mark cancelled instead</button></div>
+    </div>` : ''}
     <p class="err" id="detailErr"></p>`;
   paintReports(el('#vReports'), 'SITE_VISIT', v.id);
   el('#vSaveNotes').onclick = () => api('PATCH', `/api/site-visits/${v.id}`, { notes: el('#vNotes').value }).catch(showErr);
   els('[data-vcontact]', body).forEach((b) => (b.onclick = () => select('p', Number(b.dataset.vcontact))));
+  if (v.status === 'MISSED') {
+    armed(el('#vCorrectDone'), 'Confirm completed', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }).catch(showErr));
+    armed(el('#vCorrectCancel'), 'Confirm cancel', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }).catch(showErr));
+  }
   if (!active) return;
   el('#vAssign').onclick = () => api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vAdd').value) }).catch(showErr);
   armed(el('#vDone'), 'Confirm completed', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }));
