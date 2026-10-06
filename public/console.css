@@ -187,6 +187,11 @@ a { color: var(--accent); }
 .link-net::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--emergency); flex: none; }
 .link-net.up { color: var(--ink-dim); }
 .link-net.up::before { background: var(--available); }
+/* A pending-outbox count: amber, not the link indicator's red/green — this
+   is routine (queued while offline, or waiting on the right person to sign
+   in on a shared device), not a fault. */
+#pending { color: var(--priority); border-color: color-mix(in srgb, var(--priority) 40%, var(--line)); }
+#pending::before { background: var(--priority); }
 
 .user-block { display: flex; align-items: center; gap: 9px; }
 .user-block .avatar {

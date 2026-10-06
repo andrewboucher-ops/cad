@@ -141,7 +141,7 @@
   <button class="m-burger" data-nav-burger aria-label="Menu"><span></span><span></span><span></span></button>
   <button class="m-back hide" id="mBack" aria-label="Back">‹</button>
   <div class="m-title" id="mTitle">Home</div>
-  <div class="m-status"><span class="clock" id="clock">--:--</span><span class="link-net" id="net">link down</span></div>
+  <div class="m-status"><span class="clock" id="clock">--:--</span><span class="link-net hide" id="pending" title=""></span><span class="link-net" id="net">link down</span></div>
 </header>
 <div class="m-pins">
   <div id="alertHost"></div>
@@ -1174,8 +1174,30 @@ function stopFootTracking() {
 const bus = CCCS.bus((up) => {
   el('#net').textContent = up ? 'link up' : 'link down';
   el('#net').classList.toggle('up', up);
-  if (up) CCCS.outbox.flush();
+  if (up) { CCCS.outbox.flush(); CCCS.secureOutbox.flush(); }
 });
+
+/* ---- Pending-outbox indicator — "told plainly", not a silent queue ----
+ * Combines the plain outbox (jobs/visits/emergency/messages) and the
+ * secure one (reports, checkpoint scans, ad-hoc clock-in): either kind
+ * sitting unsent is something the officer should be able to see, not
+ * infer from nothing happening. secureOutbox also distinguishes "mine,
+ * will send itself" from "someone else's, still waiting on this device"
+ * (relevant on a shared handset, e.g. an MDT) for the tooltip. */
+let plainPending = 0, securePending = 0, secureMine = 0;
+function paintPending() {
+  const total = plainPending + securePending;
+  const badge = el('#pending');
+  badge.classList.toggle('hide', total === 0);
+  if (!total) return;
+  badge.textContent = `${total} waiting to send`;
+  const othersCount = securePending - secureMine;
+  badge.title = othersCount > 0
+    ? `${secureMine + plainPending} of these are yours and will send automatically. ${othersCount} belong to someone else signed in on this device before — they'll send once that person is signed in again.`
+    : 'Will send automatically once you have signal.';
+}
+CCCS.outbox.onChange((n) => { plainPending = n; paintPending(); });
+CCCS.secureOutbox.onChange(async (items) => { securePending = items.length; secureMine = await CCCS.secureOutbox.mine(); paintPending(); });
 
 /* ---- Reports, training, shifts, leave --------------------------------- */
 let formDefs = [], allSites = null;
