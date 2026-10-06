@@ -2257,50 +2257,121 @@ const EXTERNAL_ALARM_PRIORITY_MAP = {
   GREEN: 'GREEN', MEDIUM: 'GREEN', P3: 'GREEN',
   ROUTINE: 'ROUTINE', LOW: 'ROUTINE', P4: 'ROUTINE',
 };
-function externalAlarmJob({ secretHeader, secretEnv, source, label }) {
-  return ({ body: reqBody, req }) => {
-    const secret = process.env[secretEnv];
-    if (!secret || req.headers[secretHeader] !== secret) throw httpError(401, `bad ${label} secret`);
+/** Shared by every external-alarm source once each has mapped its own wire
+ * shape into this one: dedupes on (source, external_ref), then creates a
+ * dispatchable job the same shape a call taker would make by hand. */
+function createExternalJob({ source, label, external_ref: externalRef, priority: rawPriority, location, site, incident_type, description, caller, keyholder, lat, lon, what3words, notes, required_resources }) {
+  if (externalRef) {
+    const existing = db.jobs.find((x) => x.external_ref === externalRef && x.external_source === source);
+    if (existing) return { __status: 200, __body: publicJob(existing) };
+  }
+  const priority = EXTERNAL_ALARM_PRIORITY_MAP[String(rawPriority || 'GREEN').toUpperCase()] || 'GREEN';
+  if (!location && !site) throw httpError(400, 'location or site required');
 
-    // Logged before any validation, so a payload shape we don't yet expect
-    // (new source, or a field integration-testing has not seen before)
-    // still leaves a full record to read back rather than vanishing as a
-    // silent 400 — remove once the integration is confirmed working.
-    logEvent('integration.alarm_payload_received', `${label} INBOUND PAYLOAD`, { source, raw: reqBody });
+  const j = {
+    id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
+    incident_type: incident_type || 'ALARM', priority,
+    location: location || `${site.name}, ${site.address}`,
+    site_id: site ? site.id : null, keyholder: site ? site.keyholder : (keyholder || ''),
+    lat: lat != null ? Number(lat) : (site && site.lat != null ? site.lat : null),
+    lon: lon != null ? Number(lon) : (site && site.lon != null ? site.lon : null),
+    description: description || '', caller: caller || label, required_resources: Number(required_resources || 1),
+    what3words: String(what3words || '').replace(/^\/+/, '').trim(),
+    notes: notes || '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    external_source: source, external_ref: externalRef,
+    checklist: instantiateChecklist(site), media: [],
+  };
+  db.jobs.push(j);
+  broadcast('job.created', publicJob(j));
+  pushToRoles(CONTROL, { title: `New job — ${label}`, body: `${j.reference} · ${j.incident_type} · ${j.location}`, url: '/control.html', tag: 'cccs-job' });
+  logEvent('job.created', `JOB ${j.reference} CREATED (${priority}) — via ${label}`, { job_id: j.id, external_ref: externalRef });
+  return { __status: 201, __body: publicJob(j) };
+}
+/** Any inbound payload is logged in full before validation, so a shape we
+ * don't yet handle (a new message type, a field integration-testing
+ * hasn't seen) leaves a full record to read back instead of vanishing as
+ * a silent 400 or 401. Remove once an integration is confirmed stable. */
+function logInboundAlarmPayload(source, label, reqBody) {
+  logEvent('integration.alarm_payload_received', `${label} INBOUND PAYLOAD`, { source, raw: reqBody });
+}
+function checkAlarmSecret(secretHeader, secretEnv, label, req) {
+  const secret = process.env[secretEnv];
+  if (!secret || req.headers[secretHeader] !== secret) throw httpError(401, `bad ${label} secret`);
+}
 
-    const b = reqBody;
-    const externalRef = b.external_ref !== undefined && b.external_ref !== null ? String(b.external_ref) : null;
-    if (externalRef) {
-      const existing = db.jobs.find((x) => x.external_ref === externalRef && x.external_source === source);
-      if (existing) return { __status: 200, __body: publicJob(existing) };
-    }
+route('POST', '/api/integrations/guardm8/jobs', null, ({ body: b, req }) => {
+  checkAlarmSecret('x-guardm8-secret', 'GUARDM8_SECRET', 'GuardM8', req);
+  logInboundAlarmPayload('guardm8', 'GuardM8', b);
+  const site = b.site ? db.sites.find((x) => x.id === Number(b.site) || x.name === String(b.site)) : null;
+  return createExternalJob({
+    source: 'guardm8', label: 'GuardM8', external_ref: b.external_ref != null ? String(b.external_ref) : null,
+    priority: b.priority, location: b.location, site, incident_type: b.incident_type, description: b.description,
+    caller: b.caller, keyholder: b.keyholder, lat: b.lat, lon: b.lon, what3words: b.what3words, notes: b.notes,
+    required_resources: b.required_resources,
+  });
+});
 
-    const priority = EXTERNAL_ALARM_PRIORITY_MAP[String(b.priority || 'GREEN').toUpperCase()] || 'GREEN';
-    const site = b.site ? db.sites.find((x) => x.id === Number(b.site) || x.name === String(b.site)) : null;
-    if (!b.location && !site) throw httpError(400, 'location or site required');
-
-    const j = {
-      id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
-      incident_type: b.incident_type || 'ALARM', priority,
-      location: b.location || `${site.name}, ${site.address}`,
-      site_id: site ? site.id : null, keyholder: site ? site.keyholder : (b.keyholder || ''),
-      lat: b.lat != null ? Number(b.lat) : (site && site.lat != null ? site.lat : null),
-      lon: b.lon != null ? Number(b.lon) : (site && site.lon != null ? site.lon : null),
-      description: b.description || '', caller: b.caller || label, required_resources: Number(b.required_resources || 1),
-      what3words: String(b.what3words || '').replace(/^\/+/, '').trim(),
-      notes: b.notes || '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-      external_source: source, external_ref: externalRef,
-      checklist: instantiateChecklist(site), media: [],
-    };
-    db.jobs.push(j);
-    broadcast('job.created', publicJob(j));
-    pushToRoles(CONTROL, { title: `New job — ${label}`, body: `${j.reference} · ${j.incident_type} · ${j.location}`, url: '/control.html', tag: 'cccs-job' });
-    logEvent('job.created', `JOB ${j.reference} CREATED (${priority}) — via ${label}`, { job_id: j.id, external_ref: externalRef });
-    return { __status: 201, __body: publicJob(j) };
+/* ---- AURA callouts ------------------------------------------------------
+ * AURA's webhook (configured in their portal, not a fixed URL per event)
+ * posts every subscribed callout event to this one endpoint, discriminated
+ * by body.message (NEW_CALLOUT, CALLOUT_EVENTS_CHANGED, RESPONDER_ARRIVED_
+ * ON_SCENE, CALLOUT_CLOSED, ...) rather than GuardM8's flat single-purpose
+ * shape. Confirmed against a real captured payload (2026-10-06):
+ *   { message, callout: { id, incidentInformation: [{ typeOfEmergency,
+ *     incidentcategory, calloutCurrentLocation: { formattedAddress, lat,
+ *     lon }, ... }], ... } }
+ * callout.id is the natural idempotency key — the same callout resends on
+ * every status change, always with the same id.
+ *
+ * NEW_CALLOUT / NEW_CALLOUT_FOR_INSTANCE create a job. Every other message
+ * is a status update against a callout that (should) already have a job:
+ * it is appended to that job's notes and broadcast, rather than silently
+ * changing the job's status — an officer already en route should not be
+ * stood down just because a webhook said so with nobody at CCCS deciding
+ * that. A status update for a callout.id with no matching job is logged
+ * (logInboundAlarmPayload already did that) and otherwise ignored.
+ *
+ * No severity field has been seen on any payload yet (confirmed only on a
+ * Test Callout) — defaults to AMBER rather than GREEN/ROUTINE until AURA
+ * confirms what, if anything, carries urgency. Revisit once a real (non-
+ * test) callout has been seen, or AURA answers the question. */
+const AURA_NEW_CALLOUT_MESSAGES = ['NEW_CALLOUT', 'NEW_CALLOUT_FOR_INSTANCE'];
+function auraCalloutFields(callout) {
+  const info = (callout.incidentInformation || [])[0] || {};
+  const loc = info.calloutCurrentLocation || {};
+  const lat = loc.latitude != null ? Number(loc.latitude) : null;
+  const lon = loc.longitude != null ? Number(loc.longitude) : null;
+  return {
+    external_ref: String(callout.id),
+    location: loc.formattedAddress || null,
+    lat: Number.isFinite(lat) ? lat : null,
+    lon: Number.isFinite(lon) ? lon : null,
+    incident_type: (info.typeOfEmergency && info.typeOfEmergency.description) || 'ALARM',
+    description: [info.responseType && info.responseType.value, info.incidentcategory && info.incidentcategory.description].filter(Boolean).join(' — '),
   };
 }
-route('POST', '/api/integrations/guardm8/jobs', null, externalAlarmJob({ secretHeader: 'x-guardm8-secret', secretEnv: 'GUARDM8_SECRET', source: 'guardm8', label: 'GuardM8' }));
-route('POST', '/api/integrations/aura/jobs', null, externalAlarmJob({ secretHeader: 'x-aura-secret', secretEnv: 'AURA_SECRET', source: 'aura', label: 'AURA' }));
+route('POST', '/api/integrations/aura/jobs', null, ({ body: b, req }) => {
+  checkAlarmSecret('x-aura-secret', 'AURA_SECRET', 'AURA', req);
+  logInboundAlarmPayload('aura', 'AURA', b);
+  const callout = b.callout;
+  if (!callout || !callout.id) return { __status: 200, __body: { ok: true, note: 'no callout in payload — logged only' } };
+  const externalRef = String(callout.id);
+
+  if (AURA_NEW_CALLOUT_MESSAGES.includes(b.message)) {
+    const fields = auraCalloutFields(callout);
+    // AMBER placeholder — see the block comment above this route.
+    return createExternalJob({ source: 'aura', label: 'AURA', priority: 'AMBER', ...fields });
+  }
+
+  const existing = db.jobs.find((x) => x.external_source === 'aura' && x.external_ref === externalRef);
+  if (!existing) return { __status: 200, __body: { ok: true, note: 'status update for a callout CCCS has no job for — logged only' } };
+  const stamp = `[AURA ${b.message || 'update'} — ${new Date().toISOString()}]`;
+  existing.notes = existing.notes ? `${existing.notes}\n${stamp}` : stamp;
+  existing.updated_at = new Date().toISOString();
+  broadcast('job.updated', publicJob(existing));
+  logEvent('job.updated', `JOB ${existing.reference} — AURA ${b.message || 'UPDATE'}`, { job_id: existing.id, external_ref: externalRef });
+  return { __status: 200, __body: publicJob(existing) };
+});
 
 route('POST', '/api/jobs/:id/assign', CONTROL, ({ params, body }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');

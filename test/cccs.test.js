@@ -362,44 +362,91 @@ test('GuardM8 can push a job with a shared secret, and retries are idempotent', 
   assert.equal(retryBody.id, goodBody.id, 'the same external_ref does not create a second job');
 });
 
-/* ---------------- AURA integration ---------------- */
-test('AURA can push a job with a shared secret, and retries are idempotent', async () => {
+/* ---------------- AURA integration ----------------
+ * AURA's real wire shape (captured from their portal's "Log Callout" test
+ * feature, 2026-10-06) — deeply nested, keyed by body.message rather than
+ * GuardM8's flat single-purpose body. auraCallout() builds a minimal but
+ * realistic payload matching that capture. */
+function auraCallout(message, calloutId, { location = 'Meridian Point Retail & Leisure Park, Kings Road, Cleethorpes, UK', lat = '53.5456326', lon = '-0.0138012', emergencyType = 'Test Callout' } = {}) {
+  return {
+    message, calloutExternalRefId: null, siteExternalRefId: null,
+    callout: {
+      id: calloutId, status: 'created', internalTest: true, verified: false,
+      incidentInformation: [{
+        calloutId, status: 'created', createdAt: new Date().toISOString(),
+        calloutClassification: { id: 1, value: 'REAL' },
+        responseType: { id: 1, value: 'SECURITY' },
+        typeOfEmergency: { id: 5, description: emergencyType },
+        incidentcategory: { id: 24, description: emergencyType },
+        calloutCurrentLocation: { latitude: lat, longitude: lon, formattedAddress: location },
+      }],
+    },
+  };
+}
+test('AURA can push a NEW_CALLOUT with a shared secret, and resending the same callout id is idempotent', async () => {
   process.env.AURA_SECRET = 'test-aura-secret';
   const bad = await fetch(BASE + '/api/integrations/aura/jobs', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ location: 'Somewhere', external_ref: 'a-1' }),
+    body: JSON.stringify(auraCallout('NEW_CALLOUT', 9001)),
   });
   assert.equal(bad.status, 401);
 
   const good = await fetch(BASE + '/api/integrations/aura/jobs', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
-    body: JSON.stringify({ location: 'Somewhere', priority: 'CRITICAL', external_ref: 'a-1' }),
+    body: JSON.stringify(auraCallout('NEW_CALLOUT', 9001)),
   });
   const goodBody = await good.json();
   assert.equal(good.status, 201);
-  assert.equal(goodBody.priority, 'RED');
   assert.equal(goodBody.caller, 'AURA');
+  assert.equal(goodBody.incident_type, 'Test Callout');
+  assert.ok(goodBody.location.includes('Cleethorpes'));
+  assert.equal(goodBody.external_ref, '9001');
 
   const retry = await fetch(BASE + '/api/integrations/aura/jobs', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
-    body: JSON.stringify({ location: 'Somewhere', priority: 'CRITICAL', external_ref: 'a-1' }),
+    body: JSON.stringify(auraCallout('NEW_CALLOUT', 9001)),
   });
   const retryBody = await retry.json();
   assert.equal(retry.status, 200);
-  assert.equal(retryBody.id, goodBody.id, 'the same external_ref does not create a second job');
+  assert.equal(retryBody.id, goodBody.id, 'the same callout id does not create a second job');
 });
-test('GuardM8 and AURA using the same external_ref never collide with each other\'s job', async () => {
+test('a later AURA status event for a known callout appends a note instead of creating a job; for an unknown one it is only logged', async () => {
+  process.env.AURA_SECRET = 'test-aura-secret';
+  const created = await fetch(BASE + '/api/integrations/aura/jobs', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
+    body: JSON.stringify(auraCallout('NEW_CALLOUT', 9002)),
+  });
+  const createdBody = await created.json();
+
+  const changed = await fetch(BASE + '/api/integrations/aura/jobs', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
+    body: JSON.stringify(auraCallout('RESPONDER_ARRIVED_ON_SCENE', 9002)),
+  });
+  const changedBody = await changed.json();
+  assert.equal(changed.status, 200);
+  assert.equal(changedBody.id, createdBody.id, 'the status update targets the job already created for this callout');
+  assert.ok(changedBody.notes.includes('RESPONDER_ARRIVED_ON_SCENE'));
+
+  const orphan = await fetch(BASE + '/api/integrations/aura/jobs', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
+    body: JSON.stringify(auraCallout('CALLOUT_CLOSED', 999999)),
+  });
+  const orphanBody = await orphan.json();
+  assert.equal(orphan.status, 200);
+  assert.equal(orphanBody.ok, true, 'a status update for a callout with no matching job is acknowledged, not errored');
+});
+test('GuardM8 and AURA using the same external reference never collide with each other\'s job', async () => {
   process.env.GUARDM8_SECRET = 'test-guardm8-secret';
   process.env.AURA_SECRET = 'test-aura-secret';
   const fromGuardM8 = await fetch(BASE + '/api/integrations/guardm8/jobs', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-guardm8-secret': 'test-guardm8-secret' },
-    body: JSON.stringify({ location: 'Dual Site', external_ref: 'shared-ref-1' }),
+    body: JSON.stringify({ location: 'Dual Site', external_ref: '9003' }),
   });
   const fromAura = await fetch(BASE + '/api/integrations/aura/jobs', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
-    body: JSON.stringify({ location: 'Dual Site', external_ref: 'shared-ref-1' }),
+    body: JSON.stringify(auraCallout('NEW_CALLOUT', 9003)),
   });
   assert.equal(fromGuardM8.status, 201);
   assert.equal(fromAura.status, 201);
