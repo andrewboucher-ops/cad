@@ -720,7 +720,7 @@ test('personnel can be created, updated and deleted, with a unique employee numb
 /* ---------------- SIA / DBS compliance tracking ---------------- */
 test('SIA licence and DBS check fields compute a compliance flag, and are validated', async () => {
   const p = await call('POST', '/api/personnel', { name: 'Compliance Test' }, adminT);
-  assert.deepEqual(p.body.compliance, { sia: 'unset', dbs: 'unset' }, 'no data recorded yet');
+  assert.deepEqual(p.body.compliance, { sia: 'unset', dbs: 'unset', rtw: 'unset' }, 'no data recorded yet');
 
   const badExpiry = await call('PATCH', `/api/personnel/${p.body.id}`, { sia_licence_expiry: 'not-a-date' }, adminT);
   assert.equal(badExpiry.status, 400);
@@ -743,7 +743,41 @@ test('SIA licence and DBS check fields compute a compliance flag, and are valida
   assert.equal(checked.body.compliance.dbs, 'ok');
   assert.ok(checked.body.dbs_last_checked_at);
 
+  const badRtwType = await call('PATCH', `/api/personnel/${p.body.id}`, { rtw_check_type: 'NONSENSE' }, adminT);
+  assert.equal(badRtwType.status, 400);
+
+  const rtwIndefinite = await call('PATCH', `/api/personnel/${p.body.id}`, { rtw_check_type: 'MANUAL', rtw_reference: 'Passport 123', rtw_checked_now: true }, adminT);
+  assert.equal(rtwIndefinite.body.compliance.rtw, 'ok', 'checked with no expiry — an indefinite right to work');
+  assert.ok(rtwIndefinite.body.rtw_last_checked_at);
+
+  const rtwExpired = await call('PATCH', `/api/personnel/${p.body.id}`, { rtw_expiry: new Date(Date.now() - 86400000).toISOString() }, adminT);
+  assert.equal(rtwExpired.body.compliance.rtw, 'expired');
+
+  const rtwExpiring = await call('PATCH', `/api/personnel/${p.body.id}`, { rtw_expiry: new Date(Date.now() + 10 * 86400000).toISOString() }, adminT);
+  assert.equal(rtwExpiring.body.compliance.rtw, 'expiring');
+
   await call('DELETE', `/api/personnel/${p.body.id}`, undefined, adminT);
+});
+test('GET /api/compliance lists everyone with an expired, expiring or overdue check, worst first, excluding terminated and subcontractor staff', async () => {
+  const worst = await call('POST', '/api/personnel', { name: 'Worst Compliance', employment_status: 'ACTIVE' }, adminT);
+  await call('PATCH', `/api/personnel/${worst.body.id}`, { sia_licence_no: 'SIA-W', sia_licence_expiry: new Date(Date.now() - 86400000).toISOString() }, adminT);
+  const mild = await call('POST', '/api/personnel', { name: 'Mild Compliance', employment_status: 'ACTIVE' }, adminT);
+  await call('PATCH', `/api/personnel/${mild.body.id}`, { sia_licence_no: 'SIA-M', sia_licence_expiry: new Date(Date.now() + 10 * 86400000).toISOString() }, adminT);
+  const sub = await call('POST', '/api/personnel', { name: 'Expired Subcontractor', employment_status: 'ACTIVE', employment_type: 'SUBCONTRACTOR' }, adminT);
+  await call('PATCH', `/api/personnel/${sub.body.id}`, { sia_licence_no: 'SIA-S', sia_licence_expiry: new Date(Date.now() - 86400000).toISOString() }, adminT);
+
+  const denied = await call('GET', '/api/compliance', undefined, danT);
+  assert.equal(denied.status, 403, 'admin only');
+
+  const list = await call('GET', '/api/compliance', undefined, adminT);
+  assert.equal(list.status, 200);
+  const names = list.body.map((r) => r.name);
+  assert.ok(names.includes('Worst Compliance'));
+  assert.ok(names.includes('Mild Compliance'));
+  assert.ok(!names.includes('Expired Subcontractor'), 'a subcontractor is excluded even with an expired licence');
+  assert.ok(names.indexOf('Worst Compliance') < names.indexOf('Mild Compliance'), 'expired sorts before expiring');
+
+  for (const id of [worst.body.id, mild.body.id, sub.body.id]) await call('DELETE', `/api/personnel/${id}`, undefined, adminT);
 });
 
 test('a person can hold multiple SIA licences, worst compliance wins, and legacy single-licence records still work', async () => {

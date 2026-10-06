@@ -584,6 +584,7 @@ function normalizedSiteIds(raw) {
  * or an overdue vehicle service. */
 const SIA_EXPIRY_WARN_DAYS = 30;
 const DBS_RECHECK_DUE_DAYS = 365; // DBS sets no fixed frequency; a year is a common risk-based default, not a legal requirement
+const RTW_EXPIRY_WARN_DAYS = 30; // only applies to a time-limited right (e.g. a visa) — rtw_expiry is left blank for an indefinite right
 /** A person can hold more than one SIA licence (Door Supervision and CCTV
  * are both common). sia_licences is the canonical list; the original
  * single sia_licence_no/sia_licence_expiry fields are kept on the record
@@ -611,7 +612,17 @@ function personnelCompliance(p) {
   if (p.dbs_last_checked_at) {
     dbs = (now - Date.parse(p.dbs_last_checked_at)) > DBS_RECHECK_DUE_DAYS * 86400000 ? 'overdue' : 'ok';
   }
-  return { sia, dbs };
+  // Right to work: 'ok' once checked, regardless of expiry, unless a
+  // time-limited right (rtw_expiry set) has lapsed or is about to.
+  let rtw = 'unset';
+  if (p.rtw_last_checked_at) {
+    rtw = 'ok';
+    if (p.rtw_expiry) {
+      const expiry = Date.parse(p.rtw_expiry);
+      rtw = expiry < now ? 'expired' : expiry - now < RTW_EXPIRY_WARN_DAYS * 86400000 ? 'expiring' : 'ok';
+    }
+  }
+  return { sia, dbs, rtw };
 }
 
 /** Structural "are they actually set up yet" items, distinct from the
@@ -629,9 +640,10 @@ function personnelCompliance(p) {
  * checklist can't anticipate — logged, like every other override here. */
 function onboardingStatusForPerson(p) {
   const checks = [
-    ['id_document', 'Identity / right-to-work document on file', (p.files || []).some((f) => f.kind === 'ID')],
+    ['id_document', 'Identity document on file', (p.files || []).some((f) => f.kind === 'ID')],
     ['sia_licence', 'SIA licence recorded', siaLicencesOf(p).length > 0],
     ['dbs_check', 'DBS check recorded', Boolean(p.dbs_certificate_no || p.dbs_last_checked_at)],
+    ['rtw_check', 'Right to work checked', Boolean(p.rtw_last_checked_at)],
     ['contract', 'Signed contract on file', (p.files || []).some((f) => f.kind === 'CONTRACT')],
     ['emergency_contact', 'Emergency contact recorded', Boolean(p.emergency_contact && (p.emergency_contact.name || p.emergency_contact.phone))],
     ...(p.employment_type === 'SUBCONTRACTOR' ? [] : [['bank_details', 'Bank details recorded', Boolean(p.bank_details && (p.bank_details.account_number || p.bank_details.sort_code))]]),
@@ -647,6 +659,8 @@ function onboardingStatusForPerson(p) {
     completed_at: p.onboarding_completed_at || null, completed_by: p.onboarding_completed_by || null,
   };
 }
+
+const COMPLIANCE_SEVERITY = { expired: 3, overdue: 2, expiring: 1 };
 
 const TRAINING_EXPIRY_WARN_DAYS = 30;
 /** Same "make the gap visible" idea as SIA/DBS, but for a variable admin-
@@ -806,6 +820,8 @@ function publicPersonnel(p, user) {
     has_photo: Boolean(p.id_photo), photo_updated_at: p.id_photo ? p.id_photo.uploaded_at : null, id_card_issued_at: p.id_card_issued_at || null,
     dbs_certificate_no: p.dbs_certificate_no || null, dbs_certificate_type: p.dbs_certificate_type || null,
     dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
+    rtw_check_type: p.rtw_check_type || null, rtw_reference: p.rtw_reference || null,
+    rtw_expiry: p.rtw_expiry || null, rtw_last_checked_at: p.rtw_last_checked_at || null,
     compliance: personnelCompliance(p),
     notes: p.notes || '', branch_id: p.branch_id || null,
     lat: p.lat ?? null, lon: p.lon ?? null, location_at: p.location_at || null,
@@ -1930,6 +1946,27 @@ route('POST', '/api/assets/:id/return', ALL, ({ params, body, user }) => {
   return publicAsset(a);
 });
 route('GET', '/api/personnel', ALL, ({ user }) => db.personnel.filter((p) => visibleToUser(p, user)).map((p) => publicPersonnel(p, user)));
+/** One screen listing everyone with an expired, expiring or overdue SIA/
+ * DBS/RTW check — the same personnelCompliance() flag already shown
+ * inline on the personnel list, just gathered into one place instead of
+ * needing to open each record to notice it. Worst-first so the most
+ * urgent cases are at the top, not buried alphabetically. */
+route('GET', '/api/compliance', ADMIN, () => {
+  const rows = [];
+  for (const p of db.personnel) {
+    if (p.employment_status === 'TERMINATED' || p.employment_type === 'SUBCONTRACTOR') continue;
+    const c = personnelCompliance(p);
+    const issues = Object.entries(c).filter(([, state]) => COMPLIANCE_SEVERITY[state]);
+    if (!issues.length) continue;
+    rows.push({
+      personnel_id: p.id, name: p.name, rank: p.rank,
+      worst: Math.max(...issues.map(([, state]) => COMPLIANCE_SEVERITY[state])),
+      issues: issues.map(([axis, state]) => ({ axis, state })),
+    });
+  }
+  rows.sort((a, b) => b.worst - a.worst || a.name.localeCompare(b.name));
+  return rows;
+});
 route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
   const name = String(body.name || '').trim();
   if (!name) throw httpError(400, 'name required');
@@ -2022,6 +2059,15 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
   // Update Service check, which does not happen just because someone typed
   // in a certificate number.
   if ('dbs_checked_now' in body && body.dbs_checked_now) p.dbs_last_checked_at = new Date().toISOString();
+  if ('rtw_check_type' in body) {
+    if (body.rtw_check_type && !['MANUAL', 'ONLINE'].includes(body.rtw_check_type)) throw httpError(400, 'invalid rtw_check_type');
+    p.rtw_check_type = body.rtw_check_type || null;
+  }
+  if ('rtw_reference' in body) p.rtw_reference = body.rtw_reference ? String(body.rtw_reference).trim() : null;
+  if ('rtw_expiry' in body) p.rtw_expiry = body.rtw_expiry || null;
+  // Same reasoning as dbs_checked_now — a deliberate "I checked this" stamp,
+  // not inferred from merely having typed a reference in.
+  if ('rtw_checked_now' in body && body.rtw_checked_now) p.rtw_last_checked_at = new Date().toISOString();
   // Several SIA licences are normal — Door Supervision and CCTV together is
   // the common case this was added for. The old single sia_licence_no/
   // sia_licence_expiry fields are left exactly as they were (untouched,
@@ -3349,6 +3395,34 @@ function welfareTick() {
       broadcast('welfare.due_soon', { personnel: publicPersonnel(person), seconds_left: Math.round((due - now) / 1000) }, { personnelIds: [person.id] });
     }
   }
+}
+
+const COMPLIANCE_TICK_MS = Number(process.env.COMPLIANCE_TICK_MS || 6 * 60 * 60 * 1000); // compliance moves on a day scale, not a second scale
+/** Turns the passive compliance flags (personnelCompliance(), already shown
+ * inline on the personnel list) into a proactive push to admins — "this is
+ * about to lapse" should not depend on someone happening to open the
+ * record. One-shot per state, the same pattern as welfare_warned above:
+ * person.compliance_alerted remembers what was last alerted for each axis,
+ * so a tick that finds nothing new sends nothing, and a renewal (state
+ * goes back to ok) clears it so a future recurrence alerts again. */
+function complianceTick() {
+  for (const p of db.personnel) {
+    if (p.employment_status === 'TERMINATED' || p.employment_type === 'SUBCONTRACTOR') continue;
+    const c = personnelCompliance(p);
+    const alerted = p.compliance_alerted || {};
+    const next = {};
+    for (const [axis, state] of Object.entries(c)) {
+      const concerning = ['expired', 'expiring', 'overdue'].includes(state);
+      next[axis] = concerning ? state : null;
+      if (concerning && alerted[axis] !== state) {
+        const label = { sia: 'SIA licence', dbs: 'DBS check', rtw: 'Right to work' }[axis] || axis;
+        pushToRoles(['SYSTEM_ADMIN'], { title: 'Compliance alert', body: `${p.name} — ${label} ${state}`, url: '/admin.html#compliance', tag: `cccs-compliance-${p.id}-${axis}` });
+        logEvent('compliance.alert', `COMPLIANCE — ${p.name}: ${label} ${state.toUpperCase()}`, { personnel_id: p.id, axis, state });
+      }
+    }
+    p.compliance_alerted = next;
+  }
+  store.flushNow();
 }
 
 route('POST', '/api/personnel/:id/welfare', ALL, ({ params, body, user }) => {
@@ -4818,6 +4892,8 @@ function start() {
     retentionSweep();
     setInterval(retentionSweep, 6 * 60 * 60 * 1000).unref?.();
   }
+  complianceTick();
+  setInterval(complianceTick, COMPLIANCE_TICK_MS).unref?.();
   server.listen(PORT, HOST, () => {
     console.log(`\n  CCCS POC — simulation only, not for operational use`);
     console.log(`  Control Room : http://localhost:${PORT}/control.html`);

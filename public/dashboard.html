@@ -172,6 +172,8 @@ async function load() {
 
   const personnelActive = state.personnel.filter((p) => p.employment_status === 'ACTIVE');
 
+  const understaffedShifts = shifts.filter((s) => ['PUBLISHED', 'IN_PROGRESS'].includes(s.status) && s.coverage_gap > 0);
+
   const mdtByStatus = { online: 0, offline: 0 };
   state.mdts.forEach((m) => { m.connected ? mdtByStatus.online++ : mdtByStatus.offline++; });
 
@@ -191,6 +193,7 @@ async function load() {
     statCard('Active emergencies', state.emergencies.length, state.emergencies.length ? 'needs acknowledgement' : 'all clear', { crit: state.emergencies.length > 0 }),
     statCard('Open patrol visits', openVisits.length, missedVisits.length ? `${missedVisits.length} missed` : 'on schedule', { crit: missedVisits.length > 0 }),
     statCard('Personnel', personnelActive.length, `${state.mdts.length} MDTs · ${mdtByStatus.online} online`),
+    statCard('Understaffed shifts', understaffedShifts.length, understaffedShifts.length ? 'today, below required headcount' : 'today\'s shifts are fully covered', { crit: understaffedShifts.length > 0 }),
     statCard('Reports (30d)', recentReports.length, openReports.length ? `${openReports.length} awaiting review${restrictedOpen ? `, ${restrictedOpen} restricted` : ''}` : 'review queue is empty', {
       crit: openReports.length > 0,
       breakdown: topTypes.map(([label, value], i) => ({ color: TYPE_COLOR[i % TYPE_COLOR.length], pct: pct(value, recentReports.length) || 2, label, value })),

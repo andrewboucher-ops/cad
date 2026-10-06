@@ -83,6 +83,9 @@ test('each item flips independently as the underlying fact changes, and complete
   await call('PATCH', `/api/personnel/${pid}`, { dbs_checked_now: true }, adminT);
   assert.equal(itemsByKey(await current()).dbs_check, true);
 
+  await call('PATCH', `/api/personnel/${pid}`, { rtw_checked_now: true }, adminT);
+  assert.equal(itemsByKey(await current()).rtw_check, true);
+
   await call('PATCH', `/api/personnel/${pid}/emergency-contact`, { name: 'Jo Bloggs', relationship: 'Partner', phone: '07700900000' }, adminT);
   assert.equal(itemsByKey(await current()).emergency_contact, true);
 

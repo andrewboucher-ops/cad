@@ -118,6 +118,7 @@
       <button id="tabPersonnel" data-tab="personnel" data-desc="Staff records: call signs, licences, vetting, line managers, welfare timers.">Personnel</button>
       <button id="tabApplicants" data-tab="applicants" data-desc="Job applications from the public form, and moving people through hiring.">Applicants</button>
       <button id="tabOnboarding" data-tab="onboarding" data-desc="Active staff still missing paperwork, a licence, DBS check, contract, bank details, a login or kit before they're fully set up to work.">Onboarding</button>
+      <button id="tabCompliance" data-tab="compliance" data-desc="Everyone with an expired, expiring or overdue SIA licence, DBS check or right-to-work check — the renewals to chase, in one place.">Compliance</button>
       <button id="tabTraining" data-tab="training" data-desc="Training courses and assessments staff complete in the app.">Training</button>
       <button id="tabLeave" data-tab="leave" data-desc="Leave requests and balances.">Leave</button>
       <button id="tabPayroll" data-tab="payroll" data-desc="Monthly payroll runs — generate, review and issue payslips. ADMIN only.">Payroll</button>
@@ -271,6 +272,11 @@
       <div id="obTableWrap"></div>
     </div>
 
+    <div id="viewCompliance" class="hide">
+      <p class="dim" style="margin:0 0 10px;font-size:13px">Everyone with an expired, expiring or overdue SIA licence, DBS check or right-to-work check, worst first. The same flags shown inline on the Personnel list, gathered into one place. Admins are also alerted automatically as each one first becomes due.</p>
+      <div id="cpTableWrap"></div>
+    </div>
+
     <div id="viewLeave" class="hide">
       <div class="toolbar">
         <select id="lvStatus">
@@ -408,6 +414,9 @@ function showTab(name) {
   el('#btnNewApplicant').hidden = name !== 'applicants';
   el('#tabOnboarding').classList.toggle('active', name === 'onboarding');
   el('#viewOnboarding').classList.toggle('hide', name !== 'onboarding');
+  el('#tabCompliance').classList.toggle('active', name === 'compliance');
+  el('#viewCompliance').classList.toggle('hide', name !== 'compliance');
+  if (name === 'compliance') paintCompliance();
   el('#tabLeave').classList.toggle('active', name === 'leave');
   el('#viewLeave').classList.toggle('hide', name !== 'leave');
   el('#btnNewLeave').hidden = name !== 'leave';
@@ -469,6 +478,7 @@ el('#tabBranches').onclick = () => showTab('branches');
 el('#tabTraining').onclick = () => showTab('training');
 el('#tabApplicants').onclick = () => showTab('applicants');
 el('#tabOnboarding').onclick = () => showTab('onboarding');
+el('#tabCompliance').onclick = () => showTab('compliance');
 el('#tabLeave').onclick = () => showTab('leave');
 el('#tabPayroll').onclick = () => showTab('payroll');
 el('#tabShiftTypes').onclick = () => showTab('shiftTypes');
@@ -697,6 +707,26 @@ function paintOnboarding() {
   }));
   els('#obTableWrap [data-obcomplete]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); onboardingComplete(Number(b.dataset.obcomplete)); }));
 }
+const COMPLIANCE_SEVERITY = { expired: 3, overdue: 2, expiring: 1 };
+const COMPLIANCE_AXIS_LABEL = { sia: 'SIA licence', dbs: 'DBS check', rtw: 'Right to work' };
+const COMPLIANCE_STATE_LABEL = { expired: 'expired', overdue: 'recheck overdue', expiring: 'expires soon' };
+function paintCompliance() {
+  const rows = allPersonnel
+    .filter((p) => p.employment_status === 'ACTIVE' && p.employment_type !== 'SUBCONTRACTOR' && p.compliance)
+    .map((p) => ({ p, issues: Object.entries(p.compliance).filter(([, state]) => COMPLIANCE_SEVERITY[state]) }))
+    .filter((r) => r.issues.length)
+    .sort((a, b) => Math.max(...b.issues.map(([, s]) => COMPLIANCE_SEVERITY[s])) - Math.max(...a.issues.map(([, s]) => COMPLIANCE_SEVERITY[s])) || a.p.name.localeCompare(b.p.name));
+  el('#cpTableWrap').innerHTML = rows.length ? `
+    <table class="log-table">
+      <thead><tr><th>Name</th><th>Rank</th><th>Issues</th></tr></thead>
+      <tbody>${rows.map(({ p, issues }) => `<tr class="clickable" data-compliance="${p.id}">
+        <td>${esc(p.name)}</td>
+        <td class="dim">${esc(p.rank || '')}</td>
+        <td class="err">${issues.map(([axis, state]) => `${esc(COMPLIANCE_AXIS_LABEL[axis] || axis)} — ${esc(COMPLIANCE_STATE_LABEL[state] || state)}`).join(', ')}</td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">Nobody active has an expired, expiring or overdue check right now.</p>';
+  els('#cpTableWrap [data-compliance]').forEach((row) => (row.onclick = () => personnelModal(allPersonnel.find((p) => p.id === Number(row.dataset.compliance)))));
+}
 async function onboardingComplete(id, note) {
   try { await api('POST', `/api/personnel/${id}/onboarding-complete`, { note: note || undefined }); closeModal(); await load(); showTab('onboarding'); }
   catch (e) { alert(e.message); }
@@ -821,6 +851,20 @@ function personnelForm(p) {
         <span class="dim" id="pnDbsChecked">${p.dbs_last_checked_at ? 'Last checked ' + new Date(p.dbs_last_checked_at).toLocaleDateString('en-GB') : 'Never checked'}</span>
         <button type="button" class="btn" id="pnDbsCheckNow" style="padding:4px 10px;font-size:11px">Mark checked today</button>
       </div>${p.compliance && p.compliance.dbs === 'overdue' ? '<p class="err" style="margin:0">Recheck overdue</p>' : ''}` : ''}
+      <label>Right to work — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">leave expiry blank for an indefinite right (British/Irish citizen, settled status)</span></label>
+      <div style="display:flex;gap:8px">
+        <select id="npnRtwType" style="width:130px">
+          <option value="">— type —</option>
+          <option value="MANUAL" ${!isNew && p.rtw_check_type === 'MANUAL' ? 'selected' : ''}>Manual document check</option>
+          <option value="ONLINE" ${!isNew && p.rtw_check_type === 'ONLINE' ? 'selected' : ''}>Online (Home Office share code)</option>
+        </select>
+        <input id="npnRtwReference" autocomplete="off" placeholder="Document ref or share code" value="${isNew ? '' : esc(p.rtw_reference || '')}" style="flex:1">
+        <input id="npnRtwExpiry" type="date" value="${!isNew && p.rtw_expiry ? String(p.rtw_expiry).slice(0, 10) : ''}" style="width:150px">
+      </div>
+      ${!isNew ? `<div style="display:flex;align-items:center;gap:10px">
+        <span class="dim" id="pnRtwChecked">${p.rtw_last_checked_at ? 'Last checked ' + new Date(p.rtw_last_checked_at).toLocaleDateString('en-GB') : 'Never checked'}</span>
+        <button type="button" class="btn" id="pnRtwCheckNow" style="padding:4px 10px;font-size:11px">Mark checked today</button>
+      </div>${p.compliance && ['expired', 'expiring'].includes(p.compliance.rtw) ? `<p class="err" style="margin:0">${p.compliance.rtw === 'expired' ? 'Right to work has expired' : 'Right to work expires within 30 days'}</p>` : ''}` : ''}
       <label>Emergency contact — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">the person can also keep this up to date themselves from their own profile</span></label>
       <div style="display:flex;gap:8px">
         <input id="npnEcName" autocomplete="off" placeholder="Name" value="${isNew ? '' : esc((p.emergency_contact && p.emergency_contact.name) || '')}" style="flex:1">
@@ -1005,6 +1049,8 @@ function personnelModal(p) {
         sia_licences: readSiaRowsFromDom().filter((l) => l.licence_no),
         dbs_certificate_no: el('#npnDbsNo').value.trim() || null, dbs_certificate_type: el('#npnDbsType').value || null,
         dbs_update_service_id: el('#npnDbsUpdateId').value.trim() || null,
+        rtw_check_type: el('#npnRtwType').value || null, rtw_reference: el('#npnRtwReference').value.trim() || null,
+        rtw_expiry: el('#npnRtwExpiry').value || null,
         emergency_contact: { name: el('#npnEcName').value.trim(), relationship: el('#npnEcRelationship').value.trim(), phone: el('#npnEcPhone').value.trim(), email: el('#npnEcEmail').value.trim() },
         bank_details: { account_name: el('#npnBankAccName').value.trim(), bank_name: el('#npnBankName').value.trim(), sort_code: el('#npnBankSortCode').value.trim(), account_number: el('#npnBankAccNo').value.trim() },
         branch_id: el('#npnBranch').value ? Number(el('#npnBranch').value) : null,
@@ -1039,6 +1085,12 @@ function personnelModal(p) {
     if (el('#pnDbsCheckNow')) el('#pnDbsCheckNow').onclick = async () => {
       try {
         await api('PATCH', `/api/personnel/${p.id}`, { dbs_checked_now: true });
+        closeModal(); await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id));
+      } catch (e) { el('#pnError').textContent = e.message; }
+    };
+    if (el('#pnRtwCheckNow')) el('#pnRtwCheckNow').onclick = async () => {
+      try {
+        await api('PATCH', `/api/personnel/${p.id}`, { rtw_checked_now: true });
         closeModal(); await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id));
       } catch (e) { el('#pnError').textContent = e.message; }
     };
