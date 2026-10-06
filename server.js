@@ -2358,6 +2358,11 @@ route('POST', '/api/integrations/aura/jobs', null, ({ body: b, req }) => {
   const externalRef = String(callout.id);
 
   if (AURA_NEW_CALLOUT_MESSAGES.includes(b.message)) {
+    // AURA's own connectivity/test-send feature (internalTest: true) should
+    // not put a job on a real control room's board for someone to notice
+    // and dismiss — it is logged above like everything else, but nothing
+    // dispatchable is created from it.
+    if (callout.internalTest) return { __status: 200, __body: { ok: true, note: 'internal test callout — logged only, no job created' } };
     const fields = auraCalloutFields(callout);
     // AMBER placeholder — see the block comment above this route.
     return createExternalJob({ source: 'aura', label: 'AURA', priority: 'AMBER', ...fields });
