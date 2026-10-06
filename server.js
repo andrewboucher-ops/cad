@@ -34,6 +34,7 @@ const MS_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && M
 const { verifyMicrosoftIdToken } = require('./msauth.js');
 const webpush = require('./webpush.js');
 const sms = require('./sms.js');
+const dvla = require('./dvla.js');
 const ami = require('./asterisk.js');
 const payrollCalc = require('./payroll-calc.js');
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@echeloncic.com';
@@ -1564,6 +1565,26 @@ route('PATCH', '/api/vehicles/:id', ADMIN, ({ params, body }) => {
   if ('status' in body) { if (!VEHICLE_STATUSES.includes(body.status)) throw httpError(400, 'invalid status'); v.status = body.status; }
   if ('notes' in body) v.notes = body.notes || '';
   logEvent('vehicle.updated', `VEHICLE ${v.registration} UPDATED`, { vehicle_id: v.id });
+  return publicVehicle(v);
+});
+/* DVLA Vehicle Enquiry Service — tax/MOT status and basic details straight
+ * from government records, keyed on the registration already on file. A
+ * read on DVLA's end, but written here: updates the vehicle's make/colour
+ * and tax/MOT status+dates so the Fleet view reflects what DVLA actually
+ * has, not what was typed in by hand (or never updated) at creation. */
+route('POST', '/api/vehicles/:id/dvla-lookup', ADMIN, async ({ params }) => {
+  const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
+  const r = await dvla.lookup(v.registration);
+  if (!r.ok) throw httpError(r.httpStatus === 404 ? 404 : 502, `DVLA lookup failed: ${r.error}`);
+  const d = r.data;
+  if (d.make) v.make = d.make;
+  if (d.colour) v.colour = d.colour;
+  v.mot_status = d.motStatus || null;
+  v.tax_status = d.taxStatus || null;
+  if (d.motExpiryDate) v.mot_due_at = d.motExpiryDate;
+  if (d.taxDueDate) v.tax_due_at = d.taxDueDate;
+  v.dvla_checked_at = new Date().toISOString();
+  logEvent('vehicle.dvla_lookup', `VEHICLE ${v.registration} DVLA LOOKUP — tax ${v.tax_status || 'unknown'}, MOT ${v.mot_status || 'unknown'}`, { vehicle_id: v.id });
   return publicVehicle(v);
 });
 route('DELETE', '/api/vehicles/:id', ADMIN, ({ params }) => {

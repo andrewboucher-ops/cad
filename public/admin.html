@@ -1310,12 +1310,25 @@ async function deleteVehicle(id) {
   catch (e) { alert(e.message); }
 }
 
+function dvlaInfoLine(v) {
+  if (!v.dvla_checked_at) return 'Not checked against DVLA yet.';
+  const parts = [];
+  if (v.tax_status) parts.push(`Tax: ${esc(v.tax_status)}`);
+  if (v.mot_status) parts.push(`MOT: ${esc(v.mot_status)}`);
+  if (v.colour) parts.push(esc(v.colour));
+  parts.push(`checked ${new Date(v.dvla_checked_at).toLocaleDateString('en-GB')}`);
+  return parts.join(' · ');
+}
 function vehicleForm(v) {
   const isNew = !v;
   return `
     <form class="stack" id="vForm">
       <label>Registration</label>
-      <input id="nvReg" autocomplete="off" value="${isNew ? '' : esc(v.registration)}">
+      <div style="display:flex;gap:8px;align-items:flex-start">
+        <input id="nvReg" autocomplete="off" value="${isNew ? '' : esc(v.registration)}" style="flex:1">
+        ${v ? '<button type="button" class="btn" id="vDvlaLookup" style="white-space:nowrap">Look up (DVLA)</button>' : ''}
+      </div>
+      ${v ? `<p class="dim" id="vDvlaInfo" style="margin:2px 0 0;font-size:12px">${dvlaInfoLine(v)}</p>` : ''}
       <label>Type</label>
       <input id="nvType" autocomplete="off" value="${isNew ? '' : esc(v.type)}" placeholder="Patrol van, response car…">
       <label>Make</label>
@@ -1396,6 +1409,22 @@ function vehicleModal(v) {
         }).then(() => api('GET', `/api/vehicles/${v.id}/maintenance-logs`));
         el('#vmDesc').value = ''; el('#vmCost').value = ''; el('#vmNextDue').value = '';
         paintMaint(logs);
+      };
+      el('#vDvlaLookup').onclick = async () => {
+        const btn = el('#vDvlaLookup');
+        btn.disabled = true; btn.textContent = 'Looking up…';
+        try {
+          const updated = await api('POST', `/api/vehicles/${v.id}/dvla-lookup`);
+          Object.assign(v, updated);
+          el('#nvMake').value = v.make || '';
+          if (v.mot_due_at) el('#nvMot').value = v.mot_due_at.slice(0, 10);
+          if (v.tax_due_at) el('#nvTax').value = v.tax_due_at.slice(0, 10);
+          el('#vDvlaInfo').textContent = dvlaInfoLine(v);
+          el('#vError').textContent = '';
+          const idx = allVehicles.findIndex((x) => x.id === v.id);
+          if (idx !== -1) allVehicles[idx] = updated;
+        } catch (e) { el('#vError').textContent = e.message; }
+        btn.disabled = false; btn.textContent = 'Look up (DVLA)';
       };
     }
     const foot = document.querySelector('#modalHost .foot');
