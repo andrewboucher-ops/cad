@@ -362,6 +362,51 @@ test('GuardM8 can push a job with a shared secret, and retries are idempotent', 
   assert.equal(retryBody.id, goodBody.id, 'the same external_ref does not create a second job');
 });
 
+/* ---------------- AURA integration ---------------- */
+test('AURA can push a job with a shared secret, and retries are idempotent', async () => {
+  process.env.AURA_SECRET = 'test-aura-secret';
+  const bad = await fetch(BASE + '/api/integrations/aura/jobs', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ location: 'Somewhere', external_ref: 'a-1' }),
+  });
+  assert.equal(bad.status, 401);
+
+  const good = await fetch(BASE + '/api/integrations/aura/jobs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
+    body: JSON.stringify({ location: 'Somewhere', priority: 'CRITICAL', external_ref: 'a-1' }),
+  });
+  const goodBody = await good.json();
+  assert.equal(good.status, 201);
+  assert.equal(goodBody.priority, 'RED');
+  assert.equal(goodBody.caller, 'AURA');
+
+  const retry = await fetch(BASE + '/api/integrations/aura/jobs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
+    body: JSON.stringify({ location: 'Somewhere', priority: 'CRITICAL', external_ref: 'a-1' }),
+  });
+  const retryBody = await retry.json();
+  assert.equal(retry.status, 200);
+  assert.equal(retryBody.id, goodBody.id, 'the same external_ref does not create a second job');
+});
+test('GuardM8 and AURA using the same external_ref never collide with each other\'s job', async () => {
+  process.env.GUARDM8_SECRET = 'test-guardm8-secret';
+  process.env.AURA_SECRET = 'test-aura-secret';
+  const fromGuardM8 = await fetch(BASE + '/api/integrations/guardm8/jobs', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-guardm8-secret': 'test-guardm8-secret' },
+    body: JSON.stringify({ location: 'Dual Site', external_ref: 'shared-ref-1' }),
+  });
+  const fromAura = await fetch(BASE + '/api/integrations/aura/jobs', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-aura-secret': 'test-aura-secret' },
+    body: JSON.stringify({ location: 'Dual Site', external_ref: 'shared-ref-1' }),
+  });
+  assert.equal(fromGuardM8.status, 201);
+  assert.equal(fromAura.status, 201);
+  const guardm8Body = await fromGuardM8.json(), auraBody = await fromAura.json();
+  assert.notEqual(guardm8Body.id, auraBody.id, 'different sources with the same external_ref still get separate jobs');
+});
+
 /* ---------------- emergency ---------------- */
 test('a field user raises an emergency, control is alerted and can acknowledge and reset it', async () => {
   const officer = await wsClient(danT), control = await wsClient(dispT);
