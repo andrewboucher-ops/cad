@@ -3840,8 +3840,24 @@ route('POST', '/api/site-visits/:id/ack', ALL, ({ params, user }) => {
   logEvent('site_visit.acknowledged', `${who} ACKNOWLEDGED VISIT ${v.reference}`, { site_visit_id: v.id });
   return publicSiteVisit(v);
 });
+const SITE_VISIT_TS_FIELDS = ['dispatched_at', 'acknowledged_at', 'en_route_at', 'on_scene_at', 'completed_at'];
 route('PATCH', '/api/site-visits/:id', ALL, ({ params, body, user }) => {
   const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
+  // Control can set the actual stepper times directly — for a patrol
+  // confirmed done by radio or in person, rather than through the officer
+  // app's own checkpoint scans, there is otherwise no way to record when
+  // it really happened instead of defaulting every stage to "now" the
+  // moment status flips to COMPLETED. Applied before the status block
+  // below so stampVisitStatus's "only if not already set" guard respects
+  // whatever was explicitly given here.
+  const settingTimes = isControlRole(user.role) && SITE_VISIT_TS_FIELDS.some((f) => f in body);
+  if (settingTimes) {
+    for (const f of SITE_VISIT_TS_FIELDS) {
+      if (!(f in body)) continue;
+      if (body[f] !== null && !Number.isFinite(Date.parse(body[f]))) throw httpError(400, `invalid ${f}`);
+      v[f] = body[f] ? new Date(body[f]).toISOString() : null;
+    }
+  }
   if (body.status) {
     const s = String(body.status).toUpperCase();
     if (!SITE_VISIT_STATES.includes(s)) throw httpError(400, 'invalid visit status');
@@ -3875,6 +3891,9 @@ route('PATCH', '/api/site-visits/:id', ALL, ({ params, body, user }) => {
   if (body.notes !== undefined) v.notes = String(body.notes).slice(0, 2000);
   v.updated_at = new Date().toISOString();
   broadcast('site_visit.status_changed', publicSiteVisit(v));
+  if (settingTimes) {
+    logEvent('site_visit.times_corrected', `VISIT ${v.reference} TIMES SET BY ${user.display_name} (not via the officer app)`, { site_visit_id: v.id, corrected_by: user.id });
+  }
   logEvent('site_visit.status_changed', `VISIT ${v.reference} → ${v.status}`, { site_visit_id: v.id });
   return publicSiteVisit(v);
 });

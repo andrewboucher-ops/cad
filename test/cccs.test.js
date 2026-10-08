@@ -683,6 +683,29 @@ test('a site visit is assigned, acknowledged, walked through checklist and photo
   assert.ok((await report.text()).includes(completed.body.reference));
 });
 
+test('control can complete a patrol with real times, without the officer app — officers cannot set times themselves', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const northgate = sites.body.find((x) => x.name === 'Northgate Distribution');
+  const created = await call('POST', '/api/site-visits', { site_id: northgate.id }, dispT);
+  const visitId = created.body.id;
+  await call('POST', `/api/site-visits/${visitId}/assign`, { personnel: danId }, dispT);
+
+  const onScene = new Date(Date.now() - 20 * 60000).toISOString();
+  const completedAt = new Date(Date.now() - 5 * 60000).toISOString();
+  const byOfficer = await call('PATCH', `/api/site-visits/${visitId}`, { on_scene_at: onScene, completed_at: completedAt }, danT);
+  assert.equal(byOfficer.body.on_scene_at, null, 'an officer\'s request cannot set explicit times, only control\'s');
+
+  const bad = await call('PATCH', `/api/site-visits/${visitId}`, { completed_at: 'not-a-date' }, dispT);
+  assert.equal(bad.status, 400);
+
+  const r = await call('PATCH', `/api/site-visits/${visitId}`, { status: 'COMPLETED', on_scene_at: onScene, completed_at: completedAt }, dispT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status, 'COMPLETED');
+  assert.equal(r.body.on_scene_at, onScene);
+  assert.equal(r.body.completed_at, completedAt, 'the real time given, not "now"');
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'site_visit.times_corrected' && e.data && e.data.site_visit_id === visitId));
+});
+
 test('a person can be stood down from a site visit', async () => {
   const sites = await call('GET', '/api/sites', undefined, dispT);
   const meridian = sites.body.find((x) => x.name === 'Meridian Business Park');

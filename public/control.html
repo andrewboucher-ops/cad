@@ -209,6 +209,7 @@
 'use strict';
 const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const localDT = (iso) => (iso ? new Date(Date.parse(iso) - new Date(iso).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '');
 const me = CCCS.getSession().user;
 
 el('#whoName').textContent = me.display_name;
@@ -741,24 +742,37 @@ function renderVisit(body) {
       <div class="btn-row" style="margin-top:4px"><button class="btn" id="vSaveNotes">Save notes</button></div>
     </div>
     <div class="dsec"><div class="t">Reports</div><div id="vReports"><p class="dim">Loading…</p></div></div>
-    ${active ? `<div class="btn-row" style="margin-top:12px"><button class="btn ok" id="vDone">Mark completed</button><button class="btn danger" id="vCancel">Cancel visit</button></div>` : ''}
-    ${v.status === 'MISSED' ? `<div class="dsec">
-      <div class="t">Correct this record</div>
-      <p class="dim" style="margin:0 0 6px;font-size:12.5px">Auto-marked missed because nobody closed it out in time. If the patrol actually happened, record that here instead of leaving it missed.</p>
-      <div class="btn-row"><button class="btn ok" id="vCorrectDone">Mark completed after all</button><button class="btn" id="vCorrectCancel">Mark cancelled instead</button></div>
+    ${!['COMPLETED', 'CANCELLED'].includes(v.status) ? `<div class="dsec">
+      <div class="t">${v.status === 'MISSED' ? 'Correct this record' : 'Complete manually'}</div>
+      <p class="dim" style="margin:0 0 6px;font-size:12.5px">${v.status === 'MISSED'
+        ? 'Auto-marked missed because nobody closed it out in time. If the patrol actually happened, record it here instead of leaving it missed.'
+        : 'Confirmed done by radio or in person, without going through the officer app — set when it happened and mark it complete.'}</p>
+      <div style="display:flex;gap:8px">
+        <div style="flex:1"><label style="font-size:11px">On scene</label><input type="datetime-local" id="vOnScene" value="${localDT(v.on_scene_at)}"></div>
+        <div style="flex:1"><label style="font-size:11px">Completed</label><input type="datetime-local" id="vCompletedAt" value="${localDT(v.completed_at)}"></div>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn ok" id="vSetDone">Mark completed</button>
+        <button class="btn danger" id="vCancel">Cancel visit</button>
+      </div>
     </div>` : ''}
     <p class="err" id="detailErr"></p>`;
   paintReports(el('#vReports'), 'SITE_VISIT', v.id);
   el('#vSaveNotes').onclick = () => api('PATCH', `/api/site-visits/${v.id}`, { notes: el('#vNotes').value }).catch(showErr);
   els('[data-vcontact]', body).forEach((b) => (b.onclick = () => select('p', Number(b.dataset.vcontact))));
-  if (v.status === 'MISSED') {
-    armed(el('#vCorrectDone'), 'Confirm completed', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }).catch(showErr));
-    armed(el('#vCorrectCancel'), 'Confirm cancel', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }).catch(showErr));
+  if (!['COMPLETED', 'CANCELLED'].includes(v.status)) {
+    armed(el('#vSetDone'), 'Confirm completed', () => {
+      const onScene = el('#vOnScene').value, completedAt = el('#vCompletedAt').value;
+      return api('PATCH', `/api/site-visits/${v.id}`, {
+        status: 'COMPLETED',
+        ...(onScene ? { on_scene_at: new Date(onScene).toISOString() } : {}),
+        completed_at: completedAt ? new Date(completedAt).toISOString() : new Date().toISOString(),
+      }).catch(showErr);
+    });
+    armed(el('#vCancel'), 'Confirm cancel', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }).catch(showErr));
   }
   if (!active) return;
   el('#vAssign').onclick = () => api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vAdd').value) }).catch(showErr);
-  armed(el('#vDone'), 'Confirm completed', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'COMPLETED' }));
-  armed(el('#vCancel'), 'Confirm cancel', () => api('PATCH', `/api/site-visits/${v.id}`, { status: 'CANCELLED' }));
   els('[data-vstand]', body).forEach((b) => armed(b, 'Confirm', () => api('POST', `/api/site-visits/${v.id}/stand-down`, { personnel: Number(b.dataset.vstand) })));
 }
 
