@@ -743,6 +743,33 @@ test('editing or deleting a repeating shift can target just that one occurrence,
   assert.ok((await all()).some((s) => s.id === rootId), 'the root is unaffected by deleting one instance');
 });
 
+test('a generated instance cannot be made a repeat root of its own — that produced real duplicate shifts live once', async () => {
+  const type = (await call('GET', '/api/shift-types', undefined, dispT)).body[0];
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const site = sites.body.find((x) => x.name === 'Northgate Distribution');
+  const rootStart = Date.now() + 86400000;
+  const created = await call('POST', '/api/shifts', {
+    shift_type_id: type.id, site_id: site.id,
+    starts_at: new Date(rootStart).toISOString(), ends_at: new Date(rootStart + 8 * 3600e3).toISOString(),
+  }, adminT);
+  const rootId = created.body.id;
+  await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 7 }, adminT);
+  const week1 = (await call('GET', '/api/shifts', undefined, adminT)).body
+    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 7 * 86400000)) < 60000);
+  assert.ok(week1);
+
+  // Nesting a second root inside the first — the exact shape of the bug —
+  // is refused rather than silently creating an overlapping series.
+  const nest = await call('PUT', `/api/shifts/${week1.id}/recurrence`, { every_days: 7 }, adminT);
+  assert.equal(nest.status, 400);
+  assert.match(nest.body.error, /already repeats/);
+
+  // Clearing repeat is always allowed, including on a generated instance —
+  // there is nothing to nest, it only ever detaches.
+  const clear = await call('PUT', `/api/shifts/${week1.id}/recurrence`, { every_days: null }, adminT);
+  assert.equal(clear.status, 200);
+});
+
 test('a site visit is assigned, acknowledged, walked through checklist and photo, and completed with a report', async () => {
   const sites = await call('GET', '/api/sites', undefined, dispT);
   const northgate = sites.body.find((x) => x.name === 'Northgate Distribution');
