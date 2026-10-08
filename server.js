@@ -4614,6 +4614,35 @@ route('POST', '/api/personnel/:id/ical-feed/regenerate', ADMIN, ({ params, user 
   logEvent('ical_feed.regenerated', `${user.display_name} REGENERATED ${p.name}'S SHARED ROTA LINK`, { personnel_id: p.id });
   return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${p.ical_token}.ics` };
 });
+// Texts the shared rota link straight to the emergency contact on file —
+// same send path, dry-run safety and dial_log audit trail as the
+// existing click-to-SMS to an officer themselves (routes-contact.js).
+route('POST', '/api/personnel/:id/ical-feed/sms', ADMIN, async ({ params, user }) => {
+  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'person not found');
+  const ec = p.emergency_contact || {};
+  if (!ec.phone) throw httpError(400, 'no emergency contact phone number on file for this person');
+  if (!p.ical_token) p.ical_token = crypto.randomBytes(24).toString('hex');
+  const url = `${PUBLIC_BASE_URL}/api/rota/ical/${p.ical_token}.ics`;
+  const text = `Hi${ec.name ? ' ' + ec.name.split(/\s+/)[0] : ''}, this link shows ${p.name}'s work shifts in your calendar app and updates itself automatically: ${url}`;
+  const result = await sms.send({ to: ec.phone, body: text, label: ec.name || p.name });
+  const row = {
+    id: nextId('dial_log'), channel: 'SMS', personnel_id: p.id,
+    to_number: sms.normalizeNumber(ec.phone) || String(ec.phone || ''),
+    from_number: null, actor_user_id: user.id, actor_name: user.display_name,
+    job_id: null, site_visit_id: null, body: text,
+    provider: result.dryRun ? 'none' : 'twilio', provider_ref: result.sid || null,
+    outcome: result.ok ? (result.dryRun ? 'ATTEMPTED' : 'QUEUED') : 'FAILED',
+    error_code: result.ok ? null : (result.error || 'send failed'),
+    duration_s: null, attempted_at: new Date().toISOString(), settled_at: null,
+  };
+  db.dial_log.push(row);
+  logEvent('ical_feed.sms_sent', result.ok
+    ? `${user.display_name} SENT ${p.name}'S ROTA LINK TO THEIR EMERGENCY CONTACT${result.dryRun ? ' (dry run — SMS_LIVE is off, nothing sent)' : ` (queued, ${result.sid})`}`
+    : `ROTA LINK SMS TO ${p.name}'S EMERGENCY CONTACT FAILED — ${result.error}`,
+    { dial_log_id: row.id, personnel_id: p.id, sid: result.sid || null });
+  if (!result.ok) throw httpError(502, result.error || 'send failed');
+  return { ok: true, dry_run: Boolean(result.dryRun) };
+});
 require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow: () => store.flushNow() });
 
 // Breaks, hours, geofenced clock-in, reminders — see routes-attendance.js.

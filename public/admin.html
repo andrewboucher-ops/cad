@@ -893,6 +893,9 @@ function personnelForm(p) {
         <button type="button" class="btn" id="npnIcalCopy" style="padding:4px 10px;font-size:11px">Copy</button>
         <button type="button" class="btn danger" id="npnIcalRegen" style="padding:4px 10px;font-size:11px">Regenerate — breaks the old link</button>
       </div>
+      ${(p.emergency_contact && p.emergency_contact.phone) ? `<div class="btn-row" style="margin-top:4px">
+        <button type="button" class="btn primary" id="npnIcalSms" style="padding:4px 10px;font-size:11px">Text link to ${esc(p.emergency_contact.name || 'emergency contact')}</button>
+      </div>` : ''}
       <p class="dim" id="npnIcalMsg" style="margin:2px 0 0;font-size:12px">Anyone with this link can see their shifts — only share it with who it's meant for.</p>` : ''}
       <label>Bank details — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">for payroll. Admin-only to set, deliberately — the person can see what's on file from their own profile but can't change it themselves; get a change confirmed by them directly before updating it here</span></label>
       <div style="display:flex;gap:8px">
@@ -998,6 +1001,14 @@ function personnelModal(p) {
         if (!confirm('The old link will stop working for anyone already using it. Continue?')) return;
         try { showLink((await api('POST', `/api/personnel/${p.id}/ical-feed/regenerate`)).url); el('#npnIcalMsg').textContent = 'New link generated — share it again.'; }
         catch (e) { el('#npnIcalMsg').textContent = e.message; }
+      };
+      if (el('#npnIcalSms')) el('#npnIcalSms').onclick = async () => {
+        const ecName = (p.emergency_contact && p.emergency_contact.name) || 'their emergency contact';
+        if (!confirm(`Text ${p.name}'s rota link to ${ecName}?`)) return;
+        try {
+          const r = await api('POST', `/api/personnel/${p.id}/ical-feed/sms`, {});
+          el('#npnIcalMsg').textContent = r.dry_run ? 'Logged as a dry run — SMS_LIVE is off, nothing actually sent.' : 'Sent.';
+        } catch (e) { el('#npnIcalMsg').textContent = e.message; }
       };
     }
     if (!p) api('GET', '/api/admin/staff-numbers').then((r) => { el('#npnEmpNo').placeholder = `next: ${r.example}`; }).catch(() => {});

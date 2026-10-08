@@ -232,3 +232,20 @@ test('admin can issue someone with no login a calendar link to their own shifts,
   assert.notEqual(regen.body.url, feed.url);
   assert.equal((await callRaw('GET', `/api/rota/ical/${token}.ics`)).status, 404, 'the old link is dead');
 });
+
+test('admin can text that calendar link straight to the emergency contact on file', async () => {
+  const noContact = (await call('POST', '/api/personnel', { name: 'No Contact On File' }, adminT)).body;
+  assert.equal((await call('POST', `/api/personnel/${noContact.id}/ical-feed/sms`, {}, adminT)).status, 400, 'nothing to text it to');
+
+  await call('PATCH', `/api/personnel/${danPersonnelId}`, { emergency_contact: { name: 'Jo Whitfield', relationship: 'Spouse', phone: '07700900555' } }, adminT);
+  assert.equal((await call('POST', `/api/personnel/${danPersonnelId}/ical-feed/sms`, {}, dispT)).status, 403, 'admin only');
+
+  const before = maxLogId();
+  const r = await call('POST', `/api/personnel/${danPersonnelId}/ical-feed/sms`, {}, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.dry_run, true, 'SMS_LIVE is off in tests');
+  const logs = notifyLogsFor(danPersonnelId, before);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0].body, /Jo, this link shows/);
+  assert.match(logs[0].to_number, /0555$/);
+});
