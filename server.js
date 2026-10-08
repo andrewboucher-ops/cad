@@ -4376,13 +4376,60 @@ function buildIcsFeed(name, vevents) {
     ...vevents, 'END:VCALENDAR',
   ].join('\r\n');
 }
-route('GET', '/api/me/ical-feed', ALL, ({ req, user }) => {
+function personalVevents(personnelId) {
+  const now = new Date().toISOString();
+  return db.shift_assignments
+    .filter((a) => a.personnel_id === personnelId)
+    .map((a) => ({ a, s: db.shifts.find((x) => x.id === a.shift_id) }))
+    .filter((x) => x.s && x.s.status !== 'DRAFT')
+    .map(({ a, s }) => icsVevent({
+      uid: `shift-${s.id}-assignment-${a.id}@cccs.local`, stamp: now, startsAt: s.starts_at, endsAt: s.ends_at,
+      summary: shiftTitle(s), location: s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).address : null,
+      description: s.briefing || s.notes || '',
+      status: (s.status === 'CANCELLED' || ['DECLINED', 'REMOVED'].includes(a.status)) ? 'CANCELLED' : 'CONFIRMED',
+      sequence: s.revision || 0,
+    }));
+}
+function allOpsVevents() {
+  const now = new Date().toISOString();
+  return db.shifts
+    .filter((s) => s.status !== 'DRAFT')
+    .map((s) => icsVevent({
+      uid: `shift-${s.id}@cccs.local`, stamp: now, startsAt: s.starts_at, endsAt: s.ends_at,
+      summary: shiftTitle(s), location: s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).address : null,
+      description: s.briefing || s.notes || '', status: s.status === 'CANCELLED' ? 'CANCELLED' : 'CONFIRMED', sequence: s.revision || 0,
+    }));
+}
+// Two feeds per control-role user: their own shifts (if they personally
+// have any — a duty supervisor still works shifts) and, separately, the
+// whole operation for anyone who wants the oversight view in their own
+// calendar too. Personal is the default; "all" is opt-in. A FIELD_USER
+// only ever gets the personal one — they have no oversight role to see.
+route('GET', '/api/me/ical-feed', ALL, ({ user }) => {
   const u = db.users.find((x) => x.id === user.id);
-  if (!u.ical_token) { u.ical_token = crypto.randomBytes(24).toString('hex'); }
-  return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token}.ics` };
+  const out = {};
+  if (u.personnel_id) {
+    if (!u.ical_token) u.ical_token = crypto.randomBytes(24).toString('hex');
+    out.url = `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token}.ics`;
+  }
+  if (isControlRole(u.role)) {
+    if (!u.ical_token_all) u.ical_token_all = crypto.randomBytes(24).toString('hex');
+    out.all_url = `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token_all}.ics`;
+    // No personal shifts at all (most dispatchers/supervisors): fall back
+    // to the whole-ops feed as the one offered, same as before this change.
+    if (!out.url) out.url = out.all_url;
+  }
+  if (!out.url) throw httpError(404, 'no shifts to sync — your login is not linked to a staff record');
+  return out;
 });
-route('POST', '/api/me/ical-feed/regenerate', ALL, ({ user }) => {
+route('POST', '/api/me/ical-feed/regenerate', ALL, ({ body, user }) => {
   const u = db.users.find((x) => x.id === user.id);
+  if (body && body.which === 'all') {
+    if (!isControlRole(u.role)) throw httpError(403, 'no whole-rota feed to regenerate');
+    u.ical_token_all = crypto.randomBytes(24).toString('hex');
+    logEvent('ical_feed.regenerated', `${u.display_name} REGENERATED THEIR WHOLE-ROTA FEED LINK`, { user_id: u.id });
+    return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token_all}.ics` };
+  }
   u.ical_token = crypto.randomBytes(24).toString('hex');
   logEvent('ical_feed.regenerated', `${u.display_name} REGENERATED THEIR ROTA FEED LINK`, { user_id: u.id });
   return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token}.ics` };
@@ -4390,35 +4437,17 @@ route('POST', '/api/me/ical-feed/regenerate', ALL, ({ user }) => {
 // Deliberately `null` roles — see the comment above. The token in the URL
 // IS the credential; validation happens here, not in the router.
 route('GET', '/api/rota/ical/:token.ics', null, ({ params }) => {
-  const u = db.users.find((x) => x.ical_token && x.ical_token === params.token);
-  if (!u) throw httpError(404, 'feed not found');
-  const now = new Date().toISOString();
-  let vevents = [];
-  if (isControlRole(u.role)) {
-    // A supervisor's/dispatcher's own feed: the whole operation, not just
-    // their own assignments — they don't have shift assignments of their own.
-    vevents = db.shifts
-      .filter((s) => s.status !== 'DRAFT')
-      .map((s) => icsVevent({
-        uid: `shift-${s.id}@cccs.local`, stamp: now, startsAt: s.starts_at, endsAt: s.ends_at,
-        summary: shiftTitle(s), location: s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).address : null,
-        description: s.briefing || s.notes || '', status: s.status === 'CANCELLED' ? 'CANCELLED' : 'CONFIRMED', sequence: s.revision || 0,
-      }));
-  } else if (u.personnel_id) {
-    vevents = db.shift_assignments
-      .filter((a) => a.personnel_id === u.personnel_id)
-      .map((a) => ({ a, s: db.shifts.find((x) => x.id === a.shift_id) }))
-      .filter((x) => x.s && x.s.status !== 'DRAFT')
-      .map(({ a, s }) => icsVevent({
-        uid: `shift-${s.id}-assignment-${a.id}@cccs.local`, stamp: now, startsAt: s.starts_at, endsAt: s.ends_at,
-        summary: shiftTitle(s), location: s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).address : null,
-        description: s.briefing || s.notes || '',
-        status: (s.status === 'CANCELLED' || ['DECLINED', 'REMOVED'].includes(a.status)) ? 'CANCELLED' : 'CONFIRMED',
-        sequence: s.revision || 0,
-      }));
+  const byAll = db.users.find((x) => x.ical_token_all && x.ical_token_all === params.token);
+  if (byAll) {
+    return {
+      __body: buildIcsFeed('CCCS Rota — All sites', allOpsVevents()),
+      __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
+    };
   }
+  const u = db.users.find((x) => x.ical_token && x.ical_token === params.token);
+  if (!u || !u.personnel_id) throw httpError(404, 'feed not found');
   return {
-    __body: buildIcsFeed(isControlRole(u.role) ? 'CCCS Rota — All sites' : 'My Rota', vevents),
+    __body: buildIcsFeed('My Rota', personalVevents(u.personnel_id)),
     __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
   };
 });

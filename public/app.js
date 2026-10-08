@@ -593,11 +593,22 @@ const CCCS = (() => {
     host.querySelector('[data-cal="close"]').onclick = close;
     host.querySelector('.modal-back').onclick = (e) => { if (e.target.classList.contains('modal-back')) close(); };
     const body = host.querySelector('.content');
-    const paint = (url) => {
+    let feed = null;
+    const paint = (which) => {
+      const url = which === 'all' ? feed.all_url : feed.url;
       const webcal = url.replace(/^https?:/, 'webcal:');
-      const name = encodeURIComponent('CCCS rota');
+      const name = encodeURIComponent(which === 'all' ? 'CCCS rota — all sites' : 'CCCS rota');
+      // Only a control-role user with shifts of their own has two distinct
+      // feeds to pick between — a dispatcher with no personal shifts, or a
+      // field officer, only ever has the one (url falls back to all_url
+      // server-side for the former), so there's nothing to toggle.
+      const showToggle = feed.all_url && feed.url !== feed.all_url;
       body.innerHTML = `
-        <p>Add your rota to your calendar. It updates by itself when shifts change.</p>
+        <p>Add ${which === 'all' ? 'the whole rota' : 'your rota'} to your calendar. It updates by itself when shifts change.</p>
+        ${showToggle ? `<div class="btn-row" style="margin-bottom:10px">
+          <button class="btn ${which !== 'all' ? 'primary' : ''}" data-cal="which" data-which="mine" type="button">My shifts</button>
+          <button class="btn ${which === 'all' ? 'primary' : ''}" data-cal="which" data-which="all" type="button">Whole rota</button>
+        </div>` : ''}
         <div class="cal-links">
           <a class="btn primary" href="${esc(webcal)}">iPhone, iPad or Mac calendar</a>
           <a class="btn" target="_blank" rel="noopener" href="https://outlook.office.com/calendar/0/addfromweb?url=${encodeURIComponent(url)}&name=${name}">Outlook (work account)</a>
@@ -610,9 +621,10 @@ const CCCS = (() => {
           <button class="btn" data-cal="copy" type="button">Copy link</button>
           <button class="btn danger" data-cal="regen" type="button">Regenerate link</button>
         </div>
-        <p class="dim" data-cal="msg" style="margin-top:8px">Anyone with this link can see the rota, so don't share it. Google can take several hours to show changes.</p>`;
+        <p class="dim" data-cal="msg" style="margin-top:8px">Anyone with this link can see ${which === 'all' ? 'the whole rota' : 'your rota'}, so don't share it. Google can take several hours to show changes.</p>`;
       const input = body.querySelector('[data-cal="url"]'), msg = body.querySelector('[data-cal="msg"]');
       input.onclick = () => input.select();
+      body.querySelectorAll('[data-cal="which"]').forEach((b) => (b.onclick = () => paint(b.dataset.which)));
       body.querySelector('[data-cal="copy"]').onclick = async () => {
         try { await navigator.clipboard.writeText(input.value); msg.textContent = 'Copied.'; return; } catch {}
         input.focus(); input.select();
@@ -621,11 +633,15 @@ const CCCS = (() => {
       };
       body.querySelector('[data-cal="regen"]').onclick = async () => {
         if (!confirm('The old link will stop working in any calendar already using it. Continue?')) return;
-        try { const r = await api('POST', '/api/me/ical-feed/regenerate', {}); paint(r.url); body.querySelector('[data-cal="msg"]').textContent = 'New link made — add it to your calendar again.'; }
-        catch (e) { msg.textContent = e.message; }
+        try {
+          const r = await api('POST', '/api/me/ical-feed/regenerate', which === 'all' ? { which: 'all' } : {});
+          if (which === 'all') feed.all_url = r.url; else feed.url = r.url;
+          paint(which);
+          body.querySelector('[data-cal="msg"]').textContent = 'New link made — add it to your calendar again.';
+        } catch (e) { msg.textContent = e.message; }
       };
     };
-    try { paint((await api('GET', '/api/me/ical-feed')).url); }
+    try { feed = await api('GET', '/api/me/ical-feed'); paint(feed.all_url && feed.url === feed.all_url ? 'all' : 'mine'); }
     catch (e) { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }
 

@@ -163,6 +163,36 @@ test('a control role\'s feed shows the whole operation, not just their own assig
   assert.ok(ics.text.includes(`UID:shift-${s.id}@cccs.local`));
 });
 
+test('a control role who also personally works shifts (a duty supervisor) gets both feeds, own shifts as the default', async () => {
+  const supT = await login('supervisor', 'super123');
+  const supPersonnel = (await call('POST', '/api/personnel', { name: 'Supervising Officer' }, adminT)).body;
+  const supUser = app.db.users.find((u) => u.username === 'supervisor');
+  await call('PATCH', `/api/users/${supUser.id}`, { personnel_id: supPersonnel.id }, adminT);
+  const supervisorPersonnelId = supPersonnel.id;
+  const feed = (await call('GET', '/api/me/ical-feed', undefined, supT)).body;
+  assert.ok(feed.url, 'personal feed present');
+  assert.ok(feed.all_url, 'whole-rota feed also present');
+  assert.notEqual(feed.url, feed.all_url, 'two distinct feeds, not the same one twice');
+
+  const s = await shift(160, 168);
+  const assignR = await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: supervisorPersonnelId }, adminT);
+  const assignmentId = assignR.body.assignments.find((a) => a.personnel_id === supervisorPersonnelId).id;
+  const mineToken = feed.url.split('/').pop().replace('.ics', '');
+  const mine = await callRaw('GET', `/api/rota/ical/${mineToken}.ics`);
+  assert.ok(mine.text.includes(`UID:shift-${s.id}-assignment-${assignmentId}@cccs.local`), 'the "mine" feed has their own assignment');
+  assert.ok(!mine.text.includes(`UID:shift-${s.id}@cccs.local\r`), 'and not the whole-ops UID form');
+
+  const allToken = feed.all_url.split('/').pop().replace('.ics', '');
+  const all = await callRaw('GET', `/api/rota/ical/${allToken}.ics`);
+  assert.ok(all.text.includes(`UID:shift-${s.id}@cccs.local`), 'the "all" feed has it in the whole-ops form');
+
+  const regenAll = await call('POST', '/api/me/ical-feed/regenerate', { which: 'all' }, supT);
+  assert.notEqual(regenAll.body.url, feed.all_url, 'regenerating "all" changes only that token');
+  assert.equal((await callRaw('GET', `/api/rota/ical/${mineToken}.ics`)).status, 200, 'the personal link is untouched');
+  const fieldT = await login('dwhitfield', 'field123');
+  assert.equal((await call('POST', '/api/me/ical-feed/regenerate', { which: 'all' }, fieldT)).status, 403, 'a field officer has no whole-rota feed to regenerate');
+});
+
 test('a draft shift never appears on any feed', async () => {
   const feed = await call('GET', '/api/me/ical-feed', undefined, dispT);
   const token = feed.body.url.split('/').pop().replace('.ics', '');
