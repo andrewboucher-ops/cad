@@ -4253,6 +4253,75 @@ route('DELETE', '/api/shifts/:id', ADMIN, ({ params }) => {
   return { ok: true };
 });
 
+/* ---- Recurring shifts — "repeat every N days" instead of repeatedly
+ * clicking Duplicate week forward. Same shape as shift.patrol in
+ * routes-shift-patrols.js: a setting on one shift (the root), a background
+ * tick that keeps future instances generated up to a rolling horizon, and
+ * nothing invented for the past. The root is the only shift that ever
+ * carries `recurrence` — generated instances are plain one-off DRAFT
+ * shifts tagged with recurrence_root_id, so turning recurrence off, or
+ * deleting the root, just stops future generation; it never retroactively
+ * touches what's already been made. ---- */
+const SHIFT_RECURRENCE_HORIZON_MS = 56 * 86400000; // 8 weeks
+route('PUT', '/api/shifts/:id/recurrence', ADMIN, ({ params, body, user }) => {
+  const s = findShift(params.id);
+  if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
+  if (body.every_days == null || body.every_days === '' || Number(body.every_days) === 0) {
+    s.recurrence = null;
+    logEvent('shift.recurrence_set', `RECURRENCE REMOVED FROM SHIFT ${s.id}`, { shift_id: s.id });
+    return publicShift(s);
+  }
+  const every = Number(body.every_days);
+  if (!Number.isInteger(every) || every < 1 || every > 90) throw httpError(400, 'repeat interval must be 1 to 90 days');
+  let until = null;
+  if (body.until) { const d = new Date(body.until); if (isNaN(d)) throw httpError(400, 'invalid until date'); until = d.toISOString(); }
+  const unchanged = s.recurrence && s.recurrence.every_days === every && s.recurrence.until === until;
+  s.recurrence = { every_days: every, until, set_at: unchanged ? s.recurrence.set_at : new Date().toISOString(), set_by: user.display_name };
+  logEvent('shift.recurrence_set', `SHIFT ${s.id} SET TO REPEAT EVERY ${every} DAY${every === 1 ? '' : 'S'}${until ? ` UNTIL ${until.slice(0, 10)}` : ''}`, { shift_id: s.id });
+  shiftRecurrenceTick(); // top up immediately rather than waiting for the next tick
+  return publicShift(s);
+});
+function shiftRecurrenceTick(now = Date.now()) {
+  let changed = false;
+  const horizon = now + SHIFT_RECURRENCE_HORIZON_MS;
+  for (const root of db.shifts) {
+    if (!root.recurrence || !root.recurrence.every_days) continue;
+    const untilMs = root.recurrence.until ? Date.parse(root.recurrence.until) : Infinity;
+    const everyMs = root.recurrence.every_days * 86400000;
+    const rootStart = Date.parse(root.starts_at), duration = Date.parse(root.ends_at) - rootStart;
+    const setAtMs = Date.parse(root.recurrence.set_at);
+    for (let k = 1; k < 500; k++) {
+      const instStart = rootStart + k * everyMs;
+      if (instStart > horizon) break;
+      if (instStart > untilMs) break;
+      if (instStart < setAtMs) continue; // never invent instances for before the setting was made
+      if (db.shifts.some((x) => x.recurrence_root_id === root.id && Math.abs(Date.parse(x.starts_at) - instStart) < 60000)) continue;
+      const inst = {
+        id: nextId('shifts'), site_id: root.site_id, shift_type_id: root.shift_type_id,
+        starts_at: new Date(instStart).toISOString(), ends_at: new Date(instStart + duration).toISOString(),
+        break_minutes: root.break_minutes, required_headcount: root.required_headcount, status: 'DRAFT',
+        pay_rate: root.pay_rate, bill_rate: root.bill_rate,
+        uniform_ppe: root.uniform_ppe, briefing: root.briefing, notes: root.notes,
+        detail: { ...(root.detail || {}) }, template_id: null, revision: 0,
+        created_by: root.created_by, created_at: new Date(now).toISOString(),
+        recurrence_root_id: root.id,
+      };
+      db.shifts.push(inst);
+      changed = true;
+      for (const a of db.shift_assignments.filter((x) => x.shift_id === root.id && ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
+        db.shift_assignments.push({
+          id: nextId('shift_assignments'), shift_id: inst.id, personnel_id: a.personnel_id, role_on_shift: a.role_on_shift,
+          is_duty_supervisor: a.is_duty_supervisor, status: 'ASSIGNED', confirmed_at: null,
+          attendance: null, clocked_in_at: null, clocked_out_at: null,
+          created_by: a.created_by, created_at: new Date(now).toISOString(), updated_at: new Date(now).toISOString(),
+        });
+      }
+      logEvent('shift.recurrence_generated', `SHIFT ${inst.id} GENERATED FROM RECURRING SHIFT ${root.id}`, { shift_id: inst.id, recurrence_root_id: root.id });
+    }
+  }
+  if (changed) store.flushNow();
+}
+
 /* ---- Assignments: who's on a shift, and their attendance ---- */
 function assertAssignmentAccess(a, user) {
   if (isControlRole(user.role)) return;
@@ -5018,6 +5087,8 @@ function start() {
   setInterval(welfareTick, WELFARE_TICK_MS).unref?.();
   patrolScheduleTick();
   setInterval(patrolScheduleTick, PATROL_SCHEDULE_TICK_MS).unref?.();
+  shiftRecurrenceTick();
+  setInterval(shiftRecurrenceTick, Number(process.env.SHIFT_RECURRENCE_TICK_MS || 60 * 60 * 1000)).unref?.();
   if (process.env.RETENTION !== 'off') {
     retentionSweep();
     setInterval(retentionSweep, 6 * 60 * 60 * 1000).unref?.();
@@ -5046,4 +5117,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, shiftPatrols, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, RETENTION, hashPassword, verifyPassword, sign, PORT };

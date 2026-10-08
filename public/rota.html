@@ -457,6 +457,14 @@ function shiftForm(s, defaults) {
       <input id="shHeadcount" type="number" min="1" value="${headcountVal}" ${dis}>
       <label>Notes</label>
       <textarea id="shNotes" rows="2" ${dis}>${esc(notesVal)}</textarea>
+      ${!isNew ? `<label>Repeat</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="dim" style="font-size:12.5px;white-space:nowrap">every</span>
+        <input id="shRecurEvery" type="number" min="1" max="90" style="width:70px" value="${s.recurrence ? s.recurrence.every_days : ''}" placeholder="off" ${dis}>
+        <span class="dim" style="font-size:12.5px;white-space:nowrap">day(s), until</span>
+        <input id="shRecurUntil" type="date" value="${s.recurrence && s.recurrence.until ? s.recurrence.until.slice(0, 10) : ''}" style="flex:1" ${dis}>
+      </div>
+      <p class="dim" style="margin:2px 0 0;font-size:12px">Leave the interval blank to turn repeating off. Future shifts are generated automatically as drafts, about 8 weeks ahead, that you can still edit individually.</p>` : ''}
       ${isNew
         ? `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="shDraft" ${dis}> Create as draft — not shown to staff until published</label>`
         : `<label>Status</label>
@@ -741,6 +749,12 @@ function shiftModal(s, defaults) {
         if (s) {
           if (el('#shStatus')) body.status = el('#shStatus').value;
           await api('PATCH', `/api/shifts/${s.id}`, body);
+          if (el('#shRecurEvery')) {
+            await api('PUT', `/api/shifts/${s.id}/recurrence`, {
+              every_days: el('#shRecurEvery').value ? Number(el('#shRecurEvery').value) : null,
+              until: el('#shRecurUntil').value || null,
+            });
+          }
         } else {
           body.personnel = Number(el('#shPersonnel').value);
           if (el('#shDraft') && el('#shDraft').checked) body.status = 'DRAFT';

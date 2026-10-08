@@ -646,6 +646,50 @@ test('a patrol schedule is created and the tick turns a due occurrence into a sc
   assert.equal(stillOne.length, 1, 'a second tick does not create a duplicate while one is still open');
 });
 
+test('a recurring shift generates future drafts up to the 8-week horizon, with assignments carried over, and no duplicates', async () => {
+  const type = (await call('GET', '/api/shift-types', undefined, dispT)).body[0];
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const site = sites.body.find((x) => x.name === 'Northgate Distribution');
+  const rootStart = Date.now() + 86400000; // tomorrow
+  const created = await call('POST', '/api/shifts', {
+    shift_type_id: type.id, site_id: site.id,
+    starts_at: new Date(rootStart).toISOString(), ends_at: new Date(rootStart + 8 * 3600e3).toISOString(),
+    personnel: danId,
+  }, adminT);
+  assert.equal(created.status, 201);
+  const rootId = created.body.id;
+
+  assert.equal((await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 7 }, dispT)).status, 403, 'dispatchers cannot set recurrence');
+  assert.equal((await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 200 }, adminT)).status, 400, 'out of range');
+
+  const set = await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 7 }, adminT);
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+  assert.equal(set.body.recurrence.every_days, 7);
+
+  const near = (await call('GET', '/api/shifts', undefined, adminT)).body
+    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 7 * 86400000)) < 60000);
+  assert.ok(near, 'next week\'s instance exists');
+  assert.equal(near.status, 'DRAFT');
+  assert.ok(near.assignments.some((a) => a.personnel_id === danId), 'the assignment carried over');
+
+  const far = (await call('GET', '/api/shifts', undefined, adminT)).body
+    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 42 * 86400000)) < 60000);
+  assert.ok(far, 'six weeks out, still within the 8-week horizon');
+
+  const tooFar = (await call('GET', '/api/shifts', undefined, adminT)).body
+    .filter((s) => s.recurrence_root_id === rootId && Date.parse(s.starts_at) > rootStart + 56 * 86400000);
+  assert.equal(tooFar.length, 0, 'nothing generated beyond the 8-week horizon');
+
+  const before = (await call('GET', '/api/shifts', undefined, adminT)).body.filter((s) => s.recurrence_root_id === rootId).length;
+  app.shiftRecurrenceTick();
+  const after = (await call('GET', '/api/shifts', undefined, adminT)).body.filter((s) => s.recurrence_root_id === rootId).length;
+  assert.equal(after, before, 'ticking again does not duplicate');
+
+  await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: null }, adminT);
+  const stopped = (await call('GET', '/api/shifts', undefined, adminT)).body.find((s) => s.id === rootId);
+  assert.equal(stopped.recurrence, null);
+});
+
 test('a site visit is assigned, acknowledged, walked through checklist and photo, and completed with a report', async () => {
   const sites = await call('GET', '/api/sites', undefined, dispT);
   const northgate = sites.body.find((x) => x.name === 'Northgate Distribution');
