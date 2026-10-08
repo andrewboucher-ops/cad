@@ -4532,12 +4532,34 @@ route('GET', '/api/rota/ical/:token.ics', null, ({ params }) => {
       __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
     };
   }
+  // An admin-issued link for someone with no CCCS login at all — a shift
+  // officer's emergency contact, typically — to see just their shifts,
+  // the same feed shape as the officer's own, without ever having a
+  // user account or needing one.
+  const p = db.personnel.find((x) => x.ical_token && x.ical_token === params.token);
+  if (p) {
+    return {
+      __body: buildIcsFeed(`${p.name} — Rota`, personalVevents(p.id)),
+      __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
+    };
+  }
   const u = db.users.find((x) => x.ical_token && x.ical_token === params.token);
   if (!u || !u.personnel_id) throw httpError(404, 'feed not found');
   return {
     __body: buildIcsFeed('My Rota', personalVevents(u.personnel_id)),
     __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
   };
+});
+route('POST', '/api/personnel/:id/ical-feed', ADMIN, ({ params }) => {
+  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'person not found');
+  if (!p.ical_token) p.ical_token = crypto.randomBytes(24).toString('hex');
+  return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${p.ical_token}.ics` };
+});
+route('POST', '/api/personnel/:id/ical-feed/regenerate', ADMIN, ({ params, user }) => {
+  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'person not found');
+  p.ical_token = crypto.randomBytes(24).toString('hex');
+  logEvent('ical_feed.regenerated', `${user.display_name} REGENERATED ${p.name}'S SHARED ROTA LINK`, { personnel_id: p.id });
+  return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${p.ical_token}.ics` };
 });
 require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow: () => store.flushNow() });
 

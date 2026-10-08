@@ -884,6 +884,16 @@ function personnelForm(p) {
         <input id="npnEcPhone" autocomplete="off" placeholder="Phone" value="${isNew ? '' : esc((p.emergency_contact && p.emergency_contact.phone) || '')}" style="flex:1">
         <input id="npnEcEmail" type="email" autocomplete="off" placeholder="Email (optional)" value="${isNew ? '' : esc((p.emergency_contact && p.emergency_contact.email) || '')}" style="flex:1">
       </div>
+      ${!isNew ? `<label>Shared rota link — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">lets their emergency contact, or anyone else, see their shifts in a calendar app — no CCCS login needed</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="npnIcalUrl" readonly placeholder="Not generated yet" style="flex:1">
+        <button type="button" class="btn" id="npnIcalGen" style="padding:6px 12px;font-size:12px;white-space:nowrap">Generate / show</button>
+      </div>
+      <div class="btn-row hide" id="npnIcalActions" style="margin-top:0">
+        <button type="button" class="btn" id="npnIcalCopy" style="padding:4px 10px;font-size:11px">Copy</button>
+        <button type="button" class="btn danger" id="npnIcalRegen" style="padding:4px 10px;font-size:11px">Regenerate — breaks the old link</button>
+      </div>
+      <p class="dim" id="npnIcalMsg" style="margin:2px 0 0;font-size:12px">Anyone with this link can see their shifts — only share it with who it's meant for.</p>` : ''}
       <label>Bank details — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">for payroll. Admin-only to set, deliberately — the person can see what's on file from their own profile but can't change it themselves; get a change confirmed by them directly before updating it here</span></label>
       <div style="display:flex;gap:8px">
         <input id="npnBankAccName" autocomplete="off" placeholder="Account name" value="${isNew ? '' : esc((p.bank_details && p.bank_details.account_name) || '')}" style="flex:1">
@@ -974,6 +984,22 @@ function personnelModal(p) {
       </div>`;
     el('#pnCancel').onclick = closeModal;
     if (el('#pnFile')) el('#pnFile').onclick = () => personnelFileModal(p);
+    if (el('#npnIcalGen')) {
+      const showLink = (url) => { el('#npnIcalUrl').value = url; el('#npnIcalActions').classList.remove('hide'); };
+      el('#npnIcalGen').onclick = async () => {
+        try { showLink((await api('POST', `/api/personnel/${p.id}/ical-feed`)).url); }
+        catch (e) { el('#npnIcalMsg').textContent = e.message; }
+      };
+      el('#npnIcalCopy').onclick = async () => {
+        try { await navigator.clipboard.writeText(el('#npnIcalUrl').value); el('#npnIcalMsg').textContent = 'Copied.'; }
+        catch { el('#npnIcalUrl').select(); el('#npnIcalMsg').textContent = 'Select the link and copy it with your device\'s copy command.'; }
+      };
+      el('#npnIcalRegen').onclick = async () => {
+        if (!confirm('The old link will stop working for anyone already using it. Continue?')) return;
+        try { showLink((await api('POST', `/api/personnel/${p.id}/ical-feed/regenerate`)).url); el('#npnIcalMsg').textContent = 'New link generated — share it again.'; }
+        catch (e) { el('#npnIcalMsg').textContent = e.message; }
+      };
+    }
     if (!p) api('GET', '/api/admin/staff-numbers').then((r) => { el('#npnEmpNo').placeholder = `next: ${r.example}`; }).catch(() => {});
     else if (!p.employee_no) el('#npnEmpNo').placeholder = 'none yet — Staff numbers → number everyone without one';
     if (el('#pnPhotoFile')) el('#pnPhotoFile').onchange = async () => {

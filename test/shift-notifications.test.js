@@ -216,3 +216,19 @@ test('an unknown feed token is refused with no auth required', async () => {
   const r = await callRaw('GET', '/api/rota/ical/not-a-real-token.ics');
   assert.equal(r.status, 404);
 });
+
+test('admin can issue someone with no login a calendar link to their own shifts, e.g. for an emergency contact', async () => {
+  assert.equal((await call('POST', `/api/personnel/${danPersonnelId}/ical-feed`, {}, dispT)).status, 403, 'admin only');
+  const feed = (await call('POST', `/api/personnel/${danPersonnelId}/ical-feed`, {}, adminT)).body;
+  const token = feed.url.split('/').pop().replace('.ics', '');
+
+  const s = await shift(170, 178);
+  await call('POST', `/api/shifts/${s.id}/assignments`, { personnel: danPersonnelId }, adminT);
+  const ics = await callRaw('GET', `/api/rota/ical/${token}.ics`);
+  assert.equal(ics.status, 200);
+  assert.ok(ics.text.includes(`shift-${s.id}-assignment`), 'carries this person\'s own shifts, same as their self-service feed');
+
+  const regen = await call('POST', `/api/personnel/${danPersonnelId}/ical-feed/regenerate`, {}, adminT);
+  assert.notEqual(regen.body.url, feed.url);
+  assert.equal((await callRaw('GET', `/api/rota/ical/${token}.ics`)).status, 404, 'the old link is dead');
+});
