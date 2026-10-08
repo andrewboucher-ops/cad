@@ -166,6 +166,33 @@ function modal(title, html, onMount) {
 const closeModal = () => (el('#modalHost').innerHTML = '');
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
+/** A shift that repeats needs a scope on edit/delete — just this one
+ * occurrence, or this and every future one in the series. Appended
+ * standalone (not through modal()/#modalHost, which holds only one thing
+ * at a time) so it layers over the shift-edit modal that's asking the
+ * question without wiping out whatever is still filled into its fields.
+ * Resolves 'one' | 'series' | null (cancelled). */
+function seriesScopeModal(verb) {
+  return new Promise((resolve) => {
+    const host = document.createElement('div');
+    host.innerHTML = `<div class="modal-back"><div class="modal" role="dialog" aria-label="Repeating shift">
+      <h2>This shift repeats</h2>
+      <div class="content">
+        <p style="margin-top:0">${esc(verb)} just this shift, or this and every future shift in the series?</p>
+        <div class="btn-row" style="margin-top:10px;flex-wrap:wrap">
+          <button class="btn primary" data-scope="series">This and future shifts</button>
+          <button class="btn" data-scope="one">Just this shift</button>
+        </div>
+      </div>
+      <div class="foot"><button class="btn" data-scope="cancel">Cancel</button></div>
+    </div></div>`;
+    document.body.appendChild(host);
+    const finish = (val) => { host.remove(); resolve(val); };
+    host.querySelector('.modal-back').onclick = (e) => { if (e.target.classList.contains('modal-back')) finish(null); };
+    host.querySelectorAll('[data-scope]').forEach((b) => (b.onclick = () => finish(b.dataset.scope === 'cancel' ? null : b.dataset.scope)));
+  });
+}
+
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 function startOfWeek(d) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -632,8 +659,12 @@ function shiftModal(s, defaults) {
       </div>`;
     el('#shCancel').onclick = closeModal;
     if (el('#shDelete')) el('#shDelete').onclick = async () => {
-      if (!confirm('Delete this shift?')) return;
-      try { await api('DELETE', `/api/shifts/${s.id}`); closeModal(); await load(); }
+      let scope = 'one';
+      if (s.recurrence || s.recurrence_root_id) {
+        scope = await seriesScopeModal('Delete');
+        if (!scope) return;
+      } else if (!confirm('Delete this shift?')) return;
+      try { await api('DELETE', `/api/shifts/${s.id}?scope=${scope}`); closeModal(); await load(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
     // Reopens the same shift fresh from the server after a row action, so
@@ -736,6 +767,11 @@ function shiftModal(s, defaults) {
       catch (e) { el('#shError').textContent = e.message; }
     }));
     if (el('#shSave')) el('#shSave').onclick = async () => {
+      let scope = 'one';
+      if (s && (s.recurrence || s.recurrence_root_id)) {
+        scope = await seriesScopeModal('Save');
+        if (!scope) return;
+      }
       const body = {
         shift_type_id: Number(el('#shType').value),
         site_id: el('#shSite').value ? Number(el('#shSite').value) : null,
@@ -748,7 +784,7 @@ function shiftModal(s, defaults) {
       try {
         if (s) {
           if (el('#shStatus')) body.status = el('#shStatus').value;
-          await api('PATCH', `/api/shifts/${s.id}`, body);
+          await api('PATCH', `/api/shifts/${s.id}${scope === 'series' ? '?scope=series' : ''}`, body);
           if (el('#shRecurEvery')) {
             await api('PUT', `/api/shifts/${s.id}/recurrence`, {
               every_days: el('#shRecurEvery').value ? Number(el('#shRecurEvery').value) : null,

@@ -690,6 +690,59 @@ test('a recurring shift generates future drafts up to the 8-week horizon, with a
   assert.equal(stopped.recurrence, null);
 });
 
+test('editing or deleting a repeating shift can target just that one occurrence, or it and every future one', async () => {
+  const type = (await call('GET', '/api/shift-types', undefined, dispT)).body[0];
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const siteA = sites.body.find((x) => x.name === 'Northgate Distribution');
+  const siteB = sites.body.find((x) => x.name === 'Carlton Retail Centre');
+  const rootStart = Date.now() + 86400000;
+  const created = await call('POST', '/api/shifts', {
+    shift_type_id: type.id, site_id: siteA.id,
+    starts_at: new Date(rootStart).toISOString(), ends_at: new Date(rootStart + 8 * 3600e3).toISOString(),
+  }, adminT);
+  const rootId = created.body.id;
+  await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 7 }, adminT);
+  const all = () => call('GET', '/api/shifts', undefined, adminT).then((r) => r.body.filter((s) => s.id === rootId || s.recurrence_root_id === rootId));
+  const byWeek = async (k) => (await all()).find((s) => Math.abs(Date.parse(s.starts_at) - (rootStart + k * 7 * 86400000)) < 60000);
+  const week1 = await byWeek(1), week2 = await byWeek(2), week3 = await byWeek(3);
+  assert.ok(week1 && week2 && week3, 'fixture precondition: three future instances exist');
+
+  // Editing just one instance leaves the rest alone.
+  const editOne = await call('PATCH', `/api/shifts/${week1.id}?scope=one`, { site_id: siteB.id, notes: 'one-off cover' }, adminT);
+  assert.equal(editOne.status, 200);
+  assert.equal((await byWeek(2)).site_id, siteA.id, 'week 2 untouched by a scope=one edit');
+
+  // Editing "this and future" carries the field to week 2 and 3, and to
+  // the root itself (so next week's fresh-generated instance inherits it
+  // too) — but never the date, and never an already-past-this-point one.
+  const editSeries = await call('PATCH', `/api/shifts/${week2.id}?scope=series`, { site_id: siteB.id, notes: 'site moved' }, adminT);
+  assert.equal(editSeries.status, 200);
+  assert.equal((await byWeek(2)).site_id, siteB.id);
+  assert.equal((await byWeek(3)).site_id, siteB.id, 'future instance picked it up too');
+  assert.equal((await byWeek(1)).site_id, siteB.id, 'week 1 already had it from its own earlier edit — unaffected either way');
+  const rootAfterEdit = (await all()).find((s) => s.id === rootId);
+  assert.equal(rootAfterEdit.site_id, siteB.id, 'the root itself was updated so later-generated instances inherit it');
+  assert.equal((await byWeek(2)).starts_at, week2.starts_at, 'the date itself is never touched by a series edit');
+
+  // Deleting "this and future" from week 2 removes week 2 and week 3, but
+  // not week 1 or the root, and stops the series regenerating past week 2.
+  const del = await call('DELETE', `/api/shifts/${week2.id}?scope=series`, undefined, adminT);
+  assert.equal(del.status, 200);
+  assert.ok(del.body.deleted >= 2, `week 2, 3 and every later instance within the horizon (got ${del.body.deleted})`);
+  assert.ok(await byWeek(1), 'week 1 survives — it is before the deleted one');
+  assert.ok((await all()).some((s) => s.id === rootId), 'the root survives');
+  assert.equal(await byWeek(2), undefined);
+  assert.equal(await byWeek(3), undefined);
+
+  app.shiftRecurrenceTick();
+  assert.equal(await byWeek(2), undefined, 'the tick does not simply recreate what scope=series just deleted');
+
+  // Deleting a single surviving instance only removes that one.
+  const delOne = await call('DELETE', `/api/shifts/${week1.id}?scope=one`, undefined, adminT);
+  assert.equal(delOne.body.deleted, 1);
+  assert.ok((await all()).some((s) => s.id === rootId), 'the root is unaffected by deleting one instance');
+});
+
 test('a site visit is assigned, acknowledged, walked through checklist and photo, and completed with a report', async () => {
   const sites = await call('GET', '/api/sites', undefined, dispT);
   const northgate = sites.body.find((x) => x.name === 'Northgate Distribution');

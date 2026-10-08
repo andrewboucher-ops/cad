@@ -4112,6 +4112,20 @@ route('PATCH', '/api/shift-types/:id', ADMIN, ({ params, body }) => {
 function findShift(id) { const s = db.shifts.find((x) => x.id === Number(id)); if (!s) throw httpError(404, 'shift not found'); return s; }
 function findAssignment(id) { const a = db.shift_assignments.find((x) => x.id === Number(id)); if (!a) throw httpError(404, 'assignment not found'); return a; }
 function assignedPersonnelIds(shiftId) { return db.shift_assignments.filter((a) => a.shift_id === shiftId && a.status !== 'REMOVED').map((a) => a.personnel_id); }
+// The root of a recurring shift's own series is itself; a generated
+// instance's root is recurrence_root_id; a plain one-off shift has none.
+function shiftSeriesRootId(s) { return s.recurrence ? s.id : (s.recurrence_root_id || null); }
+// Every member of s's series due on or after s itself — what "this and
+// every future shift" means for both edit and delete.
+function shiftSeriesFromHere(s) {
+  const rootId = shiftSeriesRootId(s);
+  if (!rootId) return [s];
+  return db.shifts.filter((x) => (x.id === rootId || x.recurrence_root_id === rootId) && Date.parse(x.starts_at) >= Date.parse(s.starts_at));
+}
+// Shift fields it makes sense to carry across a whole series — never the
+// schedule (each instance keeps its own date) or status (DRAFT/PUBLISHED/
+// CANCELLED is inherently per-occurrence).
+const SHIFT_SERIES_FIELDS = ['site_id', 'shift_type_id', 'required_headcount', 'break_minutes', 'pay_rate', 'bill_rate', 'uniform_ppe', 'briefing', 'notes'];
 
 route('GET', '/api/shifts', ALL, ({ query, user }) => {
   let rows = db.shifts.slice();
@@ -4193,7 +4207,7 @@ route('POST', '/api/shifts', ADMIN, ({ body, user }) => {
   logEvent('shift.created', `SHIFT CREATED (${type.name}) ${s.starts_at} — ${s.ends_at}${firstAssignment ? ` FOR ${findPersonnel(firstAssignment.personnel_id).name}` : ''}`, { shift_id: s.id });
   return { __status: 201, __body: pub };
 });
-route('PATCH', '/api/shifts/:id', ADMIN, ({ params, body, user }) => {
+route('PATCH', '/api/shifts/:id', ADMIN, ({ params, body, query, user }) => {
   const s = findShift(params.id);
   if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
   if ('site_id' in body && body.site_id && !siteVisibleTo(Number(body.site_id), user)) throw httpError(404, 'site not found');
@@ -4237,20 +4251,59 @@ route('PATCH', '/api/shifts/:id', ADMIN, ({ params, body, user }) => {
     if (justCancelled) notifyShiftEvent('CANCELLED', s, affected);
     else if (scheduleChanged) notifyShiftEvent('CHANGED', s, affected);
   }
-  logEvent('shift.updated', `SHIFT ${s.id} UPDATED`, { shift_id: s.id });
+  // "This and future shifts" — every other member of the series due on or
+  // after this one (never the past) picks up the same non-schedule fields.
+  // The root itself is updated too when it isn't `s` directly, so a shift
+  // the recurrence tick generates next week inherits the change as well,
+  // rather than reverting to whatever the root still had on file.
+  let seriesCount = 0;
+  if (query.get('scope') === 'series') {
+    const rootId = shiftSeriesRootId(s);
+    if (rootId) {
+      const touched = new Set([s.id]);
+      for (const m of shiftSeriesFromHere(s)) {
+        if (touched.has(m.id)) continue;
+        touched.add(m.id);
+        for (const f of SHIFT_SERIES_FIELDS) if (f in body) m[f] = s[f];
+        m.revision = (m.revision || 0) + 1;
+        broadcast('shift.updated', publicShift(m), m.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: assignedPersonnelIds(m.id) });
+        seriesCount++;
+      }
+      const root = db.shifts.find((x) => x.id === rootId);
+      if (root && !touched.has(root.id)) for (const f of SHIFT_SERIES_FIELDS) if (f in body) root[f] = s[f];
+    }
+  }
+  logEvent('shift.updated', `SHIFT ${s.id} UPDATED${seriesCount ? ` (AND ${seriesCount} FUTURE SERIES SHIFT${seriesCount === 1 ? '' : 'S'})` : ''}`, { shift_id: s.id });
   return pub;
 });
-route('DELETE', '/api/shifts/:id', ADMIN, ({ params }) => {
+route('DELETE', '/api/shifts/:id', ADMIN, ({ params, query }) => {
   const s = findShift(params.id);
-  const affected = assignedPersonnelIds(s.id);
-  const wasDraft = s.status === 'DRAFT';
-  shiftApplications.expireApplicationsForShift(s.id);
-  db.shifts = db.shifts.filter((x) => x.id !== s.id);
-  db.shift_assignments = db.shift_assignments.filter((a) => a.shift_id !== s.id);
-  broadcast('shift.deleted', { id: s.id }, { personnelIds: affected });
-  if (!wasDraft) notifyShiftEvent('CANCELLED', s, affected);
-  logEvent('shift.deleted', `SHIFT ${s.id} DELETED`, { shift_id: s.id });
-  return { ok: true };
+  const scope = query.get('scope') === 'series' ? 'series' : 'one';
+  let targets = [s];
+  if (scope === 'series') {
+    const rootId = shiftSeriesRootId(s);
+    if (rootId) {
+      targets = shiftSeriesFromHere(s);
+      // The root survives this delete (it's earlier than s, so it isn't
+      // in targets) — cap its recurrence just before s so the next tick
+      // doesn't simply regenerate what was just deleted.
+      const root = db.shifts.find((x) => x.id === rootId);
+      if (root && !targets.some((t) => t.id === root.id) && root.recurrence) {
+        root.recurrence = { ...root.recurrence, until: new Date(Date.parse(s.starts_at) - 1000).toISOString() };
+      }
+    }
+  }
+  for (const t of targets) {
+    const affected = assignedPersonnelIds(t.id);
+    const wasDraft = t.status === 'DRAFT';
+    shiftApplications.expireApplicationsForShift(t.id);
+    db.shifts = db.shifts.filter((x) => x.id !== t.id);
+    db.shift_assignments = db.shift_assignments.filter((a) => a.shift_id !== t.id);
+    broadcast('shift.deleted', { id: t.id }, { personnelIds: affected });
+    if (!wasDraft) notifyShiftEvent('CANCELLED', t, affected);
+  }
+  logEvent('shift.deleted', `SHIFT ${s.id} DELETED${targets.length > 1 ? ` (AND ${targets.length - 1} FUTURE SERIES SHIFT${targets.length - 1 === 1 ? '' : 'S'})` : ''}`, { shift_id: s.id });
+  return { ok: true, deleted: targets.length };
 });
 
 /* ---- Recurring shifts — "repeat every N days" instead of repeatedly
