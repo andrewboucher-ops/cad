@@ -4341,24 +4341,48 @@ route('PUT', '/api/shifts/:id/recurrence', ADMIN, ({ params, body, user }) => {
   shiftRecurrenceTick(); // top up immediately rather than waiting for the next tick
   return publicShift(s);
 });
+// A week-later shift means the same clock time on a UK wall, not the same
+// number of UTC milliseconds — the two differ by an hour either side of
+// the last-Sunday-in-March/October clock change. Adding fixed ms (what
+// this did originally) generated a run of shifts an hour out from the
+// moment the clocks changed, every week, forever, until someone noticed.
+const LONDON_FMT = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+function londonParts(utcMs) {
+  const p = Object.fromEntries(LONDON_FMT.formatToParts(new Date(utcMs)).map((x) => [x.type, x.value]));
+  return { y: Number(p.year), mo: Number(p.month) - 1, d: Number(p.day), h: Number(p.hour) % 24, mi: Number(p.minute), s: Number(p.second) };
+}
+function londonToUtc(y, mo, d, h, mi, s) {
+  const guess = Date.UTC(y, mo, d, h, mi, s);
+  const asLondon = londonParts(guess);
+  const offsetMin = Math.round((Date.UTC(asLondon.y, asLondon.mo, asLondon.d, asLondon.h, asLondon.mi, asLondon.s) - guess) / 60000);
+  return guess - offsetMin * 60000;
+}
 function shiftRecurrenceTick(now = Date.now()) {
   let changed = false;
   const horizon = now + SHIFT_RECURRENCE_HORIZON_MS;
   for (const root of db.shifts) {
     if (!root.recurrence || !root.recurrence.every_days) continue;
     const untilMs = root.recurrence.until ? Date.parse(root.recurrence.until) : Infinity;
-    const everyMs = root.recurrence.every_days * 86400000;
-    const rootStart = Date.parse(root.starts_at), duration = Date.parse(root.ends_at) - rootStart;
     const setAtMs = Date.parse(root.recurrence.set_at);
+    const startLocal = londonParts(Date.parse(root.starts_at));
+    const endLocal = londonParts(Date.parse(root.ends_at));
+    // Whole local calendar days between start and end (0 for a day shift,
+    // 1 for one running past midnight) — carried forward unchanged so an
+    // overnight shift stays overnight on every generated instance too.
+    const endDayOffset = Math.round((Date.UTC(endLocal.y, endLocal.mo, endLocal.d) - Date.UTC(startLocal.y, startLocal.mo, startLocal.d)) / 86400000);
+    const startDateUtc = Date.UTC(startLocal.y, startLocal.mo, startLocal.d);
     for (let k = 1; k < 500; k++) {
-      const instStart = rootStart + k * everyMs;
+      const d = new Date(startDateUtc + k * root.recurrence.every_days * 86400000);
+      const instStart = londonToUtc(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), startLocal.h, startLocal.mi, startLocal.s);
       if (instStart > horizon) break;
       if (instStart > untilMs) break;
       if (instStart < setAtMs) continue; // never invent instances for before the setting was made
       if (db.shifts.some((x) => x.recurrence_root_id === root.id && Math.abs(Date.parse(x.starts_at) - instStart) < 60000)) continue;
+      const dEnd = new Date(startDateUtc + k * root.recurrence.every_days * 86400000 + endDayOffset * 86400000);
+      const instEnd = londonToUtc(dEnd.getUTCFullYear(), dEnd.getUTCMonth(), dEnd.getUTCDate(), endLocal.h, endLocal.mi, endLocal.s);
       const inst = {
         id: nextId('shifts'), site_id: root.site_id, shift_type_id: root.shift_type_id,
-        starts_at: new Date(instStart).toISOString(), ends_at: new Date(instStart + duration).toISOString(),
+        starts_at: new Date(instStart).toISOString(), ends_at: new Date(instEnd).toISOString(),
         break_minutes: root.break_minutes, required_headcount: root.required_headcount, status: 'DRAFT',
         pay_rate: root.pay_rate, bill_rate: root.bill_rate,
         uniform_ppe: root.uniform_ppe, briefing: root.briefing, notes: root.notes,

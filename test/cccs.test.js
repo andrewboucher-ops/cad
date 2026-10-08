@@ -667,13 +667,18 @@ test('a recurring shift generates future drafts up to the 8-week horizon, with a
   assert.equal(set.body.recurrence.every_days, 7);
 
   const near = (await call('GET', '/api/shifts', undefined, adminT)).body
-    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 7 * 86400000)) < 60000);
+    // Tolerance wide enough to span the UK clock change (an hour either
+    // side of the last Sunday in March/October), not just clock drift —
+    // a week-later instance means the same local wall-clock time, which
+    // can land up to an hour off the naive rootStart + k*7days UTC math
+    // either side of that date, by design (see shiftRecurrenceTick).
+    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 7 * 86400000)) < 3700000);
   assert.ok(near, 'next week\'s instance exists');
   assert.equal(near.status, 'DRAFT');
   assert.ok(near.assignments.some((a) => a.personnel_id === danId), 'the assignment carried over');
 
   const far = (await call('GET', '/api/shifts', undefined, adminT)).body
-    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 42 * 86400000)) < 60000);
+    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 42 * 86400000)) < 3700000);
   assert.ok(far, 'six weeks out, still within the 8-week horizon');
 
   const tooFar = (await call('GET', '/api/shifts', undefined, adminT)).body
@@ -703,7 +708,7 @@ test('editing or deleting a repeating shift can target just that one occurrence,
   const rootId = created.body.id;
   await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 7 }, adminT);
   const all = () => call('GET', '/api/shifts', undefined, adminT).then((r) => r.body.filter((s) => s.id === rootId || s.recurrence_root_id === rootId));
-  const byWeek = async (k) => (await all()).find((s) => Math.abs(Date.parse(s.starts_at) - (rootStart + k * 7 * 86400000)) < 60000);
+  const byWeek = async (k) => (await all()).find((s) => Math.abs(Date.parse(s.starts_at) - (rootStart + k * 7 * 86400000)) < 3700000);
   const week1 = await byWeek(1), week2 = await byWeek(2), week3 = await byWeek(3);
   assert.ok(week1 && week2 && week3, 'fixture precondition: three future instances exist');
 
@@ -755,7 +760,7 @@ test('a generated instance cannot be made a repeat root of its own — that prod
   const rootId = created.body.id;
   await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 7 }, adminT);
   const week1 = (await call('GET', '/api/shifts', undefined, adminT)).body
-    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 7 * 86400000)) < 60000);
+    .find((s) => s.recurrence_root_id === rootId && Math.abs(Date.parse(s.starts_at) - (rootStart + 7 * 86400000)) < 3700000);
   assert.ok(week1);
 
   // Nesting a second root inside the first — the exact shape of the bug —
@@ -768,6 +773,40 @@ test('a generated instance cannot be made a repeat root of its own — that prod
   // there is nothing to nest, it only ever detaches.
   const clear = await call('PUT', `/api/shifts/${week1.id}/recurrence`, { every_days: null }, adminT);
   assert.equal(clear.status, 200);
+});
+
+test('a weekly repeat keeps the same UK local clock time across the daylight-saving change, not the same UTC offset', async () => {
+  // UK clocks go back on the last Sunday of October — 2026-10-25. A root
+  // shift the Sunday before, repeating weekly, generates its first
+  // post-change instance on 2026-11-01: it must still read 17:30 on a UK
+  // wall clock, not 17:30 UTC (which the old fixed-milliseconds math would
+  // have produced, one hour later on the clock than intended).
+  const type = (await call('GET', '/api/shift-types', undefined, dispT)).body[0];
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const site = sites.body.find((x) => x.name === 'Northgate Distribution');
+  const created = await call('POST', '/api/shifts', {
+    shift_type_id: type.id, site_id: site.id,
+    starts_at: '2026-10-18T17:30:00.000+01:00', ends_at: '2026-10-19T01:30:00.000+01:00', // BST
+  }, adminT);
+  const rootId = created.body.id;
+  await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 7 }, adminT);
+  app.shiftRecurrenceTick(Date.parse('2026-11-05T00:00:00Z')); // well past the change, forces generation if the first tick missed it
+
+  const londonTime = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour12: false, hour: '2-digit', minute: '2-digit' }).format(new Date(iso));
+  const instances = (await call('GET', '/api/shifts', undefined, adminT)).body.filter((s) => s.recurrence_root_id === rootId);
+  const nov1 = instances.find((s) => s.starts_at.slice(0, 10) === '2026-11-01');
+  assert.ok(nov1, 'the post-change instance exists');
+  assert.equal(londonTime(nov1.starts_at), '17:30', 'still 17:30 on a UK clock after the change, not 16:30');
+  assert.equal(londonTime(nov1.ends_at), '01:30', 'the overnight end time is preserved the same way');
+  assert.equal(nov1.ends_at.slice(0, 10), '2026-11-02', 'still ends the calendar day after it starts');
+
+  // The clock change itself happens overnight on the 25th (2am), so that
+  // whole day is already on GMT by 17:30 — Oct 25's instance and Nov 1's
+  // both correctly show 17:30 UTC. The root (Oct 18, still BST) is the
+  // one that actually differs in UTC terms, which is the real point:
+  // same UK clock reading, different UTC instant either side of the change.
+  assert.equal(created.body.starts_at.slice(11, 16), '16:30', 'the root itself, the week before the change, is 17:30 BST = 16:30 UTC');
+  assert.equal(nov1.starts_at.slice(11, 16), '17:30', 'after the change, 17:30 local is 17:30 UTC (GMT) — a different UTC instant for the same clock time');
 });
 
 test('a site visit is assigned, acknowledged, walked through checklist and photo, and completed with a report', async () => {
