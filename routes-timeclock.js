@@ -187,8 +187,17 @@ module.exports = function registerTimeclock({
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) throw httpError(400, 'from and to dates required');
     const t0 = Date.parse(`${from}T00:00:00Z`), t1 = Date.parse(`${to}T00:00:00Z`) + 86400000;
     const pid = query.get('personnel_id') ? Number(query.get('personnel_id')) : null;
-    return db.shift_assignments.filter((a) => a.clocked_in_at && Date.parse(a.clocked_in_at) >= t0 && Date.parse(a.clocked_in_at) < t1 && (!pid || a.personnel_id === pid))
-      .map(row).filter((r) => r && (!r.site_id || siteVisibleTo(r.site_id, user))).sort((x, y) => x.clocked_in_at.localeCompare(y.clocked_in_at));
+    const clocked = db.shift_assignments.filter((a) => a.clocked_in_at && Date.parse(a.clocked_in_at) >= t0 && Date.parse(a.clocked_in_at) < t1 && (!pid || a.personnel_id === pid));
+    // Rostered for a shift in this period, never clocked in at all, and
+    // the shift has already ended — invisible everywhere else (not "now"
+    // once it's over, no clocked_in_at to anchor a row on here) unless
+    // surfaced explicitly. NO_SHOW is excluded: that's already a deliberate
+    // "did not attend" record, not a gap waiting to be backfilled.
+    const now = Date.now();
+    const missed = db.shift_assignments.filter((a) => !a.clocked_in_at && ['ASSIGNED', 'CONFIRMED'].includes(a.status) && a.attendance !== 'NO_SHOW' && (!pid || a.personnel_id === pid))
+      .filter((a) => { const s = db.shifts.find((x) => x.id === a.shift_id); return s && Date.parse(s.starts_at) >= t0 && Date.parse(s.starts_at) < t1 && Date.parse(s.ends_at) < now; });
+    return [...clocked, ...missed].map(row).filter((r) => r && (!r.site_id || siteVisibleTo(r.site_id, user)))
+      .sort((x, y) => (x.clocked_in_at || x.starts_at).localeCompare(y.clocked_in_at || y.starts_at));
   });
   /** Officer's own: the sites they can clock in at with no shift. */
   route('GET', '/api/timeclock/sites', ['FIELD_USER', ...CONTROL], ({ user }) => db.sites.filter((s) => s.active !== false && siteVisibleTo(s.id, user)).map((s) => ({ id: s.id, name: s.name })));

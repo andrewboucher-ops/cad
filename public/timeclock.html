@@ -196,16 +196,16 @@ async function paintSheet() {
     const tot = {};
     for (const r of sheet) if (!r.rejected) tot[r.name] = (tot[r.name] || 0) + r.worked_min;
     el('#sheet').innerHTML = sheet.length ? `<div style="overflow-x:auto"><table class="k"><thead><tr><th>Date</th><th>Who</th><th>Site</th><th>Rostered</th><th>In – out</th><th class="num">Break</th><th class="num">Worked</th><th></th></tr></thead><tbody>
-      ${sheet.map((r) => `<tr><td style="white-space:nowrap">${esc(date(r.clocked_in_at))}</td><td>${esc(r.name)}</td><td>${esc(r.site_name || '—')}</td><td class="dim">${r.ad_hoc ? 'no shift' : `${hm(r.starts_at)}–${hm(r.ends_at)}`}</td>
-        <td style="white-space:nowrap">${hm(r.clocked_in_at)}–${r.clocked_out_at ? hm(r.clocked_out_at) : 'now'}</td><td class="num">${r.break_min ? `${r.break_min}m` : ''}</td><td class="num">${r.rejected ? '<s>' : ''}${dur(r.worked_min)}${r.rejected ? '</s>' : ''}</td>
-        <td>${flags(r)} ${r.clocked_out_at ? `<button class="btn" data-st="${r.assignment_id}" style="padding:2px 8px;font-size:11.5px">Times</button>` : ''}</td></tr>`).join('')}</tbody></table></div>
+      ${sheet.map((r) => `<tr><td style="white-space:nowrap">${esc(date(r.clocked_in_at || r.starts_at))}</td><td>${esc(r.name)}</td><td>${esc(r.site_name || '—')}</td><td class="dim">${r.ad_hoc ? 'no shift' : `${hm(r.starts_at)}–${hm(r.ends_at)}`}</td>
+        <td style="white-space:nowrap">${r.clocked_in_at ? `${hm(r.clocked_in_at)}–${r.clocked_out_at ? hm(r.clocked_out_at) : 'now'}` : '<span class="pill bad">Never clocked in</span>'}</td><td class="num">${r.break_min ? `${r.break_min}m` : ''}</td><td class="num">${r.rejected ? '<s>' : ''}${dur(r.worked_min)}${r.rejected ? '</s>' : ''}</td>
+        <td>${flags(r)} <button class="btn" data-st="${r.assignment_id}" style="padding:2px 8px;font-size:11.5px">Times</button></td></tr>`).join('')}</tbody></table></div>
       <h3 class="sec">Totals (approved and waiting; rejected left out)</h3><table class="k"><tbody>${Object.entries(tot).map(([n, m]) => `<tr><td>${esc(n)}</td><td class="num"><strong>${dur(m)}</strong> <span class="sub">(${(m / 60).toFixed(2)} h)</span></td></tr>`).join('')}</tbody></table>`
       : '<p class="dim">No clocked time in this period.</p>';
     els('[data-st]').forEach((b) => (b.onclick = () => timesModal(sheet.find((r) => r.assignment_id === Number(b.dataset.st)))));
   };
   el('#sGo').onclick = run;
   el('#sCsv').onclick = () => sheet && KIT.csv(`timesheet-${range.from}-to-${range.to}.csv`, ['Date', 'Name', 'Site', 'Ad hoc', 'Rostered start', 'Rostered finish', 'Clocked in', 'Clocked out', 'Break min', 'Worked hours', 'Approval', 'Reasons'],
-    sheet.map((r) => [r.clocked_in_at.slice(0, 10), r.name, r.site_name, r.ad_hoc ? 'yes' : '', r.ad_hoc ? '' : r.starts_at, r.ad_hoc ? '' : r.ends_at, r.clocked_in_at, r.clocked_out_at, r.break_min, r.rejected ? 0 : (r.worked_min / 60).toFixed(2), r.rejected ? 'REJECTED' : r.approval, r.exceptions.map((x) => `${x.label}: ${x.reason} (${x.status.toLowerCase()})`).join('; ')]));
+    sheet.map((r) => [(r.clocked_in_at || r.starts_at).slice(0, 10), r.name, r.site_name, r.ad_hoc ? 'yes' : '', r.ad_hoc ? '' : r.starts_at, r.ad_hoc ? '' : r.ends_at, r.clocked_in_at || 'never clocked in', r.clocked_out_at, r.break_min, r.rejected ? 0 : (r.worked_min / 60).toFixed(2), r.rejected ? 'REJECTED' : r.approval, r.exceptions.map((x) => `${x.label}: ${x.reason} (${x.status.toLowerCase()})`).join('; ')]));
   run();
 }
 

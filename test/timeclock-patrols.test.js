@@ -184,3 +184,33 @@ test('the client sees the shifts at their site and every patrol with its checkpo
   assert.equal((await call('GET', `/api/client/shifts?${q}`, undefined, otherT)).status, 404, 'not another client\'s site');
   assert.equal((await call('GET', `/api/client/shifts?${q}`, undefined, danT)).status, 403);
 });
+
+test('someone rostered for a past shift who never clocked in at all shows up on the timesheet, not just invisibly missing', async () => {
+  const { s, a } = await shiftFor(-240, 2); // ended two hours ago, nobody ever clocked in
+  const from = new Date(Date.parse(s.starts_at)).toISOString().slice(0, 10);
+  const to = new Date(Date.parse(s.ends_at) + 86400e3).toISOString().slice(0, 10);
+  let sheet = (await call('GET', `/api/timeclock/timesheet?from=${from}&to=${to}&personnel_id=${dan.id}`, undefined, adminT)).body;
+  const row = sheet.find((x) => x.assignment_id === a.id);
+  assert.ok(row, 'present even with no clocked_in_at to anchor a normal row on');
+  assert.equal(row.clocked_in_at, null);
+  assert.equal(row.worked_min, 0);
+
+  // Backfilling it through the same /times route used to correct a wrong
+  // time makes it a normal, clocked row from here on.
+  const inAt = s.starts_at, outAt = s.ends_at;
+  const r = await call('PATCH', `/api/shift-assignments/${a.id}/times`, { clocked_in_at: inAt, clocked_out_at: outAt, reason: 'phone died on shift, confirmed worked the full shift with the site manager' }, dispT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(a.clocked_in_at, inAt);
+  assert.equal(a.attendance, 'ATTENDED');
+
+  sheet = (await call('GET', `/api/timeclock/timesheet?from=${from}&to=${to}&personnel_id=${dan.id}`, undefined, adminT)).body;
+  const backfilled = sheet.find((x) => x.assignment_id === a.id);
+  assert.equal(backfilled.clocked_in_at, inAt);
+  assert.ok(Math.abs(backfilled.worked_min - 120) <= 1);
+
+  // A NO_SHOW is a deliberate record, not a gap to surface for backfilling.
+  const { a: b } = await shiftFor(-240, 2);
+  await call('PATCH', `/api/shift-assignments/${b.id}`, { attendance: 'NO_SHOW' }, adminT);
+  sheet = (await call('GET', `/api/timeclock/timesheet?from=${from}&to=${to}&personnel_id=${dan.id}`, undefined, adminT)).body;
+  assert.ok(!sheet.some((x) => x.assignment_id === b.id), 'NO_SHOW is excluded');
+});
