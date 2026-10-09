@@ -57,6 +57,8 @@ const TABLES = [
   'ui_settings',
   // Stock & asset management (routes-inventory.js).
   'stock_locations', 'stock_subcategories', 'asset_events', 'stocktakes',
+  // Medical gas cylinders and their history (routes-cylinders.js).
+  'gas_cylinders', 'cylinder_events',
   // Asset hire to clients (routes-rentals.js) — signed agreements, keep.
   'rentals',
   // Quotes/contracts (signed by clients) and the invoices made from them.

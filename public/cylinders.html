@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — medical gases</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+</head>
+<body>
+<div class="k-top">
+  <h1>Medical gases</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary admin-only hide" id="bReceive">Receive cylinder</button>
+  <button class="btn" id="bExport">Export CSV</button>
+</div>
+<div class="k-body">
+  <div class="tiles" id="tiles"></div>
+  <div class="bar" id="filters">
+    <input id="q" placeholder="Search serial, size, batch or location">
+    <select id="fGas"><option value="">Oxygen and Entonox</option><option value="OXYGEN">Oxygen</option><option value="ENTONOX">Entonox</option></select>
+    <select id="fStatus"></select>
+    <select id="fLoc"></select>
+  </div>
+  <p class="dim" style="font-size:12.5px;margin:4px 0 10px">Entonox must be stored at 10 °C or above. If a cylinder has been colder than that, follow the supplier's re-mixing guidance before it is used.</p>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
+if (isAdmin) els('.admin-only').forEach((b) => b.classList.remove('hide'));
+const { modal, close, foot, wire, v, numOrNull, date, when, options } = KIT;
+
+const GAS = { OXYGEN: 'Oxygen', ENTONOX: 'Entonox' };
+const STATUS = { FULL: 'Full', IN_USE: 'In use', EMPTY: 'Empty', QUARANTINE: 'Faulty — do not use', RETURNED: 'Returned to supplier' };
+const STATUS_PILL = { FULL: 'ok', IN_USE: 'info', EMPTY: 'warn', QUARANTINE: 'bad', RETURNED: 'off' };
+const EVENT = { RECEIVED: 'Received', CHECKED: 'Checked', MOVED: 'Moved', USED: 'Used', EMPTY: 'Marked empty', FAULT: 'Fault reported', RETURNED: 'Returned to supplier', NOTE: 'Note' };
+// Common medical cylinder sizes — a suggestion only, any size can be typed.
+const SIZES = { OXYGEN: ['CD', 'D', 'ZD', 'E', 'F', 'HX', 'ZX'], ENTONOX: ['D', 'ED', 'F', 'G'] };
+let data = null, locations = [], showReturned = false;
+
+const locOpts = (sel, blank) => options(locations.filter((l) => l.active !== false).map((l) => [l.id, l.name]), sel, blank);
+const name = (c) => `${GAS[c.gas]} ${c.size || ''} · ${c.serial}`;
+
+async function load() {
+  try {
+    [data, locations] = await Promise.all([api('GET', `/api/cylinders${showReturned ? '?include_returned=1' : ''}`), api('GET', '/api/stock/locations')]);
+  } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  const keepLoc = el('#fLoc').value, keepStatus = el('#fStatus').value;
+  el('#fLoc').innerHTML = locOpts(keepLoc, 'All locations');
+  el('#fStatus').innerHTML = options([['ATTENTION', 'Needs attention'], ...Object.entries(STATUS).filter(([k]) => k !== 'RETURNED')], keepStatus, 'Every status')
+    + `<option value="RETURNED" ${keepStatus === 'RETURNED' ? 'selected' : ''}>Returned to supplier</option>`;
+  paint();
+}
+
+function paintTiles() {
+  const s = data.summary;
+  const t = (n, l, cls, go) => `<button class="tile ${cls}" data-go="${go}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
+  el('#tiles').innerHTML = [
+    t(s.oxygen_full, 'Oxygen full', '', 'OXYGEN:FULL'), t(s.entonox_full, 'Entonox full', '', 'ENTONOX:FULL'),
+    t(s.in_use, 'In use', '', ':IN_USE'),
+    t(s.to_return, 'Empty / faulty to return', s.to_return ? 'warn' : 'good', ':EMPTY'),
+    t(s.expiring, 'Expired / expiring', s.expiring ? 'bad' : 'good', ':ATTENTION'),
+    t(s.check_overdue, `Not checked in ${data.check_days} days`, s.check_overdue ? 'warn' : 'good', ':ATTENTION'),
+  ].join('');
+  els('#tiles [data-go]').forEach((b) => (b.onclick = () => {
+    const [gas, status] = b.dataset.go.split(':');
+    el('#fGas').value = gas; el('#fStatus').value = status; el('#fStatus').dispatchEvent(new Event('change'));
+  }));
+}
+
+el('#fStatus').addEventListener('change', async () => {
+  const want = el('#fStatus').value === 'RETURNED';
+  if (want !== showReturned) { showReturned = want; await load(); } else paint();
+});
+['#fGas', '#fLoc'].forEach((s) => el(s).addEventListener('change', paint));
+el('#q').addEventListener('input', paint);
+
+const attention = (c) => c.expired || c.expiring_soon || c.check_overdue || c.low || c.status === 'QUARANTINE';
+function filtered() {
+  const q = el('#q').value.trim().toLowerCase(), gas = el('#fGas').value, st = el('#fStatus').value, loc = el('#fLoc').value;
+  return data.cylinders.filter((c) => (!gas || c.gas === gas)
+    && (!st || (st === 'ATTENTION' ? attention(c) : c.status === st))
+    && (st === 'RETURNED' || c.status !== 'RETURNED')
+    && (!loc || c.location_id === Number(loc))
+    && (!q || [c.serial, c.size, c.batch_no, c.location_name, c.in_vehicle, c.supplier].some((x) => String(x || '').toLowerCase().includes(q))));
+}
+
+function paint() {
+  if (!data) return;
+  paintTiles();
+  const rows = filtered();
+  el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k">
+    <thead><tr><th>Cylinder</th><th>Status</th><th class="num">Contents</th><th>Where</th><th>Expiry</th><th>Last checked</th><th></th></tr></thead>
+    <tbody>${rows.map((c) => {
+      const flags = [
+        c.expired ? '<span class="pill bad">Expired</span>' : c.expiring_soon ? '<span class="pill warn">Expiring</span>' : '',
+        c.low ? '<span class="pill warn">Low</span>' : '',
+        c.check_overdue ? '<span class="pill warn">Check due</span>' : '',
+      ].join(' ');
+      const live = c.status !== 'RETURNED';
+      return `<tr>
+        <td><strong>${esc(GAS[c.gas])}</strong> <span class="dim">${esc(c.size || '')}</span><div class="mono" style="font-size:12.5px">${esc(c.serial)}</div>${c.batch_no ? `<div class="dim" style="font-size:11.5px">batch ${esc(c.batch_no)}</div>` : ''}</td>
+        <td><span class="pill ${STATUS_PILL[c.status]}">${esc(STATUS[c.status])}</span> ${flags}</td>
+        <td class="num">${c.contents_pct != null ? `<strong>${c.contents_pct}%</strong>` : '—'}${c.capacity_litres && c.contents_pct != null ? `<div class="dim" style="font-size:11.5px">≈ ${Math.round(c.capacity_litres * c.contents_pct / 100)} L</div>` : ''}</td>
+        <td>${esc(c.location_name || '—')}${c.in_vehicle ? `<div class="dim" style="font-size:11.5px">in ${esc(c.in_vehicle)}</div>` : ''}</td>
+        <td class="dim">${esc(date(c.expiry_date))}</td>
+        <td class="dim">${c.last_check_at ? esc(when(c.last_check_at)) : 'never'}</td>
+        <td><div class="acts">
+          ${live ? `<button class="btn" data-a="check" data-id="${c.id}">Check</button>
+          <button class="btn" data-a="move" data-id="${c.id}">Move</button>
+          <button class="btn" data-a="use" data-id="${c.id}">Used</button>
+          <button class="btn" data-a="fault" data-id="${c.id}">Fault</button>
+          <button class="btn" data-a="ret" data-id="${c.id}">Return</button>` : ''}
+          <button class="btn" data-a="history" data-id="${c.id}">History</button>
+          ${isAdmin ? `<button class="btn" data-a="edit" data-id="${c.id}">Edit</button>` : ''}
+        </div></td></tr>`;
+    }).join('')}</tbody></table></div>`
+    : `<p class="dim">${data.cylinders.length ? 'No cylinders match.' : 'No cylinders on the register yet.' + (isAdmin ? ' Press <strong>Receive cylinder</strong> when a delivery arrives.' : ' An admin adds them as they are delivered.')}</p>`;
+  els('#main [data-a]').forEach((b) => (b.onclick = () => ACTIONS[b.dataset.a](data.cylinders.find((c) => c.id === Number(b.dataset.id)))));
+}
+
+/* ---------------- logging ---------------- */
+const done = async (msg) => { close(); await load(); if (msg) flash(msg); };
+function flash(msg) { el('#updated').textContent = msg; setTimeout(() => (el('#updated').textContent = ''), 4000); }
+const log = (c, body) => api('POST', `/api/cylinders/${c.id}/log`, body);
+const pctInput = (id, val) => `<input id="${id}" type="number" min="0" max="100" step="5" inputmode="numeric" value="${val ?? ''}">`;
+
+const ACTIONS = {
+  check(c) {
+    modal(`Check — ${name(c)}`, `<div class="k-form">
+      <div><label>Gauge reading (% full)</label>${pctInput('cP', c.contents_pct)}</div>
+      <div><label>Seal / tamper tag</label><select id="cS"><option value="1">Intact</option><option value="0" ${c.status === 'FULL' ? '' : 'selected'}>Broken / removed</option></select></div>
+      <div class="full"><label>Note</label><input id="cN" placeholder="e.g. valve and regulator OK"></div></div>${foot('Save check')}`, (root) => wire(root, async () => {
+      await log(c, { type: 'CHECKED', contents_pct: numOrNull(v(root, '#cP')), seal_intact: v(root, '#cS') === '1', note: v(root, '#cN') });
+      await done('Check saved.');
+    }));
+  },
+  move(c) {
+    modal(`Move — ${name(c)}`, `<div class="k-form">
+      <div class="full"><label>To</label><select id="mL">${locOpts('', '— choose location —')}</select></div>
+      <div class="full"><label>Note</label><input id="mN"></div></div>
+      <p class="dim" style="font-size:12.5px">Locations are the same as on the Stock page — a vehicle's kit, a bag, the main store.</p>${foot('Move')}`, (root) => wire(root, async () => {
+      await log(c, { type: 'MOVED', location_id: numOrNull(v(root, '#mL')), note: v(root, '#mN') });
+      await done('Moved.');
+    }));
+  },
+  use(c) {
+    modal(`Used — ${name(c)}`, `<div class="k-form">
+      <div><label>Left afterwards (% full)</label>${pctInput('uP', '')}</div>
+      <div><label>Job / patient report ref</label><input id="uR"></div>
+      <div class="full"><label>Note</label><input id="uN"></div></div>
+      <p class="dim" style="font-size:12.5px">Now ${c.contents_pct ?? '?'}%. Enter 0 if it is empty.</p>${foot('Save')}`, (root) => wire(root, async () => {
+      await log(c, { type: 'USED', contents_pct: numOrNull(v(root, '#uP')), reference: v(root, '#uR'), note: v(root, '#uN') });
+      await done('Saved.');
+    }));
+  },
+  fault(c) {
+    modal(`Report a fault — ${name(c)}`, `<div class="k-form">
+      <div class="full"><label>What is wrong</label><input id="fN" placeholder="e.g. leaking valve, damaged, label unreadable"></div></div>
+      <p class="dim" style="font-size:12.5px">It is marked <strong>Faulty — do not use</strong> until it goes back to the supplier.</p>${foot('Report fault')}`, (root) => wire(root, async () => {
+      await log(c, { type: 'FAULT', note: v(root, '#fN') });
+      await done('Fault reported.');
+    }));
+  },
+  ret(c) {
+    modal(`Return to supplier — ${name(c)}`, `<div class="k-form">
+      <div><label>Collection / returns note ref</label><input id="rR"></div>
+      <div><label>Note</label><input id="rN"></div></div>
+      <p class="dim" style="font-size:12.5px">It leaves the working list; its history is kept (choose "Returned to supplier" in the status filter).</p>${foot('Mark returned')}`, (root) => wire(root, async () => {
+      await log(c, { type: 'RETURNED', reference: v(root, '#rR'), note: v(root, '#rN') });
+      await done('Returned.');
+    }));
+  },
+  history(c) {
+    modal(`History — ${name(c)}`, '<div id="hBody"><p class="dim">Loading…</p></div><div class="btn-row" style="margin-top:10px"><button class="btn" id="hNote">Add note</button><button class="btn" id="hClose">Close</button></div>', async (root) => {
+      root.querySelector('#hClose').onclick = close;
+      root.querySelector('#hNote').onclick = async () => {
+        const note = prompt('Note');
+        if (!note) return;
+        try { await log(c, { type: 'NOTE', note }); close(); await load(); ACTIONS.history(c); } catch (e) { alert(e.message); }
+      };
+      const rows = await api('GET', `/api/cylinders/${c.id}/history`).catch(() => []);
+      root.querySelector('#hBody').innerHTML = rows.length ? `<table class="k"><thead><tr><th>When</th><th>What</th><th class="num">Contents</th><th>Where</th><th>By</th><th>Ref / note</th></tr></thead><tbody>
+        ${rows.map((e) => `<tr><td class="dim" style="white-space:nowrap">${esc(when(e.at))}</td><td>${esc(EVENT[e.type] || e.type)}</td><td class="num">${e.contents_pct != null ? e.contents_pct + '%' : ''}</td>
+          <td class="dim">${esc(e.location_name || '')}</td><td class="dim">${esc(e.by)}</td><td>${e.reference ? `<span class="mono">${esc(e.reference)}</span> ` : ''}${esc(e.note || '')}</td></tr>`).join('')}</tbody></table>` : '<p class="dim">No history.</p>';
+    }, { wide: true });
+  },
+  edit(c) { editor(c); },
+};
+
+/* ---------------- receive / edit (admin) ---------------- */
+function editor(c) {
+  const isNew = !c;
+  const gas = c ? c.gas : 'OXYGEN';
+  modal(isNew ? 'Receive cylinder' : `Edit — ${name(c)}`, `<div class="k-form">
+    <div><label>Gas</label><select id="eG">${options(Object.entries(GAS), gas)}</select></div>
+    <div><label>Serial number</label><input id="eSer" value="${esc(c ? c.serial : '')}" autocomplete="off" autocapitalize="characters"></div>
+    <div><label>Size</label><input id="eSize" list="sizes" value="${esc(c ? c.size : '')}" placeholder="e.g. CD"><datalist id="sizes"></datalist></div>
+    <div><label>Capacity (litres, optional)</label><input id="eCap" type="number" min="0" value="${c && c.capacity_litres != null ? c.capacity_litres : ''}"></div>
+    <div><label>Rented or owned</label><select id="eOwn">${options([['RENTED', 'Rented from supplier'], ['OWNED', 'Owned']], c ? c.ownership : 'RENTED')}</select></div>
+    <div><label>Supplier</label><input id="eSup" value="${esc(c ? c.supplier : '')}" placeholder="e.g. BOC"></div>
+    <div><label>Batch number</label><input id="eBatch" value="${esc(c ? c.batch_no : '')}"></div>
+    <div><label>Contents expiry</label><input id="eExp" type="date" value="${esc(c && c.expiry_date ? c.expiry_date : '')}"></div>
+    ${isNew ? `<div><label>Into</label><select id="eLoc">${locOpts(el('#fLoc').value)}</select></div>
+      <div><label>Delivery note ref</label><input id="eRef"></div>` : ''}
+    <div class="full"><label>Notes</label><input id="eNotes" value="${esc(c ? c.notes : '')}"></div></div>
+    ${isNew ? '<p class="dim" style="font-size:12.5px">A new cylinder starts Full (100%) in the location chosen.</p>' : ''}
+    ${foot(isNew ? 'Receive' : 'Save', isNew ? '' : '<button type="button" class="btn danger" id="eDel">Delete</button>')}`, (root) => {
+    const sizes = () => { root.querySelector('#sizes').innerHTML = SIZES[v(root, '#eG')].map((s) => `<option value="${s}">`).join(''); };
+    root.querySelector('#eG').onchange = sizes; sizes();
+    if (!isNew) root.querySelector('#eDel').onclick = async () => {
+      if (!confirm(`Delete ${name(c)}? Only for a record added by mistake.`)) return;
+      try { await api('DELETE', `/api/cylinders/${c.id}`); await done('Deleted.'); } catch (e) { alert(e.message); }
+    };
+    wire(root, async () => {
+      const body = {
+        gas: v(root, '#eG'), serial: v(root, '#eSer'), size: v(root, '#eSize'), capacity_litres: numOrNull(v(root, '#eCap')),
+        ownership: v(root, '#eOwn'), supplier: v(root, '#eSup'), batch_no: v(root, '#eBatch'), expiry_date: v(root, '#eExp') || null, notes: v(root, '#eNotes'),
+      };
+      if (isNew) await api('POST', '/api/cylinders', { ...body, location_id: numOrNull(v(root, '#eLoc')), reference: v(root, '#eRef') });
+      else await api('PATCH', `/api/cylinders/${c.id}`, body);
+      await done(isNew ? 'Cylinder received.' : 'Saved.');
+    });
+  });
+}
+el('#bReceive').onclick = () => editor(null);
+
+el('#bExport').onclick = () => KIT.csv(`medical-gases-${new Date().toISOString().slice(0, 10)}.csv`,
+  ['Gas', 'Size', 'Serial', 'Status', 'Contents %', 'Capacity L', 'Location', 'Vehicle', 'Batch', 'Expiry', 'Last checked', 'Rented/owned', 'Supplier', 'Notes'],
+  filtered().map((c) => [GAS[c.gas], c.size, c.serial, STATUS[c.status], c.contents_pct, c.capacity_litres, c.location_name, c.in_vehicle, c.batch_no, c.expiry_date, c.last_check_at, c.ownership, c.supplier, c.notes]));
+
+load();
+setInterval(() => { if (!document.querySelector('.modal-back')) load(); }, 60000);
+</script>
+</body>
+</html>

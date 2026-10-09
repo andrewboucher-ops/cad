@@ -59,6 +59,7 @@ const SECTIONS = [
   { key: 'signout', label: 'Sign in / out', group: 'Stock & assets', icon: 'scan', desktop: '/signout.html', mobile: '/signout.html', allowed: CONTROL, default: CONTROL },
   { key: 'rentals', label: 'Rentals', group: 'Stock & assets', icon: 'rental', desktop: '/rentals.html', mobile: '/rentals.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'assets', label: 'Assets', group: 'Stock & assets', icon: 'asset', desktop: '/assets.html', mobile: '/assets.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
+  { key: 'cylinders', label: 'Medical gases', group: 'Stock & assets', icon: 'cylinder', desktop: '/cylinders.html', mobile: '/cylinders.html', allowed: CONTROL, default: CONTROL },
   { key: 'stock', label: 'Stock', group: 'Stock & assets', icon: 'stock', desktop: '/stock.html', mobile: '/stock.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   // Finance
   { key: 'contracts', label: 'Quotes & contracts', group: 'Finance', icon: 'contract', desktop: '/contracts.html', mobile: '/contracts.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
