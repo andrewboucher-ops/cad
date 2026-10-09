@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — medication</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .cd { display:inline-block; font-size:10.5px; font-weight:700; letter-spacing:.04em; padding:1px 6px; border-radius:4px; background:var(--emergency); color:#fff; vertical-align:1px; }
+  @media print { .icon-rail, .k-top button, #views, #tiles, .no-print, .acts { display:none !important; } }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>Medication</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary control-only hide" id="bReceive">Receive</button>
+  <button class="btn control-only hide" id="bCheck">Stock check</button>
+  <button class="btn admin-only hide" id="bNew">New medicine</button>
+</div>
+<div class="k-body">
+  <div class="tiles" id="tiles"></div>
+  <div class="bar" id="views">
+    <button class="chip on" data-view="stock">Stock</button>
+    <button class="chip" data-view="register">CD register</button>
+    <button class="chip" data-view="activity">Activity</button>
+  </div>
+  <div class="bar no-print" id="filters">
+    <input id="q" placeholder="Search medicine">
+    <select id="fLoc"></select>
+    <select id="fKind"><option value="">All medicines</option><option value="cd">Controlled drugs only</option><option value="other">Not controlled</option></select>
+  </div>
+  <div id="main"><p class="dim">Loading…</p></div>
+  <p class="dim no-print" style="font-size:12px;margin-top:14px">Follow your organisation's medicines and controlled drugs policy and your CD Accountable Officer's instructions — this register supports them, it does not replace them. Entries cannot be edited or deleted; put a mistake right with a correction.</p>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['FIELD_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const me = CCCS.getSession().user;
+const isAdmin = me.role === 'SYSTEM_ADMIN', isControl = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role);
+if (isAdmin) els('.admin-only').forEach((b) => b.classList.remove('hide'));
+if (isControl) els('.control-only').forEach((b) => b.classList.remove('hide'));
+const { modal, close, foot, wire, v, numOrNull, date, when, words, options } = KIT;
+
+const FORMS = ['AMPOULE', 'VIAL', 'TABLET', 'CAPSULE', 'ORAL_SOLUTION', 'PREFILLED_SYRINGE', 'INHALER', 'NEBULE', 'SPRAY', 'PATCH', 'SACHET', 'OTHER'];
+const TYPE = { RECEIVED: 'Received', TRANSFER_OUT: 'Moved out', TRANSFER_IN: 'Moved in', ADMINISTERED: 'Administered', WASTED: 'Wasted', DESTROYED: 'Destroyed', RETURNED: 'Returned', STOCK_CHECK: 'Stock check', CORRECTION: 'Correction' };
+let data = null, view = 'stock', registerMed = null;
+
+const locName = (id) => (data.locations.find((l) => l.id === Number(id)) || {}).name || '—';
+const locOpts = (sel, blank) => options(data.locations.map((l) => [l.id, l.name]), sel, blank);
+const medName = (m) => `${m.name} ${m.strength}`.trim();
+const formText = (m) => words(m.form).toLowerCase();
+const cdBadge = (m) => (m.controlled ? `<span class="cd" title="Controlled drug, schedule ${m.cd_schedule}">CD${m.cd_schedule}</span>` : '');
+
+async function load() {
+  try { data = await api('GET', '/api/medication'); } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  const keep = el('#fLoc').value;
+  el('#fLoc').innerHTML = locOpts(keep, 'All locations');
+  paint();
+}
+
+function paintTiles() {
+  const s = data.summary;
+  const t = (n, l, cls, go) => `<button class="tile ${cls}" data-go="${go}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
+  el('#tiles').innerHTML = [
+    t(s.medicines, 'Medicines', '', 'stock'), t(s.controlled, 'Controlled drugs', '', 'register'),
+    t(s.below_reorder, 'To reorder', s.below_reorder ? 'bad' : 'good', 'stock'),
+    t(s.expiring, 'Expired / expiring', s.expiring ? 'warn' : 'good', 'stock'),
+    t(s.discrepancies, 'CD discrepancies (30 days)', s.discrepancies ? 'bad' : 'good', 'activity'),
+  ].join('');
+  els('#tiles [data-go]').forEach((b) => (b.onclick = () => setView(b.dataset.go)));
+}
+function setView(vw) { view = vw; els('#views .chip').forEach((c) => c.classList.toggle('on', c.dataset.view === vw)); paint(); }
+els('#views .chip').forEach((c) => (c.onclick = () => setView(c.dataset.view)));
+['#fLoc', '#fKind'].forEach((s) => el(s).addEventListener('change', () => paint()));
+el('#q').addEventListener('input', () => paint());
+
+function filtered() {
+  const q = el('#q').value.trim().toLowerCase(), kind = el('#fKind').value, loc = el('#fLoc').value;
+  return data.medicines.filter((m) => (m.active !== false || m.total > 0)
+    && (!kind || (kind === 'cd') === Boolean(m.controlled))
+    && (!loc || m.levels[loc])
+    && (!q || medName(m).toLowerCase().includes(q)));
+}
+function paint() {
+  if (!data) return;
+  paintTiles();
+  el('#filters').style.display = view === 'register' ? 'none' : '';
+  ({ stock: paintStock, register: paintRegister, activity: paintActivity })[view]();
+}
+
+function paintStock() {
+  const rows = filtered(), loc = el('#fLoc').value;
+  el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k">
+    <thead><tr><th>Medicine</th><th class="num">${loc ? esc(locName(loc)) : 'Total'}</th><th>Where / batches</th><th>Status</th><th></th></tr></thead>
+    <tbody>${rows.map((m) => {
+      const bs = m.batches.filter((b) => !loc || b.location_id === Number(loc));
+      const lvl = loc ? (m.levels[loc] || 0) : m.total;
+      const flags = [m.below_reorder ? '<span class="pill bad">Reorder</span>' : '', bs.some((b) => b.expired) ? '<span class="pill bad">Expired stock</span>' : bs.some((b) => b.expiring_soon) ? '<span class="pill warn">Expiring</span>' : '', m.active === false ? '<span class="pill off">Inactive</span>' : ''].join(' ');
+      return `<tr>
+        <td>${cdBadge(m)} <strong>${esc(medName(m))}</strong> <span class="dim">${esc(formText(m))}</span><div class="dim" style="font-size:11.5px">${esc(m.legal_category || '')}${m.controlled ? ` · Schedule ${m.cd_schedule} controlled drug` : ''}</div></td>
+        <td class="num"><strong>${lvl}</strong> <span class="dim">${esc(m.unit || '')}</span></td>
+        <td style="font-size:12px">${bs.map((b) => `<div><span class="${b.expired ? 'err' : ''}">${esc(locName(b.location_id))}: ${b.qty}</span> <span class="dim">· ${esc(b.batch_no || 'no batch')} · exp ${esc(date(b.expiry_date))}</span></div>`).join('') || '<span class="dim">none</span>'}</td>
+        <td>${flags}</td>
+        <td><div class="acts">
+          <button class="btn" data-a="give" data-id="${m.id}">Give</button>
+          <button class="btn" data-a="waste" data-id="${m.id}">Waste</button>
+          ${isControl ? `<button class="btn" data-a="receive" data-id="${m.id}">Receive</button>
+          <button class="btn" data-a="move" data-id="${m.id}">Move</button>
+          <button class="btn" data-a="destroy" data-id="${m.id}">Destroy</button>
+          <button class="btn" data-a="ret" data-id="${m.id}">Return</button>` : ''}
+          <button class="btn" data-a="register" data-id="${m.id}">Register</button>
+          ${isAdmin ? `<button class="btn" data-a="edit" data-id="${m.id}">Edit</button>` : ''}
+        </div></td></tr>`;
+    }).join('')}</tbody></table></div>`
+    : `<p class="dim">${data.medicines.length ? 'No medicines match.' : 'No medicines yet.' + (isAdmin ? ' Press <strong>New medicine</strong> — one entry per drug, strength and form (e.g. Morphine sulfate, 10 mg/1 ml, ampoule).' : ' An admin adds them.')}</p>`;
+  els('#main [data-a]').forEach((b) => (b.onclick = () => ACTIONS[b.dataset.a](data.medicines.find((m) => m.id === Number(b.dataset.id)))));
+}
+
+/* ---------------- register & activity ---------------- */
+function entryWho(e) {
+  return [e.patient_name ? `Patient: ${e.patient_name}` : '', e.patient_ref ? `ref ${e.patient_ref}` : '', e.supplier ? `From ${e.supplier}` : '',
+    e.type === 'STOCK_CHECK' ? `counted ${e.counted}, expected ${e.expected}` : '', e.reason || '', e.note || ''].filter(Boolean).join(' · ');
+}
+function entryTable(rows, withMed, withCorrect) {
+  return `<div style="overflow-x:auto"><table class="k" style="font-size:12.5px"><thead><tr><th>#</th><th>When</th>${withMed ? '<th>Medicine</th>' : ''}<th>Entry</th><th class="num">In</th><th class="num">Out</th><th class="num">Balance</th><th>Location</th><th>Batch</th><th>Patient / supplier / reason</th><th>Dose</th><th>By</th><th>Witness</th>${withCorrect ? '<th class="no-print"></th>' : ''}</tr></thead><tbody>
+    ${rows.map((e) => `<tr${e.type === 'STOCK_CHECK' && e.delta ? ' style="background:rgba(220,60,60,.08)"' : ''}>
+      <td class="dim mono">${e.id}</td><td class="dim" style="white-space:nowrap">${esc(when(e.at))}</td>${withMed ? `<td>${e.controlled ? '<span class="cd">CD</span> ' : ''}${esc(e.medicine)}</td>` : ''}
+      <td>${esc(TYPE[e.type] || e.type)}${e.corrects_id ? ` <span class="dim">of #${e.corrects_id}</span>` : ''}${e.corrected_by ? ` <span class="pill warn">corrected by #${e.corrected_by}</span>` : ''}${e.type === 'STOCK_CHECK' && e.delta ? ' <span class="pill bad">Discrepancy</span>' : ''}</td>
+      <td class="num">${e.delta > 0 ? e.delta : ''}</td><td class="num">${e.delta < 0 ? -e.delta : ''}</td>
+      <td class="num"><strong>${e.balance_after}</strong><div class="dim" style="font-size:11px">here ${e.location_balance_after}</div></td>
+      <td>${esc(e.location_name)}</td><td class="dim mono">${esc(e.batch_no || '')}${e.expiry_date ? `<div style="font-family:var(--font)">exp ${esc(date(e.expiry_date))}</div>` : ''}</td>
+      <td>${esc(entryWho(e))}${e.reference ? ` <span class="dim">ref ${esc(e.reference)}</span>` : ''}${e.authority ? ` <span class="dim">(${esc(e.authority)})</span>` : ''}</td>
+      <td>${esc(e.dose_given || '')}${e.route ? ` ${esc(e.route)}` : ''}${e.dose_wasted ? `<div class="dim">wasted ${esc(e.dose_wasted)}</div>` : ''}</td>
+      <td>${esc(e.by_name || e.by)}</td><td>${esc(e.witness_name || '')}</td>
+      ${withCorrect ? `<td class="no-print">${isControl && !e.corrected_by ? `<button class="btn" data-fix="${e.id}" style="padding:2px 8px;font-size:11.5px">Correct</button>` : ''}</td>` : ''}</tr>`).join('')}</tbody></table></div>`;
+}
+async function paintRegister() {
+  const cds = data.medicines.filter((m) => m.controlled), others = data.medicines.filter((m) => !m.controlled);
+  if (!registerMed || !data.medicines.some((m) => m.id === registerMed)) registerMed = (cds[0] || others[0] || {}).id || null;
+  if (!registerMed) { el('#main').innerHTML = '<p class="dim">No medicines yet.</p>'; return; }
+  const pick = `<div class="bar no-print"><select id="rMed">${cds.length ? `<optgroup label="Controlled drugs">${cds.map((m) => `<option value="${m.id}" ${m.id === registerMed ? 'selected' : ''}>${esc(medName(m))} ${esc(formText(m))} (CD${m.cd_schedule})</option>`).join('')}</optgroup>` : ''}${others.length ? `<optgroup label="Other medicines">${others.map((m) => `<option value="${m.id}" ${m.id === registerMed ? 'selected' : ''}>${esc(medName(m))} ${esc(formText(m))}</option>`).join('')}</optgroup>` : ''}</select>
+    <button class="btn" id="rPrint">Print</button><button class="btn" id="rCsv">Export CSV</button></div>`;
+  el('#main').innerHTML = pick + '<p class="dim">Loading…</p>';
+  const reg = await api('GET', `/api/medication/register/${registerMed}`).catch((e) => ({ error: e.message }));
+  if (reg.error) { el('#main').innerHTML = `<p class="err">${esc(reg.error)}</p>`; return; }
+  const m = reg.medicine;
+  el('#main').innerHTML = pick + `<h3 style="margin:10px 0 2px">${cdBadge(m)} ${esc(medName(m))} <span class="dim">${esc(formText(m))}</span></h3>
+    <p class="dim" style="margin:0 0 8px">${m.controlled ? `Schedule ${m.cd_schedule} controlled drug · ` : ''}Balance now <strong>${m.total} ${esc(m.unit || '')}</strong>${Object.keys(m.levels).length ? ` (${Object.entries(m.levels).map(([k, n]) => `${esc(locName(k))} ${n}`).join(', ')})` : ''}</p>
+    ${reg.entries.length ? entryTable(reg.entries, false, true) : '<p class="dim">No entries yet.</p>'}`;
+  el('#rMed').onchange = () => { registerMed = Number(el('#rMed').value); paintRegister(); };
+  el('#rPrint').onclick = () => window.print();
+  el('#rCsv').onclick = () => KIT.csv(`register-${medName(m).replace(/[^a-z0-9]+/gi, '-')}-${new Date().toISOString().slice(0, 10)}.csv`,
+    ['Entry', 'When', 'Type', 'In', 'Out', 'Balance', 'Location', 'Location balance', 'Batch', 'Expiry', 'Patient', 'Patient ref', 'Supplier', 'Dose given', 'Dose wasted', 'Route', 'Authority', 'Reason', 'Reference', 'By', 'Witness', 'Corrects', 'Corrected by', 'Note'],
+    reg.entries.map((e) => [e.id, e.at, TYPE[e.type] || e.type, e.delta > 0 ? e.delta : '', e.delta < 0 ? -e.delta : '', e.balance_after, e.location_name, e.location_balance_after, e.batch_no, e.expiry_date, e.patient_name, e.patient_ref, e.supplier, e.dose_given, e.dose_wasted, e.route, e.authority, e.reason, e.reference, e.by_name || e.by, e.witness_name, e.corrects_id, e.corrected_by, e.note]));
+  els('#main [data-fix]').forEach((b) => (b.onclick = () => correct(m, reg.entries.find((e) => e.id === Number(b.dataset.fix)))));
+}
+async function paintActivity() {
+  el('#main').innerHTML = '<p class="dim">Loading…</p>';
+  const q = new URLSearchParams({ limit: '500' });
+  if (el('#fLoc').value) q.set('location_id', el('#fLoc').value);
+  const rows = await api('GET', `/api/medication/movements?${q}`).catch(() => []);
+  const text = el('#q').value.trim().toLowerCase(), kind = el('#fKind').value;
+  const shown = rows.filter((e) => (!text || e.medicine.toLowerCase().includes(text)) && (!kind || (kind === 'cd') === Boolean(e.controlled)));
+  const disc = data.discrepancies.filter((d) => d.controlled);
+  el('#main').innerHTML = (disc.length ? `<div style="border:1px solid var(--emergency);border-radius:10px;padding:10px 12px;margin-bottom:12px"><strong>Controlled drug discrepancies in the last 30 days</strong>
+      <div class="dim" style="font-size:12.5px;margin:2px 0 6px">Investigate and report each one to your CD Accountable Officer.</div>
+      ${disc.map((d) => `<div style="font-size:13px">${esc(when(d.at))} · ${esc(d.medicine)} at ${esc(d.location_name)}: counted ${d.counted}, expected ${d.expected} (${d.delta > 0 ? '+' : ''}${d.delta}) — ${esc(d.reason)} <span class="dim">· ${esc(d.by_name || d.by)}, witness ${esc(d.witness_name || '—')}</span></div>`).join('')}</div>` : '')
+    + (shown.length ? entryTable(shown, true, false) : '<p class="dim">No entries yet.</p>');
+}
+
+/* ---------------- entry forms ---------------- */
+const done = async (msg) => { close(); await load(); if (msg) flash(msg); };
+function flash(msg) { el('#updated').textContent = msg; setTimeout(() => (el('#updated').textContent = ''), 4000); }
+/** The second signature on a CD entry: their own username and password. */
+const witnessFields = (m) => (m && m.controlled ? `<div class="k-section">Witness — controlled drug</div>
+  <div><label>Witness username</label><input id="wU" autocomplete="off" autocapitalize="none"></div>
+  <div><label>Witness password</label><input id="wP" type="password" autocomplete="new-password"></div>
+  <p class="dim full" style="font-size:12px;margin:0">A second member of staff watches this and confirms with their own login.</p>` : '');
+const witnessBody = (root) => (root.querySelector('#wU') ? { witness_username: v(root, '#wU'), witness_password: root.querySelector('#wP').value } : {});
+/** Batch choice when taking stock out: automatic (earliest expiry first) unless one is picked. */
+function batchPicker(root, m, locSel, host, { expiredOk } = {}) {
+  const paintB = () => {
+    const bs = m.batches.filter((b) => b.location_id === Number(v(root, locSel)) && (expiredOk || !b.expired));
+    root.querySelector(host).innerHTML = bs.length ? `<label>Batch</label><select id="bSel"><option value="">Earliest expiry first</option>${bs.map((b, n) => `<option value="${n}">${esc(b.batch_no || 'no batch')} — exp ${esc(date(b.expiry_date))} (${b.qty})${b.expired ? ' EXPIRED' : ''}</option>`).join('')}</select>` : '<p class="dim" style="font-size:12px;margin:22px 0 0">None here</p>';
+    root._bs = bs;
+  };
+  root.querySelector(locSel).addEventListener('change', paintB); paintB();
+}
+const batchBody = (root) => { const s = root.querySelector('#bSel'); if (!s || s.value === '') return {}; const b = root._bs[Number(s.value)]; return { batch_no: b.batch_no || '', expiry_date: b.expiry_date || undefined }; };
+/** The first location holding any medication — where a count usually starts. */
+const heldLoc = () => { const b = data.medicines.flatMap((m) => m.batches)[0]; return b ? b.location_id : ''; };
+const firstLoc = (m) => el('#fLoc').value || Object.keys(m.levels).find((k) => m.levels[k] > 0) || '';
+
+const ACTIONS = {
+  give(m) {
+    modal(`Give — ${medName(m)}`, `<div class="k-form">
+      <div><label>Taken from</label><select id="gL">${locOpts(firstLoc(m))}</select></div>
+      <div id="gB"></div>
+      <div><label>Quantity used (${esc(m.unit || 'units')})</label><input id="gQ" type="number" min="0" step="any" value="1"></div>
+      <div><label>Dose given</label><input id="gD" placeholder="e.g. 5 mg"></div>
+      <div><label>Route</label><input id="gR" placeholder="e.g. IV, IM, oral"></div>
+      <div><label>Dose wasted (if any)</label><input id="gW" placeholder="e.g. 5 mg discarded"></div>
+      <div><label>Patient name${m.controlled ? '' : ' (or job ref)'}</label><input id="gP"></div>
+      <div><label>Job / patient report number</label><input id="gRef"></div>
+      <div class="full"><label>Authority</label><input id="gA" placeholder="e.g. JRCALC, PGD name, prescriber"></div>
+      ${witnessFields(m)}
+      <div class="full"><label>Note</label><input id="gN"></div></div>${foot('Record')}`, (root) => {
+      batchPicker(root, m, '#gL', '#gB');
+      wire(root, async () => {
+        await api('POST', `/api/medication/${m.id}/administer`, { location_id: numOrNull(v(root, '#gL')), quantity: numOrNull(v(root, '#gQ')), dose_given: v(root, '#gD'), route: v(root, '#gR'), dose_wasted: v(root, '#gW'), patient_name: v(root, '#gP'), patient_ref: v(root, '#gRef'), authority: v(root, '#gA'), note: v(root, '#gN'), ...batchBody(root), ...witnessBody(root) });
+        await done('Recorded.');
+      });
+    });
+  },
+  waste(m) { outForm(m, 'waste', 'Waste', 'e.g. ampoule broken, drawn up and not used', true); },
+  destroy(m) { outForm(m, 'destroy', 'Destroy', 'e.g. expired — destroyed with a denaturing kit', true); },
+  ret(m) { outForm(m, 'return', 'Return to supplier', 'e.g. unwanted stock', m.controlled); },
+  receive(m) { receiveForm(m); },
+  move(m) {
+    modal(`Move — ${medName(m)}`, `<div class="k-form">
+      <div><label>From</label><select id="xF">${locOpts(firstLoc(m))}</select></div>
+      <div><label>To</label><select id="xT">${locOpts('', '— choose —')}</select></div>
+      <div><label>Quantity</label><input id="xQ" type="number" min="0" step="any" value="1"></div>
+      <div id="xB"></div>
+      ${witnessFields(m)}
+      <div class="full"><label>Note</label><input id="xN"></div></div>${foot('Move')}`, (root) => {
+      batchPicker(root, m, '#xF', '#xB', { expiredOk: true });
+      wire(root, async () => {
+        await api('POST', `/api/medication/${m.id}/transfer`, { from_location_id: numOrNull(v(root, '#xF')), to_location_id: numOrNull(v(root, '#xT')), quantity: numOrNull(v(root, '#xQ')), note: v(root, '#xN'), ...batchBody(root), ...witnessBody(root) });
+        await done('Moved.');
+      });
+    });
+  },
+  register(m) { registerMed = m.id; setView('register'); },
+  edit(m) { medEditor(m); },
+};
+function outForm(m, path, title, hint, reasonRequired) {
+  modal(`${title} — ${medName(m)}`, `<div class="k-form">
+    <div><label>From</label><select id="oL">${locOpts(firstLoc(m))}</select></div>
+    <div id="oB"></div>
+    <div><label>Quantity</label><input id="oQ" type="number" min="0" step="any" value="1"></div>
+    <div><label>Reference</label><input id="oRef" placeholder="${path === 'return' ? 'returns note' : 'optional'}"></div>
+    <div class="full"><label>Reason${reasonRequired ? '' : ' (optional)'}</label><input id="oR" placeholder="${esc(hint)}"></div>
+    ${witnessFields(m)}</div>${foot(title)}`, (root) => {
+    batchPicker(root, m, '#oL', '#oB', { expiredOk: true });
+    wire(root, async () => {
+      await api('POST', `/api/medication/${m.id}/${path}`, { location_id: numOrNull(v(root, '#oL')), quantity: numOrNull(v(root, '#oQ')), reason: v(root, '#oR'), reference: v(root, '#oRef'), ...batchBody(root), ...witnessBody(root) });
+      await done('Recorded.');
+    });
+  });
+}
+function receiveForm(m) {
+  const choose = !m;
+  modal(m ? `Receive — ${medName(m)}` : 'Receive medication', `<div class="k-form">
+    ${choose ? `<div class="full"><label>Medicine</label><select id="rM">${options(data.medicines.filter((x) => x.active !== false).map((x) => [x.id, `${medName(x)} ${formText(x)}${x.controlled ? ` (CD${x.cd_schedule})` : ''}`]), '', '— choose —')}</select></div>` : ''}
+    <div><label>Quantity</label><input id="rQ" type="number" min="0" step="any"></div>
+    <div><label>Into</label><select id="rL">${locOpts(el('#fLoc').value)}</select></div>
+    <div><label>Batch number</label><input id="rB"></div>
+    <div><label>Expiry date</label><input id="rE" type="date"></div>
+    <div><label>Supplier</label><input id="rS"></div>
+    <div><label>Invoice / requisition ref</label><input id="rRef"></div>
+    <div id="rW" class="full" style="display:contents">${witnessFields(m)}</div>
+    <div class="full"><label>Note</label><input id="rN"></div></div>${foot('Receive')}`, (root) => {
+    const cur = () => m || data.medicines.find((x) => x.id === Number(v(root, '#rM')));
+    if (choose) root.querySelector('#rM').onchange = () => { root.querySelector('#rW').innerHTML = witnessFields(cur()); };
+    wire(root, async () => {
+      const med = cur();
+      if (!med) throw new Error('choose a medicine');
+      await api('POST', `/api/medication/${med.id}/receive`, { quantity: numOrNull(v(root, '#rQ')), location_id: numOrNull(v(root, '#rL')), batch_no: v(root, '#rB'), expiry_date: v(root, '#rE') || null, supplier: v(root, '#rS'), reference: v(root, '#rRef'), note: v(root, '#rN'), ...witnessBody(root) });
+      await done('Received.');
+    });
+  });
+}
+el('#bReceive').onclick = () => receiveForm(null);
+
+function correct(m, e) {
+  modal(`Correct entry #${e.id}`, `<p style="margin-top:0">${esc(TYPE[e.type] || e.type)} of ${Math.abs(e.delta)} ${esc(m.unit || '')} at ${esc(e.location_name)} on ${esc(when(e.at))} by ${esc(e.by_name || e.by)}.</p>
+    <p class="dim" style="font-size:12.5px">The original entry stays as it is. This adds a correction that points at it and moves the balance at that location and batch.</p>
+    <div class="k-form">
+      <div><label>Adjust balance by</label><input id="cD" type="number" step="any" placeholder="e.g. 1 or -1"></div>
+      <div class="full"><label>Reason</label><input id="cR" placeholder="what was wrong"></div>
+      ${witnessFields(m)}</div>${foot('Add correction')}`, (root) => wire(root, async () => {
+    await api('POST', '/api/medication/correct', { corrects_id: e.id, delta: Number(v(root, '#cD')), reason: v(root, '#cR'), ...witnessBody(root) });
+    close(); await load(); setView('register');
+  }));
+}
+
+/* ---------------- stock check ---------------- */
+el('#bCheck').onclick = () => {
+  modal('Medication stock check', `<div class="k-form">
+    <div><label>Location</label><select id="sL">${locOpts(el('#fLoc').value || heldLoc())}</select></div>
+    <div><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13.5px;margin-top:22px"><input type="checkbox" id="sCd" style="width:18px;height:18px"> Controlled drugs only</label></div>
+    <div class="full" id="sList"></div>
+    <div class="full"><label>Reason for any difference</label><input id="sR" placeholder="required if a count does not match"></div>
+    <div id="sW" class="full" style="display:contents"></div></div>
+    <p class="dim" style="font-size:12.5px">Count what is physically there without looking at the expected figure first. Every controlled drug count is recorded, right or not; a difference is booked and flagged for the CD Accountable Officer.</p>${foot('Submit count')}`, (root) => {
+    const paintList = () => {
+      const loc = Number(v(root, '#sL')), cdOnly = root.querySelector('#sCd').checked;
+      const rows = [];
+      for (const m of data.medicines) {
+        if (cdOnly && !m.controlled) continue;
+        for (const b of m.batches.filter((x) => x.location_id === loc)) rows.push({ m, b });
+      }
+      root._rows = rows;
+      root.querySelector('#sList').innerHTML = rows.length ? `<table class="k"><thead><tr><th>Medicine</th><th>Batch</th><th class="num" style="width:110px">Counted</th></tr></thead><tbody>
+        ${rows.map((r, n) => `<tr><td>${cdBadge(r.m)} ${esc(medName(r.m))} <span class="dim">${esc(formText(r.m))}</span></td><td class="dim">${esc(r.b.batch_no || 'no batch')} · exp ${esc(date(r.b.expiry_date))}</td><td><input type="number" min="0" step="any" data-count="${n}" style="width:100px"></td></tr>`).join('')}</tbody></table>` : '<p class="dim">Nothing is held here.</p>';
+      root.querySelector('#sW').innerHTML = witnessFields(rows.some((r) => r.m.controlled) ? { controlled: true } : null);
+    };
+    root.querySelector('#sL').onchange = paintList; root.querySelector('#sCd').onchange = paintList; paintList();
+    wire(root, async () => {
+      const counts = [...root.querySelectorAll('[data-count]')].filter((x) => x.value !== '').map((x) => { const r = root._rows[Number(x.dataset.count)]; return { medicine_id: r.m.id, batch_no: r.b.batch_no || '', expiry_date: r.b.expiry_date || '', counted: Number(x.value) }; });
+      if (!counts.length) throw new Error('enter at least one count');
+      const res = await api('POST', '/api/medication/stock-check', { location_id: Number(v(root, '#sL')), counts, reason: v(root, '#sR'), ...witnessBody(root) });
+      const off = res.lines.filter((l) => l.diff);
+      close(); await load();
+      alert(off.length ? `Saved. ${off.length} difference(s):\n${off.map((l) => `${l.medicine}: expected ${l.expected}, counted ${l.counted}`).join('\n')}${off.some((l) => l.controlled) ? '\n\nControlled drug discrepancy — report it to your CD Accountable Officer.' : ''}` : 'Saved — every count matched.');
+    });
+  }, { wide: true });
+};
+
+/* ---------------- catalogue (admin) ---------------- */
+function medEditor(m) {
+  const isNew = !m, locked = m && m.controlled && m.has_entries;
+  modal(isNew ? 'New medicine' : `Edit — ${medName(m)}`, `<div class="k-form">
+    <div><label>Drug name</label><input id="eN" value="${esc(m ? m.name : '')}" placeholder="e.g. Morphine sulfate" ${locked ? 'readonly' : ''}></div>
+    <div><label>Strength</label><input id="eS" value="${esc(m ? m.strength : '')}" placeholder="e.g. 10 mg/1 ml" ${locked ? 'readonly' : ''}></div>
+    <div><label>Form</label><select id="eF" ${locked ? 'disabled' : ''}>${options(FORMS.map((f) => [f, words(f)]), m ? m.form : 'AMPOULE')}</select></div>
+    <div><label>Counted in</label><input id="eU" value="${esc(m ? m.unit : '')}" placeholder="ampoule, tablet, ml"></div>
+    <div><label>Legal category</label><select id="eLg">${options([['POM', 'POM — prescription only'], ['P', 'P — pharmacy'], ['GSL', 'GSL — general sale']], m ? m.legal_category : 'POM')}</select></div>
+    <div><label>Reorder at or below</label><input id="eRe" type="number" min="0" value="${m && m.reorder_level != null ? m.reorder_level : ''}"></div>
+    <div><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13.5px;margin-top:22px"><input type="checkbox" id="eCd" ${m && m.controlled ? 'checked' : ''} ${locked ? 'disabled' : ''} style="width:18px;height:18px"> Controlled drug</label></div>
+    <div id="eSchW"><label>CD schedule</label><select id="eSch" ${locked ? 'disabled' : ''}>${options([[2, 'Schedule 2'], [3, 'Schedule 3'], [4, 'Schedule 4'], [5, 'Schedule 5']], m && m.cd_schedule ? m.cd_schedule : 2)}</select></div>
+    ${locked ? '<p class="dim full" style="font-size:12px;margin:0">Name, strength, form and schedule are fixed once a controlled drug has register entries. For a different strength, add a new medicine.</p>' : ''}
+    ${isNew ? '' : `<div><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13.5px;margin-top:22px"><input type="checkbox" id="eAct" ${m.active !== false ? 'checked' : ''} style="width:18px;height:18px"> Active</label></div>`}
+    <div class="full"><label>Notes</label><input id="eNo" value="${esc(m ? m.notes : '')}"></div></div>
+    ${foot(isNew ? 'Add medicine' : 'Save', !isNew && !m.has_entries ? '<button type="button" class="btn danger" id="eDel">Delete</button>' : '')}`, (root) => {
+    const sch = () => root.querySelector('#eSchW').classList.toggle('hide', !root.querySelector('#eCd').checked);
+    root.querySelector('#eCd').onchange = sch; sch();
+    if (root.querySelector('#eDel')) root.querySelector('#eDel').onclick = async () => {
+      if (!confirm(`Delete ${medName(m)}?`)) return;
+      try { await api('DELETE', `/api/medication/medicines/${m.id}`); await done('Deleted.'); } catch (e) { alert(e.message); }
+    };
+    wire(root, async () => {
+      const body = { unit: v(root, '#eU'), legal_category: v(root, '#eLg'), reorder_level: numOrNull(v(root, '#eRe')), notes: v(root, '#eNo') };
+      if (!locked) Object.assign(body, { name: v(root, '#eN'), strength: v(root, '#eS'), form: v(root, '#eF'), controlled: root.querySelector('#eCd').checked, cd_schedule: root.querySelector('#eCd').checked ? Number(v(root, '#eSch')) : null });
+      if (!isNew) body.active = root.querySelector('#eAct').checked;
+      if (isNew) await api('POST', '/api/medication/medicines', body); else await api('PATCH', `/api/medication/medicines/${m.id}`, body);
+      await done(isNew ? 'Medicine added.' : 'Saved.');
+    });
+  });
+}
+el('#bNew').onclick = () => medEditor(null);
+
+load();
+setInterval(() => { if (!document.querySelector('.modal-back') && view !== 'register') load(); }, 60000);
+</script>
+</body>
+</html>

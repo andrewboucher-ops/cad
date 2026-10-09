@@ -96,7 +96,7 @@ const db = {
   training_courses: [], training_records: [],
   leave_requests: [],
   ui_settings: [],
-  stock_locations: [], stock_subcategories: [], gas_cylinders: [], cylinder_events: [], asset_events: [], stocktakes: [], rentals: [],
+  stock_locations: [], stock_subcategories: [], gas_cylinders: [], cylinder_events: [], medicines: [], med_movements: [], asset_events: [], stocktakes: [], rentals: [],
   agreements: [], invoices: [],
   payroll_runs: [], payslips: [],
 };
@@ -4725,6 +4725,9 @@ const inventory = require('./routes-inventory.js')({
 
 // Oxygen and Entonox cylinders, one record each — see routes-cylinders.js.
 require('./routes-cylinders.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent });
+
+// Medication and the controlled drugs register — see routes-medication.js.
+require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow() });
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
 require('./routes-rentals.js')({ route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, UPLOADS_DIR, publicAsset, flushNow: () => store.flushNow() });

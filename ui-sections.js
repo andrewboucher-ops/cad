@@ -60,6 +60,9 @@ const SECTIONS = [
   { key: 'rentals', label: 'Rentals', group: 'Stock & assets', icon: 'rental', desktop: '/rentals.html', mobile: '/rentals.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'assets', label: 'Assets', group: 'Stock & assets', icon: 'asset', desktop: '/assets.html', mobile: '/assets.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'cylinders', label: 'Medical gases', group: 'Stock & assets', icon: 'cylinder', desktop: '/cylinders.html', mobile: '/cylinders.html', allowed: CONTROL, default: CONTROL },
+  // Medication: field staff record what they give, so the page serves every
+  // staff role; by default only control sees it — an admin can add field staff.
+  { key: 'medication', label: 'Medication', group: 'Stock & assets', icon: 'medication', desktop: '/medication.html', mobile: '/medication.html', allowed: STAFF, default: CONTROL },
   { key: 'stock', label: 'Stock', group: 'Stock & assets', icon: 'stock', desktop: '/stock.html', mobile: '/stock.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   // Finance
   { key: 'contracts', label: 'Quotes & contracts', group: 'Finance', icon: 'contract', desktop: '/contracts.html', mobile: '/contracts.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },

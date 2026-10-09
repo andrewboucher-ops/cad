@@ -68,6 +68,7 @@
     invoice: i('<path d="M6 3h12v18l-2-1.5L14 21l-2-1.5L10 21l-2-1.5L6 21z" stroke-linejoin="round"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/>'),
     rental: i('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4" stroke-linecap="round"/><path d="M15 17l1.5 1.5L19 15" stroke-linecap="round" stroke-linejoin="round"/>'),
     cylinder: i('<rect x="8" y="6" width="8" height="15" rx="3"/><path d="M10 6V4h4v2M10 3h4" stroke-linecap="round"/>'),
+    medication: i('<rect x="3" y="9" width="18" height="6" rx="3" transform="rotate(-45 12 12)"/><path d="M9.5 9.5l5 5"/>'),
     stock: i('<rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/><rect x="8" y="3" width="8" height="8" rx="1"/>'),
     equipment: i('<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2M3 12h18" stroke-linecap="round"/>'),
   };
