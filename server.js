@@ -96,7 +96,7 @@ const db = {
   training_courses: [], training_records: [],
   leave_requests: [],
   ui_settings: [],
-  stock_locations: [], asset_events: [], stocktakes: [], rentals: [],
+  stock_locations: [], stock_subcategories: [], asset_events: [], stocktakes: [], rentals: [],
   agreements: [], invoices: [],
   payroll_runs: [], payslips: [],
 };
@@ -1788,7 +1788,7 @@ route('DELETE', '/api/maintenance-logs/:id', ADMIN, ({ params }) => {
   return { ok: true };
 });
 
-const ASSET_CATEGORIES = ['EQUIPMENT', 'UNIFORM', 'KEY', 'DEVICE', 'RADIO', 'BODY_CAMERA', 'PPE', 'FIRST_AID', 'IT', 'CONSUMABLE', 'OTHER'];
+const ASSET_CATEGORIES = ['EQUIPMENT', 'UNIFORM', 'KEY', 'DEVICE', 'RADIO', 'BODY_CAMERA', 'PPE', 'FIRST_AID', 'MEDICAL_CONSUMABLES', 'IT', 'CONSUMABLE', 'OTHER'];
 const ASSET_STATUSES = ['IN_USE', 'IN_STORE', 'IN_REPAIR', 'ON_HIRE', 'LOST', 'RETIRED'];
 const ASSET_CONDITIONS = ['NEW', 'GOOD', 'FAIR', 'POOR', 'DAMAGED'];
 /** The asset-register and stock-catalogue details (routes-inventory.js):
@@ -1836,6 +1836,19 @@ function applyAssetExtras(a, body) {
     if (body.location_id && !loc) throw httpError(400, 'store location not found');
     a.location_id = loc ? loc.id : null;
   }
+  // Sub-category (two optional levels under the fixed category, kept in
+  // stock_subcategories — routes-inventory.js). It always sits inside the
+  // item's own category, so a category change drops one that no longer fits.
+  const sub = (id) => (db.stock_subcategories || []).find((s) => s.id === Number(id));
+  if ('subcategory_id' in body) {
+    const s = body.subcategory_id ? sub(body.subcategory_id) : null;
+    if (body.subcategory_id && !s) throw httpError(400, 'sub-category not found');
+    if (s && s.category !== a.category) throw httpError(400, 'that sub-category belongs to a different category');
+    a.subcategory_id = s ? s.id : null;
+  } else if (a.subcategory_id) {
+    const s = sub(a.subcategory_id);
+    if (!s || s.category !== a.category) a.subcategory_id = null;
+  }
 }
 route('GET', '/api/assets', ALL, ({ query, user }) => {
   let rows = db.assets.filter((a) => visibleToUser(a, user)).map((a) => publicAsset(a));
@@ -1862,7 +1875,7 @@ route('POST', '/api/assets', ADMIN, ({ body, user }) => {
     is_stock_tracked: isStockTracked,
     low_stock_threshold: isStockTracked && body.low_stock_threshold != null && body.low_stock_threshold !== '' ? Number(body.low_stock_threshold) : null,
     expiry_date: isStockTracked ? (body.expiry_date || null) : null,
-    parent_asset_id: parent ? parent.id : null,
+    parent_asset_id: parent ? parent.id : null, subcategory_id: null,
   };
   applyAssetExtras(a, body);
   if (!a.is_stock_tracked) inventory.firstDueDates(a);
@@ -4707,7 +4720,7 @@ const shiftPatrols = require('./routes-shift-patrols.js')({
 // Stock and asset management — see routes-inventory.js.
 const inventory = require('./routes-inventory.js')({
   route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, visibleToUser, isControlRole,
-  publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, flushNow: () => store.flushNow(),
+  publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, ASSET_CATEGORIES, flushNow: () => store.flushNow(),
 });
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.

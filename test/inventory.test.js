@@ -272,3 +272,35 @@ test('a rental: items scanned out on hire, signed PDF agreement, shown in the cl
   assert.equal(note.status, 200);
   assert.ok((await call('GET', `/api/assets/${a1.id}/history`, undefined, adminT)).body.some((h) => h.type === 'HIRED_OUT'));
 });
+
+test('stock sub-categories: two levels under a category, Medical consumables included', async () => {
+  const cats = (await call('GET', '/api/stock/categories', undefined, adminT)).body;
+  assert.ok(cats.categories.includes('MEDICAL_CONSUMABLES'), 'Medical consumables is a category');
+  assert.equal((await call('POST', '/api/stock/categories', { category: 'MEDICAL_CONSUMABLES', name: 'Dressings' }, dispT)).status, 403, 'admin only');
+  assert.equal((await call('POST', '/api/stock/categories', { category: 'NOT_REAL', name: 'X' }, adminT)).status, 400);
+  const dressings = (await call('POST', '/api/stock/categories', { category: 'MEDICAL_CONSUMABLES', name: 'Dressings' }, adminT)).body;
+  assert.equal((await call('POST', '/api/stock/categories', { category: 'MEDICAL_CONSUMABLES', name: 'dressings' }, adminT)).status, 409, 'unique among siblings');
+  const sterile = (await call('POST', '/api/stock/categories', { parent_id: dressings.id, name: 'Sterile' }, adminT)).body;
+  assert.equal(sterile.category, 'MEDICAL_CONSUMABLES', 'a sub-sub-category takes its parent\'s category');
+  assert.equal((await call('POST', '/api/stock/categories', { parent_id: sterile.id, name: 'Too deep' }, adminT)).status, 400, 'two levels at most');
+  const gloves = (await call('POST', '/api/stock/categories', { category: 'PPE', name: 'Gloves' }, adminT)).body;
+  assert.equal((await call('POST', '/api/stock/categories', { parent_id: gloves.id, name: 'Sterile' }, adminT)).status, 201, 'same name under another parent is fine');
+
+  // An item sits in a sub-category of its own category only.
+  assert.equal((await call('POST', '/api/assets', { description: 'Wrong', category: 'UNIFORM', subcategory_id: sterile.id, is_stock_tracked: true }, adminT)).status, 400);
+  const pad = (await call('POST', '/api/assets', { description: 'Sterile pad 10cm', category: 'MEDICAL_CONSUMABLES', subcategory_id: sterile.id, is_stock_tracked: true }, adminT)).body;
+  assert.equal(pad.subcategory_id, sterile.id);
+  const ov = (await call('GET', '/api/stock/overview', undefined, adminT)).body;
+  assert.ok(ov.subcategories.some((s) => s.id === sterile.id), 'the stock page gets the tree in one read');
+
+  // Still in use or still has children: cannot be deleted.
+  assert.equal((await call('DELETE', `/api/stock/categories/${dressings.id}`, undefined, adminT)).status, 409, 'has a child');
+  assert.equal((await call('DELETE', `/api/stock/categories/${sterile.id}`, undefined, adminT)).status, 409, 'an item uses it');
+  assert.equal((await call('PATCH', `/api/stock/categories/${sterile.id}`, { name: 'Sterile (individually wrapped)' }, adminT)).body.name, 'Sterile (individually wrapped)');
+
+  // Moving the item to another category drops a sub-category that no longer fits.
+  const moved = (await call('PATCH', `/api/assets/${pad.id}`, { category: 'FIRST_AID' }, adminT)).body;
+  assert.equal(moved.subcategory_id, null);
+  assert.equal((await call('DELETE', `/api/stock/categories/${sterile.id}`, undefined, adminT)).status, 200);
+  assert.equal((await call('DELETE', `/api/stock/categories/${dressings.id}`, undefined, adminT)).status, 200);
+});

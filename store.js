@@ -56,7 +56,7 @@ const TABLES = [
   // Admin's choice of which roles see which menu section (ui-sections.js).
   'ui_settings',
   // Stock & asset management (routes-inventory.js).
-  'stock_locations', 'asset_events', 'stocktakes',
+  'stock_locations', 'stock_subcategories', 'asset_events', 'stocktakes',
   // Asset hire to clients (routes-rentals.js) — signed agreements, keep.
   'rentals',
   // Quotes/contracts (signed by clients) and the invoices made from them.

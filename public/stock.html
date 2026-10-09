@@ -19,6 +19,7 @@
   <button class="btn" id="bStocktake">Stocktake</button>
   <button class="btn admin-only hide" id="bNewItem">New item</button>
   <button class="btn admin-only hide" id="bLocations">Locations</button>
+  <button class="btn admin-only hide" id="bCategories">Categories</button>
   <button class="btn" id="bExport">Export CSV</button>
 </div>
 <div class="k-body">
@@ -35,6 +36,14 @@
     <input id="q" placeholder="Search item, size or code">
     <select id="fLoc"></select>
     <select id="fCat"></select>
+    <select id="fSub" class="hide"></select>
+    <select id="fSub2" class="hide"></select>
+    <span id="groupBar" style="display:inline-flex;gap:6px;align-items:center">
+      <button class="chip" data-group="category">By category</button>
+      <button class="chip" data-group="location">By location</button>
+      <button class="btn" id="bOpenAll" style="padding:4px 10px;font-size:12px">Expand all</button>
+      <button class="btn" id="bCloseAll" style="padding:4px 10px;font-size:12px">Collapse all</button>
+    </span>
   </div>
   <div id="main"><p class="dim">Loading…</p></div>
 </div>
@@ -50,7 +59,7 @@ const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
 if (isAdmin) els('.admin-only').forEach((b) => b.classList.remove('hide'));
 const { modal, close, foot, wire, v, numOrNull, money, date, when, words, options } = KIT;
 
-const CATEGORIES = ['UNIFORM', 'PPE', 'FIRST_AID', 'CONSUMABLE', 'EQUIPMENT', 'DEVICE', 'OTHER'];
+const CATEGORIES = ['UNIFORM', 'PPE', 'FIRST_AID', 'MEDICAL_CONSUMABLES', 'CONSUMABLE', 'EQUIPMENT', 'DEVICE', 'OTHER'];
 const REASON = { RESTOCK: 'Received', ISSUED: 'Issued', RETURNED: 'Returned', RETURNED_DISPOSED: 'Returned (written off)', TRANSFER_IN: 'Transfer in', TRANSFER_OUT: 'Transfer out', DAMAGED: 'Damaged', EXPIRED: 'Expired', LOST: 'Lost', FOUND: 'Found', AUDIT_CORRECTION: 'Count correction', ALLOCATED: 'Allocated to shift', USED_ON_SHIFT: 'Used on shift' };
 let data = null, people = [], sites = [], view = 'items';
 
@@ -60,7 +69,16 @@ const locOpts = (sel, blank) => options(activeLocs().map((l) => [l.id, l.name]),
 const itemName = (i) => `${i.description}${i.size ? ` (${i.size})` : ''}`;
 const itemOpts = (sel) => options(data.items.map((i) => [i.id, itemName(i)]), sel, '— choose item —');
 const peopleOpts = (sel) => options(people.map((p) => [p.id, p.name]), sel, '— choose person —');
-const levelHere = (i) => (el('#fLoc').value ? (i.levels[el('#fLoc').value] || 0) : i.total);
+/* Sub-categories: up to two levels under each fixed category. */
+const subById = (id) => (data.subcategories || []).find((s) => s.id === Number(id));
+const subsOf = (cat, parentId) => (data.subcategories || []).filter((s) => s.category === cat && (s.parent_id || null) === (parentId || null)).sort((a, b) => a.name.localeCompare(b.name));
+/** [sub, sub-sub] ids for an item — either may be null. */
+function subPair(subId) {
+  const s = subById(subId);
+  if (!s) return [null, null];
+  return s.parent_id ? [s.parent_id, s.id] : [s.id, null];
+}
+const catPath = (i) => [words(i.category), ...subPair(i.subcategory_id).filter(Boolean).map((id) => subById(id).name)].join(' › ');
 
 async function load() {
   try {
@@ -71,6 +89,7 @@ async function load() {
   const keepLoc = el('#fLoc').value, keepCat = el('#fCat').value;
   el('#fLoc').innerHTML = locOpts(keepLoc, 'All locations');
   el('#fCat').innerHTML = options(CATEGORIES.map((c) => [c, words(c)]), keepCat, 'All categories');
+  paintSubFilters();
   paint();
 }
 
@@ -87,50 +106,134 @@ function paintTiles() {
 }
 function setView(vw) { view = vw; els('#views .chip').forEach((c) => c.classList.toggle('on', c.dataset.view === vw)); paint(); }
 els('#views .chip').forEach((c) => (c.onclick = () => setView(c.dataset.view)));
-['#q', '#fLoc', '#fCat'].forEach((s) => el(s).addEventListener(s === '#q' ? 'input' : 'change', () => paint()));
+['#q', '#fLoc', '#fSub2'].forEach((s) => el(s).addEventListener(s === '#q' ? 'input' : 'change', () => paint()));
+// Choosing a level clears the levels below it.
+el('#fCat').addEventListener('change', () => { el('#fSub').innerHTML = ''; el('#fSub2').innerHTML = ''; paintSubFilters(); paint(); });
+el('#fSub').addEventListener('change', () => { el('#fSub2').innerHTML = ''; paintSubFilters(); paint(); });
+
+/** The sub-category filters only appear once there is something to pick. */
+function paintSubFilters() {
+  const cat = el('#fCat').value, sub = el('#fSub').value, sub2 = el('#fSub2').value;
+  const l2 = cat ? subsOf(cat, null) : [];
+  const keep = l2.some((s) => String(s.id) === sub) ? sub : '';
+  el('#fSub').innerHTML = options(l2.map((s) => [s.id, s.name]), keep, `All ${words(cat).toLowerCase()}`);
+  el('#fSub').classList.toggle('hide', !l2.length);
+  const l3 = keep ? subsOf(cat, Number(keep)) : [];
+  el('#fSub2').innerHTML = options(l3.map((s) => [s.id, s.name]), l3.some((s) => String(s.id) === sub2) ? sub2 : '', keep ? `All ${subById(keep).name.toLowerCase()}` : '');
+  el('#fSub2').classList.toggle('hide', !l3.length);
+}
 
 function filtered() {
   const q = el('#q').value.trim().toLowerCase(), cat = el('#fCat').value;
-  return data.items.filter((i) => (!cat || i.category === cat)
-    && (!q || [i.description, i.size, i.sku, i.supplier].some((x) => String(x || '').toLowerCase().includes(q))));
+  const sub = Number(el('#fSub').value) || null, sub2 = Number(el('#fSub2').value) || null;
+  return data.items.filter((i) => {
+    const [s1, s2] = subPair(i.subcategory_id);
+    return (!cat || i.category === cat) && (!sub || s1 === sub) && (!sub2 || s2 === sub2)
+      && (!q || [i.description, i.size, i.sku, i.supplier, catPath(i)].some((x) => String(x || '').toLowerCase().includes(q)));
+  });
 }
 function paint() {
   if (!data) return;
   paintTiles();
   el('#filters').style.display = ['items', 'reorder', 'movements'].includes(view) ? '' : 'none';
+  el('#groupBar').style.display = view === 'items' ? 'inline-flex' : 'none';
   ({ items: paintItems, reorder: paintReorder, expiring: paintExpiring, holdings: paintHoldings, movements: paintMovements, stocktakes: paintStocktakes })[view]();
 }
 
+/* Items are grouped — by category (with its sub- and sub-sub-categories
+ * nested inside) or by location — and every group starts closed. Searching
+ * opens them all so a match is never hidden. The grouping and which groups
+ * are open are remembered per browser. */
+const remember = (k, fallback) => { try { return JSON.parse(localStorage.getItem(`stock.${k}`)) ?? fallback; } catch { return fallback; } };
+const keep = (k, val) => { try { localStorage.setItem(`stock.${k}`, JSON.stringify(val)); } catch {} };
+let groupBy = remember('groupBy', 'category') === 'location' ? 'location' : 'category';
+const openGroups = new Set(remember('open', []));
+const saveOpen = () => keep('open', [...openGroups]);
+function paintGroupBar() { els('#groupBar [data-group]').forEach((b) => b.classList.toggle('on', b.dataset.group === groupBy)); }
+els('#groupBar [data-group]').forEach((b) => (b.onclick = () => { groupBy = b.dataset.group; keep('groupBy', groupBy); paint(); }));
+paintGroupBar();
+
+function itemRow(i, loc, depth, hidden) {
+  const lvl = loc ? (i.levels[loc] || 0) : i.total;
+  const flags = [i.below_reorder ? '<span class="pill bad">Reorder</span>' : '', i.expired ? `<span class="pill bad">Expired ${esc(date(i.next_expiry))}</span>` : i.expiring_soon ? `<span class="pill warn">Expires ${esc(date(i.next_expiry))}</span>` : i.next_expiry ? `<span class="dim" style="font-size:11.5px">next expiry ${esc(date(i.next_expiry))}</span>` : '', i.issued_out ? `<span class="pill info">${i.issued_out} issued</span>` : ''].join(' ');
+  const bs = i.batches.filter((b) => !loc || b.location_id === Number(loc));
+  const batchLine = bs.length ? `<div class="dim" style="font-size:11.5px">${bs.map((b) => `${esc(b.batch_no || 'no batch no.')}${b.expiry_date ? ` exp ${esc(date(b.expiry_date))}` : ''}: ${b.qty}`).join(' · ')}</div>` : '';
+  const where = !loc && Object.keys(i.levels).filter((k) => i.levels[k]).length > 1 ? `<div class="dim" style="font-size:11.5px">${Object.entries(i.levels).filter(([, n]) => n).map(([k, n]) => `${esc(locName(k))}: ${n}`).join(' · ')}</div>` : '';
+  return `<tr${hidden ? ' hidden' : ''}>
+    <td style="padding-left:${12 + depth * 18}px"><strong>${esc(i.description)}</strong>${i.size ? ` <span class="dim">· ${esc(i.size)}</span>` : ''}${i.supplier ? `<div class="dim" style="font-size:11.5px">${esc(i.supplier)}</div>` : ''}</td>
+    <td class="mono dim">${esc(i.sku || '—')}</td>
+    <td class="dim">${esc(catPath(i))}</td>
+    <td class="num"><strong>${lvl}</strong> <span class="dim">${esc(i.unit || '')}</span>${where}${batchLine}</td>
+    <td class="num dim">${i.low_stock_threshold ?? '—'}</td>
+    <td class="num">${money(i.value)}</td>
+    <td>${flags}</td>
+    <td><div class="acts">
+      <button class="btn" data-a="receive" data-id="${i.id}">Receive</button>
+      <button class="btn" data-a="issue" data-id="${i.id}">Issue</button>
+      <button class="btn" data-a="return" data-id="${i.id}">Return</button>
+      <button class="btn" data-a="transfer" data-id="${i.id}">Move</button>
+      <button class="btn" data-a="adjust" data-id="${i.id}">Adjust</button>
+      <button class="btn" data-a="history" data-id="${i.id}">History</button>
+      ${isAdmin ? `<button class="btn" data-a="edit" data-id="${i.id}">Edit</button>` : ''}
+    </div></td></tr>`;
+}
+
+/** A group: { key, name, items: [[item, locationId]], children: [group] }.
+ * Returns the tree for the current grouping, empty groups left out. */
+function itemGroups(rows) {
+  if (groupBy === 'location') {
+    const loc = el('#fLoc').value;
+    const groups = data.locations.filter((l) => (!loc || l.id === Number(loc)) && (l.active !== false || rows.some((i) => i.levels[l.id])))
+      .map((l) => ({ key: `l:${l.id}`, name: l.name, items: rows.filter((i) => i.levels[l.id] > 0).map((i) => [i, l.id]), children: [] }));
+    if (!loc) groups.push({ key: 'l:none', name: 'Out of stock everywhere', items: rows.filter((i) => !i.total).map((i) => [i, null]), children: [] });
+    return groups.filter((g) => g.items.length);
+  }
+  const loc = el('#fLoc').value || null;
+  const build = (key, name, mine, kids) => ({ key, name, items: mine.map((i) => [i, loc]), children: kids.filter((g) => g.items.length || g.children.length) });
+  // Any other category an item was given elsewhere still gets a group.
+  const cats = [...CATEGORIES, ...new Set(rows.map((i) => i.category).filter((c) => !CATEGORIES.includes(c)))];
+  return cats.map((c) => {
+    const inCat = rows.filter((i) => i.category === c);
+    return build(`c:${c}`, words(c), inCat.filter((i) => !subPair(i.subcategory_id)[0]), subsOf(c, null).map((s1) =>
+      build(`s:${s1.id}`, s1.name, inCat.filter((i) => { const [a, b] = subPair(i.subcategory_id); return a === s1.id && !b; }), subsOf(c, s1.id).map((s2) =>
+        build(`s:${s2.id}`, s2.name, inCat.filter((i) => subPair(i.subcategory_id)[1] === s2.id), [])))));
+  }).filter((g) => g.items.length || g.children.length);
+}
+const groupItems = (g) => [...g.items.map(([i]) => i), ...g.children.flatMap(groupItems)];
+
 function paintItems() {
+  paintGroupBar();
   const rows = filtered();
+  const searching = Boolean(el('#q').value.trim());
+  const groups = itemGroups(rows);
+  const out = [];
+  const walk = (g, depth, hidden) => {
+    const open = searching || openGroups.has(g.key);
+    const all = groupItems(g), distinct = new Set(all.map((i) => i.id));
+    const reorder = [...distinct].filter((id) => data.items.find((i) => i.id === id).below_reorder).length;
+    const expiring = [...distinct].filter((id) => { const i = data.items.find((x) => x.id === id); return i.expired || i.expiring_soon; }).length;
+    out.push(`<tr class="clickable" data-g="${esc(g.key)}"${hidden ? ' hidden' : ''} style="background:var(--panel-2)">
+      <td colspan="8" style="padding-left:${12 + depth * 18}px"><span style="display:inline-block;width:14px">${open ? '▾' : '▸'}</span><strong>${esc(g.name)}</strong>
+        <span class="dim" style="font-size:12px">· ${distinct.size} item${distinct.size === 1 ? '' : 's'}</span>
+        ${reorder ? `<span class="pill bad">${reorder} to reorder</span>` : ''} ${expiring ? `<span class="pill warn">${expiring} expiring</span>` : ''}</td></tr>`);
+    g.children.forEach((c) => walk(c, depth + 1, hidden || !open));
+    g.items.forEach(([i, loc]) => out.push(itemRow(i, loc, depth + 1, hidden || !open)));
+  };
+  groups.forEach((g) => walk(g, 0, false));
   const loc = el('#fLoc').value;
+  const qtyHead = groupBy === 'location' ? 'Here' : loc ? esc(locName(loc)) : 'In stock';
   el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k">
-    <thead><tr><th>Item</th><th>Code</th><th>Category</th><th class="num">${loc ? esc(locName(loc)) : 'In stock'}</th><th class="num">Reorder at</th><th class="num">Value</th><th>Status</th><th></th></tr></thead>
-    <tbody>${rows.map((i) => {
-      const lvl = levelHere(i);
-      const flags = [i.below_reorder ? '<span class="pill bad">Reorder</span>' : '', i.expired ? `<span class="pill bad">Expired ${esc(date(i.next_expiry))}</span>` : i.expiring_soon ? `<span class="pill warn">Expires ${esc(date(i.next_expiry))}</span>` : i.next_expiry ? `<span class="dim" style="font-size:11.5px">next expiry ${esc(date(i.next_expiry))}</span>` : '', i.issued_out ? `<span class="pill info">${i.issued_out} issued</span>` : ''].join(' ');
-      const bs = i.batches.filter((b) => !loc || b.location_id === Number(loc));
-      const batchLine = bs.length ? `<div class="dim" style="font-size:11.5px">${bs.map((b) => `${esc(b.batch_no || 'no batch no.')}${b.expiry_date ? ` exp ${esc(date(b.expiry_date))}` : ''}: ${b.qty}`).join(' · ')}</div>` : '';
-      const where = !loc && Object.keys(i.levels).filter((k) => i.levels[k]).length > 1 ? `<div class="dim" style="font-size:11.5px">${Object.entries(i.levels).filter(([, n]) => n).map(([k, n]) => `${esc(locName(k))}: ${n}`).join(' · ')}</div>` : '';
-      return `<tr>
-        <td><strong>${esc(i.description)}</strong>${i.size ? ` <span class="dim">· ${esc(i.size)}</span>` : ''}${i.supplier ? `<div class="dim" style="font-size:11.5px">${esc(i.supplier)}</div>` : ''}</td>
-        <td class="mono dim">${esc(i.sku || '—')}</td>
-        <td class="dim">${esc(words(i.category))}</td>
-        <td class="num"><strong>${lvl}</strong> <span class="dim">${esc(i.unit || '')}</span>${where}${batchLine}</td>
-        <td class="num dim">${i.low_stock_threshold ?? '—'}</td>
-        <td class="num">${money(i.value)}</td>
-        <td>${flags}</td>
-        <td><div class="acts">
-          <button class="btn" data-a="receive" data-id="${i.id}">Receive</button>
-          <button class="btn" data-a="issue" data-id="${i.id}">Issue</button>
-          <button class="btn" data-a="return" data-id="${i.id}">Return</button>
-          <button class="btn" data-a="transfer" data-id="${i.id}">Move</button>
-          <button class="btn" data-a="adjust" data-id="${i.id}">Adjust</button>
-          <button class="btn" data-a="history" data-id="${i.id}">History</button>
-          ${isAdmin ? `<button class="btn" data-a="edit" data-id="${i.id}">Edit</button>` : ''}
-        </div></td></tr>`;
-    }).join('')}</tbody></table></div>` : `<p class="dim">${data.items.length ? 'No items match.' : 'No stock items yet.' + (isAdmin ? ' Press <strong>New item</strong> to add your first one (e.g. "Hi-vis vest", size L).' : ' An admin adds items.')}</p>`;
+    <thead><tr><th>Item</th><th>Code</th><th>Category</th><th class="num">${qtyHead}</th><th class="num">Reorder at</th><th class="num">Value</th><th>Status</th><th></th></tr></thead>
+    <tbody>${out.join('')}</tbody></table></div>` : `<p class="dim">${data.items.length ? 'No items match.' : 'No stock items yet.' + (isAdmin ? ' Press <strong>New item</strong> to add your first one (e.g. "Hi-vis vest", size L).' : ' An admin adds items.')}</p>`;
+  els('#main [data-g]').forEach((r) => (r.onclick = () => {
+    if (searching) return;
+    const k = r.dataset.g;
+    if (openGroups.has(k)) openGroups.delete(k); else openGroups.add(k);
+    saveOpen(); paintItems();
+  }));
   els('#main [data-a]').forEach((b) => (b.onclick = () => ACTIONS[b.dataset.a](data.items.find((i) => i.id === Number(b.dataset.id)))));
+  el('#bOpenAll').onclick = () => { const add = (g) => { openGroups.add(g.key); g.children.forEach(add); }; groups.forEach(add); saveOpen(); paintItems(); };
+  el('#bCloseAll').onclick = () => { openGroups.clear(); saveOpen(); paintItems(); };
 }
 
 function paintReorder() {
@@ -329,6 +432,8 @@ function itemEditor(i) {
     <div><label>Size / variant</label><input id="eSize" value="${esc((i && i.size) || '')}" placeholder="e.g. L — one item per size"></div>
     <div><label>Code / SKU</label><input id="eSku" value="${esc((i && i.sku) || '')}"></div>
     <div><label>Category</label><select id="eCat">${options(CATEGORIES.map((c) => [c, words(c)]), i ? i.category : 'UNIFORM')}</select></div>
+    <div id="eSubW"><label>Sub-category</label><select id="eSub"></select></div>
+    <div id="eSub2W"><label>Sub-sub-category</label><select id="eSub2"></select></div>
     <div><label>Unit</label><input id="eUnit" value="${esc((i && i.unit) || '')}" placeholder="each, pair, box"></div>
     <div><label>Supplier</label><input id="eSup" value="${esc((i && i.supplier) || '')}"></div>
     <div><label>Unit cost (£)</label><input id="eCost" type="number" min="0" step="0.01" value="${i && i.unit_cost != null ? i.unit_cost : ''}"></div>
@@ -342,6 +447,17 @@ function itemEditor(i) {
       <div><label>Expiry date (optional)</label><input id="eExp" type="date"></div>` : '<p class="dim full" style="font-size:12.5px;margin:0">Batch numbers and expiry dates are recorded each time stock is received.</p>'}
     <div class="full"><label>Notes</label><textarea id="eNotes" rows="2">${esc((i && i.notes) || '')}</textarea></div></div>
     ${foot(isNew ? 'Create item' : 'Save', isNew ? '' : '<button type="button" class="btn danger" id="eDel">Delete item</button>')}`, (root) => {
+    const paintSubs = (sub, sub2) => {
+      const cat = v(root, '#eCat'), l2 = subsOf(cat, null);
+      root.querySelector('#eSub').innerHTML = options(l2.map((s) => [s.id, s.name]), sub, '— none —');
+      root.querySelector('#eSubW').classList.toggle('hide', !l2.length);
+      const l3 = v(root, '#eSub') ? subsOf(cat, Number(v(root, '#eSub'))) : [];
+      root.querySelector('#eSub2').innerHTML = options(l3.map((s) => [s.id, s.name]), sub2, '— none —');
+      root.querySelector('#eSub2W').classList.toggle('hide', !l3.length);
+    };
+    paintSubs(...subPair(i && i.subcategory_id));
+    root.querySelector('#eCat').onchange = () => paintSubs(null, null);
+    root.querySelector('#eSub').onchange = () => paintSubs(v(root, '#eSub'), null);
     if (!isNew) root.querySelector('#eDel').onclick = async () => {
       if (i.total || i.issued_out) { alert('This item still has stock or is issued to people. Write it off or get it back first.'); return; }
       if (!confirm(`Delete ${itemName(i)}? Its history goes with it.`)) return;
@@ -352,6 +468,7 @@ function itemEditor(i) {
         description: v(root, '#eName'), size: v(root, '#eSize'), sku: v(root, '#eSku'), category: v(root, '#eCat'), unit: v(root, '#eUnit'),
         supplier: v(root, '#eSup'), unit_cost: numOrNull(v(root, '#eCost')), low_stock_threshold: numOrNull(v(root, '#eRe')),
         reorder_qty: numOrNull(v(root, '#eRq')), notes: v(root, '#eNotes'), is_stock_tracked: true,
+        subcategory_id: numOrNull(v(root, '#eSub2')) || numOrNull(v(root, '#eSub')),
       };
       if (isNew) {
         const created = await api('POST', '/api/assets', body);
@@ -432,9 +549,47 @@ el('#bLocations').onclick = async function locations() {
   }, { wide: true });
 };
 
+/* ---------------- categories (admin) ---------------- */
+/* The top level is fixed; under each an admin adds sub-categories, and
+ * sub-sub-categories under those (two levels at most). */
+el('#bCategories').onclick = function categories() {
+  const btn = (attr, id, text, cls = '') => `<button class="btn ${cls}" ${attr}="${id}" style="padding:2px 8px;font-size:11.5px">${text}</button>`;
+  const node = (s, indent) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 0 3px ${indent}px">
+      <span style="flex:1">${esc(s.name)} <span class="dim" style="font-size:11.5px">${data.items.filter((i) => subPair(i.subcategory_id).includes(s.id)).length || ''}</span></span>
+      ${btn('data-cr', s.id, 'Rename')} ${btn('data-cd', s.id, 'Delete', 'danger')}</div>`;
+  const tree = CATEGORIES.map((c) => {
+    const l2 = subsOf(c, null);
+    return `<div style="border-top:1px solid var(--line);padding:6px 0"><strong>${esc(words(c))}</strong>
+      ${l2.map((s) => node(s, 16) + subsOf(c, s.id).map((t) => node(t, 36)).join('')).join('') || '<div class="dim" style="font-size:12px;padding-left:16px">No sub-categories</div>'}</div>`;
+  }).join('');
+  const targets = CATEGORIES.flatMap((c) => [[`c:${c}`, words(c)], ...subsOf(c, null).map((s) => [`s:${s.id}`, `${words(c)} › ${s.name}`])]);
+  modal('Stock categories', `<p class="dim" style="margin-top:0">Narrow a long list down: add sub-categories under a category, and sub-sub-categories under those — e.g. Medical consumables › Dressings › Sterile.</p>
+    ${tree}
+    <h3 style="font-size:13px;margin:14px 0 6px">Add a sub-category</h3>
+    <div class="k-form"><div><label>Under</label><select id="cUnder">${options(targets, el('#fCat').value ? `c:${el('#fCat').value}` : '')}</select></div>
+      <div><label>Name</label><input id="cName" placeholder="e.g. Dressings"></div></div>${foot('Add')}`, (root) => {
+    const again = async () => { await load(); categories(); };
+    root.querySelectorAll('[data-cr]').forEach((b) => (b.onclick = async () => {
+      const s = subById(b.dataset.cr), name = prompt('New name', s.name);
+      if (!name || name.trim() === s.name) return;
+      try { await api('PATCH', `/api/stock/categories/${s.id}`, { name }); await again(); } catch (e) { alert(e.message); }
+    }));
+    root.querySelectorAll('[data-cd]').forEach((b) => (b.onclick = async () => {
+      const s = subById(b.dataset.cd);
+      if (!confirm(`Delete "${s.name}"?`)) return;
+      try { await api('DELETE', `/api/stock/categories/${s.id}`); await again(); } catch (e) { alert(e.message); }
+    }));
+    wire(root, async () => {
+      const [kind, ref] = v(root, '#cUnder').split(':');
+      await api('POST', '/api/stock/categories', kind === 'c' ? { category: ref, name: v(root, '#cName') } : { parent_id: Number(ref), name: v(root, '#cName') });
+      await again();
+    });
+  }, { wide: true });
+};
+
 el('#bExport').onclick = () => KIT.csv(`stock-${new Date().toISOString().slice(0, 10)}.csv`,
   ['Item', 'Size', 'Code', 'Category', 'Unit', ...data.locations.map((l) => l.name), 'Total', 'Issued to people', 'Reorder at', 'Reorder qty', 'Unit cost', 'Value', 'Supplier', 'Next expiry', 'Batches'],
-  data.items.map((i) => [i.description, i.size, i.sku, words(i.category), i.unit, ...data.locations.map((l) => i.levels[l.id] || 0), i.total, i.issued_out, i.low_stock_threshold, i.reorder_qty, i.unit_cost, i.value, i.supplier, i.next_expiry, i.batches.map((b) => `${b.batch_no || '-'}${b.expiry_date ? ' exp ' + b.expiry_date : ''}: ${b.qty} @ ${locName(b.location_id)}`).join('; ')]));
+  data.items.map((i) => [i.description, i.size, i.sku, catPath(i), i.unit, ...data.locations.map((l) => i.levels[l.id] || 0), i.total, i.issued_out, i.low_stock_threshold, i.reorder_qty, i.unit_cost, i.value, i.supplier, i.next_expiry, i.batches.map((b) => `${b.batch_no || '-'}${b.expiry_date ? ' exp ' + b.expiry_date : ''}: ${b.qty} @ ${locName(b.location_id)}`).join('; ')]));
 
 load();
 setInterval(() => { if (!document.querySelector('.modal-back')) load(); }, 60000);

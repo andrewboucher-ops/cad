@@ -22,7 +22,11 @@
  *   - REORDER: an item at or under its reorder level is listed with a
  *     suggested quantity, grouped by supplier;
  *   - HOLDINGS: what each person has been issued and not returned — the
- *     uniform-issue record — from the ledger's person_delta.
+ *     uniform-issue record — from the ledger's person_delta;
+ *   - SUB-CATEGORIES: under each fixed category (Uniform, Medical
+ *     consumables…) an admin can add sub-categories, and sub-sub-categories
+ *     under those — never deeper — so a long list can be narrowed level by
+ *     level (Medical consumables › Dressings › Sterile).
  * Levels can never go below zero at any location or in any batch.
  *
  * ASSETS are things with a tag: radios, body cameras, keys, laptops. The
@@ -49,9 +53,9 @@ const DUE_SOON_DAYS = 30;
 
 module.exports = function registerInventoryRoutes({
   route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, visibleToUser, isControlRole,
-  publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, flushNow = () => {},
+  publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, ASSET_CATEGORIES = [], flushNow = () => {},
 }) {
-  for (const t of ['stock_locations', 'asset_events', 'stocktakes', 'stock_movements', 'assets', 'asset_checkouts']) if (!Array.isArray(db[t])) db[t] = [];
+  for (const t of ['stock_locations', 'stock_subcategories', 'asset_events', 'stocktakes', 'stock_movements', 'assets', 'asset_checkouts']) if (!Array.isArray(db[t])) db[t] = [];
 
   /** The main store always exists; ledger rows with no location are its. */
   function mainStore() {
@@ -192,6 +196,54 @@ module.exports = function registerInventoryRoutes({
     return l;
   });
 
+  /* ---- sub-categories: two optional levels under a fixed category ---- */
+  const findSubcategory = (id) => {
+    const s = db.stock_subcategories.find((x) => x.id === Number(id));
+    if (!s) throw httpError(404, 'sub-category not found');
+    return s;
+  };
+  const subName = (raw) => { const n = String(raw || '').trim().slice(0, 60); if (!n) throw httpError(400, 'name required'); return n; };
+  /** Names are unique among siblings only — "Sterile" can sit under both
+   * Dressings and Gloves. */
+  const assertUniqueSibling = (category, parentId, name, exceptId) => {
+    if (db.stock_subcategories.some((x) => x.id !== exceptId && x.category === category && (x.parent_id || null) === (parentId || null) && x.name.toLowerCase() === name.toLowerCase())) {
+      throw httpError(409, 'there is already one with that name here');
+    }
+  };
+  route('GET', '/api/stock/categories', ALL, () => ({
+    categories: ASSET_CATEGORIES,
+    subcategories: db.stock_subcategories.slice().sort((x, y) => x.name.localeCompare(y.name)),
+  }));
+  route('POST', '/api/stock/categories', ADMIN, ({ body, user }) => {
+    const name = subName(body.name);
+    let category = body.category, parentId = null;
+    if (body.parent_id) {
+      const parent = findSubcategory(body.parent_id);
+      if (parent.parent_id) throw httpError(400, 'sub-categories go two levels deep at most');
+      category = parent.category; parentId = parent.id;
+    }
+    if (!ASSET_CATEGORIES.includes(category)) throw httpError(400, 'invalid category');
+    assertUniqueSibling(category, parentId, name);
+    const s = { id: nextId('stock_subcategories'), category, parent_id: parentId, name, created_at: new Date().toISOString() };
+    db.stock_subcategories.push(s);
+    logEvent('stock.subcategory_created', `STOCK SUB-CATEGORY "${name}" ADDED BY ${user.username}`, { subcategory_id: s.id });
+    return { __status: 201, __body: s };
+  });
+  route('PATCH', '/api/stock/categories/:id', ADMIN, ({ params, body }) => {
+    const s = findSubcategory(params.id);
+    if ('name' in body) { const name = subName(body.name); assertUniqueSibling(s.category, s.parent_id, name, s.id); s.name = name; }
+    return s;
+  });
+  route('DELETE', '/api/stock/categories/:id', ADMIN, ({ params, user }) => {
+    const s = findSubcategory(params.id);
+    if (db.stock_subcategories.some((x) => x.parent_id === s.id)) throw httpError(409, 'delete or move what is inside it first');
+    const used = db.assets.filter((a) => a.subcategory_id === s.id).length;
+    if (used) throw httpError(409, `${used} item${used === 1 ? '' : 's'} still use${used === 1 ? 's' : ''} it — move ${used === 1 ? 'it' : 'them'} first`);
+    db.stock_subcategories.splice(db.stock_subcategories.indexOf(s), 1);
+    logEvent('stock.subcategory_deleted', `STOCK SUB-CATEGORY "${s.name}" DELETED BY ${user.username}`, { subcategory_id: s.id });
+    return { ok: true };
+  });
+
   /** Where a location is. A bag or kit box can BE an asset (First aid bag
    * 01, tag FAB-01) — then it is wherever that asset is, e.g. in a vehicle.
    * Otherwise it can sit in a vehicle or at a site directly. */
@@ -293,6 +345,7 @@ module.exports = function registerInventoryRoutes({
     }).sort((x, y) => x.description.localeCompare(y.description) || String(x.size || '').localeCompare(String(y.size || '')));
     return {
       locations: db.stock_locations.map(describeLocation),
+      subcategories: db.stock_subcategories,
       items,
       expiring_batches: expiringBatches.sort((x, y) => x.expiry_date.localeCompare(y.expiry_date)),
       summary: {
