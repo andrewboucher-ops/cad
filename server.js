@@ -2774,8 +2774,24 @@ function notifyShiftEvent(eventKey, s, personnelIds) {
   for (const pid of personnelIds || []) notifyPersonnelAboutShift(pid, eventKey, s).catch((e) => console.warn('[cccs] shift notify failed:', e.message));
 }
 
+const JOB_TS_FIELDS = ['dispatched_at', 'acknowledged_at', 'en_route_at', 'on_scene_at', 'completed_at'];
 route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  // Control can set the actual stepper times directly — for a job an
+  // officer confirmed by radio or in person rather than through the phone
+  // app or MDT, there is otherwise no way to record when it really
+  // happened instead of defaulting every unset stage to "now" the moment
+  // status flips to COMPLETED. Applied before the status block below so
+  // stampJobStatus's "only if not already set" guard respects whatever
+  // was explicitly given here.
+  const settingTimes = isControlRole(user.role) && JOB_TS_FIELDS.some((f) => f in body);
+  if (settingTimes) {
+    for (const f of JOB_TS_FIELDS) {
+      if (!(f in body)) continue;
+      if (body[f] !== null && !Number.isFinite(Date.parse(body[f]))) throw httpError(400, `invalid ${f}`);
+      j[f] = body[f] ? new Date(body[f]).toISOString() : null;
+    }
+  }
   if (body.status) {
     const s = String(body.status).toUpperCase();
     if (!JOB_STATES.includes(s)) throw httpError(400, 'invalid job status');
@@ -2816,6 +2832,9 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   }
   j.updated_at = new Date().toISOString();
   broadcast('job.status_changed', publicJob(j));
+  if (settingTimes) {
+    logEvent('job.times_corrected', `JOB ${j.reference} TIMES SET BY ${user.display_name} (not via phone/MDT)`, { job_id: j.id, corrected_by: user.id });
+  }
   logEvent('job.status_changed', `JOB ${j.reference} → ${j.status}`, { job_id: j.id });
   return publicJob(j);
 });

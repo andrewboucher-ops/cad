@@ -618,7 +618,7 @@ function renderDetail({ force = false } = {}) {
   const title = (t) => (el('#detailTitle').textContent = t);
   if (mode === 'newJob') { title('New job'); return renderNewJob(body); }
   if (mode === 'newVisit') { title('New patrol visit'); return renderNewVisit(body); }
-  if (mode === 'assign') { title('Assign by call sign'); return renderAssign(body); }
+  if (mode === 'assign') { title('Assign'); return renderAssign(body); }
   if (mode === 'message') { title('Send message'); return renderMessage(body); }
   if (mode === 'notify') { title('Notifications'); return renderNotify(body); }
   if (mode === 'callsigns') { title('Call signs'); return renderCallsigns(body); }
@@ -685,14 +685,25 @@ function renderJob(body) {
         ${r.personnel ? `<button class="btn" data-contact="${esc(r.personnel)}" style="padding:1px 8px;font-size:11px">Contact</button>` : ''}
         ${active ? `<button class="btn danger" data-standdown="${esc(r.personnel ? 'p:' + r.personnel : 'm:' + r.mdt)}" style="padding:1px 8px;font-size:11px">Stand down</button>` : ''}
       </div>`).join('') : '<p class="dim" style="margin:0">Nobody assigned.</p>'}
-      ${active ? `<div class="btn-row" style="margin-top:6px"><button class="btn primary" id="jAssign">Assign by call sign</button><button class="btn" id="jEditBtn">Edit details</button></div>` : ''}
+      ${active ? `<div class="btn-row" style="margin-top:6px"><button class="btn primary" id="jAssign">Assign</button><button class="btn" id="jEditBtn">Edit details</button></div>` : ''}
     </div>
     <div class="dsec"><div class="t">Notes — visible to every assigned call sign</div>
       <textarea id="jNotes" rows="2">${esc(j.notes || '')}</textarea>
       <div class="btn-row" style="margin-top:4px"><button class="btn" id="jSaveNotes">Save notes</button></div>
     </div>
     <div class="dsec"><div class="t">Reports</div><div id="jReports"><p class="dim">Loading…</p></div></div>
-    ${active ? `<div class="btn-row" style="margin-top:12px"><button class="btn ok" id="jDone">Mark completed</button><button class="btn danger" id="jCancel">Cancel job</button></div>` : ''}
+    ${active ? `<div class="dsec">
+      <div class="t">Complete manually</div>
+      <p class="dim" style="margin:0 0 6px;font-size:12.5px">Confirmed done by radio or in person, without the phone app or MDT — set when it happened and mark it complete.</p>
+      <div style="display:flex;gap:8px">
+        <div style="flex:1"><label style="font-size:11px">On scene</label><input type="datetime-local" id="jOnScene" value="${localDT(j.on_scene_at)}"></div>
+        <div style="flex:1"><label style="font-size:11px">Completed</label><input type="datetime-local" id="jCompletedAt" value="${localDT(j.completed_at)}"></div>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn ok" id="jDone">Mark completed</button>
+        <button class="btn danger" id="jCancel">Cancel job</button>
+      </div>
+    </div>` : ''}
     <p class="err" id="detailErr"></p>`;
   paintReports(el('#jReports'), 'JOB', j.id);
   el('#jSaveNotes').onclick = () => api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }).catch(showErr);
@@ -704,7 +715,14 @@ function renderJob(body) {
   el('#eSave').onclick = () => api('PATCH', `/api/jobs/${j.id}`, {
     incident_type: el('#eType').value, location: el('#eLoc').value, what3words: el('#eW3w').value, caller: el('#eCaller').value, description: el('#eDesc').value,
   }).then(() => renderDetail({ force: true })).catch(showErr);
-  armed(el('#jDone'), 'Confirm completed', () => api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }));
+  armed(el('#jDone'), 'Confirm completed', () => {
+    const onScene = el('#jOnScene').value, completedAt = el('#jCompletedAt').value;
+    return api('PATCH', `/api/jobs/${j.id}`, {
+      status: 'COMPLETED',
+      ...(onScene ? { on_scene_at: new Date(onScene).toISOString() } : {}),
+      completed_at: completedAt ? new Date(completedAt).toISOString() : new Date().toISOString(),
+    }).catch(showErr);
+  });
   armed(el('#jCancel'), 'Confirm cancel', () => api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }));
   els('[data-standdown]', body).forEach((b) => armed(b, 'Confirm', () => {
     const [k, id] = b.dataset.standdown.split(':');
@@ -966,8 +984,9 @@ function renderNewVisit(body) {
   };
 }
 
-/** Assign by call sign: every person and MDT on a call sign moves together,
- * the way a dispatch console assigns — not one resource at a time. */
+/** Dispatch a call sign (every person and MDT on it moves together, the
+ * way a dispatch console assigns) or a single person directly — for
+ * someone with no call sign set, which a call sign pick can never reach. */
 async function renderAssign(body) {
   const jobId = state.modeArg;
   body.innerHTML = '<p class="dim">Loading call signs…</p>';
@@ -976,18 +995,30 @@ async function renderAssign(body) {
   const paint = () => {
     const job = state.jobs.find((j) => j.id === jobId);
     if (!job) { body.innerHTML = '<p class="dim">That job is no longer open.</p>'; return; }
+    const unassigned = state.personnel.filter((p) => !job.resources.some((r) => r.personnel === p.name));
     body.innerHTML = `
       <p class="dim" style="margin:0 0 8px">Tap a call sign to dispatch every officer and MDT on it to <strong>${esc(job.reference)}</strong>.</p>
       <div class="chips">${callsigns.map((c) => {
         const n = c.personnel.length + c.mdts.length, already = job.resources.some((r) => r.callsign === c.name);
         return `<button class="chip ${already ? 'on' : ''}" data-cs="${esc(c.name)}" ${already || !n ? 'disabled' : ''}>${esc(c.name)} ${already ? '✓' : `(${n})`}</button>`;
       }).join('') || '<span class="dim">No call signs configured.</span>'}</div>
+      <div class="dsec">
+        <div class="t">Or assign a person directly — no call sign needed</div>
+        <div style="display:flex;gap:6px">
+          <select id="asPerson" style="flex:1">${unassigned.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}${p.callsign ? ` — ${esc(p.name)}` : ''}</option>`).join('') || '<option value="">— nobody left to assign —</option>'}</select>
+          <button class="btn primary" id="asPersonGo" ${unassigned.length ? '' : 'disabled'}>Assign</button>
+        </div>
+      </div>
       <div class="btn-row" style="margin-top:10px"><button class="btn" id="asBack">Back to ${esc(job.reference)}</button></div>
       <p class="err" id="detailErr"></p>`;
     els('[data-cs]', body).forEach((b) => (b.onclick = async () => {
       try { upsert(state.jobs, await api('POST', `/api/jobs/${jobId}/assign`, { resources: [b.dataset.cs] })); paint(); renderDispatch(); }
       catch (e) { showErr(e); }
     }));
+    if (el('#asPersonGo')) el('#asPersonGo').onclick = async () => {
+      try { upsert(state.jobs, await api('POST', `/api/jobs/${jobId}/assign`, { resources: [el('#asPerson').value] })); paint(); renderDispatch(); }
+      catch (e) { showErr(e); }
+    };
     el('#asBack').onclick = () => select('j', jobId);
   };
   paint();

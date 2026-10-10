@@ -334,6 +334,36 @@ test('a resource can be stood down from a job', async () => {
   assert.ok(stood.body.resources.some((r) => r.mdt === 'MDT-001'), 'the MDT is untouched');
 });
 
+test('a job can be dispatched straight to a person with no call sign at all', async () => {
+  const p = await call('POST', '/api/personnel', { name: 'No Callsign Officer' }, adminT);
+  assert.equal(p.body.callsign, null, 'fixture precondition: nobody assigned a call sign');
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
+  const dispatched = await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: [p.body.id] }, dispT);
+  assert.equal(dispatched.status, 200, JSON.stringify(dispatched.body));
+  assert.equal(dispatched.body.status, 'DISPATCHED');
+  assert.ok(dispatched.body.resources.some((r) => r.personnel === 'No Callsign Officer'));
+});
+
+test('control can complete a job with real times, without the phone app or MDT', async () => {
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
+
+  const onScene = new Date(Date.now() - 20 * 60000).toISOString();
+  const completedAt = new Date(Date.now() - 5 * 60000).toISOString();
+  const byOfficer = await call('PATCH', `/api/jobs/${job.body.id}`, { on_scene_at: onScene, completed_at: completedAt }, danT);
+  assert.equal(byOfficer.body.on_scene_at, null, 'an officer\'s request cannot set explicit times, only control\'s');
+
+  const bad = await call('PATCH', `/api/jobs/${job.body.id}`, { completed_at: 'not-a-date' }, dispT);
+  assert.equal(bad.status, 400);
+
+  const r = await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'COMPLETED', on_scene_at: onScene, completed_at: completedAt }, dispT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status, 'COMPLETED');
+  assert.equal(r.body.on_scene_at, onScene);
+  assert.equal(r.body.completed_at, completedAt, 'the real time given, not "now"');
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'job.times_corrected' && e.data && e.data.job_id === job.body.id));
+});
+
 /* ---------------- GuardM8 integration ---------------- */
 test('GuardM8 can push a job with a shared secret, and retries are idempotent', async () => {
   process.env.GUARDM8_SECRET = 'test-guardm8-secret';
