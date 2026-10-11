@@ -52,6 +52,16 @@ const SCRIPTS = {
     [5, { Event: 'DialEnd', Channel: CH, DestChannel: 'PJSIP/trunkA-0006', DialStatus: 'NOANSWER' }],
     [5, { Event: 'Hangup', Channel: CH, Cause: '19' }],
   ],
+  '07700900007': (id) => [ // direct-dial IVR call: answered
+    [5, { Event: 'OriginateResponse', ActionID: id, Response: 'Success', Channel: 'Local/07700900007@from-internal-00000007;1', Reason: '4' }],
+    [5, { Event: 'DialEnd', Channel: 'Local/07700900007@from-internal-00000007;1', DestChannel: 'PJSIP/trunkA-0007', DialStatus: 'ANSWER' }],
+    [50, { Event: 'Hangup', Channel: 'Local/07700900007@from-internal-00000007;1', Cause: '16' }],
+  ],
+  '07700900008': (id) => [ // direct-dial IVR call: never answered
+    [5, { Event: 'OriginateResponse', ActionID: id, Response: 'Success', Channel: 'Local/07700900008@from-internal-00000008;1', Reason: '4' }],
+    [5, { Event: 'DialEnd', Channel: 'Local/07700900008@from-internal-00000008;1', DestChannel: 'PJSIP/trunkA-0008', DialStatus: 'NOANSWER' }],
+    [5, { Event: 'Hangup', Channel: 'Local/07700900008@from-internal-00000008;1', Cause: '19' }],
+  ],
 };
 
 before(async () => {
@@ -78,7 +88,13 @@ before(async () => {
         } else if (h.Action === 'Originate') {
           if (mode === 'no-originate') { reply({ Response: 'Error', Message: 'Permission denied' }); continue; }
           reply({ Response: 'Success', Message: 'Originate successfully queued' });
-          const script = SCRIPTS[h.Exten];
+          // Click-to-dial carries the dialled number in Exten; a direct
+          // dial (originateDirect) carries it in the Channel itself
+          // (Local/<number>@...) and Exten is the IVR's own entry point —
+          // so a number embedded in Channel takes priority when it matches
+          // a script.
+          const chanNumber = /^Local\/(\d+)@/.exec(h.Channel || '');
+          const script = (chanNumber && SCRIPTS[chanNumber[1]]) ? SCRIPTS[chanNumber[1]] : SCRIPTS[h.Exten];
           let t = 0;
           for (const [delay, ev] of script ? script(h.ActionID) : []) {
             t += delay;
@@ -196,5 +212,36 @@ test('nothing that could inject AMI headers ever reaches the socket', async () =
   await assert.rejects(ami.originate({ extension: '201', number: '07700900001\r\nAction: Command' }), /not a dialable number/);
   await assert.rejects(ami.originate({ extension: '201\r\n', number: '07700900001' }), /extension/);
   await assert.rejects(ami.originate({ extension: '201', number: '+15551234567' }), /not a dialable number/, 'non-UK E.164 on a national trunk is refused, not misdialled');
+  assert.equal(received.length, before, 'no connection was even opened');
+});
+
+test('originateDirect dials the number itself — no operator leg — and drops the answer into the given context/exten with its variables', async () => {
+  mode = 'ok';
+  const placed = await load().originateDirect({ number: '07700900007', context: 'cccs-welfare-check', exten: 's', variables: { CCCS_TOKEN: 'abc123' }, ringS: 20 });
+  const r = await placed.result;
+  const o = received.filter((x) => x.Action === 'Originate').pop();
+  assert.equal(o.Channel, 'Local/07700900007@from-internal/n', 'rings the number directly, not an internal extension first');
+  assert.equal(o.Context, 'cccs-welfare-check');
+  assert.equal(o.Exten, 's');
+  assert.equal(o.Priority, '1');
+  assert.equal(o.Timeout, '20000');
+  assert.equal(o.Variable, 'CCCS_TOKEN=abc123');
+  assert.equal(r.outcome, 'ANSWERED');
+  assert.ok(r.duration_s >= 0);
+});
+
+test('originateDirect reports a call nobody answered, with no operator/officer distinction (there is no operator leg)', async () => {
+  mode = 'ok';
+  const r = await (await load().originateDirect({ number: '07700900008', context: 'cccs-welfare-check' })).result;
+  assert.equal(r.outcome, 'NO_ANSWER');
+});
+
+test('originateDirect refuses an unsafe context, exten or variable name before opening a connection', async () => {
+  const ami = load();
+  const before = received.length;
+  await assert.rejects(ami.originateDirect({ number: '07700900007', context: 'bad ctx' }), /invalid context/);
+  await assert.rejects(ami.originateDirect({ number: '07700900007', context: 'ok-ctx', exten: 'bad exten' }), /invalid exten/);
+  await assert.rejects(ami.originateDirect({ number: '07700900007', context: 'ok-ctx', variables: { 'BAD NAME': 'x' } }), /invalid variable name/);
+  await assert.rejects(ami.originateDirect({ number: '07700900007', context: 'ok-ctx', variables: { X: 'has\r\nbreak' } }), /line break/);
   assert.equal(received.length, before, 'no connection was even opened');
 });

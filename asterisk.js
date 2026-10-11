@@ -392,6 +392,96 @@ async function originate({ extension, number } = {}) {
   return { action_id: actionId, dial_string: dial, result };
 }
 
+/**
+ * Rings a number directly — no operator in the loop — and, once answered,
+ * drops the call straight into a dialplan context of the caller's choosing
+ * instead of back into DIAL_CONTEXT's normal number-dialling logic. Built
+ * for an IVR: the context named here is expected to Answer(), run its own
+ * prompt/Read()/whatever it needs, and report the outcome back to CCCS
+ * itself (a webhook, an AGI call — this module has no part in that); all
+ * AMI sees from here is whether the number answered at all.
+ *
+ * UNVERIFIED AGAINST A REAL PBX as of the day this was written — same
+ * caution as the AURA MQTT publisher: the Channel/Context/Exten shape
+ * mirrors originate()'s already-confirmed-working pattern exactly (just
+ * swapping who is dialled first and where the call continues on answer),
+ * but nobody has placed this call for real yet. Confirm before relying on
+ * it, the same way originate()'s own shape was confirmed via a captured
+ * call (see the module comment).
+ *
+ * variables become AMI Variable headers (`Key=Value`, one per header) —
+ * typically a single correlation token the dialplan passes back on its
+ * own callback so CCCS knows which pending check this result answers.
+ *
+ * Resolves once Asterisk has ACCEPTED the originate (not once answered,
+ * and never with the IVR's own result — see above) to { action_id,
+ * dial_string, result }, result being a Promise of whether the call was
+ * ever answered at all ({ outcome: 'ANSWERED'|'NO_ANSWER'|'BUSY'|'FAILED',
+ * duration_s }). Rejects if the PBX is unreachable or refuses the
+ * Originate — nothing was dialled in either case.
+ */
+async function originateDirect({ number, context, exten = 's', variables = {}, ringS } = {}) {
+  const dial = toDialString(number);
+  if (!dial) throw new Error(`not a dialable number: ${number}`);
+  const ctx = String(context || '');
+  if (!headerSafe(ctx) || !/^[A-Za-z0-9_-]+$/.test(ctx)) throw new Error('invalid context');
+  const ext = String(exten || 's');
+  if (!headerSafe(ext) || !/^[A-Za-z0-9_-]+$/.test(ext)) throw new Error('invalid exten');
+  const varHeaders = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(variables)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`invalid variable name ${k}`);
+    const value = String(v);
+    if (!headerSafe(value)) throw new Error(`variable ${k} contains a line break`);
+    n += 1;
+    varHeaders[n === 1 ? 'Variable' : `Variable${n}`] = `${k}=${value}`;
+  }
+
+  const handle = await connect();
+  const actionId = crypto.randomBytes(8).toString('hex');
+  const tracker = createCallTracker(actionId);
+
+  let settle;
+  const result = new Promise((res) => { settle = res; });
+  let finished = false;
+  let ringTimer = null, maxTimer = null;
+  const finish = (r) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(ringTimer); clearTimeout(maxTimer);
+    offEvent(); offClose();
+    handle.close();
+    settle(r);
+  };
+
+  const offEvent = handle.onEvent((ev) => {
+    const r = tracker.feed(ev);
+    if (r) return finish(r);
+  });
+  const offClose = handle.onClose(() => finish(tracker.abandon('AMI_DISCONNECTED')));
+  const ringMs = (ringS || OPERATOR_RING_S) * 1000;
+  ringTimer = setTimeout(() => { if (!tracker.answered) finish(tracker.abandon('TRACKING_TIMEOUT')); }, RING_TRACK_MS);
+  maxTimer = setTimeout(() => finish(tracker.abandon('TRACKING_TIMEOUT')), CALL_MAX_MS);
+  ringTimer.unref?.(); maxTimer.unref?.();
+
+  try {
+    await handle.sendAction('Originate', {
+      ActionID: actionId,
+      Channel: `Local/${dial}@${DIAL_CONTEXT}/n`,
+      Context: ctx,
+      Exten: ext,
+      Priority: '1',
+      Timeout: String(ringMs),
+      Async: 'true',
+      ...varHeaders,
+    });
+  } catch (e) {
+    finish(tracker.abandon('ORIGINATE_REJECTED'));
+    throw e;
+  }
+  return { action_id: actionId, dial_string: dial, result };
+}
+
 /** A one-shot connectivity + permission check, for an admin diagnostics
  * route. Reports what it can see rather than assuming: ListCommands only
  * lists the actions this AMI user is permitted, so Originate's presence
@@ -413,6 +503,6 @@ async function probe() {
 }
 
 module.exports = {
-  connect, originate, probe, createCallTracker, toDialString, parseBlock,
+  connect, originate, originateDirect, probe, createCallTracker, toDialString, parseBlock,
   configured, HOST, PORT, DIAL_CONTEXT,
 };
