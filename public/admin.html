@@ -906,6 +906,8 @@ function personnelForm(p) {
         <input id="npnBankSortCode" autocomplete="off" placeholder="Sort code" value="${isNew ? '' : esc((p.bank_details && p.bank_details.sort_code) || '')}" style="width:150px">
         <input id="npnBankAccNo" autocomplete="off" placeholder="Account number" value="${isNew ? '' : esc((p.bank_details && p.bank_details.account_number) || '')}" style="flex:1">
       </div>
+      <label>Date of birth — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">admin-only, same reasoning as bank details. Needed for the welfare check-call (if enabled) to confirm it's genuinely reaching them</span></label>
+      <input id="npnDob" type="date" value="${!isNew && p.date_of_birth ? String(p.date_of_birth).slice(0, 10) : ''}" style="width:150px">
       <label>Branch (optional — leave shared if you don't use branches)</label>
       <select id="npnBranch">${branchOptions(isNew ? null : p.branch_id)}</select>
       ${!isNew ? `
@@ -1100,6 +1102,7 @@ function personnelModal(p) {
         rtw_expiry: el('#npnRtwExpiry').value || null,
         emergency_contact: { name: el('#npnEcName').value.trim(), relationship: el('#npnEcRelationship').value.trim(), phone: el('#npnEcPhone').value.trim(), email: el('#npnEcEmail').value.trim() },
         bank_details: { account_name: el('#npnBankAccName').value.trim(), bank_name: el('#npnBankName').value.trim(), sort_code: el('#npnBankSortCode').value.trim(), account_number: el('#npnBankAccNo').value.trim() },
+        date_of_birth: el('#npnDob').value || null,
         branch_id: el('#npnBranch').value ? Number(el('#npnBranch').value) : null,
         employment_type: empType,
         annual_leave_allowance_days: empType === 'SUBCONTRACTOR' ? null : (el('#npnAllowance').value ? Number(el('#npnAllowance').value) : null),

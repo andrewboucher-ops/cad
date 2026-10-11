@@ -10,6 +10,7 @@ process.env.AUTH_SECRET = 'attendance-test-secret';
 process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';
 process.env.SHIFT_REMINDERS = 'on';
+process.env.WELFARE_CHECKCALL_ENABLED = 'on';
 
 const app = require('../server.js');
 const BASE = `http://127.0.0.1:${process.env.PORT}`;
@@ -29,6 +30,7 @@ before(async () => {
   adminT = await login('admin', 'admin123'); dispT = await login('dispatcher', 'dispatch123'); danT = await login('dwhitfield', 'field123');
   dan = app.db.personnel.find((p) => p.name === 'Dan Whitfield');
   dan.contact_phone = '07700900123';
+  dan.date_of_birth = '1985-06-15';
   site = app.db.sites[0];
   await call('PATCH', `/api/sites/${site.id}`, { lat: 53.5, lon: -0.1, geofence_m: 200 }, adminT);
 });
@@ -164,6 +166,116 @@ test('10 minutes late is a real alarm, not another reminder — an emergency wit
   // new alarm is additive, not a replacement.
   app.attendance.tick(start + 16 * 60000);
   assert.ok(a.late_alert_at);
+});
+
+test('welfare check-call: not scheduled without both a phone number and a date of birth on file', async () => {
+  const { a } = await shiftFor(-1);
+  await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+  const realDob = dan.date_of_birth;
+  dan.date_of_birth = null;
+  app.attendance.tick();
+  assert.ok(!a.welfare_checkcall_due_at, 'no date of birth on file — never scheduled');
+  dan.date_of_birth = realDob;
+  app.attendance.tick();
+  assert.ok(a.welfare_checkcall_due_at, 'date of birth now on file — scheduled on the next tick');
+});
+
+test('welfare check-call: due two hours after clock-in; AMI not being configured in this test env fails it fast and raises the same alarm a real failure would', async () => {
+  const { a, s } = await shiftFor(-1);
+  const clockIn = await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+  assert.equal(clockIn.status, 200);
+  // Backdating clocked_in_at (rather than advancing tick's `now`) keeps only
+  // this test's own clock-in crossing the two-hour mark — advancing `now`
+  // globally would also push every other still-clocked-in assignment left
+  // over from earlier tests in this file past ITS OWN due time in the same
+  // tick, raising alarms that have nothing to do with this test.
+  a.clocked_in_at = new Date(Date.now() - 60 * 60000).toISOString();
+  app.attendance.tick();
+  assert.ok(!a.welfare_checkcall_token, 'one hour in — not due yet');
+  // Scheduling (setting welfare_checkcall_due_at) and acting on a due check
+  // are deliberately on different branches of the same tick — one tick to
+  // recompute due_at from the new, further-back clock-in time, a second to
+  // see it's now in the past.
+  a.welfare_checkcall_due_at = null;
+  a.clocked_in_at = new Date(Date.now() - 121 * 60000).toISOString();
+  app.attendance.tick();
+  app.attendance.tick();
+  assert.ok(a.welfare_checkcall_token, 'due at two hours — a call is placed');
+  const matching = () => app.db.emergency_events.filter((e) => e.kind === 'WELFARE_CHECKCALL_FAILED' && e.personnel_id === dan.id);
+  const before = matching().length;
+  // Placing the call is async (AMI connect/reject); give it a tick to settle.
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(matching().length, before + 1, 'AMI is unconfigured here, so the attempt itself fails — and that fails the check honestly, same as a real no-answer');
+  const ev = matching()[matching().length - 1];
+  assert.match(ev.note, /could not place the check call/);
+  assert.equal(ev.callsign, 'Dan Whitfield');
+  assert.equal(ev.zone_source, dan.employee_no);
+  const job = app.db.jobs.find((j) => j.emergency_id === ev.id);
+  assert.equal(job.incident_type, 'WELFARE CHECK CALL FAILED');
+  assert.equal(job.priority, 'RED');
+  assert.ok(!a.welfare_checkcall_token, 'cleared, not left pending forever');
+  assert.ok(Date.parse(a.welfare_checkcall_due_at) > Date.now(), 'rescheduled forward from now, not stuck re-trying immediately');
+});
+
+test('welfare check-call: the dialplan GET/result pair — confirmed clears it and reschedules, a mismatch raises the alarm, an unknown token 404s', async () => {
+  const { a, s } = await shiftFor(-1);
+  await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+
+  assert.equal((await call('GET', '/api/welfare-checkcall/not-a-real-token')).status, 404);
+  assert.equal((await call('POST', '/api/welfare-checkcall/not-a-real-token/result', { outcome: 'CONFIRMED' })).status, 404);
+
+  a.welfare_checkcall_token = 'tok-confirmed';
+  a.welfare_checkcall_sent_at = new Date().toISOString();
+  const got = await call('GET', '/api/welfare-checkcall/tok-confirmed');
+  assert.equal(got.status, 200, JSON.stringify(got.body));
+  assert.equal(got.body.first_name, 'Dan');
+  assert.equal(got.body.date_of_birth, dan.date_of_birth);
+
+  const okRes = await call('POST', '/api/welfare-checkcall/tok-confirmed/result', { outcome: 'CONFIRMED' });
+  assert.equal(okRes.status, 200);
+  assert.ok(!a.welfare_checkcall_token, 'resolved — no longer pending');
+  assert.ok(a.welfare_checkcall_due_at, 'rescheduled for the next check');
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'shift.welfare_checkcall_confirmed' && e.data.personnel_id === dan.id));
+  // The token is spent — reusing it now 404s, same as one never issued.
+  assert.equal((await call('GET', '/api/welfare-checkcall/tok-confirmed')).status, 404);
+
+  const matching = () => app.db.emergency_events.filter((e) => e.kind === 'WELFARE_CHECKCALL_FAILED' && e.personnel_id === dan.id);
+  const before = matching().length;
+  a.welfare_checkcall_token = 'tok-mismatch';
+  a.welfare_checkcall_sent_at = new Date().toISOString();
+  const failRes = await call('POST', '/api/welfare-checkcall/tok-mismatch/result', { outcome: 'MISMATCH' });
+  assert.equal(failRes.status, 200);
+  assert.equal(matching().length, before + 1, 'a mismatch is a real alarm, same mechanism as any other');
+  const ev = matching()[matching().length - 1];
+  assert.match(ev.note, /did not match/);
+  assert.ok(!a.welfare_checkcall_token);
+});
+
+test('welfare check-call: no result inside the timeout is itself a failure, and clocking out while one is pending drops it quietly instead of alarming', async () => {
+  const { a } = await shiftFor(-1);
+  await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT);
+  const matching = () => app.db.emergency_events.filter((e) => e.kind === 'WELFARE_CHECKCALL_FAILED' && e.personnel_id === dan.id);
+
+  // Mirrors the state placeWelfareCheckcall actually leaves behind: due_at
+  // already in the past (that's what made the call due) and now a token
+  // pending — not just a bare token, or the due_at branch would run instead
+  // of the pending-token one.
+  a.welfare_checkcall_due_at = new Date(Date.now() - 125 * 60000).toISOString();
+  a.welfare_checkcall_token = 'tok-timeout';
+  a.welfare_checkcall_sent_at = new Date(Date.now() - 20 * 60000).toISOString(); // older than the 10 min default timeout
+  const before = matching().length;
+  app.attendance.tick();
+  assert.equal(matching().length, before + 1, 'no result arrived in time — treated as a failure, not left pending forever');
+  assert.ok(!a.welfare_checkcall_token);
+
+  a.welfare_checkcall_token = 'tok-clockout';
+  a.welfare_checkcall_sent_at = new Date().toISOString();
+  await call('POST', `/api/shift-assignments/${a.id}/clock-out`, { reason: 'test: going home' }, danT);
+  const before2 = matching().length;
+  const r = await call('POST', '/api/welfare-checkcall/tok-clockout/result', { outcome: 'MISMATCH' });
+  assert.equal(r.status, 200);
+  assert.equal(matching().length, before2, 'already off shift — no alarm for a result that arrived too late to matter');
+  assert.ok(!a.welfare_checkcall_token, 'still cleared, just quietly');
 });
 
 /* ---------------- kit on vehicles ---------------- */

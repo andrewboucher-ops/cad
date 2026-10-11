@@ -40,6 +40,8 @@
  */
 'use strict';
 
+const crypto = require('crypto');
+
 const DEFAULT_RADIUS = Number(process.env.GEOFENCE_METRES || 250);
 const AUTO_OUT_MS = Number(process.env.AUTO_CLOCK_OUT_MIN || 5) * 60000;
 const LATE_SMS_MS = 5 * 60000, LATE_ALERT_MS = 15 * 60000;
@@ -50,10 +52,26 @@ const NOT_CLOCKED_IN_ALARM_MS = 10 * 60000;
 const NUDGE_AFTER_MS = 15 * 60000, NUDGE_EVERY_MS = 30 * 60000;
 const REMINDERS_ON = process.env.SHIFT_REMINDERS !== 'off';
 
+// Welfare check-call — off by default, same reasoning as SMS_LIVE/
+// MQTT_AURA_PUBLISH_ENABLED: this dials a real phone and can raise a real
+// alarm, so it stays inert until an admin deliberately turns it on.
+const WELFARE_CHECKCALL_ENABLED = process.env.WELFARE_CHECKCALL_ENABLED === 'on';
+const WELFARE_CHECKCALL_INTERVAL_MS = Number(process.env.WELFARE_CHECKCALL_INTERVAL_MIN || 120) * 60000;
+// How long to wait for the dialplan to report a result (POST .../result)
+// after the call was answered before giving up on it as a failure — covers
+// a hung-up-mid-prompt or an AGI that never calls back, not just silence.
+const WELFARE_CHECKCALL_RESULT_TIMEOUT_MS = Number(process.env.WELFARE_CHECKCALL_RESULT_TIMEOUT_MIN || 10) * 60000;
+// The FreePBX dialplan context the call is dropped into once answered —
+// expected to Answer(), ask for date of birth, fetch the expected value
+// from GET /api/welfare-checkcall/:token below, compare, and report the
+// outcome via POST .../result. Not yet written — see asterisk.js's own
+// originateDirect() comment: unverified against a real PBX.
+const WELFARE_CHECKCALL_CONTEXT = process.env.WELFARE_CHECKCALL_CONTEXT || 'cccs-welfare-check';
+
 module.exports = function registerAttendance({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers = () => {}, sms, notifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl = '', flushNow = () => {},
-  createEmergencyJob, forwardEmergencyToAura = () => {},
+  createEmergencyJob, forwardEmergencyToAura = () => {}, ami,
 }) {
   /* ---- geofence ---- */
   function distanceM(a, b) {
@@ -192,6 +210,108 @@ module.exports = function registerAttendance({
     return done(a, s, 'shift.times_corrected', `${user.display_name} CORRECTED THE CLOCK TIMES OF ${nameOf(a)} — ${reason.toUpperCase()}`);
   });
 
+  /* ---- welfare check-call ---- */
+  /** Raises the same real alarm a welfare timer or an officer emergency
+   * does — not another reminder — because by this point the call has
+   * already failed to confirm the officer is OK, one way or another.
+   * Rescheduled from now, not from the original due time, so a slow PBX or
+   * a long result-timeout can't fire a second alarm back-to-back for the
+   * same gap. */
+  function failWelfareCheckcall(a, s, p, site, reason) {
+    const where = site ? ` at ${site.name}` : '';
+    a.welfare_checkcall_token = null;
+    a.welfare_checkcall_sent_at = null;
+    a.welfare_checkcall_due_at = new Date(Date.now() + WELFARE_CHECKCALL_INTERVAL_MS).toISOString();
+    const ev = {
+      id: nextId('emergency_events'), kind: 'WELFARE_CHECKCALL_FAILED', personnel_id: a.personnel_id,
+      callsign: p ? p.name : nameOf(a), zone_source: p ? p.employee_no : null, lat: null, lon: null, state: 'ACTIVE',
+      note: `Welfare check call failed — ${reason}`,
+      activated_at: new Date().toISOString(), acknowledged_at: null, acknowledged_by: null, resolved_at: null, resolved_by: null,
+    };
+    db.emergency_events.push(ev);
+    createEmergencyJob({ ...ev, location_hint: site ? site.name : null });
+    broadcast('emergency.activated', ev);
+    pushToRoles(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'], { title: 'ALARM — welfare check call failed', body: `${nameOf(a)}${where} — ${reason}`, url: '/control.html', tag: `cccs-welfarecheckcall-${a.id}` });
+    logEvent('shift.welfare_checkcall_failed', `!!! WELFARE CHECK CALL FAILED FOR ${nameOf(a)}${where.toUpperCase()} — ${reason.toUpperCase()} — ALARM RAISED`, { shift_id: a.shift_id, personnel_id: a.personnel_id, emergency_id: ev.id });
+    forwardEmergencyToAura(ev);
+  }
+  /** Places the call and leaves the AMI-answered outcome (not the IVR's
+   * verdict — see the result webhook below) to settle it fast on NO_ANSWER/
+   * BUSY/FAILED rather than waiting out the full result timeout for a call
+   * that was never even picked up. */
+  function placeWelfareCheckcall(a, s, p, site) {
+    const token = crypto.randomBytes(24).toString('hex');
+    a.welfare_checkcall_token = token;
+    a.welfare_checkcall_sent_at = new Date().toISOString();
+    logEvent('shift.welfare_checkcall_sent', `WELFARE CHECK CALL PLACED TO ${nameOf(a)}`, { shift_id: s.id, personnel_id: a.personnel_id });
+    Promise.resolve()
+      .then(() => ami.originateDirect({ number: p.contact_phone, context: WELFARE_CHECKCALL_CONTEXT, exten: 's', variables: { CCCS_TOKEN: token } }))
+      .then((placed) => placed.result)
+      .then((r) => {
+        // Something else may already have resolved this token (the
+        // dialplan's own result webhook, or an earlier timeout) by the
+        // time the call outcome lands — only act if it's still pending.
+        if (a.welfare_checkcall_token !== token) return;
+        // Clocked out while the call was ringing — they're off shift now,
+        // not failing to answer a welfare check for a shift they're still
+        // on. Drop it quietly rather than raising an alarm for someone who
+        // may well be fine and simply left.
+        if (a.clocked_out_at) { a.welfare_checkcall_token = null; a.welfare_checkcall_sent_at = null; flushNow(); return; }
+        if (r.outcome !== 'ANSWERED') { failWelfareCheckcall(a, s, p, site, `check call ${r.outcome.toLowerCase().replace(/_/g, ' ')}`); flushNow(); }
+        // Answered just means someone picked up — the result webhook is
+        // what actually confirms it was them, via date of birth.
+      })
+      .catch((e) => {
+        if (a.welfare_checkcall_token !== token) return;
+        if (a.clocked_out_at) { a.welfare_checkcall_token = null; a.welfare_checkcall_sent_at = null; flushNow(); return; }
+        failWelfareCheckcall(a, s, p, site, `could not place the check call — ${e.message}`); flushNow();
+      });
+  }
+  function findPendingCheckcall(token) { return (db.shift_assignments || []).find((x) => x.welfare_checkcall_token === token); }
+  // Token-authenticated, no login — the same trust model already used for
+  // the ical feed (routes above): the caller here is the PBX dialplan
+  // itself, over the LAN, not a browser. GET hands over what the IVR needs
+  // to run the check (date of birth, compared locally by the dialplan — it
+  // never comes back to CCCS, only the final CONFIRMED/MISMATCH verdict
+  // does); POST reports that verdict once the call (and however many
+  // retries the dialplan allows) is done. Both 404 alike on an unknown or
+  // already-resolved token, deliberately not distinguishing "wrong token"
+  // from "already handled" to anyone probing it.
+  route('GET', '/api/welfare-checkcall/:token', null, ({ params }) => {
+    const a = findPendingCheckcall(params.token); if (!a) throw httpError(404, 'check call not found or already resolved');
+    const p = db.personnel.find((x) => x.id === a.personnel_id);
+    if (!p || !p.date_of_birth) throw httpError(404, 'check call not found or already resolved');
+    return { first_name: p.name.split(/\s+/)[0], date_of_birth: p.date_of_birth };
+  });
+  route('POST', '/api/welfare-checkcall/:token/result', null, ({ params, body }) => {
+    const a = findPendingCheckcall(params.token); if (!a) throw httpError(404, 'check call not found or already resolved');
+    const s = findShift(a.shift_id);
+    const p = db.personnel.find((x) => x.id === a.personnel_id);
+    const site = s && s.site_id ? db.sites.find((x) => x.id === s.site_id) : null;
+    // Clocked out since the call went out — off shift now, nothing to
+    // alarm about even on a MISMATCH; just clear the stale pending state.
+    if (a.clocked_out_at) {
+      a.welfare_checkcall_token = null; a.welfare_checkcall_sent_at = null;
+      flushNow();
+      return { ok: true };
+    }
+    const outcome = String(body.outcome || '').toUpperCase();
+    if (outcome === 'CONFIRMED') {
+      a.welfare_checkcall_token = null;
+      a.welfare_checkcall_sent_at = null;
+      a.welfare_checkcall_due_at = new Date(Date.now() + WELFARE_CHECKCALL_INTERVAL_MS).toISOString();
+      logEvent('shift.welfare_checkcall_confirmed', `${nameOf(a)} CONFIRMED WELFARE ON THE CHECK CALL`, { shift_id: a.shift_id, personnel_id: a.personnel_id });
+      flushNow();
+      return { ok: true };
+    }
+    const reason = outcome === 'MISMATCH' ? 'entered date of birth did not match'
+      : outcome === 'NO_ENTRY' ? 'no date of birth entered'
+      : `unexpected check call result (${outcome || 'none given'})`;
+    failWelfareCheckcall(a, s, p, site, reason);
+    flushNow();
+    return { ok: true };
+  });
+
   /* ---- reminders, alerts and auto clock-out ---- */
   const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
   async function text(p, body, shiftId) {
@@ -295,6 +415,27 @@ module.exports = function registerAttendance({
       if (a.clocked_in_at && !a.clocked_out_at && now >= end && now < end + 2 * 3600000 && !a.end_sms_at) {
         a.end_sms_at = new Date(now).toISOString(); changed = true;
         text(p, `Thanks for today's shift${where}, ${first}. Please remember to clock out on the CCCS app.`, s.id).catch(() => {});
+      }
+      // Welfare check-call: while clocked in, ring every
+      // WELFARE_CHECKCALL_INTERVAL_MS and have the IVR confirm their date
+      // of birth. Needs a phone number and a date of birth on file — no
+      // silent partial check with only one of the two.
+      if (WELFARE_CHECKCALL_ENABLED && a.clocked_in_at && !a.clocked_out_at && p && p.date_of_birth && p.contact_phone) {
+        if (!a.welfare_checkcall_due_at) {
+          a.welfare_checkcall_due_at = new Date(Date.parse(a.clocked_in_at) + WELFARE_CHECKCALL_INTERVAL_MS).toISOString();
+          changed = true;
+        } else if (a.welfare_checkcall_token) {
+          // Waiting on the dialplan's result webhook (or the AMI-answered
+          // outcome, handled as it lands — see placeWelfareCheckcall). If
+          // neither ever arrives, this is the backstop.
+          if (now - Date.parse(a.welfare_checkcall_sent_at) >= WELFARE_CHECKCALL_RESULT_TIMEOUT_MS) {
+            failWelfareCheckcall(a, s, p, site, `no result from the check call within ${Math.round(WELFARE_CHECKCALL_RESULT_TIMEOUT_MS / 60000)} min`);
+            changed = true;
+          }
+        } else if (now >= Date.parse(a.welfare_checkcall_due_at)) {
+          placeWelfareCheckcall(a, s, p, site);
+          changed = true;
+        }
       }
     }
     if (changed) flushNow();

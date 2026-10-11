@@ -834,7 +834,7 @@ function publicPersonnel(p, user) {
     // Same audience as emergency_contact/bank_details above: onboarding
     // status is an HR-chasing concern, not something a colleague needs to
     // see about another officer, even as a boolean checklist with no detail.
-    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, onboarding: onboardingStatusForPerson(p) } : {}),
+    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, date_of_birth: p.date_of_birth || null, onboarding: onboardingStatusForPerson(p) } : {}),
     ...(canSeePayroll ? { payroll: p.payroll || null } : {}),
   };
 }
@@ -2133,6 +2133,13 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
   // unsupervised is exactly the fraud pattern (a compromised account
   // redirecting its own pay) a real HR process checks before acting on.
   if ('bank_details' in body) p.bank_details = cleanBankDetails(body.bank_details);
+  // Needed to run the welfare check-call (the PBX IVR asks for it to confirm
+  // it's really reaching the right person) — same fraud-prevention reasoning
+  // as bank_details above: no self-service write path, admin-set only.
+  if ('date_of_birth' in body) {
+    if (body.date_of_birth && isNaN(Date.parse(body.date_of_birth))) throw httpError(400, 'invalid date_of_birth');
+    p.date_of_birth = body.date_of_birth ? String(body.date_of_birth).slice(0, 10) : null;
+  }
   if ('notes' in body) p.notes = body.notes || '';
   // Both fields are validated against the FULL intended result before either
   // is written — a request that sets both at once (e.g. SUBCONTRACTOR + an
@@ -2940,7 +2947,8 @@ route('POST', '/api/jobs/:id/stand-down', CONTROL, ({ params, body }) => {
 function createEmergencyJob(ev) {
   const j = {
     id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
-    incident_type: ev.kind === 'WELFARE' ? 'WELFARE ALARM' : ev.kind === 'NOT_CLOCKED_IN' ? 'NOT CLOCKED IN' : 'OFFICER EMERGENCY', priority: 'RED',
+    incident_type: ev.kind === 'WELFARE' ? 'WELFARE ALARM' : ev.kind === 'NOT_CLOCKED_IN' ? 'NOT CLOCKED IN'
+      : ev.kind === 'WELFARE_CHECKCALL_FAILED' ? 'WELFARE CHECK CALL FAILED' : 'OFFICER EMERGENCY', priority: 'RED',
     // No GPS fix for a not-clocked-in alarm, but the site is known — a
     // location_hint (only ever set by that caller) beats the generic
     // "add details as received" placeholder every other emergency gets.
@@ -4712,7 +4720,7 @@ require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, f
 const attendance = require('./routes-attendance.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
-  createEmergencyJob, forwardEmergencyToAura,
+  createEmergencyJob, forwardEmergencyToAura, ami,
 });
 
 
