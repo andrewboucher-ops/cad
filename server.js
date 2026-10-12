@@ -2818,6 +2818,51 @@ route('POST', '/api/shifts/:id/clock-out', ALL, ({ params, user }) => {
   return publicShift(s);
 });
 
+/* ---- Control room workstation clock-in --------------------------------
+ * A control room PC clocks its operator in when they sign in to Windows.
+ * The PC is a system, not a CCCS operator, so like GuardM8 it authenticates
+ * with a shared secret (WORKSTATION_SECRET) - and this route can do nothing
+ * but clock a person into a shift already on the rota. It never creates one.
+ * The Windows account is matched to a CCCS login by email (the account's UPN)
+ * or by username, then to that login's personnel record. */
+const CLOCK_IN_EARLY_MS = 60 * 60 * 1000; // a shift starting within the hour counts as current
+route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) => {
+  const secret = process.env.WORKSTATION_SECRET;
+  const given = Buffer.from(String(req.headers['x-workstation-secret'] || ''));
+  if (!secret || given.length !== Buffer.byteLength(secret) || !crypto.timingSafeEqual(given, Buffer.from(secret))) {
+    throw httpError(401, 'bad workstation secret');
+  }
+  const upn = String(body.upn || '').trim().toLowerCase();
+  const username = String(body.username || '').trim().toLowerCase();
+  const workstation = String(body.workstation || '').slice(0, 64);
+  if (!upn && !username) throw httpError(400, 'upn or username required');
+
+  const account = (upn && db.users.find((u) => u.email && u.email.toLowerCase() === upn))
+    || (username && db.users.find((u) => u.username === username)) || null;
+  const p = account && account.personnel_id ? db.personnel.find((x) => x.id === account.personnel_id) : null;
+  if (!p) {
+    logEvent('shift.clock_in_unmatched', `WORKSTATION ${workstation} COULD NOT CLOCK IN ${upn || username}: NO LINKED CCCS ACCOUNT`, { upn, username, workstation });
+    throw httpError(404, account ? 'CCCS account has no personnel record linked' : 'no CCCS account matches this Windows sign-in');
+  }
+
+  const now = Date.now();
+  const current = db.shifts
+    .filter((s) => s.personnel_id === p.id && ['SCHEDULED', 'CONFIRMED', 'CLOCKED_IN'].includes(s.status)
+      && Date.parse(s.starts_at) - CLOCK_IN_EARLY_MS <= now && now < Date.parse(s.ends_at))
+    .sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
+  const s = current.find((x) => x.status === 'CLOCKED_IN') || current[0];
+  if (!s) {
+    logEvent('shift.clock_in_no_shift', `${p.name} SIGNED IN AT ${workstation || 'A WORKSTATION'} WITH NO SHIFT ON THE ROTA`, { personnel_id: p.id, workstation });
+    throw httpError(409, 'no shift on the rota now or in the next hour');
+  }
+  if (s.status === 'CLOCKED_IN') return { result: 'ALREADY_CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
+
+  s.status = 'CLOCKED_IN'; s.clocked_in_at = new Date().toISOString();
+  broadcast('shift.updated', publicShift(s), { personnelIds: [s.personnel_id] });
+  logEvent('shift.clocked_in', `${p.name} CLOCKED IN AT ${workstation || 'A WORKSTATION'}`, { shift_id: s.id, personnel_id: s.personnel_id, workstation });
+  return { result: 'CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
+});
+
 route('GET', '/api/config', ALL, () => ({
   audio: process.env.AUDIO !== 'off',
 }));

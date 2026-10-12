@@ -582,6 +582,39 @@ test('a shift is created, and only the assigned officer or control can clock in 
   assert.equal((await call('POST', `/api/shifts/${shift.body.id}/clock-out`, {}, danT)).status, 409, 'cannot clock out twice');
 });
 
+test('a control room PC clocks its Windows user into their current shift with a shared secret', async () => {
+  process.env.WORKSTATION_SECRET = 'test-workstation-secret';
+  const clock = (body, secret = 'test-workstation-secret') => fetch(BASE + '/api/integrations/workstation/clock-in', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-workstation-secret': secret }, body: JSON.stringify(body),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+  assert.equal((await clock({ username: 'rcole' }, 'wrong')).status, 401);
+  assert.equal((await clock({ username: 'nobody' })).status, 404, 'no CCCS account for that Windows user');
+  assert.equal((await clock({ username: 'dispatcher' })).status, 404, 'an account with no personnel record cannot clock in');
+  assert.equal((await clock({ username: 'rcole' })).status, 409, 'no shift on the rota yet');
+
+  const later = await call('POST', '/api/shifts', { personnel: ryanId,
+    starts_at: new Date(Date.now() + 3 * 3600000).toISOString(), ends_at: new Date(Date.now() + 9 * 3600000).toISOString() }, dispT);
+  assert.equal((await clock({ username: 'rcole' })).status, 409, 'a shift three hours away is not current');
+
+  const soon = await call('POST', '/api/shifts', { personnel: ryanId,
+    starts_at: new Date(Date.now() + 30 * 60000).toISOString(), ends_at: new Date(Date.now() + 8 * 3600000).toISOString() }, dispT);
+  await call('PATCH', '/api/users/' + (await call('GET', '/api/users', undefined, adminT)).body.find((u) => u.username === 'rcole').id,
+    { email: 'Ryan.Cole@example.com' }, adminT);
+  const first = await clock({ upn: 'ryan.cole@EXAMPLE.com', username: 'RyanC', workstation: 'CONTROL-01' });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.result, 'CLOCKED_IN', 'matched by UPN, case-insensitively');
+  assert.equal(first.body.shift.id, soon.body.id, 'the shift starting within the hour, not the later one');
+  assert.equal(first.body.personnel_name, 'Ryan Cole');
+
+  const again = await clock({ upn: 'ryan.cole@example.com', workstation: 'CONTROL-01' });
+  assert.equal(again.body.result, 'ALREADY_CLOCKED_IN', 'signing in twice is harmless');
+  const laterNow = (await call('GET', `/api/shifts?personnel_id=${ryanId}`, undefined, dispT)).body.find((x) => x.id === later.body.id);
+  assert.equal(laterNow.status, 'SCHEDULED');
+  delete process.env.WORKSTATION_SECRET;
+  assert.equal((await clock({ username: 'rcole' })).status, 401, 'disabled until a secret is set');
+});
+
 test('shifts reject a bad time range and can be filtered by personnel', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
   const bad = await call('POST', '/api/shifts', { personnel: ryanId, starts_at: start, ends_at: start }, dispT);

@@ -332,6 +332,26 @@
         }
       }
     },
+    "/api/integrations/workstation/clock-in": {
+      "post": {
+        "summary": "Control room PC clocks its Windows user into their current rota shift (shared-secret auth via X-Workstation-Secret, not a user session). Body: upn, username, workstation",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "clocked in, or already clocked in"
+          },
+          "401": {
+            "description": "bad secret"
+          },
+          "404": {
+            "description": "no CCCS account or personnel record matches"
+          },
+          "409": {
+            "description": "no shift on the rota now or in the next hour"
+          }
+        }
+      }
+    },
     "/api/emergency": {
       "get": {
         "summary": "List emergency events",

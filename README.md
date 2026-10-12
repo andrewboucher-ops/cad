@@ -70,6 +70,7 @@ These are deliberately weak demo credentials for a POC. Replace them before the 
 | `RETAIN_MESSAGES_DAYS` | `180` | message metadata |
 | `RETAIN_JOBS_DAYS` | `730` | closed jobs |
 | `GUARDM8_SECRET` | — | shared secret for GuardM8's `POST /api/integrations/guardm8/jobs` |
+| `WORKSTATION_SECRET` | — | shared secret for control room PCs' `POST /api/integrations/workstation/clock-in` |
 | `MS_TENANT_ID` / `MS_CLIENT_ID` / `MS_CLIENT_SECRET` / `MS_REDIRECT_URI` | — | Microsoft Entra ID SSO — see `docs/SSO.md` |
 
 No secrets are hardcoded. If `AUTH_SECRET` is unset the server generates an ephemeral one and warns; sessions then drop on restart.
@@ -395,6 +396,16 @@ guarding/alarm-receiving product) push an alarm straight in as a dispatchable
 job, authenticated with a shared secret (`GUARDM8_SECRET`) rather than a user
 session. `external_ref` lets GuardM8 retry a send without creating a
 duplicate job.
+
+## Control room clock-in
+
+`POST /api/integrations/workstation/clock-in` lets a control room PC clock its
+operator in when they sign in to Windows. It is authenticated with a shared
+secret (`WORKSTATION_SECRET`) and can only clock a person into a shift already
+on the rota: the one running now, or starting within the hour. The Windows
+account is matched to a CCCS login by email (its UPN) or username, and from
+there to the login's personnel record. A sign-in with no matching login, or
+with no shift, is written to the audit trail for a supervisor.
 
 ## Deployment
 
