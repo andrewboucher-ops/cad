@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — reports</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCCS Reports">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  body { display: flex; justify-content: center; min-height: 100vh; padding-bottom: 40px; }
+  .wrap { width: min(980px, 100%); padding: 0 16px; }
+  .topbar { display: flex; align-items: center; gap: 12px; padding: 14px 0; }
+  .topbar img { height: 22px; }
+  .topbar .spacer { flex: 1; }
+  .page-head h1 { margin: 18px 0 2px; font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .page-head p { margin: 0 0 18px; color: var(--ink-dim); font-size: 13px; }
+  .section-card { background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur)); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 18px; }
+  .section-card > header { padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); font-weight: 700; }
+  .section-card .body { padding: 12px 16px 14px; overflow-x: auto; }
+  .range-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 14px; flex-wrap: wrap; }
+  .range-row label { display: block; font-size: 11px; color: var(--ink-dim); margin-bottom: 4px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .tile { background: var(--panel-mixed); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+  .tile .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 700; }
+  .tile .l { font-size: 11px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+  .tile.warn .n { color: #d97706; }
+  table.fin { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.fin th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-dim); padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.fin td { padding: 7px 10px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+  table.fin td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+  .bar-cell { min-width: 140px; }
+  .bar-track { position: relative; height: 14px; background: var(--panel-3); border-radius: 4px; overflow: hidden; }
+  .bar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
+  .bar-fill.cost { background: #d97706; }
+  .bar-fill.revenue { background: #0ea5a0; }
+  .legend-dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  .empty-note { color: var(--ink-dim); padding: 14px 0; text-align: center; font-size: 13px; }
+  .warn-box { background: rgba(217,119,6,.1); border: 1px solid rgba(217,119,6,.35); border-radius: 8px; padding: 10px 14px; font-size: 12.5px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <img class="brand-wordmark" src="/assets/echelon-wordmark.png" alt="Echelon">
+    <span class="spacer"></span>
+    <span class="link-net" id="net">link down</span>
+    <button class="btn" id="signout" style="padding:6px 12px;font-size:12px">Sign out</button>
+  </div>
+
+  <div class="page-head">
+    <h1>Staffing cost vs revenue</h1>
+    <p>Control room = Dispatcher and Supervisor roles. Cost is gross pay plus employer NI and pension — the true cost to the business — from <strong>issued</strong> payroll only. Revenue is invoices marked Approved, sent to Xero, or Paid, by invoice date. Draft payroll and draft invoices aren't counted — run and issue payroll for a period before it shows up here.</p>
+  </div>
+
+  <div class="section-card">
+    <div class="body">
+      <div class="range-row">
+        <div><label>From</label><input type="date" id="rFrom"></div>
+        <div><label>To</label><input type="date" id="rTo"></div>
+        <button type="button" class="btn primary" id="rRun">Run</button>
+      </div>
+      <div id="tiles" class="tiles"></div>
+      <div id="warnBox"></div>
+    </div>
+  </div>
+
+  <div class="section-card">
+    <header>By month</header>
+    <div class="body"><div id="monthBody"><p class="empty-note">Loading…</p></div></div>
+  </div>
+
+  <div class="section-card">
+    <header>By person — control room staffing cost</header>
+    <div class="body"><div id="personBody"><p class="empty-note">Loading…</p></div></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script>
+const { el, esc, api, requireAuth, bus } = CCCS;
+if (!requireAuth(['SYSTEM_ADMIN'])) throw new Error('auth');
+
+el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.html'; };
+
+function money(n) { return n == null ? '—' : `£${Number(n).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; }
+function monthLabel(m) { const [y, mo] = m.split('-').map(Number); return new Date(y, mo - 1, 1).toLocaleDateString('en-GB', { month: 'short', year: 'numeric' }); }
+
+function tile(n, l, warn) { return `<div class="tile${warn ? ' warn' : ''}"><div class="n">${n}</div><div class="l">${esc(l)}</div></div>`; }
+
+async function run() {
+  const from = el('#rFrom').value, to = el('#rTo').value;
+  if (!from || !to) return;
+  el('#tiles').innerHTML = ''; el('#warnBox').innerHTML = '';
+  el('#monthBody').innerHTML = '<p class="empty-note">Loading…</p>';
+  el('#personBody').innerHTML = '<p class="empty-note">Loading…</p>';
+  let r;
+  try { r = await api('GET', `/api/reports/staffing-cost?from=${from}&to=${to}`); }
+  catch (e) { el('#monthBody').innerHTML = `<p class="empty-note">${esc(e.message)}</p>`; el('#personBody').innerHTML = ''; return; }
+
+  const highCost = r.cost_pct_of_revenue != null && r.cost_pct_of_revenue >= 15;
+  el('#tiles').innerHTML = [
+    tile(money(r.total_cost), 'Control room cost'),
+    tile(money(r.total_revenue), 'Revenue (invoiced)'),
+    tile(r.cost_pct_of_revenue == null ? '—' : `${r.cost_pct_of_revenue}%`, 'Cost as % of revenue', highCost),
+  ].join('');
+
+  if (r.missing_payroll.length) {
+    el('#warnBox').innerHTML = `<div class="warn-box"><strong>${r.missing_payroll.length} control room ${r.missing_payroll.length === 1 ? 'person has' : 'people have'} no issued payroll in this range</strong> — their cost isn't counted above until a payroll run is issued for them: ${r.missing_payroll.map((m) => esc(m.name)).join(', ')}.</div>`;
+  }
+
+  const maxMonth = Math.max(1, ...r.by_month.map((m) => Math.max(m.cost, m.revenue)));
+  el('#monthBody').innerHTML = r.by_month.length ? `
+    <p style="margin:0 0 10px;font-size:11.5px"><span class="legend-dot" style="background:#d97706"></span>Cost &nbsp; <span class="legend-dot" style="background:#0ea5a0"></span>Revenue</p>
+    <table class="fin"><thead><tr><th>Month</th><th class="num">Cost</th><th class="num">Revenue</th><th class="num">Cost %</th><th>Chart</th></tr></thead><tbody>
+      ${r.by_month.map((m) => `<tr>
+        <td>${esc(monthLabel(m.month))}</td>
+        <td class="num">${money(m.cost)}</td>
+        <td class="num">${money(m.revenue)}</td>
+        <td class="num">${m.cost_pct_of_revenue == null ? '—' : m.cost_pct_of_revenue + '%'}</td>
+        <td class="bar-cell">
+          <div class="bar-track" style="margin-bottom:2px"><div class="bar-fill cost" style="width:${Math.round((m.cost / maxMonth) * 100)}%"></div></div>
+          <div class="bar-track"><div class="bar-fill revenue" style="width:${Math.round((m.revenue / maxMonth) * 100)}%"></div></div>
+        </td>
+      </tr>`).join('')}
+    </tbody></table>` : '<p class="empty-note">No cost or revenue in range.</p>';
+
+  const maxPerson = Math.max(1, ...r.by_person.map((p) => p.cost));
+  el('#personBody').innerHTML = r.by_person.length ? `
+    <table class="fin"><thead><tr><th>Name</th><th class="num">Payslips</th><th class="num">Total cost</th><th>Share</th></tr></thead><tbody>
+      ${r.by_person.map((p) => `<tr>
+        <td>${esc(p.name)}</td>
+        <td class="num">${p.payslip_count}</td>
+        <td class="num">${money(p.cost)}</td>
+        <td class="bar-cell"><div class="bar-track"><div class="bar-fill cost" style="width:${Math.round((p.cost / maxPerson) * 100)}%"></div></div></td>
+      </tr>`).join('')}
+    </tbody></table>` : '<p class="empty-note">No control room payroll issued in range.</p>';
+}
+
+el('#rRun').onclick = run;
+
+CCCS.bus((up) => {
+  const n = el('#net');
+  if (n) { n.textContent = up ? 'link up' : 'link down'; n.classList.toggle('up', up); }
+});
+
+// Default to the last 6 months, inclusive of this one.
+const today = new Date();
+const fromDefault = new Date(today.getFullYear(), today.getMonth() - 5, 1);
+el('#rFrom').value = fromDefault.toISOString().slice(0, 10);
+el('#rTo').value = today.toISOString().slice(0, 10);
+run();
+</script>
+</body>
+</html>

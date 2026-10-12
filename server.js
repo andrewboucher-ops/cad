@@ -4820,6 +4820,10 @@ require('./routes-payroll.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, attendance, flushNow: () => store.flushNow(),
 });
 
+// Reports — cross-cutting admin views (staffing cost vs revenue). See
+// routes-reports.js.
+require('./routes-reports.js')({ route, httpError, ADMIN, db });
+
 // Shift applications — see routes-shift-applications.js for the design.
 const shiftApplications = require('./routes-shift-applications.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,

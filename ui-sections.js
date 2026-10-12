@@ -68,6 +68,7 @@ const SECTIONS = [
   { key: 'contracts', label: 'Quotes & contracts', group: 'Finance', icon: 'contract', desktop: '/contracts.html', mobile: '/contracts.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'invoices', label: 'Invoices', group: 'Finance', icon: 'invoice', desktop: '/invoices.html', mobile: '/invoices.html', allowed: ['SYSTEM_ADMIN', 'FINANCE'], default: ['SYSTEM_ADMIN', 'FINANCE'] },
   { key: 'finance', label: 'Finance', group: 'Finance', icon: 'finance', desktop: '/finance.html', mobile: '/finance.html', allowed: [...CONTROL, 'FINANCE'], default: [...CONTROL, 'FINANCE'] },
+  { key: 'staffing_cost', label: 'Staffing cost', group: 'Finance', icon: 'finance', desktop: '/reports.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   // HR — one-click shortcuts straight into the matching tab of admin.html
   // (it reads location.hash on load) rather than separate pages, so there
   // is exactly one implementation of each to keep in sync. The highest-
