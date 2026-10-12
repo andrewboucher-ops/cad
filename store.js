@@ -69,6 +69,10 @@ const TABLES = [
   // Payroll runs and the payslips they produce — an issued payslip is a
   // legal record, same evidentiary weight as a filed form submission.
   'payroll_runs', 'payslips',
+  // Check call changes queued by control room PCs off the VPN until the
+  // check call host applies them (routes-checkcalls.js). A queued stop must
+  // survive a restart, or the calls carry on.
+  'checkcall_commands',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */
@@ -79,6 +83,7 @@ const CAPS = {
   // and is a safety valve rather than a retention policy. Set a real retention
   // window for it alongside RETAIN_AUDIT_DAYS if you need one.
   dial_log: 50000,
+  checkcall_commands: 5000,
 };
 
 function createStore(db, seq, opts = {}) {

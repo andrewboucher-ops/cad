@@ -49,6 +49,10 @@ SIMULATION=off
 # AMI_USER=
 # AMI_SECRET=
 # AMI_LOCAL_EXTENSIONS=
+# Check calls, escalation alerts and PC updates for control room PCs off the
+# VPN (routes-checkcalls.js). The check call host's sync service uses this;
+# PCs use WORKSTATION_SECRET above.
+# CHECKCALL_HOST_SECRET=
 # Microsoft 365 / Entra ID single sign-on — optional, sits alongside local login.
 # See SSO.md for how to register the app and get these three values. Uncomment
 # all four once you have them; leaving any unset keeps SSO disabled.

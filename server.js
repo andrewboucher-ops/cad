@@ -99,6 +99,7 @@ const db = {
   stock_locations: [], stock_subcategories: [], gas_cylinders: [], cylinder_events: [], medicines: [], med_movements: [], asset_events: [], stocktakes: [], rentals: [],
   agreements: [], invoices: [],
   payroll_runs: [], payslips: [],
+  checkcall_commands: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -1092,6 +1093,9 @@ const MIME = {
  * CORS preflight, so accepting it everywhere would widen what another origin
  * can make a signed-in browser send. */
 const FORM_BODY_PATHS = new Set(['/api/sms/status']);
+// Routes that read the request stream themselves (a PC installer upload is a
+// few hundred MB), so the dispatcher must not buffer or parse it first.
+const RAW_BODY_PATHS = new Set(['/api/integrations/checkcall-host/release']);
 
 const requestHandler = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -1105,7 +1109,7 @@ const requestHandler = async (req, res) => {
     const ip = req.socket.remoteAddress || 'unknown';
     if (!rateLimit(ip)) return send(429, { error: 'rate limit exceeded' });
     let body = {};
-    if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) {
+    if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method) && !RAW_BODY_PATHS.has(url.pathname)) {
       const chunks = [];
       let size = 0;
       // 1MB is plenty for every route except on-scene photo uploads (base64
@@ -5037,6 +5041,13 @@ route('POST', '/api/integrations/workstation/dial', null, async ({ body, req }) 
   }
   logEvent('dial.relayed', `DIAL FROM ${ext} TO ${number} AT ${workstation}`, { extension: ext, number, workstation });
   return { ok: true };
+});
+
+/* ---- Control room check calls and PC updates off the VPN -------------- */
+const RELEASE_DIR = process.env.WORKSTATION_RELEASE_DIR
+  || path.join(path.dirname(process.env.DATA_FILE || path.join(__dirname, 'data', 'cccs.db')), 'workstation-release');
+const checkCalls = require('./routes-checkcalls.js')({
+  route, httpError, db, nextId, logEvent, assertWorkstationSecret, RELEASE_DIR, flushNow: () => store.flushNow(),
 });
 
 route('GET', '/api/config', ALL, () => ({
