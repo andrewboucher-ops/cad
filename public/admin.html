@@ -303,6 +303,11 @@
       <p class="dim" style="margin:0 0 10px;font-size:13px">A payroll run is draft until approved — reviewable, re-calculable, deletable. Once issued it's permanent: the payslip is the record, nothing about it changes again. A correction to an issued payslip goes on the next run instead.</p>
       <div class="toolbar"><button type="button" class="btn primary" id="btnNewPayrollRun">New payroll run</button></div>
       <div id="prTableWrap"></div>
+
+      <h3 style="margin:28px 0 6px;font-size:14px">Enhanced/override pay days</h3>
+      <p class="dim" style="margin:0 0 10px;font-size:13px">Bank holidays and Christmas Day, Boxing Day and New Year's Day are seeded automatically at time and a half / double time — add a day here only for something extra, like a flat override rate for a specific date, or a future year's bank holiday not seeded yet. Applies to whoever works that date. For a named person on one specific shift instead, set a pay override on the shift assignment itself, in Rota.</p>
+      <div class="toolbar"><button type="button" class="btn" id="btnNewRateDay">Add rate day</button></div>
+      <div id="rdTableWrap"></div>
     </div>
 
     <div id="viewShiftTypes" class="hide">
@@ -431,7 +436,7 @@ function showTab(name) {
   el('#btnNewLeave').hidden = name !== 'leave';
   el('#tabPayroll').classList.toggle('active', name === 'payroll');
   el('#viewPayroll').classList.toggle('hide', name !== 'payroll');
-  if (name === 'payroll') paintPayroll();
+  if (name === 'payroll') { paintPayroll(); paintRateDays(); }
   el('#tabShiftTypes').classList.toggle('active', name === 'shiftTypes');
   el('#viewShiftTypes').classList.toggle('hide', name !== 'shiftTypes');
   el('#btnNewShiftType').hidden = name !== 'shiftTypes';
@@ -3066,6 +3071,63 @@ el('#btnNewPayrollRun').onclick = () => {
     };
   });
 };
+async function paintRateDays() {
+  el('#rdTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  let days;
+  try { days = await api('GET', '/api/payroll/rate-days'); } catch (e) { el('#rdTableWrap').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#rdTableWrap').innerHTML = days.length ? `
+    <table class="log-table">
+      <thead><tr><th style="width:120px">Date</th><th>Label</th><th style="width:100px">Rate</th><th style="width:150px"></th></tr></thead>
+      <tbody>${days.map((d) => `<tr>
+        <td>${esc(new Date(`${d.date}T12:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }))}</td>
+        <td>${esc(d.label)}</td>
+        <td class="dim">${d.kind === 'FLAT' ? `${gbpPr(d.flat_rate)}/h` : `×${d.multiplier}`}</td>
+        <td style="text-align:right;white-space:nowrap"><button type="button" class="btn" data-edit-rd="${d.id}" style="padding:3px 8px;font-size:11px">Edit</button> <button type="button" class="btn danger" data-del-rd="${d.id}" style="padding:3px 8px;font-size:11px">Delete</button></td>
+      </tr>`).join('')}</tbody>
+    </table>` : '<p class="empty-note">No rate days yet — the seeded bank holidays and Christmas/Boxing Day/New Year\'s Day cover the common case with no setup needed.</p>';
+  els('#rdTableWrap [data-edit-rd]').forEach((b) => (b.onclick = () => rateDayModal(days.find((d) => d.id === Number(b.dataset.editRd)))));
+  els('#rdTableWrap [data-del-rd]').forEach((b) => (b.onclick = async () => {
+    if (!confirm('Delete this rate day? Anyone who already worked it keeps the payslip they were issued — this only affects runs generated from now on.')) return;
+    try { await api('DELETE', `/api/payroll/rate-days/${b.dataset.delRd}`); await paintRateDays(); } catch (e) { alert(e.message); }
+  }));
+}
+el('#btnNewRateDay').onclick = () => rateDayModal(null);
+/** Add or edit one rate day. The date is the row's identity (one rate day
+ * per date, enforced server-side) so it's fixed once created — change it
+ * by deleting and re-adding instead. */
+function rateDayModal(d) {
+  const isNew = !d;
+  modal(isNew ? 'Add rate day' : 'Edit rate day', `
+    <form class="stack" onsubmit="return false">
+      <label>Date</label><input id="rdDate" type="date" value="${d ? d.date : ''}" ${isNew ? '' : 'disabled'}>
+      <label>Label</label><input id="rdLabel" placeholder="e.g. Late-notice cover, or a future bank holiday" value="${d ? esc(d.label) : ''}">
+      <label>Type</label><select id="rdKind">
+        <option value="MULTIPLIER" ${!d || d.kind === 'MULTIPLIER' ? 'selected' : ''}>Multiplier (e.g. ×1.5)</option>
+        <option value="FLAT" ${d && d.kind === 'FLAT' ? 'selected' : ''}>Flat rate (£/hour)</option>
+      </select>
+      <label id="rdValueLabel">${d && d.kind === 'FLAT' ? 'Rate (£/hour)' : 'Multiplier'}</label>
+      <input id="rdValue" type="number" step="0.01" min="0" value="${d ? (d.kind === 'FLAT' ? d.flat_rate : d.multiplier) : ''}">
+      <p class="dim" style="margin:0;font-size:12px">Applies to whoever works this date. Never pays less than a person's normal rate, even if set below it by mistake.</p>
+      <p class="err" id="rdError" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    el('#rdKind').onchange = () => { el('#rdValueLabel').textContent = el('#rdKind').value === 'FLAT' ? 'Rate (£/hour)' : 'Multiplier'; };
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `<div class="btn-row" style="justify-content:flex-end"><button class="btn" data-x>Cancel</button><button class="btn primary" id="rdSave">${isNew ? 'Add' : 'Save'}</button></div>`;
+    foot.querySelector('[data-x]').onclick = closeModal;
+    el('#rdSave').onclick = async () => {
+      const kind = el('#rdKind').value, amount = Number(el('#rdValue').value);
+      const body = {
+        label: el('#rdLabel').value, kind,
+        multiplier: kind === 'MULTIPLIER' ? amount : undefined, flat_rate: kind === 'FLAT' ? amount : undefined,
+      };
+      if (isNew) body.date = el('#rdDate').value;
+      try {
+        await api(isNew ? 'POST' : 'PATCH', isNew ? '/api/payroll/rate-days' : `/api/payroll/rate-days/${d.id}`, body);
+        closeModal(); await paintRateDays();
+      } catch (e) { el('#rdError').textContent = e.message; }
+    };
+  });
+}
 /** The run-detail view: every payslip, editable while DRAFT, with the
  * totals that answer "what's due to whom" — net pay is the bank-transfer
  * total, employer cost is net + employer NI + employer pension on top. */
