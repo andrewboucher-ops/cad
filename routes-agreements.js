@@ -36,6 +36,8 @@ const { Doc, A4 } = require('./pdf.js');
 const LINE_KINDS = { HOURLY: 'per hour', FIXED_PERIOD: 'per invoice period', ONE_OFF: 'one-off' };
 const PERIODS = { WEEKLY: 'weekly', MONTHLY: 'monthly' };
 const BASES = { HOURS_WORKED: 'hours worked (as clocked)', ROSTERED: 'hours rostered' };
+// How an admin recorded a contract as agreed outside the portal (mark-signed below).
+const SIGN_HOW = { PHONE: 'by phone', EMAIL: 'by email', IN_PERSON: 'in person', LETTER: 'on a paper contract', OTHER: 'other' };
 const DEFAULT_CONTRACT_TERMS = `1. Services. The Company will provide the security services described in this contract at the site named, to the standard reasonably expected of a professional provider and in line with the relevant SIA and British Standard codes of practice.
 2. Term. This contract runs from the start date until the end date shown or, where none is shown, until either party ends it by giving 30 days' written notice.
 3. Charges. The Client will pay the charges set out in this contract. Hourly charges are calculated on the basis stated (hours worked as recorded by the Company's attendance system, or hours rostered). Additional hours requested by the Client are charged at the same rates unless agreed otherwise.
@@ -175,6 +177,11 @@ module.exports = function registerAgreements({
         const top = doc.y; doc.rect(doc.margin, top - 100, 240, 96, { stroke: 0.8 }); doc.y = top - 4;
         doc.image(signatureJpeg, { maxW: 232, maxH: 88, x: doc.margin + 4 }); doc.y = top - 104;
         doc.pairs([['Name', a.signed_name], ['Position', a.signed_position || '—'], ['Signed', new Date(a.signed_at).toLocaleString('en-GB', { timeZone: 'Europe/London' })]], { labelWidth: 70 });
+      } else if (a.status === 'SIGNED' && a.signed_via) {
+        // Recorded by an admin, not a real online signature — typically a
+        // contract that was already agreed (on paper, or verbally) before
+        // being entered into this system.
+        doc.para(`Agreed by ${a.signed_name}${a.signed_position ? `, ${a.signed_position}` : ''}, ${SIGN_HOW[a.signed_via] || 'recorded'}, on ${fmt(a.signed_at)}. Recorded by ${a.signed_recorded_by}.${a.signed_note ? ` ${a.signed_note}` : ''}`, { size: 9.5 });
       } else doc.para('This contract is signed in the client portal.', { size: 9.5 });
     } else if (a.status === 'ACCEPTED') {
       doc.heading('Accepted', 12);
@@ -296,6 +303,39 @@ module.exports = function registerAgreements({
     writePdf(a, 'accepted.pdf');
     logEvent('agreement.accepted', `QUOTE ${a.reference} MARKED ACCEPTED BY ${user.display_name} (${name}, ${HOW[how].toUpperCase()})`, { agreement_id: a.id });
     if (body.notify !== false) emailClient(a, 'ACCEPTED');
+    flushNow();
+    return publicAgreement(a);
+  });
+  /** The client agreed outside the online portal — often on a paper
+   * contract or a verbal agreement from before this system tracked it —
+   * and an admin is formally recording that as a signed contract so
+   * invoicing can work from it. Mirrors mark-accepted above for quotes;
+   * no real signature image, so the PDF notes who recorded it instead of
+   * rendering one (see pdf()'s SIGN_HOW branch). signed_at can be
+   * backdated to when the agreement actually happened — this exists
+   * specifically for migrating existing contracts, which is rarely today. */
+  route('POST', '/api/agreements/:id/mark-signed', ADMIN, ({ params, body, user }) => {
+    const a = find(params.id);
+    if (a.kind !== 'CONTRACT') throw httpError(400, 'only a contract is signed — a quote is accepted');
+    if (!['DRAFT', 'SENT'].includes(a.status)) throw httpError(409, `this contract is ${statusOf(a).toLowerCase()}`);
+    if (!a.lines.length) throw httpError(400, 'add at least one line first');
+    if (!a.start_date) throw httpError(400, 'a contract needs a start date');
+    const name = String(body.name || '').trim().slice(0, 120); if (!name) throw httpError(400, 'who signed it for the client?');
+    const how = SIGN_HOW[body.how] ? body.how : 'OTHER';
+    const signedAt = dateOrNull(body.signed_at, 'signed date') || today();
+    if (new Date(signedAt) > new Date()) throw httpError(400, 'the signed date can\'t be in the future');
+    if (!a.client_id) { const c = clientForSite(a.site_id); if (c) a.client_id = c.id; }
+    if (!a.terms_snapshot) a.terms_snapshot = a.terms || contractTerms();
+    Object.assign(a, {
+      status: 'SIGNED', signed_name: name, signed_position: String(body.position || '').trim().slice(0, 120) || null,
+      signed_at: new Date(signedAt).toISOString(), signed_by_user_id: null,
+      signed_via: how, signed_recorded_by: user.display_name, signed_note: String(body.note || '').trim().slice(0, 1000),
+    });
+    if (!a.sent_at) a.sent_at = a.signed_at;
+    a.history.push({ at: new Date().toISOString(), by: user.display_name, what: `marked signed — ${name} agreed ${SIGN_HOW[how]}${a.signed_note ? ` (${a.signed_note})` : ''}` });
+    writePdf(a, 'signed.pdf');
+    logEvent('agreement.signed', `CONTRACT ${a.reference} MARKED SIGNED BY ${user.display_name} (${name}, ${SIGN_HOW[how].toUpperCase()})`, { agreement_id: a.id });
+    if (body.notify === true) emailClient(a, 'SIGNED');
     flushNow();
     return publicAgreement(a);
   });

@@ -414,3 +414,47 @@ test('an admin can mark a quote accepted when the client said yes outside the po
   assert.equal((await call('POST', url, { name: 'x' }, adminT)).status, 409, 'once only');
   assert.equal((await call('POST', `/api/agreements/${q.id}/convert`, {}, adminT)).status, 201, 'and it can become a contract');
 });
+
+test('an admin can mark a contract signed when it was agreed outside the portal — e.g. migrating an existing paper contract', async () => {
+  // No `lines` key at all — not `lines: []`, which the base create route
+  // itself already rejects — to reach a real DRAFT with none yet, same as
+  // one freshly created and never touched.
+  const draft = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: siteB.id }, adminT)).body;
+  const url = `/api/agreements/${draft.id}/mark-signed`;
+  assert.equal((await call('POST', url, { name: 'Jo' }, clientT)).status, 403, 'admins only');
+  assert.equal((await call('POST', url, { name: 'Jo' }, adminT)).status, 400, 'needs at least one line');
+  await call('PATCH', `/api/agreements/${draft.id}`, { lines: [LINES[0]] }, adminT);
+  assert.equal((await call('POST', url, { name: 'Jo' }, adminT)).status, 400, 'needs a start date');
+  await call('PATCH', `/api/agreements/${draft.id}`, { start_date: '2024-01-01' }, adminT);
+  assert.equal((await call('POST', url, {}, adminT)).status, 400, 'who signed it is needed');
+  assert.equal((await call('POST', url, { name: 'Jo Bloggs', signed_at: '2099-01-01' }, adminT)).status, 400, 'cannot be in the future');
+
+  const before = mails.length;
+  const r = await call('POST', url, { name: 'Jo Bloggs', position: 'Ops Manager', how: 'LETTER', signed_at: '2024-01-15', note: 'migrating existing paper contract' }, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status, 'SIGNED');
+  assert.equal(r.body.signed_name, 'Jo Bloggs');
+  assert.equal(r.body.signed_via, 'LETTER');
+  assert.equal(r.body.signed_recorded_by, 'System Admin');
+  assert.equal(r.body.signed_at.slice(0, 10), '2024-01-15', 'backdated to when it was actually agreed, not today');
+  await new Promise((res) => setTimeout(res, 60));
+  assert.equal(mails.length, before, 'no email unless explicitly asked for — this is a formality, not fresh outreach');
+
+  assert.equal((await call('POST', url, { name: 'x' }, adminT)).status, 409, 'once only — already signed');
+  const pdf = await call('GET', `/api/agreements/${draft.id}/pdf`, undefined, adminT, true);
+  assert.equal(pdf.status, 200, 'the PDF is still generated for a recorded signing, not just a real online one');
+});
+
+test('mark-signed can email a copy when asked, and refuses a quote', async () => {
+  // siteA's client (Meridian Estates) has a contact_email on file; siteB's
+  // (Other Co) deliberately doesn't, used above to prove the no-lines path
+  // without the unrelated "no contact email" message getting in the way.
+  const a = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: siteA.id, lines: [LINES[0]], start_date: '2026-01-01' }, adminT)).body;
+  const before = mails.length;
+  await call('POST', `/api/agreements/${a.id}/mark-signed`, { name: 'Pat', notify: true }, adminT);
+  await new Promise((res) => setTimeout(res, 60));
+  assert.ok(mails.slice(before).some((m) => /signed/i.test(m.subject)), 'emailed when notify is explicitly true');
+
+  const q = (await call('POST', '/api/agreements', { kind: 'QUOTE', site_id: siteA.id, lines: LINES }, adminT)).body;
+  assert.equal((await call('POST', `/api/agreements/${q.id}/mark-signed`, { name: 'x' }, adminT)).status, 400, 'a quote is accepted, not signed');
+});

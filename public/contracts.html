@@ -194,6 +194,7 @@ function view(a) {
   if (a.status === 'DRAFT') acts.push(act('edit', 'Edit'), act('del', 'Delete'), act('send', `Send to client`, 'primary'));
   if (a.status === 'SENT') acts.push(act('withdraw', 'Withdraw'));
   if (a.kind === 'QUOTE' && ['DRAFT', 'SENT'].includes(a.status)) acts.push(act('markacc', 'Mark accepted'));
+  if (a.kind === 'CONTRACT' && ['DRAFT', 'SENT'].includes(a.status)) acts.push(act('marksign', 'Mark signed'));
   if (['SENT', 'ACCEPTED', 'SIGNED'].includes(a.status)) acts.push(act('email', 'Email again'));
   if (a.kind === 'QUOTE' && a.status === 'ACCEPTED' && !rows.some((x) => x.from_quote_id === a.id && x.status !== 'WITHDRAWN')) acts.push(act('convert', 'Make contract from this quote', 'primary'));
   if (a.status === 'SIGNED') acts.push(act('end', 'End contract'), `<a class="btn primary" href="/invoices.html?contract_id=${a.id}">Invoices</a>`);
@@ -211,7 +212,7 @@ function view(a) {
     </tbody></table>
     <p class="est">Estimated ${money(a.estimate.per_period)} per ${a.invoice_period === 'WEEKLY' ? 'week' : 'month'} + VAT${a.estimate.one_off ? `, one-off ${money(a.estimate.one_off)}` : ''}.</p>
     ${a.status === 'DECLINED' && a.decline_reason ? `<p class="note"><strong>Client's reason:</strong> ${esc(a.decline_reason)}</p>` : ''}
-    ${a.status === 'SIGNED' ? `<p class="note">Signed by <strong>${esc(a.signed_name)}</strong>${a.signed_position ? `, ${esc(a.signed_position)}` : ''} on ${esc(when(a.signed_at))}.</p>` : ''}
+    ${a.status === 'SIGNED' ? `<p class="note">Signed by <strong>${esc(a.signed_name)}</strong>${a.signed_position ? `, ${esc(a.signed_position)}` : ''} on ${esc(when(a.signed_at))}.${a.signed_via ? ` <span class="dim">Recorded by ${esc(a.signed_recorded_by)} — not an online signature${a.signed_note ? `: ${esc(a.signed_note)}` : '.'}</span>` : ''}</p>` : ''}
     ${(a.emails || []).length ? `<p class="note">${a.emails.map((e) => e.ok ? `✓ ${esc({ SENT: 'Sent', ACCEPTED: 'Acceptance confirmation', SIGNED: 'Signed copy' }[e.kind] || e.kind)} emailed to ${esc(e.to)} ${esc(when(e.at))}` : `<span class="err">✕ Not emailed${e.to ? ` to ${esc(e.to)}` : ''}: ${esc(e.error || 'failed')}</span>`).join('<br>')}</p>` : ''}
     ${made ? `<p class="note">Contract <a href="#" data-goto="${made.id}">${esc(made.reference)}</a> was made from this quote.</p>` : ''}
     ${a.internal_notes ? `<p class="note dim"><strong>Internal:</strong> ${esc(a.internal_notes)}</p>` : ''}
@@ -230,6 +231,7 @@ function view(a) {
       if (k === 'send') { if (!confirm(`Send ${a.reference} to ${c ? c.name : 'the client'}? It appears in their portal and they are emailed. It can't be edited after.`)) return; out = await api('POST', `/api/agreements/${a.id}/send`); }
       if (k === 'withdraw') { const reason = prompt('Why is it being withdrawn? (optional)'); if (reason === null) return; out = await api('POST', `/api/agreements/${a.id}/withdraw`, { reason }); }
       if (k === 'markacc') return markAccepted(a);
+      if (k === 'marksign') return markSigned(a);
       if (k === 'email') { if (!confirm('Email it to the client again, with the PDF?')) return; out = await api('POST', `/api/agreements/${a.id}/email`); await new Promise((r) => setTimeout(r, 800)); }
       if (k === 'convert') out = await api('POST', `/api/agreements/${a.id}/convert`);
       if (k === 'end') { const d = prompt('Last day of the contract (YYYY-MM-DD)', new Date().toISOString().slice(0, 10)); if (!d) return; out = await api('POST', `/api/agreements/${a.id}/end`, { end_date: d }); }
@@ -249,6 +251,29 @@ function markAccepted(a) {
       <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px"><input type="checkbox" id="mMail" checked style="width:auto"> Email the client a confirmation with the PDF${c && c.contact_email ? ` (${esc(c.contact_email)})` : ''}</label></div>
     </div>${foot('Mark accepted')}`, (root) => wire(root, async () => {
     const out = await api('POST', `/api/agreements/${a.id}/mark-accepted`, { name: v(root, '#mName'), how: v(root, '#mHow'), note: v(root, '#mNote'), notify: root.querySelector('#mMail').checked });
+    close(); await load(); view(rows.find((x) => x.id === out.id));
+  }));
+}
+
+/** The client agreed outside the portal — typically a contract already in
+ * force on paper or by verbal agreement before this system tracked it —
+ * and an admin is formally recording it as signed. No real signature; the
+ * date can be backdated to when it actually happened. */
+function markSigned(a) {
+  const c = clients.find((x) => x.id === a.client_id) || clientOf(a.site_id);
+  modal(`Mark ${a.reference} signed`, `<p class="note" style="margin-top:0">Use this when ${c ? esc(c.name) : 'the client'} has already agreed this contract outside the portal — often one already in place on paper or verbally before this system existed. Who agreed it, how, when, and that you recorded it are kept on the contract and printed on its PDF.</p>
+    <div class="k-form">
+      <div><label>Signed by (client's name)</label><input id="sName" placeholder="e.g. Sam Patel"></div>
+      <div><label>Position (optional)</label><input id="sPosition" placeholder="e.g. Facilities Manager"></div>
+      <div><label>How it was agreed</label><select id="sHow">${options([['PHONE', 'By phone'], ['EMAIL', 'By email'], ['IN_PERSON', 'In person'], ['LETTER', 'On a paper contract'], ['OTHER', 'Other']], 'LETTER')}</select></div>
+      <div><label>Date agreed</label><input id="sDate" type="date" value="${new Date().toISOString().slice(0, 10)}" max="${new Date().toISOString().slice(0, 10)}"></div>
+      <div class="full"><label>Note (optional)</label><input id="sNote" placeholder="e.g. migrating an existing paper contract from 2024"></div>
+      <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px"><input type="checkbox" id="sMail" style="width:auto"> Email the client a copy of the PDF${c && c.contact_email ? ` (${esc(c.contact_email)})` : ''}</label></div>
+    </div>${foot('Mark signed')}`, (root) => wire(root, async () => {
+    const out = await api('POST', `/api/agreements/${a.id}/mark-signed`, {
+      name: v(root, '#sName'), position: v(root, '#sPosition'), how: v(root, '#sHow'), signed_at: v(root, '#sDate'),
+      note: v(root, '#sNote'), notify: root.querySelector('#sMail').checked,
+    });
     close(); await load(); view(rows.find((x) => x.id === out.id));
   }));
 }
