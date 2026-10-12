@@ -332,6 +332,25 @@
         }
       }
     },
+    "/api/shifts/manual-hours": {
+      "post": {
+        "summary": "Admin only: record hours worked on a past shift that was never clocked. Body: reason (required), clocked_in_at, clocked_out_at, and either shift_id (an unclocked rota shift) or personnel (plus optional site_id, role_type) to create one. Stamps manual_entry on the shift and writes a shift.manual_hours audit row",
+        "responses": {
+          "200": {
+            "description": "rota shift filled in"
+          },
+          "201": {
+            "description": "shift created with the hours"
+          },
+          "400": {
+            "description": "missing reason or personnel, bad or future times, or longer than 24 hours"
+          },
+          "409": {
+            "description": "the shift is already clocked or cancelled, or the time overlaps hours already recorded"
+          }
+        }
+      }
+    },
     "/api/integrations/workstation/clock-in": {
       "post": {
         "summary": "Control room PC clocks its Windows user into their current rota shift (shared-secret auth via X-Workstation-Secret, not a user session). Body: upn, username, workstation",

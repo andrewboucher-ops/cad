@@ -40,6 +40,14 @@ the account form; `public/rota.html` is a new week-grid rota builder;
 `officer.html` shows the officer's current/next shift with clock-in/out.
 Covered by tests. Live on the container.
 
+Manual hours: an admin can record the hours someone worked on a past shift
+they could not clock in for (`POST /api/shifts/manual-hours`), either filling
+in an unclocked rota shift or creating one. A reason is required; the shift
+keeps a `manual_entry` stamp (who, when, why, prior state) and a
+`shift.manual_hours` audit row is written. Future, overlapping or >24h time is
+refused. `rota.html` has an admin-only "Add missed hours" button and an "Add
+hours" button on past unclocked shifts. Covered by tests.
+
 **Phase D — Asset tracking: done and deployed.** Vehicle CRUD
 (`POST`/`PATCH`/`DELETE /api/vehicles`, unique registration, delete blocked
 while an MDT or person is still linked to it) and a new `assets` collection
