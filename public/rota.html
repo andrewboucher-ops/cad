@@ -45,6 +45,8 @@
   form.stack { display: flex; flex-direction: column; gap: 12px; }
   form.stack label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: -6px; }
   .foot-split { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+  .manual-tag { font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-dim); }
+  .manual-note { font-size: 12px; padding: 8px 10px; border-radius: 6px; background: var(--panel-3); line-height: 1.45; }
 </style>
 </head>
 <body>
@@ -98,7 +100,10 @@
         <button class="btn" id="thisWeek" style="padding:6px 12px">This week</button>
         <button class="btn" id="nextWeek" style="padding:6px 12px">Next ›</button>
       </div>
-      <button class="btn primary" id="btnNewShift" style="padding:7px 14px;font-size:13px">New shift</button>
+      <span class="btn-row" style="margin:0">
+        <button class="btn" id="btnManualHours" style="padding:7px 14px;font-size:13px" hidden>Add missed hours</button>
+        <button class="btn primary" id="btnNewShift" style="padding:7px 14px;font-size:13px">New shift</button>
+      </span>
     </div>
     <div id="gridWrap"></div>
   </div>
@@ -143,6 +148,9 @@ function weekDays() {
 // of UTC (confirmed live: BST puts this off by one). Format the local
 // calendar date directly instead.
 function fmtDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+// Same trap for datetime-local inputs: they want local wall-clock time, so
+// shift by the timezone offset before formatting rather than showing UTC.
+function localInput(iso) { const d = new Date(iso); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); }
 function sameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
 
 async function load() {
@@ -172,6 +180,7 @@ function paintGrid() {
         ${dayShifts.map((s) => `<div class="shift-chip status-${s.status}" data-shift="${s.id}">
           <div class="times">${new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}–${new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</div>
           <div>${esc(s.site_name || s.role_type || '')}</div>
+          ${s.manual_entry ? '<div class="manual-tag">Manual hours</div>' : ''}
         </div>`).join('')}
         <span class="add-hint">+ add shift</span>
       </div>`;
@@ -196,8 +205,8 @@ el('#thisWeek').onclick = () => { weekStart = startOfWeek(new Date()); load(); }
 function shiftForm(s, defaults) {
   const isNew = !s;
   const d = defaults || {};
-  const startDefault = isNew ? `${d.date}T09:00` : new Date(s.starts_at).toISOString().slice(0, 16);
-  const endDefault = isNew ? `${d.date}T17:00` : new Date(s.ends_at).toISOString().slice(0, 16);
+  const startDefault = isNew ? `${d.date}T09:00` : localInput(s.starts_at);
+  const endDefault = isNew ? `${d.date}T17:00` : localInput(s.ends_at);
   return `
     <form class="stack" id="shForm">
       <label>Personnel</label>
@@ -214,27 +223,32 @@ function shiftForm(s, defaults) {
       <textarea id="shNotes" rows="2">${isNew ? '' : esc(s.notes || '')}</textarea>
       ${isNew ? '' : `<label>Status</label>
       <select id="shStatus">${['SCHEDULED', 'CONFIRMED', 'CLOCKED_IN', 'CLOCKED_OUT', 'NO_SHOW', 'CANCELLED'].map((v) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${v.replace('_', ' ')}</option>`).join('')}</select>`}
+      ${!isNew && s.manual_entry ? `<div class="manual-note">Hours ${fmtTime(s.clocked_in_at)}–${fmtTime(s.clocked_out_at)} added manually by ${esc(s.manual_entry.by_username)} on ${new Date(s.manual_entry.at).toLocaleString('en-GB')}. Reason: ${esc(s.manual_entry.reason)}</div>` : ''}
       <p class="dim" id="shError" style="min-height:16px;margin:0"></p>
     </form>`;
 }
+function fmtTime(iso) { return new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); }
 function shiftModal(s, defaults) {
   modal(s ? `Shift — ${s.personnel_name}` : 'New shift', shiftForm(s, defaults), () => {
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
-        <span>${s ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}</span>
+        <span>${s ? '<button class="btn danger" id="shDelete">Delete shift</button>' : ''}
+          ${canAddHours(s) ? '<button class="btn" id="shAddHours">Add hours</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
           <button class="btn" id="shCancel">Cancel</button>
           <button class="btn primary" id="shSave">${s ? 'Save changes' : 'Create shift'}</button>
         </span>
       </div>`;
     el('#shCancel').onclick = closeModal;
+    if (el('#shAddHours')) el('#shAddHours').onclick = () => manualHoursModal(s);
     if (el('#shDelete')) el('#shDelete').onclick = async () => {
       if (!confirm('Delete this shift?')) return;
       try { await api('DELETE', `/api/shifts/${s.id}`); closeModal(); await load(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
     el('#shSave').onclick = async () => {
+      if (!el('#shStart').value || !el('#shEnd').value) { el('#shError').textContent = 'Enter both start and end times'; return; }
       const body = {
         personnel: Number(el('#shPersonnel').value),
         site_id: el('#shSite').value ? Number(el('#shSite').value) : null,
@@ -255,6 +269,57 @@ function shiftModal(s, defaults) {
     };
   });
 }
+/* Admin-only: record hours for a past shift someone could not clock in for.
+ * The server stamps who, when and why, and writes it to the audit log. */
+const isAdmin = me.role === 'SYSTEM_ADMIN';
+el('#btnManualHours').hidden = !isAdmin;
+function canAddHours(s) {
+  return isAdmin && s && ['SCHEDULED', 'CONFIRMED', 'NO_SHOW'].includes(s.status) && Date.parse(s.starts_at) < Date.now();
+}
+function manualHoursModal(s) {
+  const yesterday = new Date(Date.now() - 86400000);
+  const inDefault = s ? localInput(s.starts_at) : `${fmtDate(yesterday)}T09:00`;
+  const outDefault = s ? localInput(Math.min(Date.parse(s.ends_at), Date.now())) : `${fmtDate(yesterday)}T17:00`;
+  modal(s ? `Add hours — ${s.personnel_name}` : 'Add missed hours', `
+    <form class="stack" id="mhForm">
+      ${s ? `<p class="dim" style="margin:0">Rota shift ${fmtTime(s.starts_at)}–${fmtTime(s.ends_at)}${s.site_name ? ' at ' + esc(s.site_name) : ''}.</p>` : `
+      <label>Personnel</label>
+      <select id="mhPersonnel">${allPersonnel.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <label>Site (optional)</label>
+      <select id="mhSite"><option value="">— none —</option>${allSites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
+      <label>Role</label>
+      <input id="mhRole" autocomplete="off" placeholder="Patrol, static guard…">`}
+      <label>Clocked in</label>
+      <input id="mhIn" type="datetime-local" value="${inDefault}">
+      <label>Clocked out</label>
+      <input id="mhOut" type="datetime-local" value="${outDefault}">
+      <label>Reason</label>
+      <textarea id="mhReason" rows="2" placeholder="Why they could not clock in, and who confirmed the hours"></textarea>
+      <p class="dim" style="margin:0;font-size:12px">This is recorded against your name in the audit log.</p>
+      <p class="dim" id="mhError" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `<span class="btn-row" style="margin:0"><button class="btn" id="mhCancel">Cancel</button><button class="btn primary" id="mhSave">Add hours</button></span>`;
+    el('#mhCancel').onclick = closeModal;
+    el('#mhSave').onclick = async () => {
+      if (!el('#mhIn').value || !el('#mhOut').value) { el('#mhError').textContent = 'Enter both clock-in and clock-out times'; return; }
+      const body = {
+        clocked_in_at: new Date(el('#mhIn').value).toISOString(),
+        clocked_out_at: new Date(el('#mhOut').value).toISOString(),
+        reason: el('#mhReason').value.trim(),
+      };
+      if (s) body.shift_id = s.id;
+      else Object.assign(body, {
+        personnel: Number(el('#mhPersonnel').value),
+        site_id: el('#mhSite').value ? Number(el('#mhSite').value) : null,
+        role_type: el('#mhRole').value.trim(),
+      });
+      try { await api('POST', '/api/shifts/manual-hours', body); closeModal(); await load(); }
+      catch (e) { el('#mhError').textContent = e.message; }
+    };
+  });
+}
+el('#btnManualHours').onclick = () => manualHoursModal(null);
 el('#btnNewShift').onclick = () => shiftModal(null, { personnelId: allPersonnel[0] && allPersonnel[0].id, date: fmtDate(new Date()) });
 
 CCCS.bus((up) => {

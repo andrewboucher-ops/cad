@@ -690,6 +690,56 @@ test('a shift can be edited and deleted by control', async () => {
   assert.equal((await call('DELETE', `/api/shifts/${shift.body.id}`, undefined, adminT)).status, 200);
 });
 
+test('an admin adds manual hours to a past rota shift, with a reason and an audit trail', async () => {
+  const start = new Date(Date.now() - 30 * 3600000).toISOString();
+  const end = new Date(Date.now() - 22 * 3600000).toISOString();
+  const shift = await call('POST', '/api/shifts', { personnel: ellieId, starts_at: start, ends_at: end }, dispT);
+  const inAt = new Date(Date.now() - 29.5 * 3600000).toISOString();
+  const outAt = new Date(Date.now() - 22 * 3600000).toISOString();
+  const body = { shift_id: shift.body.id, clocked_in_at: inAt, clocked_out_at: outAt, reason: 'Phone died, confirmed by supervisor' };
+
+  assert.equal((await call('POST', '/api/shifts/manual-hours', body, dispT)).status, 403, 'admin only');
+  assert.equal((await call('POST', '/api/shifts/manual-hours', body, ellieT)).status, 403, 'not the officer themselves');
+  assert.equal((await call('POST', '/api/shifts/manual-hours', { ...body, reason: '  ' }, adminT)).status, 400, 'reason required');
+  assert.equal((await call('POST', '/api/shifts/manual-hours', { ...body, personnel: danId }, adminT)).status, 400, 'shift must match the person');
+
+  const done = await call('POST', '/api/shifts/manual-hours', body, adminT);
+  assert.equal(done.status, 200);
+  assert.equal(done.body.status, 'CLOCKED_OUT');
+  assert.equal(done.body.clocked_in_at, inAt);
+  assert.equal(done.body.clocked_out_at, outAt);
+  assert.equal(done.body.manual_entry.by_username, 'admin');
+  assert.equal(done.body.manual_entry.reason, 'Phone died, confirmed by supervisor');
+  assert.equal(done.body.manual_entry.previous.status, 'SCHEDULED');
+  assert.equal(done.body.manual_entry.created_shift, false);
+
+  const ev = (await call('GET', '/api/events', undefined, adminT)).body.find((e) => e.type === 'shift.manual_hours' && e.data.shift_id === shift.body.id);
+  assert.ok(ev, 'audit row written');
+  assert.equal(ev.data.hours, 7.5);
+  assert.equal(ev.data.reason, 'Phone died, confirmed by supervisor');
+
+  assert.equal((await call('POST', '/api/shifts/manual-hours', body, adminT)).status, 409, 'an already clocked shift cannot be overwritten');
+});
+
+test('an admin can record manual hours with no rota shift, but not future, overlapping or overlong time', async () => {
+  const h = (n) => new Date(Date.now() - n * 3600000).toISOString();
+  const add = (b) => call('POST', '/api/shifts/manual-hours', { personnel: ryanId, reason: 'Covered a call-out, not on the rota', ...b }, adminT);
+
+  const created = await add({ clocked_in_at: h(60), clocked_out_at: h(54), role_type: 'Patrol' });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.personnel_id, ryanId);
+  assert.equal(created.body.status, 'CLOCKED_OUT');
+  assert.equal(created.body.starts_at, created.body.clocked_in_at, 'the shift spans the hours worked');
+  assert.equal(created.body.manual_entry.created_shift, true);
+  assert.equal(created.body.manual_entry.previous, null);
+
+  assert.equal((await add({ clocked_in_at: h(56), clocked_out_at: h(50) })).status, 409, 'overlaps the hours just recorded');
+  assert.equal((await add({ clocked_in_at: h(1), clocked_out_at: new Date(Date.now() + 3600000).toISOString() })).status, 400, 'no future time');
+  assert.equal((await add({ clocked_in_at: h(100), clocked_out_at: h(70) })).status, 400, 'no more than 24 hours');
+  assert.equal((await add({ clocked_in_at: h(80), clocked_out_at: h(81) })).status, 400, 'out must follow in');
+  assert.equal((await add({ personnel: undefined, clocked_in_at: h(80), clocked_out_at: h(79) })).status, 400, 'personnel required');
+});
+
 /* ---------------- asset tracking ---------------- */
 test('a vehicle can be created, updated and deleted, with a unique registration', async () => {
   const created = await call('POST', '/api/vehicles', { registration: 'test-500', type: 'Van' }, adminT);
