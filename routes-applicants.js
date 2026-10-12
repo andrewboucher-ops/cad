@@ -56,6 +56,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { contentDisposition } = require('./disposition.js');
 
 const APPLICANT_STATUSES = ['APPLIED', 'SCREENING', 'INTERVIEW', 'OFFER', 'HIRED', 'REJECTED', 'WITHDRAWN'];
 const CV_MAX_BYTES = 8e6;
@@ -257,7 +258,7 @@ module.exports = function registerApplicantRoutes({
     if (!a || !a.cv) throw httpError(404, 'no CV on file');
     const file = path.join(cvDir(a.id), a.cv.stored_name);
     if (!fs.existsSync(file)) throw httpError(404, 'CV file missing');
-    return { __body: fs.readFileSync(file), __headers: { 'content-type': a.cv.mimetype, 'content-disposition': `attachment; filename="${a.cv.filename.replace(/"/g, '')}"` } };
+    return { __body: fs.readFileSync(file), __headers: { 'content-type': a.cv.mimetype, 'content-disposition': contentDisposition('attachment', a.cv.filename) } };
   });
 
   /* ---------------------------------------------------------------- *
@@ -533,7 +534,7 @@ module.exports = function registerApplicantRoutes({
     if (!ans) throw httpError(404, 'not found');
     const file = path.join(infoDir(a.id, r.id), ans.file.stored_name);
     if (!fs.existsSync(file)) throw httpError(404, 'file missing');
-    return { __body: fs.readFileSync(file), __headers: { 'content-type': ans.file.mimetype, 'content-disposition': `inline; filename="${ans.file.filename.replace(/"/g, '')}"`, 'cache-control': 'private, no-store' } };
+    return { __body: fs.readFileSync(file), __headers: { 'content-type': ans.file.mimetype, 'content-disposition': contentDisposition('inline', ans.file.filename), 'cache-control': 'private, no-store' } };
   });
 
   // Public: the page behind the emailed link.

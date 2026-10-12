@@ -37,6 +37,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { contentDisposition } = require('./disposition.js');
 
 // ASSIGNMENT_INSTRUCTIONS, SITE_MAP and INDUCTION are versioned (see the
 // upload route); CONTRACT and SITE_DOCUMENT keep their original,
@@ -419,7 +420,7 @@ module.exports = function registerClientRoutes({
       __stream: fs.createReadStream(file),
       __headers: {
         'content-type': d.mimetype, 'cache-control': 'private, max-age=604800',
-        'content-disposition': `${inline ? 'inline' : 'attachment'}; filename="${d.filename.replace(/"/g, '')}"`,
+        'content-disposition': contentDisposition(inline ? 'inline' : 'attachment', d.filename),
       },
     };
   });
@@ -561,6 +562,6 @@ module.exports = function registerClientRoutes({
     if (!d || !client.site_ids.includes(d.site_id) || !clientCanSeeDoc(d)) throw httpError(404, 'document not found');
     const file = path.join(documentsDir(d.site_id), d.stored_name);
     if (!fs.existsSync(file)) throw httpError(404, 'document file missing');
-    return { __stream: fs.createReadStream(file), __headers: { 'content-type': d.mimetype, 'cache-control': 'private, max-age=604800', 'content-disposition': `attachment; filename="${d.filename.replace(/"/g, '')}"` } };
+    return { __stream: fs.createReadStream(file), __headers: { 'content-type': d.mimetype, 'cache-control': 'private, max-age=604800', 'content-disposition': contentDisposition('attachment', d.filename) } };
   });
 };

@@ -185,6 +185,24 @@ test('assignment instructions and site maps are versioned by title, and only the
   assert.equal((await call('GET', `/api/client/documents/${siteDoc.body.id}/file`, undefined, clientT)).status, 404);
 });
 
+/* ---------------- non-ASCII filenames must not break the download ---------------- */
+test('a document whose original filename has a non-ASCII character (an en-dash, as actually happened) still downloads', async () => {
+  const site = (await call('GET', '/api/sites', undefined, dispT)).body[0];
+  const doc = await call('POST', `/api/sites/${site.id}/documents`, {
+    type: 'ASSIGNMENT_INSTRUCTIONS', title: 'Dash Test', mimetype: 'application/pdf',
+    filename: 'Assignment Instructions – Meridian Point, Cleethorpes (Static Guarding).pdf', data: PDF,
+  }, adminT);
+  assert.equal(doc.status, 201, JSON.stringify(doc.body));
+
+  const client = (await call('POST', '/api/clients', { name: 'Dash Test Co', site_ids: [site.id] }, adminT)).body;
+  await call('POST', '/api/users', { username: 'dashclient', password: 'realpassword1', role: 'CLIENT', client_id: client.id }, adminT);
+  const clientT = await login('dashclient', 'realpassword1');
+
+  const file = await call('GET', `/api/client/documents/${doc.body.id}/file`, undefined, clientT);
+  assert.equal(file.status, 200, 'the en-dash in the filename must not crash the Content-Disposition header');
+  assert.match(file.headers.get('content-disposition'), /filename\*=UTF-8''/, 'the real name travels via the RFC 5987 parameter');
+});
+
 /* ---------------- broadcast is opt-in only for CLIENT ---------------- */
 test('a CLIENT websocket receives nothing from an untargeted broadcast, and only a siteIds-scoped one for its own site', async () => {
   const sites = (await call('GET', '/api/sites', undefined, dispT)).body;

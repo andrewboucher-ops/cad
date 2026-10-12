@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { contentDisposition } = require('./disposition.js');
 
 const KINDS = { SIA_FRONT: 'SIA licence — front', SIA_BACK: 'SIA licence — back', CV: 'CV', APPLICATION: 'Application', INFO: 'Further information', CONTRACT: 'Contract', ID: 'Identity document', TRAINING: 'Training certificate', OTHER: 'Other' };
 const TYPES = { 'application/pdf': '.pdf', 'image/png': '.png', 'image/jpeg': '.jpg' };
@@ -64,7 +65,7 @@ module.exports = function registerPersonnelFiles({ route, httpError, ADMIN, db, 
     if (!f) throw httpError(404, 'file not found');
     const file = path.join(dir(p.id), f.stored_name);
     if (!fs.existsSync(file)) throw httpError(404, 'file missing');
-    return { __body: fs.readFileSync(file), __headers: { 'content-type': f.mimetype, 'content-disposition': `inline; filename="${f.filename.replace(/"/g, '')}"`, 'cache-control': 'private, no-store' } };
+    return { __body: fs.readFileSync(file), __headers: { 'content-type': f.mimetype, 'content-disposition': contentDisposition('inline', f.filename), 'cache-control': 'private, no-store' } };
   });
   route('POST', '/api/personnel/:id/files', ADMIN, ({ params, body, user }) => {
     const p = findPerson(params.id);
