@@ -338,7 +338,7 @@
         "security": [],
         "responses": {
           "200": {
-            "description": "clocked in, or already clocked in"
+            "description": "clocked in, or already clocked in: result (CLOCKED_IN or ALREADY_CLOCKED_IN), personnel_name, clocked_in_at, shift"
           },
           "401": {
             "description": "bad secret"
