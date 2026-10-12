@@ -956,6 +956,11 @@ account is matched to a CCCS login by email (its UPN) or username, and from
 there to the login's personnel record. A sign-in with no matching login, or
 with no shift, is written to the audit trail for a supervisor.
 
+`POST /api/integrations/workstation/clock-out` is its sign-out counterpart,
+with the same secret and matching. Operators also sign out to move desks, so
+it only clocks someone out in the last hour of their shift or after it ends;
+earlier, it answers `STILL_CLOCKED_IN`, changes nothing and logs the sign-out.
+
 ## Control room click-to-dial relay
 
 `POST /api/integrations/workstation/dial` lets a control room PC that is off

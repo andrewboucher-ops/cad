@@ -1198,6 +1198,43 @@ test('a control room PC clocks its Windows user into their current shift with a 
   assert.equal((await clock({ username: 'rcole' })).status, 401, 'disabled until a secret is set');
 });
 
+test('a control room PC clocks its Windows user out at sign-out, but only near the end of their shift', async () => {
+  process.env.WORKSTATION_SECRET = 'test-workstation-secret';
+  const post = (path, body, secret = 'test-workstation-secret') => fetch(BASE + '/api/integrations/workstation/' + path, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-workstation-secret': secret }, body: JSON.stringify(body),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+  assert.equal((await post('clock-out', { username: 'emarsh' }, 'wrong')).status, 401);
+  assert.equal((await post('clock-out', { username: 'nobody' })).status, 404, 'no CCCS account for that Windows user');
+  assert.equal((await post('clock-out', { username: 'emarsh' })).status, 409, 'not clocked in, nothing to clock out of');
+
+  // Clocked in on a shift with hours still to run: signing out to move desks leaves them clocked in.
+  const long = await call('POST', '/api/shifts', { personnel: ellieId, shift_type_id: patrolTypeId(),
+    starts_at: new Date(Date.now() + 20 * 60000).toISOString(), ends_at: new Date(Date.now() + 6 * 3600000).toISOString() }, adminT);
+  assert.equal(long.status, 201, JSON.stringify(long.body));
+  assert.equal((await post('clock-in', { username: 'emarsh', workstation: 'CONTROL-02' })).body.result, 'CLOCKED_IN');
+  const early = await post('clock-out', { username: 'emarsh', workstation: 'CONTROL-02' });
+  assert.equal(early.status, 200);
+  assert.equal(early.body.result, 'STILL_CLOCKED_IN', 'more than an hour before the end, sign-out is not a clock-out');
+  const stillIn = (await call('GET', `/api/shifts?personnel_id=${ellieId}`, undefined, dispT)).body.find((x) => x.id === long.body.id);
+  assert.ok(stillIn.assignments[0].clocked_in_at && !stillIn.assignments[0].clocked_out_at);
+
+  // Last hour of the shift: sign-out clocks them out.
+  const a = stillIn.assignments[0];
+  const corrected = await call('PATCH', `/api/shifts/${long.body.id}`, { ends_at: new Date(Date.now() + 30 * 60000).toISOString() }, adminT);
+  assert.ok(corrected.status < 300, JSON.stringify(corrected.body));
+  const out = await post('clock-out', { username: 'emarsh', workstation: 'CONTROL-02' });
+  assert.equal(out.body.result, 'CLOCKED_OUT');
+  assert.equal(out.body.shift.id, long.body.id);
+  assert.ok(!Number.isNaN(Date.parse(out.body.clocked_out_at)));
+  const after = (await call('GET', `/api/shifts?personnel_id=${ellieId}`, undefined, dispT)).body.find((x) => x.id === long.body.id);
+  const mine = after.assignments.find((x) => x.id === a.id);
+  assert.equal(mine.clocked_out_at, out.body.clocked_out_at);
+  assert.equal(mine.attendance, 'ATTENDED');
+  assert.equal((await post('clock-out', { username: 'emarsh' })).status, 409, 'signing out again is harmless');
+  delete process.env.WORKSTATION_SECRET;
+});
+
 test('the dial relay rings the extension through AMI, and only for allowed numbers', async () => {
   const seen = [];
   const ami = net.createServer((sock) => {
