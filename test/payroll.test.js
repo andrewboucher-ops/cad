@@ -238,3 +238,63 @@ test('a person can list and PDF their own ISSUED payslips only, never a DRAFT on
   const ellieT = await login('emarsh', 'field123');
   assert.equal((await call('GET', `/api/payslips?personnel_id=${dan.id}`, undefined, ellieT)).status, 403, 'not someone else\'s');
 });
+
+/* ---------------- enhanced/override pay days ---------------- */
+
+test('a bank holiday pays time and a half, and Christmas Day pays double — seeded defaults, not something an admin had to set up', async () => {
+  const days = (await call('GET', '/api/payroll/rate-days', undefined, adminT)).body;
+  assert.equal((await call('GET', '/api/payroll/rate-days', undefined, dispT)).status, 403, 'admin only');
+  const spring = days.find((d) => d.date === '2027-05-31');
+  assert.equal(spring.label, 'Spring bank holiday');
+  assert.equal(spring.kind, 'MULTIPLIER'); assert.equal(spring.multiplier, 1.5);
+  const xmas = days.find((d) => d.date === '2026-12-25');
+  assert.equal(xmas.kind, 'MULTIPLIER'); assert.equal(xmas.multiplier, 2);
+
+  // £2500 gross for the hour at the plain rate (same anchor as the worked
+  // examples above) — time and a half makes the extra exactly £1250.
+  // 2027, a month no other test in this file touches, to avoid colliding
+  // with an existing run over the same period.
+  const bh = await newPayrollPerson('Payroll Test BankHoliday');
+  await oneHourShift(bh.id, '2027-05-31'); // Spring bank holiday, ×1.5
+  const bhRun = await generateAndApprove('2027-05-01', '2027-05-31');
+  const bhSlip = bhRun.payslips.find((x) => x.personnel_id === bh.id);
+  assert.equal(bhSlip.gross_from_hours, 2500, 'gross_from_hours stays the plain hours × rate — unchanged meaning');
+  assert.equal(bhSlip.enhanced_pay, 1250);
+  assert.equal(bhSlip.gross_pay, 3750);
+  assert.equal(bhSlip.enhanced_pay_breakdown.length, 1);
+  assert.equal(bhSlip.enhanced_pay_breakdown[0].label, 'Spring bank holiday');
+  assert.equal(bhSlip.enhanced_pay_breakdown[0].rate, 3750, 'the full per-hour rate on the day, not just the uplift');
+
+  const xm = await newPayrollPerson('Payroll Test Christmas');
+  await oneHourShift(xm.id, '2026-12-25'); // Christmas Day, ×2
+  const xmRun = await generateAndApprove('2026-12-01', '2026-12-31');
+  const xmSlip = xmRun.payslips.find((x) => x.personnel_id === xm.id);
+  assert.equal(xmSlip.enhanced_pay, 2500, 'double time — the extra equals the plain gross itself');
+  assert.equal(xmSlip.gross_pay, 5000);
+});
+
+test('an admin can add a flat override rate for a specific date (e.g. a late-notice shift), and it is never allowed to pay less than the normal rate', async () => {
+  const add = await call('POST', '/api/payroll/rate-days', { date: '2026-11-11', label: 'Late-notice cover', kind: 'FLAT', flat_rate: 4000 }, adminT);
+  assert.equal(add.status, 201, JSON.stringify(add.body));
+  assert.equal((await call('POST', '/api/payroll/rate-days', { date: '2026-11-11', label: 'dup' }, adminT)).status, 409, 'one rate day per date');
+  assert.equal((await call('POST', '/api/payroll/rate-days', { date: '2026-11-12', label: 'x', kind: 'FLAT', flat_rate: 1000 }, dispT)).status, 403);
+
+  // A flat override set BELOW the normal rate never reduces pay — checked
+  // in the same run as the £40/h override above (one run per period).
+  const low = await call('POST', '/api/payroll/rate-days', { date: '2026-11-18', label: 'Low override', kind: 'FLAT', flat_rate: 1000 }, adminT);
+
+  const p = await newPayrollPerson('Payroll Test FlatOverride');
+  await oneHourShift(p.id, '2026-11-11');
+  const p2 = await newPayrollPerson('Payroll Test FlatOverrideLow');
+  await oneHourShift(p2.id, '2026-11-18');
+  const run = await generateAndApprove('2026-11-01', '2026-11-30');
+  const slip = run.payslips.find((x) => x.personnel_id === p.id);
+  assert.equal(slip.gross_from_hours, 2500);
+  assert.equal(slip.enhanced_pay, 1500, 'the flat £4000/h override over the plain £2500/h rate, for the one hour');
+  assert.equal(slip.gross_pay, 4000);
+  const slip2 = run.payslips.find((x) => x.personnel_id === p2.id);
+  assert.equal(slip2.enhanced_pay, 0, 'never paid less than their normal rate');
+
+  await call('DELETE', `/api/payroll/rate-days/${add.body.id}`, {}, adminT);
+  await call('DELETE', `/api/payroll/rate-days/${low.body.id}`, {}, adminT);
+});

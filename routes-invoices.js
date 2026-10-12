@@ -42,6 +42,13 @@ module.exports = function registerInvoices({
   if (!Array.isArray(db.invoices)) db.invoices = [];
   const MONEY = [...ADMIN, ...FINANCE];
   const r2 = (n) => Math.round(n * 100) / 100;
+  // Same pay-rate-day list routes-payroll.js maintains (bank holidays at
+  // time and a half, Christmas/Boxing Day/New Year's Day at double, plus
+  // anything an admin's added) — the client is charged the same enhanced
+  // rate on the same dates the staff cost more to cover, rather than that
+  // extra just being absorbed as a margin hit. One list, two consumers.
+  const rateDayFor = (dateISO) => (db.payroll_rate_days || []).find((r) => r.date === String(dateISO).slice(0, 10)) || null;
+  const rateDayRate = (rd, baseRate) => Math.max(rd.kind === 'FLAT' ? Number(rd.flat_rate) : r2(baseRate * rd.multiplier), baseRate);
   const findInv = (id) => { const i = db.invoices.find((x) => x.id === Number(id)); if (!i) throw httpError(404, 'invoice not found'); return i; };
   const span = (a, b) => { const f = (d, o) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-GB', o); return a === b ? f(a, { day: 'numeric', month: 'short', year: 'numeric' }) : `${f(a, { day: 'numeric', month: 'short' })} – ${f(b, { day: 'numeric', month: 'short', year: 'numeric' })}`; };
   const money = (n) => `£${Number(n || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -224,10 +231,31 @@ module.exports = function registerInvoices({
     for (const l of c.lines) {
       if (l.kind === 'HOURLY') {
         const rows = hoursFor(c, l, from, to);
-        const hours = r2(rows.reduce((n, x) => n + x.hours, 0));
         for (const x of rows) if (x.source === 'to check') checks.push(`${x.person} on ${x.date}: no clock-out — counted as 0 hours`);
         for (const x of rows) if (x.source === 'awaiting approval') checks.push(`${x.person} on ${x.date}: clock time waiting for approval in Timeclock`);
-        lines.push({ id: crypto.randomUUID(), description: `${l.description}${l.shift_type_name ? ` (${l.shift_type_name})` : ''} — hours, ${span(from, to)}`, kind: 'HOURLY', quantity: hours, unit_amount: l.rate, shifts: rows });
+        // Hours on a pay rate day (a bank holiday, Christmas Day, or a
+        // one-off an admin's added) are billed on their own line at that
+        // day's enhanced rate — kept separate from the normal-rate line
+        // rather than blended into one average, so the client sees exactly
+        // which days cost more and why.
+        const label = `${l.description}${l.shift_type_name ? ` (${l.shift_type_name})` : ''}`;
+        const normalRows = [], byRateDay = new Map(); // rate_day id -> { rd, rows: [] }
+        for (const x of rows) {
+          const rd = rateDayFor(x.date);
+          if (!rd) { normalRows.push(x); continue; }
+          if (!byRateDay.has(rd.id)) byRateDay.set(rd.id, { rd, rows: [] });
+          byRateDay.get(rd.id).rows.push(x);
+        }
+        const normalHours = r2(normalRows.reduce((n, x) => n + x.hours, 0));
+        if (normalHours > 0 || byRateDay.size === 0) {
+          lines.push({ id: crypto.randomUUID(), description: `${label} — hours, ${span(from, to)}`, kind: 'HOURLY', quantity: normalHours, unit_amount: l.rate, shifts: normalRows });
+        }
+        for (const { rd, rows: rdRows } of byRateDay.values()) {
+          const rdHours = r2(rdRows.reduce((n, x) => n + x.hours, 0));
+          const rate = rateDayRate(rd, l.rate);
+          const how = rd.kind === 'FLAT' ? 'override rate' : `×${rd.multiplier}`;
+          lines.push({ id: crypto.randomUUID(), description: `${label} — ${rd.label}, ${longDate(rd.date)} (${how})`, kind: 'HOURLY', quantity: rdHours, unit_amount: rate, shifts: rdRows });
+        }
       } else if (l.kind === 'FIXED_PERIOD') {
         lines.push({ id: crypto.randomUUID(), description: `${l.description}, ${span(from, to)}`, kind: l.kind, quantity: 1, unit_amount: l.rate });
       } else if (first) {

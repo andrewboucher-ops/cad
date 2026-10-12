@@ -36,11 +36,52 @@ const payrollCalc = require('./payroll-calc.js');
 module.exports = function registerPayroll({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, attendance, flushNow = () => {},
 }) {
-  for (const t of ['payroll_runs', 'payslips']) if (!Array.isArray(db[t])) db[t] = [];
+  for (const t of ['payroll_runs', 'payslips', 'payroll_rate_days']) if (!Array.isArray(db[t])) db[t] = [];
 
   const { round2 } = payrollCalc;
   const findRun = (id) => { const r = db.payroll_runs.find((x) => x.id === Number(id)); if (!r) throw httpError(404, 'payroll run not found'); return r; };
   const findPayslip = (id) => { const p = db.payslips.find((x) => x.id === Number(id)); if (!p) throw httpError(404, 'payslip not found'); return p; };
+
+  /* ---------------------------------------------------------------- *
+   * Enhanced/override pay days — a bank holiday worked at time and a
+   * half, Christmas/Boxing Day/New Year's Day at double time by default,
+   * plus anything an admin adds — a one-off flat override rate for a
+   * late-notice shift, say. Applies to whoever works that CALENDAR date
+   * (matched on a shift's own start date, the same single-date
+   * attribution hoursForPersonnel already uses for an overnight shift —
+   * see its own comment), not to a named person — same as a real bank
+   * holiday enhancement.
+   *
+   * Seeded once from gov.uk's published list (en-GB, England & Wales —
+   * Scotland/NI differ and aren't accounted for) so the common case needs
+   * no setup; an admin can add, edit or delete freely afterwards. Like
+   * payroll-calc.js's own TAX_YEAR_2026_27 figures, this needs a fresh
+   * look for the years ahead — nothing recomputes a bank holiday's date
+   * automatically, since the government doesn't set them by a fixed rule. */
+  if (db.payroll_rate_days.length === 0) {
+    const bh = (date, label) => ({ date, label, kind: 'MULTIPLIER', multiplier: 1.5 });
+    const dbl = (date, label) => ({ date, label, kind: 'MULTIPLIER', multiplier: 2 });
+    const defaults = [
+      dbl('2026-01-01', "New Year's Day"), bh('2026-04-03', 'Good Friday'), bh('2026-04-06', 'Easter Monday'),
+      bh('2026-05-04', 'Early May bank holiday'), bh('2026-05-25', 'Spring bank holiday'), bh('2026-08-31', 'Summer bank holiday'),
+      dbl('2026-12-25', 'Christmas Day'), dbl('2026-12-28', 'Boxing Day (substitute)'),
+      dbl('2027-01-01', "New Year's Day"), bh('2027-03-26', 'Good Friday'), bh('2027-03-29', 'Easter Monday'),
+      bh('2027-05-03', 'Early May bank holiday'), bh('2027-05-31', 'Spring bank holiday'), bh('2027-08-30', 'Summer bank holiday'),
+      dbl('2027-12-27', 'Christmas Day (substitute)'), dbl('2027-12-28', 'Boxing Day (substitute)'),
+    ];
+    for (const d of defaults) {
+      db.payroll_rate_days.push({ id: nextId('payroll_rate_days'), flat_rate: null, created_by: 'system', created_at: new Date().toISOString(), ...d });
+    }
+  }
+  const findRateDay = (id) => { const r = db.payroll_rate_days.find((x) => x.id === Number(id)); if (!r) throw httpError(404, 'rate day not found'); return r; };
+  const rateDayFor = (dateISO) => db.payroll_rate_days.find((r) => r.date === String(dateISO).slice(0, 10)) || null;
+  /** What a rate day actually pays per hour for this person, and the extra
+   * over their plain hourly_rate — never less than their normal rate, in
+   * case a flat override is mistakenly set below it. */
+  function rateDayHourlyRate(rd, hourlyRate) {
+    const rate = rd.kind === 'FLAT' ? Number(rd.flat_rate) : round2(hourlyRate * rd.multiplier);
+    return Math.max(rate, hourlyRate);
+  }
 
   /* ---------------------------------------------------------------- *
    * UK tax year (6 Apr - 5 Apr) and cumulative figures, derived fresh
@@ -78,16 +119,18 @@ module.exports = function registerPayroll({
     const t0 = Date.parse(`${periodStart}T00:00:00.000Z`), t1 = Date.parse(`${periodEnd}T23:59:59.999Z`);
     let hours = 0;
     const unresolved = [];
+    const rateDayHours = new Map(); // rate_day id -> hours worked that calendar date
     for (const a of db.shift_assignments) {
       if (a.personnel_id !== personnelId || !['ASSIGNED', 'CONFIRMED'].includes(a.status)) continue;
       const s = db.shifts.find((x) => x.id === a.shift_id);
       if (!s || ['CANCELLED', 'DRAFT'].includes(s.status)) continue;
       const startsAt = Date.parse(s.starts_at);
       if (startsAt < t0 || startsAt > t1) continue;
+      let shiftHours = 0;
       if (payBasis === 'ROSTERED') {
-        hours += Math.max(0, (Date.parse(s.ends_at) - startsAt) / 3600000 - (Number(s.break_minutes) || 0) / 60);
+        shiftHours = Math.max(0, (Date.parse(s.ends_at) - startsAt) / 3600000 - (Number(s.break_minutes) || 0) / 60);
       } else if (a.clocked_in_at && a.clocked_out_at) {
-        hours += attendance.worked(a).worked_min / 60;
+        shiftHours = attendance.worked(a).worked_min / 60;
       } else if (a.attendance === 'NO_SHOW') {
         // 0 hours, not unresolved — a no-show is a known outcome.
       } else if (Date.parse(s.ends_at) > Date.now()) {
@@ -95,8 +138,31 @@ module.exports = function registerPayroll({
       } else {
         unresolved.push({ shift_id: s.id, assignment_id: a.id, date: s.starts_at.slice(0, 10), site_name: (db.sites.find((x) => x.id === s.site_id) || {}).name || null });
       }
+      hours += shiftHours;
+      // A shift is attributed wholly to its start date, same convention
+      // hoursForPersonnel already used before rate days existed — an
+      // overnight shift starting on a rate day is paid at the enhanced
+      // rate for all of it, not apportioned past midnight.
+      if (shiftHours > 0) {
+        const rd = rateDayFor(s.starts_at);
+        if (rd) rateDayHours.set(rd.id, round2((rateDayHours.get(rd.id) || 0) + shiftHours));
+      }
     }
-    return { hours: round2(hours), unresolved };
+    const enhancedHours = [...rateDayHours.entries()].map(([id, h]) => ({ rate_day: findRateDay(id), hours: h }));
+    return { hours: round2(hours), unresolved, enhancedHours };
+  }
+  /** The extra over plain hourly_rate for hours already counted in
+   * grossFromHours that fell on a rate day — grossFromHours itself never
+   * changes meaning, this is purely the top-up (see payroll-calc.js). */
+  function enhancedPayFor(hourlyRate, enhancedHours) {
+    let extra = 0;
+    const breakdown = enhancedHours.map(({ rate_day: rd, hours }) => {
+      const rate = rateDayHourlyRate(rd, hourlyRate);
+      const extraPay = round2(hours * (rate - hourlyRate));
+      extra = round2(extra + extraPay);
+      return { rate_day_id: rd.id, date: rd.date, label: rd.label, hours, rate, extra_pay: extraPay };
+    });
+    return { enhancedPay: extra, breakdown };
   }
 
   /** Overlap-apportioned days of a leave type within a period — more
@@ -124,7 +190,7 @@ module.exports = function registerPayroll({
    * simply isn't included, not reported as a problem. */
   function buildPayslip(run, p) {
     const pr = p.payroll;
-    const { hours, unresolved } = hoursForPersonnel(p.id, run.period_start, run.period_end, pr.pay_basis);
+    const { hours, unresolved, enhancedHours } = hoursForPersonnel(p.id, run.period_start, run.period_end, pr.pay_basis);
     const holidayDays = leaveDaysInPeriod(p.id, 'ANNUAL', run.period_start, run.period_end);
     const sickDays = leaveDaysInPeriod(p.id, 'SICK', run.period_start, run.period_end);
     // An unresolved shift counts as "activity" even though it adds 0 hours
@@ -136,9 +202,10 @@ module.exports = function registerPayroll({
     const grossFromHours = round2(hours * pr.hourly_rate);
     const holidayPay = round2(holidayDays * pr.hourly_rate * pr.standard_daily_hours);
     const sspPay = round2(sickDays * payrollCalc.sspPerDay());
+    const { enhancedPay, breakdown: enhancedBreakdown } = enhancedPayFor(pr.hourly_rate, enhancedHours);
     const { priorCumulativeGrossYTD, priorCumulativeTaxYTD } = priorCumulativeFor(p.id, run.period_start);
     const calc = payrollCalc.calculatePayslip({
-      grossFromHours, holidayPay, sspPay, otherLines: [],
+      grossFromHours, holidayPay, sspPay, enhancedPay, otherLines: [],
       taxCode: pr.tax_code, scottish: pr.scottish_taxpayer, niCategory: pr.ni_category,
       periodStart: run.period_start, priorCumulativeGrossYTD, priorCumulativeTaxYTD,
       pensionEmployeePct: pr.pension_employee_pct, pensionEmployerPct: pr.pension_employer_pct, pensionOptedOut: pr.pension_opted_out,
@@ -156,6 +223,7 @@ module.exports = function registerPayroll({
       gross_from_hours: calc.grossFromHours,
       holiday_days_paid: holidayDays, holiday_pay: calc.holidayPay,
       sick_days_paid: sickDays, ssp_pay: calc.sspPay,
+      enhanced_pay: calc.enhancedPay, enhanced_pay_breakdown: enhancedBreakdown,
       other_lines: [], gross_pay: calc.grossPay,
       cumulative_gross_ytd: calc.cumulativeGrossYTD, cumulative_tax_ytd: calc.cumulativeTaxYTD, free_pay_ytd: calc.freePayYTD,
       tax_this_period: calc.taxThisPeriod,
@@ -184,14 +252,15 @@ module.exports = function registerPayroll({
   }
 
   /** Recomputes tax/NI/pension/net from the payslip's OWN stored
-   * gross_from_hours/holiday_pay/ssp_pay plus a new other_lines array —
-   * used when an admin edits a manual adjustment, which must not silently
-   * also re-derive hours or leave from current data (that's what
-   * `recalculate` is for, explicitly, as its own separate action). */
+   * gross_from_hours/holiday_pay/ssp_pay/enhanced_pay plus a new
+   * other_lines array — used when an admin edits a manual adjustment,
+   * which must not silently also re-derive hours or leave from current
+   * data (that's what `recalculate` is for, explicitly, as its own
+   * separate action). */
   function recalcWithOtherLines(payslip, otherLines) {
     const { priorCumulativeGrossYTD, priorCumulativeTaxYTD } = priorCumulativeFor(payslip.personnel_id, payslip.period_start);
     const calc = payrollCalc.calculatePayslip({
-      grossFromHours: payslip.gross_from_hours, holidayPay: payslip.holiday_pay, sspPay: payslip.ssp_pay, otherLines,
+      grossFromHours: payslip.gross_from_hours, holidayPay: payslip.holiday_pay, sspPay: payslip.ssp_pay, enhancedPay: payslip.enhanced_pay || 0, otherLines,
       taxCode: payslip.tax_code, scottish: payslip.scottish_taxpayer, niCategory: payslip.ni_category,
       periodStart: payslip.period_start, priorCumulativeGrossYTD, priorCumulativeTaxYTD,
       pensionEmployeePct: payslip.pension_employee_pct, pensionEmployerPct: payslip.pension_employer_pct, pensionOptedOut: payslip.pension_opted_out,
@@ -220,7 +289,7 @@ module.exports = function registerPayroll({
       payslip_count: slips.length,
       gross_pay, tax: sum('tax_this_period'), ni_employee: sum('ni_employee'), ni_employer,
       pension_employee: sum('pension_employee'), pension_employer, student_loan: sum('student_loan'),
-      net_pay: sum('net_pay'),
+      net_pay: sum('net_pay'), enhanced_pay: sum('enhanced_pay'),
       employer_cost: round2(gross_pay + ni_employer + pension_employer),
     };
   }
@@ -228,6 +297,61 @@ module.exports = function registerPayroll({
   /* ---------------------------------------------------------------- *
    * Routes
    * ---------------------------------------------------------------- */
+  const publicRateDay = (r) => ({ ...r });
+  route('GET', '/api/payroll/rate-days', ADMIN, () => db.payroll_rate_days.slice().sort((a, b) => a.date < b.date ? -1 : 1).map(publicRateDay));
+  /** Admin adds a one-off — a late-notice shift paid at a flat override
+   * rate, an extra bank holiday for a specific year, whatever's needed —
+   * on top of the seeded defaults. Applies to anyone working that date,
+   * not a named person. */
+  route('POST', '/api/payroll/rate-days', ADMIN, ({ body, user }) => {
+    const date = String(body.date || '').slice(0, 10);
+    if (!date || isNaN(Date.parse(date))) throw httpError(400, 'a valid date is required');
+    if (rateDayFor(date)) throw httpError(409, 'a rate day already exists for that date — edit or delete it instead');
+    const label = String(body.label || '').trim().slice(0, 120);
+    if (!label) throw httpError(400, 'a label is required, e.g. "Late-notice cover"');
+    const kind = body.kind === 'FLAT' ? 'FLAT' : 'MULTIPLIER';
+    let multiplier = null, flat_rate = null;
+    if (kind === 'MULTIPLIER') {
+      multiplier = Number(body.multiplier);
+      if (!Number.isFinite(multiplier) || multiplier <= 1) throw httpError(400, 'multiplier must be a number greater than 1');
+    } else {
+      flat_rate = round2(Number(body.flat_rate));
+      if (!Number.isFinite(flat_rate) || flat_rate <= 0) throw httpError(400, 'flat_rate must be a positive number');
+    }
+    const r = { id: nextId('payroll_rate_days'), date, label, kind, multiplier, flat_rate, created_by: user.display_name, created_at: new Date().toISOString() };
+    db.payroll_rate_days.push(r);
+    logEvent('payroll.rate_day_added', `${user.username} ADDED PAY RATE DAY ${date} (${label}, ${kind === 'FLAT' ? `flat £${flat_rate}/h` : `×${multiplier}`})`, { rate_day_id: r.id });
+    flushNow();
+    return { __status: 201, __body: publicRateDay(r) };
+  });
+  route('PATCH', '/api/payroll/rate-days/:id', ADMIN, ({ params, body, user }) => {
+    const r = findRateDay(params.id);
+    if ('label' in body) { const label = String(body.label || '').trim().slice(0, 120); if (!label) throw httpError(400, 'label required'); r.label = label; }
+    if ('kind' in body) r.kind = body.kind === 'FLAT' ? 'FLAT' : 'MULTIPLIER';
+    if ('multiplier' in body) {
+      const m = body.multiplier === null ? null : Number(body.multiplier);
+      if (m !== null && (!Number.isFinite(m) || m <= 1)) throw httpError(400, 'multiplier must be a number greater than 1');
+      r.multiplier = m;
+    }
+    if ('flat_rate' in body) {
+      const f = body.flat_rate === null ? null : round2(Number(body.flat_rate));
+      if (f !== null && (!Number.isFinite(f) || f <= 0)) throw httpError(400, 'flat_rate must be a positive number');
+      r.flat_rate = f;
+    }
+    if (r.kind === 'MULTIPLIER' && !Number.isFinite(r.multiplier)) throw httpError(400, 'a multiplier rate day needs a multiplier');
+    if (r.kind === 'FLAT' && !Number.isFinite(r.flat_rate)) throw httpError(400, 'a flat-rate day needs a flat_rate');
+    logEvent('payroll.rate_day_edited', `${user.username} EDITED PAY RATE DAY ${r.date} (${r.label})`, { rate_day_id: r.id });
+    flushNow();
+    return publicRateDay(r);
+  });
+  route('DELETE', '/api/payroll/rate-days/:id', ADMIN, ({ params, user }) => {
+    const r = findRateDay(params.id);
+    db.payroll_rate_days = db.payroll_rate_days.filter((x) => x.id !== r.id);
+    logEvent('payroll.rate_day_deleted', `${user.username} REMOVED PAY RATE DAY ${r.date} (${r.label})`, { rate_day_id: r.id });
+    flushNow();
+    return { ok: true };
+  });
+
   route('POST', '/api/payroll/runs', ADMIN, ({ body, user }) => {
     const period_start = String(body.period_start || '').slice(0, 10);
     const period_end = String(body.period_end || '').slice(0, 10);
@@ -392,6 +516,7 @@ module.exports = function registerPayroll({
       ['Gross pay (hours)', money(ps.gross_from_hours)],
       ...(ps.holiday_pay ? [['Holiday pay', money(ps.holiday_pay)]] : []),
       ...(ps.ssp_pay ? [['Statutory Sick Pay', money(ps.ssp_pay)]] : []),
+      ...((ps.enhanced_pay_breakdown || []).map((b) => [`Enhanced pay — ${b.label} (${longDate(b.date).replace(/\d{4}$/, '').trim()}, ${b.hours}h @ ${money(b.rate)})`, money(b.extra_pay)])),
       ...ps.other_lines.map((l) => [l.description, money(l.amount)]),
     ];
     doc.table([{ title: 'Payments', width: 0.7 }, { title: 'Amount', width: 0.3, align: 'right' }], rows, { size: 9.5 });

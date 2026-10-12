@@ -215,6 +215,30 @@ test('invoices come from the signed contract and the hours worked at its site', 
   assert.equal(rg.body.made[0].lines[0].quantity, 7.5);
 });
 
+test('hours worked on a pay rate day (e.g. Christmas Day) are billed on their own line at the enhanced rate', async () => {
+  // Same mechanism and seeded dates as routes-payroll.js's rate days — the
+  // client is charged the same uplift the business pays staff for working
+  // that day, kept as its own line rather than blended into one average.
+  const id = app.seq.shifts = (app.seq.shifts || 0) + 1;
+  app.db.shifts.push({ id, site_id: siteA.id, shift_type_id: app.db.shift_types[0].id, status: 'PUBLISHED',
+    starts_at: '2026-12-25T08:00:00Z', ends_at: '2026-12-25T16:00:00Z', break_minutes: 0 });
+  const aid = app.seq.shift_assignments = (app.seq.shift_assignments || 0) + 1;
+  app.db.shift_assignments.push({ id: aid, shift_id: id, personnel_id: app.db.personnel[0].id, status: 'CONFIRMED',
+    clocked_in_at: '2026-12-25T08:00:00Z', clocked_out_at: '2026-12-25T16:00:00Z', breaks: [] });
+
+  const g = await call('POST', '/api/invoices/generate', { from: '2026-12-01', to: '2026-12-31' }, finT);
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const inv = g.body.made.find((i) => i.site_id === siteA.id);
+  assert.ok(inv, JSON.stringify(g.body));
+  const hourlyLines = inv.lines.filter((l) => l.kind === 'HOURLY');
+  assert.equal(hourlyLines.length, 1, 'all the hours this period are on the rate day, so no separate normal-hours line');
+  const xmasLine = hourlyLines[0];
+  assert.match(xmasLine.description, /Christmas Day/);
+  assert.equal(xmasLine.quantity, 8);
+  assert.equal(xmasLine.unit_amount, 40, 'double the contract\'s £20/hour rate');
+  assert.equal(xmasLine.amount, 320);
+});
+
 test('generate can be narrowed to one site', async () => {
   // Both contracts (siteA and siteB, from the tests above) are running by
   // October, with nothing invoiced yet for it.

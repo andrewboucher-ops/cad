@@ -149,14 +149,18 @@ const sspPerDay = () => round2(TAX_YEAR_2026_27.ssp.weekly / 7);
  * are db-dependent); everything downstream of gross pay is computed here.
  */
 function calculatePayslip({
-  grossFromHours, holidayPay = 0, sspPay = 0, otherLines = [],
+  grossFromHours, holidayPay = 0, sspPay = 0, enhancedPay = 0, otherLines = [],
   taxCode, scottish = false, niCategory, periodStart,
   priorCumulativeGrossYTD = 0, priorCumulativeTaxYTD = 0,
   pensionEmployeePct = 0, pensionEmployerPct = 0, pensionOptedOut = false,
   studentLoanPlan = null,
 }) {
   const otherTotal = (otherLines || []).reduce((n, l) => n + Number(l.amount || 0), 0);
-  const grossPay = round2(round2(grossFromHours) + round2(holidayPay) + round2(sspPay) + round2(otherTotal));
+  // enhancedPay is the EXTRA on top of grossFromHours' normal-rate total for
+  // hours worked on a bank holiday or other rate day — grossFromHours itself
+  // always stays hours × the person's plain hourly_rate, so it keeps
+  // meaning exactly what it says rather than silently absorbing a multiplier.
+  const grossPay = round2(round2(grossFromHours) + round2(holidayPay) + round2(sspPay) + round2(enhancedPay) + round2(otherTotal));
 
   const tax = incomeTaxForPeriod({ taxCode, scottish, periodStart, grossThisPeriod: grossPay, priorCumulativeGrossYTD, priorCumulativeTaxYTD });
   const ni = niForPeriod({ grossThisPeriod: grossPay, category: niCategory });
@@ -166,7 +170,7 @@ function calculatePayslip({
   const netPay = round2(grossPay - tax.taxThisPeriod - ni.employee - pension.employee - studentLoan);
 
   return {
-    grossFromHours: round2(grossFromHours), holidayPay: round2(holidayPay), sspPay: round2(sspPay), otherLines, grossPay,
+    grossFromHours: round2(grossFromHours), holidayPay: round2(holidayPay), sspPay: round2(sspPay), enhancedPay: round2(enhancedPay), otherLines, grossPay,
     taxThisPeriod: tax.taxThisPeriod, cumulativeGrossYTD: tax.cumulativeGrossYTD, cumulativeTaxYTD: tax.cumulativeTaxYTD, freePayYTD: tax.freePayYTD,
     niEmployee: ni.employee, niEmployer: ni.employer,
     pensionEmployee: pension.employee, pensionEmployer: pension.employer, pensionQualifyingEarnings: pension.qualifyingEarnings,
