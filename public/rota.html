@@ -148,6 +148,9 @@ function weekDays() {
 // of UTC (confirmed live: BST puts this off by one). Format the local
 // calendar date directly instead.
 function fmtDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+// Same trap for datetime-local inputs: they want local wall-clock time, so
+// shift by the timezone offset before formatting rather than showing UTC.
+function localInput(iso) { const d = new Date(iso); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); }
 function sameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
 
 async function load() {
@@ -202,8 +205,8 @@ el('#thisWeek').onclick = () => { weekStart = startOfWeek(new Date()); load(); }
 function shiftForm(s, defaults) {
   const isNew = !s;
   const d = defaults || {};
-  const startDefault = isNew ? `${d.date}T09:00` : new Date(s.starts_at).toISOString().slice(0, 16);
-  const endDefault = isNew ? `${d.date}T17:00` : new Date(s.ends_at).toISOString().slice(0, 16);
+  const startDefault = isNew ? `${d.date}T09:00` : localInput(s.starts_at);
+  const endDefault = isNew ? `${d.date}T17:00` : localInput(s.ends_at);
   return `
     <form class="stack" id="shForm">
       <label>Personnel</label>
@@ -245,6 +248,7 @@ function shiftModal(s, defaults) {
       catch (e) { el('#shError').textContent = e.message; }
     };
     el('#shSave').onclick = async () => {
+      if (!el('#shStart').value || !el('#shEnd').value) { el('#shError').textContent = 'Enter both start and end times'; return; }
       const body = {
         personnel: Number(el('#shPersonnel').value),
         site_id: el('#shSite').value ? Number(el('#shSite').value) : null,
@@ -272,7 +276,6 @@ el('#btnManualHours').hidden = !isAdmin;
 function canAddHours(s) {
   return isAdmin && s && ['SCHEDULED', 'CONFIRMED', 'NO_SHOW'].includes(s.status) && Date.parse(s.starts_at) < Date.now();
 }
-function localInput(iso) { const d = new Date(iso); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); }
 function manualHoursModal(s) {
   const yesterday = new Date(Date.now() - 86400000);
   const inDefault = s ? localInput(s.starts_at) : `${fmtDate(yesterday)}T09:00`;
