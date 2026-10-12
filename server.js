@@ -2826,12 +2826,15 @@ route('POST', '/api/shifts/:id/clock-out', ALL, ({ params, user }) => {
  * The Windows account is matched to a CCCS login by email (the account's UPN)
  * or by username, then to that login's personnel record. */
 const CLOCK_IN_EARLY_MS = 60 * 60 * 1000; // a shift starting within the hour counts as current
-route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) => {
+function assertWorkstationSecret(req) {
   const secret = process.env.WORKSTATION_SECRET;
   const given = Buffer.from(String(req.headers['x-workstation-secret'] || ''));
   if (!secret || given.length !== Buffer.byteLength(secret) || !crypto.timingSafeEqual(given, Buffer.from(secret))) {
     throw httpError(401, 'bad workstation secret');
   }
+}
+route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) => {
+  assertWorkstationSecret(req);
   const upn = String(body.upn || '').trim().toLowerCase();
   const username = String(body.username || '').trim().toLowerCase();
   const workstation = String(body.workstation || '').slice(0, 64);
@@ -2861,6 +2864,83 @@ route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) =>
   broadcast('shift.updated', publicShift(s), { personnelIds: [s.personnel_id] });
   logEvent('shift.clocked_in', `${p.name} CLOCKED IN AT ${workstation || 'A WORKSTATION'}`, { shift_id: s.id, personnel_id: s.personnel_id, workstation });
   return { result: 'CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
+});
+
+/* ---- Control room click-to-dial relay -----------------------------------
+ * A control room PC dials through the phone system's AMI directly when it is
+ * on the office network or VPN. Off it, it falls back to this relay, which
+ * does the same from inside the network: ring the operator's extension, then
+ * connect it to the number. Same shared secret as clock-in.
+ *
+ * Because this lets the phone system dial out from the internet, it is kept
+ * narrow: the channel is built here from the extension, never taken from the
+ * request; only numbers matching DIAL_ALLOW (UK landline and mobile by
+ * default - no international or premium rate) can be dialled; each
+ * workstation is held to DIAL_MAX_PER_HOUR calls; and every dial is audited. */
+const DIAL_EXT_RE = /^\d{2,6}$/;
+const DIAL_ALLOW_DEFAULT = '^(0[1237]\\d{8,9}|\\d{3,4})$';
+const dialLog = new Map(); // workstation -> recent dial timestamps
+function amiOriginate({ channel, number, context, ringSeconds = 30 }) {
+  const host = process.env.AMI_HOST, port = Number(process.env.AMI_PORT || 5038);
+  return new Promise((resolve, reject) => {
+    const sock = net.connect({ host, port });
+    const actionId = crypto.randomBytes(8).toString('hex');
+    let buf = '', loggedIn = false, settled = false;
+    const done = (err) => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      sock.destroy();
+      err ? reject(err) : resolve();
+    };
+    const timer = setTimeout(() => done(new Error('phone system did not answer')), 8000);
+    sock.on('error', (e) => done(new Error(`phone system unreachable (${e.code || e.message})`)));
+    sock.on('connect', () => sock.write(
+      `Action: Login\r\nUsername: ${process.env.AMI_USER}\r\nSecret: ${process.env.AMI_SECRET}\r\nEvents: off\r\n\r\n`));
+    sock.on('data', (d) => {
+      buf += d.toString();
+      let i;
+      while ((i = buf.indexOf('\r\n\r\n')) >= 0) {
+        const msg = buf.slice(0, i); buf = buf.slice(i + 4);
+        if (!/^Response:/m.test(msg)) continue;
+        const ok = /^Response:\s*Success/im.test(msg);
+        if (!loggedIn) {
+          if (!ok) return done(new Error('phone system refused the login'));
+          loggedIn = true;
+          sock.write(`Action: Originate\r\nActionID: ${actionId}\r\nChannel: ${channel}\r\nContext: ${context}\r\n` +
+            `Exten: ${number}\r\nPriority: 1\r\nCallerID: Echelon <${number}>\r\nTimeout: ${ringSeconds * 1000}\r\nAsync: true\r\n\r\n`);
+        } else if (msg.includes(actionId)) {
+          return ok ? done() : done(new Error('phone system rejected the call'));
+        }
+      }
+    });
+  });
+}
+route('POST', '/api/integrations/workstation/dial', null, async ({ body, req }) => {
+  assertWorkstationSecret(req);
+  if (!process.env.AMI_HOST || !process.env.AMI_USER || !process.env.AMI_SECRET) throw httpError(503, 'dial relay not configured');
+  const ext = String(body.extension || '');
+  const number = String(body.number || '');
+  const workstation = String(body.workstation || '').slice(0, 64) || 'unknown';
+  if (!DIAL_EXT_RE.test(ext)) throw httpError(400, 'extension must be 2-6 digits');
+  if (!new RegExp(process.env.DIAL_ALLOW || DIAL_ALLOW_DEFAULT).test(number)) {
+    logEvent('dial.refused', `DIAL FROM ${ext} TO ${number} REFUSED: NUMBER NOT ALLOWED`, { extension: ext, number, workstation });
+    throw httpError(403, 'that number cannot be dialled through the relay');
+  }
+  const now = Date.now();
+  const recent = (dialLog.get(workstation) || []).filter((t) => now - t < 3600000);
+  if (recent.length >= Number(process.env.DIAL_MAX_PER_HOUR || 60)) throw httpError(429, 'too many calls from this workstation this hour');
+  recent.push(now); dialLog.set(workstation, recent);
+
+  const context = process.env.AMI_CONTEXT || 'from-internal';
+  const local = String(process.env.AMI_LOCAL_EXTENSIONS || '').split(',').map((x) => x.trim()).includes(ext);
+  const channel = local ? `Local/${ext}@${context}` : `PJSIP/${ext}`;
+  try {
+    await amiOriginate({ channel, number, context });
+  } catch (e) {
+    logEvent('dial.failed', `DIAL FROM ${ext} TO ${number} FAILED: ${e.message}`, { extension: ext, number, workstation });
+    throw httpError(502, e.message);
+  }
+  logEvent('dial.relayed', `DIAL FROM ${ext} TO ${number} AT ${workstation}`, { extension: ext, number, workstation });
+  return { ok: true };
 });
 
 route('GET', '/api/config', ALL, () => ({

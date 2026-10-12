@@ -43,6 +43,12 @@ SIMULATION=off
 # Control room PCs clocking operators in at Windows sign-in
 # (POST /api/integrations/workstation/clock-in):
 # WORKSTATION_SECRET=
+# Click-to-dial relay for control room PCs off the VPN
+# (POST /api/integrations/workstation/dial). The AMI user must permit this host.
+# AMI_HOST=
+# AMI_USER=
+# AMI_SECRET=
+# AMI_LOCAL_EXTENSIONS=
 # Microsoft 365 / Entra ID single sign-on — optional, sits alongside local login.
 # See SSO.md for how to register the app and get these three values. Uncomment
 # all four once you have them; leaving any unset keeps SSO disabled.

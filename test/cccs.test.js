@@ -615,6 +615,55 @@ test('a control room PC clocks its Windows user into their current shift with a 
   assert.equal((await clock({ username: 'rcole' })).status, 401, 'disabled until a secret is set');
 });
 
+test('the dial relay rings the extension through AMI, and only for allowed numbers', async () => {
+  const seen = [];
+  const ami = net.createServer((sock) => {
+    sock.write('Asterisk Call Manager/7.0.3\r\n');
+    let buf = '';
+    sock.on('data', (d) => {
+      buf += d.toString();
+      let i;
+      while ((i = buf.indexOf('\r\n\r\n')) >= 0) {
+        const msg = buf.slice(0, i); buf = buf.slice(i + 4); seen.push(msg);
+        if (/Action: Login/.test(msg)) sock.write(/Secret: right/.test(msg) ? 'Response: Success\r\nMessage: Authentication accepted\r\n\r\n' : 'Response: Error\r\nMessage: Authentication failed\r\n\r\n');
+        const id = (msg.match(/ActionID: (\w+)/) || [])[1];
+        if (/Action: Originate/.test(msg)) sock.write(`Response: Success\r\nActionID: ${id}\r\nMessage: Originate successfully queued\r\n\r\n`);
+      }
+    });
+  });
+  await new Promise((r) => ami.listen(0, '127.0.0.1', r));
+  Object.assign(process.env, { WORKSTATION_SECRET: 'test-workstation-secret', AMI_HOST: '127.0.0.1',
+    AMI_PORT: String(ami.address().port), AMI_USER: 'echelon-dial', AMI_SECRET: 'right', AMI_LOCAL_EXTENSIONS: '989' });
+  const dial = (body, secret = 'test-workstation-secret') => fetch(BASE + '/api/integrations/workstation/dial', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-workstation-secret': secret }, body: JSON.stringify(body),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+  try {
+    assert.equal((await dial({ extension: '901', number: '01472123456' }, 'wrong')).status, 401);
+    assert.equal((await dial({ extension: 'PJSIP/901', number: '01472123456' })).status, 400, 'a channel cannot be smuggled in');
+    assert.equal((await dial({ extension: '901', number: '0044123456789' })).status, 403, 'international is refused');
+    assert.equal((await dial({ extension: '901', number: '09001234567' })).status, 403, 'premium rate is refused');
+
+    const ok = await dial({ extension: '901', number: '01472123456', workstation: 'CONTROL-01' });
+    assert.equal(ok.status, 200);
+    const orig = seen.find((m) => /Action: Originate/.test(m));
+    assert.match(orig, /Channel: PJSIP\/901\r\n/);
+    assert.match(orig, /Exten: 01472123456\r\n/);
+
+    assert.equal((await dial({ extension: '989', number: '07700900123' })).status, 200);
+    assert.match(seen.filter((m) => /Action: Originate/.test(m)).pop(), /Channel: Local\/989@from-internal\r\n/);
+
+    process.env.AMI_SECRET = 'wrong';
+    const refused = await dial({ extension: '901', number: '01472123456' });
+    assert.equal(refused.status, 502);
+    assert.match(refused.body.error, /refused the login/);
+  } finally {
+    for (const k of ['WORKSTATION_SECRET', 'AMI_HOST', 'AMI_PORT', 'AMI_USER', 'AMI_SECRET', 'AMI_LOCAL_EXTENSIONS']) delete process.env[k];
+    ami.close();
+  }
+  assert.equal((await dial({ extension: '901', number: '01472123456' })).status, 401);
+});
+
 test('shifts reject a bad time range and can be filtered by personnel', async () => {
   const start = new Date(Date.now() + 3600000).toISOString();
   const bad = await call('POST', '/api/shifts', { personnel: ryanId, starts_at: start, ends_at: start }, dispT);

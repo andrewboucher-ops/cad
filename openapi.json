@@ -352,6 +352,32 @@
         }
       }
     },
+    "/api/integrations/workstation/dial": {
+      "post": {
+        "summary": "Click-to-dial relay for control room PCs off the VPN: ring the extension, then dial the number (shared-secret auth via X-Workstation-Secret). Body: extension, number, workstation",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "call queued"
+          },
+          "401": {
+            "description": "bad secret"
+          },
+          "403": {
+            "description": "number not allowed"
+          },
+          "429": {
+            "description": "too many calls from this workstation"
+          },
+          "502": {
+            "description": "phone system unreachable or refused"
+          },
+          "503": {
+            "description": "relay not configured"
+          }
+        }
+      }
+    },
     "/api/emergency": {
       "get": {
         "summary": "List emergency events",
