@@ -509,13 +509,14 @@ function paint() {
     u.username.toLowerCase().includes(q) || (u.display_name || '').toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q));
   el('#uTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
-      <thead><tr><th style="width:150px">Username</th><th style="width:200px">Display name</th><th style="width:150px">Role</th><th style="width:160px">Linked terminal</th><th>Email</th></tr></thead>
+      <thead><tr><th style="width:150px">Username</th><th style="width:200px">Display name</th><th style="width:150px">Role</th><th style="width:160px">Linked terminal</th><th>Email</th><th style="width:150px">Last login</th></tr></thead>
       <tbody>${rows.map((u) => `<tr class="clickable" data-user="${u.id}">
         <td class="mono">${esc(u.username)}</td>
         <td>${esc(u.display_name)}</td>
         <td><span class="role-pill ${roleClass(u.role)}">${esc(ROLE_LABEL[u.role] || u.role)}</span></td>
         <td class="dim">${linkedTerminal(u)}</td>
         <td class="dim">${esc(u.email || '—')}</td>
+        <td class="dim" style="font-size:12px">${u.last_login_at ? esc(whenPrecise(u.last_login_at)) : 'Never'}</td>
       </tr>`).join('')}</tbody>
     </table>` : '<p class="empty-note">No matching accounts.</p>';
   els('#uTableWrap [data-user]').forEach((row) => row.addEventListener('click', () => editModal(allUsers.find((u) => u.id === Number(row.dataset.user)))));
@@ -2280,17 +2281,31 @@ function scheduleModal(s) {
 el('#btnNewSchedule').onclick = () => scheduleModal(null);
 
 /* ---------- clients (client portal) ---------- */
+/** Date + time for a precise "when did this actually happen" (last login
+ * can be several times a day); date-only elsewhere in this file is for
+ * once-only events where the day is enough. */
+function whenPrecise(v) { if (!v) return null; const d = new Date(v); return `${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}, ${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`; }
+/** The one login a client org has (the invite flow creates at most one —
+ * routes-client.js), and whether they've ever set a password or signed in. */
+function clientLoginInfo(c) {
+  const u = allUsers.find((x) => x.client_id === c.id);
+  if (!u) return '<span class="dim">No login yet</span>';
+  const pw = u.password_set_at ? `Password set ${esc(whenPrecise(u.password_set_at))}` : '<span class="err">Invited — no password set yet</span>';
+  const li = u.last_login_at ? `Last login ${esc(whenPrecise(u.last_login_at))}` : 'Never logged in';
+  return `<div>${pw}</div><div class="dim" style="font-size:11.5px">${li}</div>`;
+}
 function paintClients() {
   const q = el('#clSearch').value.trim().toLowerCase();
   let rows = allClients.slice().sort((a, b) => a.name.localeCompare(b.name));
   if (q) rows = rows.filter((c) => c.name.toLowerCase().includes(q));
   el('#clTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
-      <thead><tr><th>Name</th><th style="width:200px">Contact email</th><th>Sites</th><th style="width:170px"></th></tr></thead>
+      <thead><tr><th>Name</th><th style="width:200px">Contact email</th><th>Sites</th><th style="width:170px">Login</th><th style="width:170px"></th></tr></thead>
       <tbody>${rows.map((c) => `<tr class="clickable" data-client="${c.id}">
         <td>${esc(c.name)}</td>
         <td class="dim">${esc(c.contact_email || '—')}</td>
         <td class="dim">${c.site_ids.length ? c.site_ids.map((id) => esc((allSites.find((s) => s.id === id) || {}).name || '?')).join(', ') : 'none linked'}</td>
+        <td style="font-size:12.5px">${clientLoginInfo(c)}</td>
         <td><a class="btn" href="/client.html?client_id=${c.id}" data-viewportal style="padding:4px 10px;font-size:11px">View portal</a> ${c.contact_email ? `<button class="btn" data-welcomeclient="${c.id}" style="padding:4px 10px;font-size:11px">Send welcome email</button> <button class="btn" data-pwclient="${c.id}" style="padding:4px 10px;font-size:11px">Send password link</button>` : ''} <button class="btn danger" data-delclient="${c.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
       </tr>`).join('')}</tbody>
     </table>` : '<p class="empty-note">No clients yet.</p>';

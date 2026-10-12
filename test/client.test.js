@@ -208,9 +208,23 @@ test('sending a password link creates the client\'s login if needed, is admin-on
   assert.ok(link, 'the email contains a set-password link');
   const token = decodeURIComponent(new URL(link[1]).searchParams.get('token'));
 
+  // Before the link is used, an admin sees the login exists but neither a
+  // password nor a login has happened yet — this is what lets Admin →
+  // Clients tell "invited" apart from "actually set up".
+  const beforeSet = (await call('GET', '/api/users', undefined, adminT)).body.find((u) => u.username === sent.body.username);
+  assert.ok(!beforeSet.password_set_at, 'not set yet');
+  assert.ok(!beforeSet.last_login_at, 'never logged in yet');
+
   const set = await call('POST', '/api/auth/set-password', { token, password: 'clientnewpass1' });
   assert.equal(set.status, 200, JSON.stringify(set.body));
+  const afterSet = (await call('GET', '/api/users', undefined, adminT)).body.find((u) => u.username === sent.body.username);
+  assert.ok(afterSet.password_set_at, 'an admin can now see the client set a password');
+  assert.ok(!afterSet.last_login_at, 'setting a password is not itself a login');
+
   assert.equal((await call('POST', '/api/auth/login', { username: sent.body.username, password: 'clientnewpass1' })).status, 200);
+  const afterLogin = (await call('GET', '/api/users', undefined, adminT)).body.find((u) => u.username === sent.body.username);
+  assert.ok(afterLogin.last_login_at, 'and now when they actually logged in');
+  assert.ok(Date.now() - Date.parse(afterLogin.last_login_at) < 5000);
 
   // Sending again reuses the same login rather than creating a second one.
   const again = await call('POST', `/api/clients/${client.id}/send-password-link`, {}, adminT);

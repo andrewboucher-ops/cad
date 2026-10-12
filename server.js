@@ -1253,7 +1253,11 @@ function normalizeUiPrefs(p) {
     reduce_motion: Boolean(p.reduce_motion),
   };
 }
-const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, branch_id: u.branch_id || null, site_ids: Array.isArray(u.site_ids) ? u.site_ids : null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs) });
+// password_set_at (epoch ms — see set-password below) and last_login_at
+// (ISO string, set on every successful login) are both admin-visible
+// account facts, not sensitive like password_hash itself, so they pass
+// straight through for every role's own publicUser() view.
+const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, branch_id: u.branch_id || null, site_ids: Array.isArray(u.site_ids) ? u.site_ids : null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs), password_set_at: u.password_set_at || null, last_login_at: u.last_login_at || null });
 
 route('POST', '/api/auth/login', null, ({ body }) => {
   const user = db.users.find((u) => u.username === String(body.username || '').toLowerCase());
@@ -1263,6 +1267,7 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   }
   const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
   const token = sign({ sub: user.id, role: user.role, exp: Date.now() + ttl });
+  user.last_login_at = new Date().toISOString();
   logEvent('auth.login', `${user.username} signed in (${user.role})`, { user_id: user.id });
   return { token, user: publicUser(user) };
 });
