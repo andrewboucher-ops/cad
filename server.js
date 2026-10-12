@@ -2874,11 +2874,12 @@ route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) =>
  *
  * Because this lets the phone system dial out from the internet, it is kept
  * narrow: the channel is built here from the extension, never taken from the
- * request; only numbers matching DIAL_ALLOW (UK landline and mobile by
- * default - no international or premium rate) can be dialled; each
+ * request; only numbers matching DIAL_ALLOW can be dialled - by default any
+ * UK number except premium rate (09, 118, 070 personal numbers and 0871-3),
+ * and no international; each
  * workstation is held to DIAL_MAX_PER_HOUR calls; and every dial is audited. */
 const DIAL_EXT_RE = /^\d{2,6}$/;
-const DIAL_ALLOW_DEFAULT = '^(0[1237]\\d{8,9}|\\d{3,4})$';
+const DIAL_ALLOW_DEFAULT = '^(?!118)(0(?!9|70|87[1-3])\\d{9,10}|\\d{2,6})$';
 const dialLog = new Map(); // workstation -> recent dial timestamps
 function amiOriginate({ channel, number, context, ringSeconds = 30 }) {
   const host = process.env.AMI_HOST, port = Number(process.env.AMI_PORT || 5038);
@@ -2927,7 +2928,7 @@ route('POST', '/api/integrations/workstation/dial', null, async ({ body, req }) 
   }
   const now = Date.now();
   const recent = (dialLog.get(workstation) || []).filter((t) => now - t < 3600000);
-  if (recent.length >= Number(process.env.DIAL_MAX_PER_HOUR || 60)) throw httpError(429, 'too many calls from this workstation this hour');
+  if (recent.length >= Number(process.env.DIAL_MAX_PER_HOUR || 200)) throw httpError(429, 'too many calls from this workstation this hour');
   recent.push(now); dialLog.set(workstation, recent);
 
   const context = process.env.AMI_CONTEXT || 'from-internal';

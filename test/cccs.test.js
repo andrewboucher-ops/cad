@@ -642,11 +642,14 @@ test('the dial relay rings the extension through AMI, and only for allowed numbe
     assert.equal((await dial({ extension: '901', number: '01472123456' }, 'wrong')).status, 401);
     assert.equal((await dial({ extension: 'PJSIP/901', number: '01472123456' })).status, 400, 'a channel cannot be smuggled in');
     assert.equal((await dial({ extension: '901', number: '0044123456789' })).status, 403, 'international is refused');
-    assert.equal((await dial({ extension: '901', number: '09001234567' })).status, 403, 'premium rate is refused');
+    for (const premium of ['09001234567', '118118', '07012345678', '08712345678'])
+      assert.equal((await dial({ extension: '901', number: premium })).status, 403, `${premium} is premium rate and refused`);
+    for (const fine of ['08001234567', '03001234567', '08451234567'])
+      assert.equal((await dial({ extension: '901', number: fine })).status, 200, `${fine} is an ordinary UK number`);
 
     const ok = await dial({ extension: '901', number: '01472123456', workstation: 'CONTROL-01' });
     assert.equal(ok.status, 200);
-    const orig = seen.find((m) => /Action: Originate/.test(m));
+    const orig = seen.find((m) => /Action: Originate/.test(m) && /Exten: 01472123456/.test(m));
     assert.match(orig, /Channel: PJSIP\/901\r\n/);
     assert.match(orig, /Exten: 01472123456\r\n/);
 
