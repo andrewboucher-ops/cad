@@ -83,6 +83,17 @@ module.exports = function registerPayroll({
     return Math.max(rate, hourlyRate);
   }
 
+  /* A per-person, per-shift override (shift_assignments.pay_override, set
+   * via PATCH /api/shift-assignments/:id — a late-notice cover shift, say)
+   * REPLACES a rate day for that assignment's hours, never stacks with
+   * one — decided explicitly rather than left to layer accidentally.
+   * Never pays less than the person's normal rate, same safety as a rate
+   * day's own flat override. */
+  function overrideHourlyRate(o, hourlyRate) {
+    const rate = o.kind === 'FLAT' ? Number(o.flat_rate) : round2(hourlyRate * o.multiplier);
+    return Math.max(rate, hourlyRate);
+  }
+
   /* ---------------------------------------------------------------- *
    * UK tax year (6 Apr - 5 Apr) and cumulative figures, derived fresh
    * every time from ISSUED payslips — never a stored running total.
@@ -120,6 +131,7 @@ module.exports = function registerPayroll({
     let hours = 0;
     const unresolved = [];
     const rateDayHours = new Map(); // rate_day id -> hours worked that calendar date
+    const overrideHours = []; // one entry per overridden assignment that had hours
     for (const a of db.shift_assignments) {
       if (a.personnel_id !== personnelId || !['ASSIGNED', 'CONFIRMED'].includes(a.status)) continue;
       const s = db.shifts.find((x) => x.id === a.shift_id);
@@ -143,18 +155,26 @@ module.exports = function registerPayroll({
       // hoursForPersonnel already used before rate days existed — an
       // overnight shift starting on a rate day is paid at the enhanced
       // rate for all of it, not apportioned past midnight.
+      // A per-assignment override REPLACES a rate-day match for these
+      // hours — it never stacks on top of one, decided explicitly with
+      // the user rather than left to layer by accident.
       if (shiftHours > 0) {
-        const rd = rateDayFor(s.starts_at);
-        if (rd) rateDayHours.set(rd.id, round2((rateDayHours.get(rd.id) || 0) + shiftHours));
+        if (a.pay_override) {
+          overrideHours.push({ assignment_id: a.id, shift_id: s.id, date: s.starts_at.slice(0, 10), hours: round2(shiftHours), override: a.pay_override });
+        } else {
+          const rd = rateDayFor(s.starts_at);
+          if (rd) rateDayHours.set(rd.id, round2((rateDayHours.get(rd.id) || 0) + shiftHours));
+        }
       }
     }
     const enhancedHours = [...rateDayHours.entries()].map(([id, h]) => ({ rate_day: findRateDay(id), hours: h }));
-    return { hours: round2(hours), unresolved, enhancedHours };
+    return { hours: round2(hours), unresolved, enhancedHours, overrideHours };
   }
   /** The extra over plain hourly_rate for hours already counted in
-   * grossFromHours that fell on a rate day — grossFromHours itself never
-   * changes meaning, this is purely the top-up (see payroll-calc.js). */
-  function enhancedPayFor(hourlyRate, enhancedHours) {
+   * grossFromHours that fell on a rate day or carried a per-assignment
+   * override — grossFromHours itself never changes meaning, this is
+   * purely the top-up (see payroll-calc.js). */
+  function enhancedPayFor(hourlyRate, enhancedHours, overrideHours = []) {
     let extra = 0;
     const breakdown = enhancedHours.map(({ rate_day: rd, hours }) => {
       const rate = rateDayHourlyRate(rd, hourlyRate);
@@ -162,6 +182,12 @@ module.exports = function registerPayroll({
       extra = round2(extra + extraPay);
       return { rate_day_id: rd.id, date: rd.date, label: rd.label, hours, rate, extra_pay: extraPay };
     });
+    for (const oh of overrideHours) {
+      const rate = overrideHourlyRate(oh.override, hourlyRate);
+      const extraPay = round2(oh.hours * (rate - hourlyRate));
+      extra = round2(extra + extraPay);
+      breakdown.push({ assignment_id: oh.assignment_id, shift_id: oh.shift_id, date: oh.date, label: `Pay override — ${oh.override.reason}`, hours: oh.hours, rate, extra_pay: extraPay });
+    }
     return { enhancedPay: extra, breakdown };
   }
 
@@ -190,7 +216,7 @@ module.exports = function registerPayroll({
    * simply isn't included, not reported as a problem. */
   function buildPayslip(run, p) {
     const pr = p.payroll;
-    const { hours, unresolved, enhancedHours } = hoursForPersonnel(p.id, run.period_start, run.period_end, pr.pay_basis);
+    const { hours, unresolved, enhancedHours, overrideHours } = hoursForPersonnel(p.id, run.period_start, run.period_end, pr.pay_basis);
     const holidayDays = leaveDaysInPeriod(p.id, 'ANNUAL', run.period_start, run.period_end);
     const sickDays = leaveDaysInPeriod(p.id, 'SICK', run.period_start, run.period_end);
     // An unresolved shift counts as "activity" even though it adds 0 hours
@@ -202,7 +228,7 @@ module.exports = function registerPayroll({
     const grossFromHours = round2(hours * pr.hourly_rate);
     const holidayPay = round2(holidayDays * pr.hourly_rate * pr.standard_daily_hours);
     const sspPay = round2(sickDays * payrollCalc.sspPerDay());
-    const { enhancedPay, breakdown: enhancedBreakdown } = enhancedPayFor(pr.hourly_rate, enhancedHours);
+    const { enhancedPay, breakdown: enhancedBreakdown } = enhancedPayFor(pr.hourly_rate, enhancedHours, overrideHours);
     const { priorCumulativeGrossYTD, priorCumulativeTaxYTD } = priorCumulativeFor(p.id, run.period_start);
     const calc = payrollCalc.calculatePayslip({
       grossFromHours, holidayPay, sspPay, enhancedPay, otherLines: [],

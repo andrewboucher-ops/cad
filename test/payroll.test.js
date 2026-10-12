@@ -298,3 +298,64 @@ test('an admin can add a flat override rate for a specific date (e.g. a late-not
   await call('DELETE', `/api/payroll/rate-days/${add.body.id}`, {}, adminT);
   await call('DELETE', `/api/payroll/rate-days/${low.body.id}`, {}, adminT);
 });
+
+/* ---------------- per-person, per-shift pay override ---------------- */
+
+test('a per-assignment pay override replaces a rate day for that assignment\'s hours — it never stacks with one', async () => {
+  // 2027-01-01 is New Year's Day — seeded ×2. The override must fully
+  // replace that for this assignment, not add to it.
+  const p = await newPayrollPerson('Payroll Test Override Precedence');
+  const { assignment } = await oneHourShift(p.id, '2027-01-01');
+  const set = await call('PATCH', `/api/shift-assignments/${assignment.id}`, {
+    pay_override: { kind: 'MULTIPLIER', multiplier: 3, reason: 'late-notice cover' },
+  }, adminT);
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+  assert.equal(set.body.assignments[0].pay_override.multiplier, 3, 'the admin who set it sees it straight back');
+
+  const run = await generateAndApprove('2027-01-01', '2027-01-31');
+  const slip = run.payslips.find((x) => x.personnel_id === p.id);
+  assert.equal(slip.gross_from_hours, 2500);
+  assert.equal(slip.enhanced_pay, 5000, '×3 override (£5000 extra), not ×2 New Year\'s Day — the override replaces the rate day entirely');
+  assert.equal(slip.gross_pay, 7500);
+  assert.equal(slip.enhanced_pay_breakdown.length, 1);
+  assert.match(slip.enhanced_pay_breakdown[0].label, /late-notice cover/);
+});
+
+test('a flat per-assignment override is never allowed to pay less than normal, and is rejected without a reason or a multiplier over 1', async () => {
+  const p = await newPayrollPerson('Payroll Test Override Floor');
+  const { assignment } = await oneHourShift(p.id, '2027-02-10'); // not a rate day
+
+  assert.equal((await call('PATCH', `/api/shift-assignments/${assignment.id}`, { pay_override: { kind: 'MULTIPLIER', multiplier: 2 } }, adminT)).status, 400, 'a reason is required');
+  assert.equal((await call('PATCH', `/api/shift-assignments/${assignment.id}`, { pay_override: { kind: 'MULTIPLIER', multiplier: 1, reason: 'x' } }, adminT)).status, 400, 'a multiplier of 1 or less is not an override');
+  assert.equal((await call('PATCH', `/api/shift-assignments/${assignment.id}`, { pay_override: { kind: 'MULTIPLIER', multiplier: 2, reason: 'x' } }, dispT)).status, 403, 'not their shift, and not an admin either');
+
+  const set = await call('PATCH', `/api/shift-assignments/${assignment.id}`, {
+    pay_override: { kind: 'FLAT', flat_rate: 1000, reason: 'set below the normal rate by mistake' },
+  }, adminT);
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+
+  const run = await generateAndApprove('2027-02-01', '2027-02-28');
+  const slip = run.payslips.find((x) => x.personnel_id === p.id);
+  assert.equal(slip.enhanced_pay, 0, 'never paid less than their normal £2500/h rate');
+
+  const removed = await call('PATCH', `/api/shift-assignments/${assignment.id}`, { pay_override: null }, adminT);
+  assert.equal(removed.status, 200);
+  assert.equal(removed.body.assignments[0].pay_override, null);
+});
+
+test('pay_override is visible on GET /api/shifts only to SYSTEM_ADMIN — never to a dispatcher (a control role, but not an admin) or to the officer it concerns', async () => {
+  const p = await newPayrollPerson('Payroll Test Override Redaction');
+  const { shift, assignment } = await oneHourShift(p.id, '2027-03-01');
+  await call('PATCH', `/api/shift-assignments/${assignment.id}`, { pay_override: { kind: 'MULTIPLIER', multiplier: 2, reason: 'test' } }, adminT);
+
+  const findAssignment = (list) => list.find((s) => s.id === shift.id).assignments.find((a) => a.id === assignment.id);
+
+  const asAdmin = await call('GET', `/api/shifts?personnel_id=${p.id}`, undefined, adminT);
+  assert.ok(findAssignment(asAdmin.body).pay_override, 'the admin who set it can see it');
+
+  const asDispatcher = await call('GET', `/api/shifts?personnel_id=${p.id}`, undefined, dispT);
+  assert.ok(!('pay_override' in findAssignment(asDispatcher.body)), 'a dispatcher never sees it, even though they see everything else on the rota');
+
+  const asOfficer = await call('GET', `/api/shifts?personnel_id=${p.id}`, undefined, danT);
+  assert.ok(!('pay_override' in findAssignment(asOfficer.body)), 'not even the officer it concerns — payroll-grade detail is SYSTEM_ADMIN only');
+});

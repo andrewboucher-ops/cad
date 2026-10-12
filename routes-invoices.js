@@ -49,6 +49,13 @@ module.exports = function registerInvoices({
   // extra just being absorbed as a margin hit. One list, two consumers.
   const rateDayFor = (dateISO) => (db.payroll_rate_days || []).find((r) => r.date === String(dateISO).slice(0, 10)) || null;
   const rateDayRate = (rd, baseRate) => Math.max(rd.kind === 'FLAT' ? Number(rd.flat_rate) : r2(baseRate * rd.multiplier), baseRate);
+  // A per-person, per-shift override (shift_assignments.pay_override, set
+  // in Rota) only reaches an invoice when the admin explicitly flagged it
+  // bill_client — an override is otherwise an internal staffing-cost
+  // decision the client is never billed for. When it does bill, it
+  // REPLACES a rate day for those hours, same "never stacks" precedence
+  // routes-payroll.js applies for pay.
+  const overrideRate = (o, baseRate) => Math.max(o.kind === 'FLAT' ? Number(o.flat_rate) : r2(baseRate * o.multiplier), baseRate);
   const findInv = (id) => { const i = db.invoices.find((x) => x.id === Number(id)); if (!i) throw httpError(404, 'invoice not found'); return i; };
   const span = (a, b) => { const f = (d, o) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-GB', o); return a === b ? f(a, { day: 'numeric', month: 'short', year: 'numeric' }) : `${f(a, { day: 'numeric', month: 'short' })} – ${f(b, { day: 'numeric', month: 'short', year: 'numeric' })}`; };
   const money = (n) => `£${Number(n || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -210,7 +217,7 @@ module.exports = function registerInvoices({
         } else {
           source = Date.parse(s.ends_at) > Date.now() ? 'not finished' : 'to check';
         }
-        rows.push({ shift_id: s.id, assignment_id: a.id, date: s.starts_at.slice(0, 10), starts_at: s.starts_at, ends_at: s.ends_at, person: p ? p.name : '—', hours: r2(hours), source });
+        rows.push({ shift_id: s.id, assignment_id: a.id, date: s.starts_at.slice(0, 10), starts_at: s.starts_at, ends_at: s.ends_at, person: p ? p.name : '—', hours: r2(hours), source, pay_override: a.pay_override || null });
       }
     }
     return rows.sort((x, y) => x.starts_at.localeCompare(y.starts_at));
@@ -239,15 +246,27 @@ module.exports = function registerInvoices({
         // rather than blended into one average, so the client sees exactly
         // which days cost more and why.
         const label = `${l.description}${l.shift_type_name ? ` (${l.shift_type_name})` : ''}`;
-        const normalRows = [], byRateDay = new Map(); // rate_day id -> { rd, rows: [] }
+        const normalRows = [], byRateDay = new Map(), byOverride = new Map(); // keyed rd.id / assignment_id -> { rd|override, rows: [] }
         for (const x of rows) {
+          // A per-assignment override, where flagged bill_client, pre-empts
+          // a rate day entirely for these hours — never both. Set but not
+          // bill_client, it's an internal pay decision only: the client
+          // still sees the plain normal-rate line, no rate day either,
+          // since the override already claimed precedence for payroll.
+          if (x.pay_override) {
+            if (x.pay_override.bill_client) {
+              if (!byOverride.has(x.assignment_id)) byOverride.set(x.assignment_id, { override: x.pay_override, rows: [] });
+              byOverride.get(x.assignment_id).rows.push(x);
+            } else normalRows.push(x);
+            continue;
+          }
           const rd = rateDayFor(x.date);
           if (!rd) { normalRows.push(x); continue; }
           if (!byRateDay.has(rd.id)) byRateDay.set(rd.id, { rd, rows: [] });
           byRateDay.get(rd.id).rows.push(x);
         }
         const normalHours = r2(normalRows.reduce((n, x) => n + x.hours, 0));
-        if (normalHours > 0 || byRateDay.size === 0) {
+        if (normalHours > 0 || (byRateDay.size === 0 && byOverride.size === 0)) {
           lines.push({ id: crypto.randomUUID(), description: `${label} — hours, ${span(from, to)}`, kind: 'HOURLY', quantity: normalHours, unit_amount: l.rate, shifts: normalRows });
         }
         for (const { rd, rows: rdRows } of byRateDay.values()) {
@@ -255,6 +274,12 @@ module.exports = function registerInvoices({
           const rate = rateDayRate(rd, l.rate);
           const how = rd.kind === 'FLAT' ? 'override rate' : `×${rd.multiplier}`;
           lines.push({ id: crypto.randomUUID(), description: `${label} — ${rd.label}, ${longDate(rd.date)} (${how})`, kind: 'HOURLY', quantity: rdHours, unit_amount: rate, shifts: rdRows });
+        }
+        for (const { override, rows: orRows } of byOverride.values()) {
+          const orHours = r2(orRows.reduce((n, x) => n + x.hours, 0));
+          const rate = overrideRate(override, l.rate);
+          const how = override.kind === 'FLAT' ? 'override rate' : `×${override.multiplier}`;
+          lines.push({ id: crypto.randomUUID(), description: `${label} — pay override, ${span(from, to)} (${how}: ${override.reason})`, kind: 'HOURLY', quantity: orHours, unit_amount: rate, shifts: orRows });
         }
       } else if (l.kind === 'FIXED_PERIOD') {
         lines.push({ id: crypto.randomUUID(), description: `${l.description}, ${span(from, to)}`, kind: l.kind, quantity: 1, unit_amount: l.rate });

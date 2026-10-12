@@ -526,6 +526,7 @@ function assignmentsSection(s) {
             ${!a.clocked_in_at ? `<button type="button" class="btn" data-clockin="${a.id}" style="padding:4px 8px;font-size:11px">Clock in</button>` : ''}
             ${a.clocked_in_at && !a.clocked_out_at ? `<button type="button" class="btn" data-clockout="${a.id}" style="padding:4px 8px;font-size:11px">Clock out</button>` : ''}
             ${a.clocked_in_at ? `<button type="button" class="btn" data-times="${a.id}" style="padding:4px 8px;font-size:11px">Times</button>` : ''}
+            ${isAdmin ? `<button type="button" class="btn${a.pay_override ? ' primary' : ''}" data-payoverride="${a.id}" style="padding:4px 8px;font-size:11px" title="${a.pay_override ? esc(a.pay_override.reason) : 'Pay a different rate for this person on this shift — a late-notice cover, say'}">Pay override${a.pay_override ? ' ✓' : ''}</button>` : ''}
             ${isAdmin ? `<button type="button" class="btn danger" data-remove="${a.id}" style="padding:4px 8px;font-size:11px">Remove</button>` : ''}
           </div>
           ${a.clocked_in_at ? `<div class="hide" data-times-form="${a.id}" style="border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:-4px;font-size:12px">
@@ -536,6 +537,23 @@ function assignmentsSection(s) {
             </div>
             ${(a.time_edits || []).length ? `<div class="dim" style="margin-top:6px">${a.time_edits.map((e) => `${esc(e.by)}: ${esc(e.reason)}`).join('<br>')}</div>` : ''}
             <button type="button" class="btn primary" data-t-save="${a.id}" style="margin-top:6px;padding:4px 10px;font-size:12px">Save times</button>
+          </div>` : ''}
+          ${isAdmin ? `<div class="hide" data-payoverride-form="${a.id}" style="border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:-4px;font-size:12px">
+            <p class="dim" style="margin:0 0 6px;font-size:12px">Replaces any bank-holiday/Christmas rate for this person's hours on this shift — it never stacks with one. Pays ${esc(a.personnel_name)} this rate instead of their normal one.</p>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+              <div><label>Type</label><select data-po-kind>
+                <option value="MULTIPLIER" ${!a.pay_override || a.pay_override.kind === 'MULTIPLIER' ? 'selected' : ''}>Multiplier (e.g. ×1.5)</option>
+                <option value="FLAT" ${a.pay_override && a.pay_override.kind === 'FLAT' ? 'selected' : ''}>Flat rate (£/hour)</option>
+              </select></div>
+              <div><label data-po-value-label>Multiplier</label><input type="number" step="0.01" min="0" data-po-value value="${a.pay_override ? (a.pay_override.kind === 'FLAT' ? a.pay_override.flat_rate : a.pay_override.multiplier) : ''}"></div>
+              <div style="grid-column:1/-1"><label>Reason</label><input data-po-reason placeholder="e.g. late-notice cover shift" value="${a.pay_override ? esc(a.pay_override.reason) : ''}" maxlength="200"></div>
+              <div style="grid-column:1/-1"><label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400"><input type="checkbox" data-po-bill ${a.pay_override && a.pay_override.bill_client ? 'checked' : ''}> Also bill the client this rate for these hours</label></div>
+            </div>
+            ${a.pay_override ? `<p class="dim" style="margin:6px 0 0">Set by ${esc(a.pay_override.set_by)}, ${new Date(a.pay_override.set_at).toLocaleString('en-GB')}</p>` : ''}
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <button type="button" class="btn primary" data-po-save="${a.id}" style="padding:4px 10px;font-size:12px">Save override</button>
+              ${a.pay_override ? `<button type="button" class="btn danger" data-po-remove="${a.id}" style="padding:4px 10px;font-size:12px">Remove override</button>` : ''}
+            </div>
           </div>` : ''}`).join('') || '<p class="dim" style="font-size:13px">Nobody assigned yet.</p>'}
       </div>
       ${isAdmin && available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
@@ -712,6 +730,29 @@ function shiftModal(s, defaults) {
     els('[data-remove]').forEach((b) => (b.onclick = async () => {
       if (!confirm('Remove this person from the shift?')) return;
       try { await api('PATCH', `/api/shift-assignments/${b.dataset.remove}`, { status: 'REMOVED' }); await reopen(); }
+      catch (e) { el('#shError').textContent = e.message; }
+    }));
+    els('[data-payoverride]').forEach((b) => (b.onclick = () => el(`[data-payoverride-form="${b.dataset.payoverride}"]`).classList.toggle('hide')));
+    els('[data-po-kind]').forEach((sel) => (sel.onchange = () => {
+      const f = sel.closest('[data-payoverride-form]');
+      f.querySelector('[data-po-value-label]').textContent = sel.value === 'FLAT' ? 'Rate (£/hour)' : 'Multiplier';
+    }));
+    els('[data-po-save]').forEach((b) => (b.onclick = async () => {
+      const f = el(`[data-payoverride-form="${b.dataset.poSave}"]`), val = (sel) => f.querySelector(sel).value;
+      const kind = val('[data-po-kind]'), amount = Number(val('[data-po-value]'));
+      try {
+        await api('PATCH', `/api/shift-assignments/${b.dataset.poSave}`, {
+          pay_override: {
+            kind, multiplier: kind === 'MULTIPLIER' ? amount : undefined, flat_rate: kind === 'FLAT' ? amount : undefined,
+            reason: val('[data-po-reason]'), bill_client: f.querySelector('[data-po-bill]').checked,
+          },
+        });
+        await reopen();
+      } catch (e) { el('#shError').textContent = e.message; }
+    }));
+    els('[data-po-remove]').forEach((b) => (b.onclick = async () => {
+      if (!confirm('Remove this pay override?')) return;
+      try { await api('PATCH', `/api/shift-assignments/${b.dataset.poRemove}`, { pay_override: null }); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     }));
     if (el('#shAddPerson')) el('#shAddPerson').onclick = async () => {

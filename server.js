@@ -923,13 +923,19 @@ function buildShiftIndex() {
  * assignment, not per shift, since a shift can now carry several people and
  * only some of them might have approved leave over it — same "warn, don't
  * block" flag as before, just scoped to whoever it's actually about. */
-function publicAssignment(a, shift, idx) {
+// user is optional, same reasoning as publicPersonnel's own emergency_contact/
+// bank_details gating: every existing call site that doesn't pass it (every
+// broadcast, which goes to the officer and to dispatchers at once, never
+// just an admin) simply never gets pay_override in the payload — stricter
+// by default, never laxer. Only a direct admin-viewed read passes user.
+function publicAssignment(a, shift, idx, user) {
   const p = idx ? idx.personnelById.get(a.personnel_id) : db.personnel.find((x) => x.id === a.personnel_id);
   const callsign = p ? (idx ? idx.callsignsById.get(p.callsign_id) : db.callsigns.find((c) => c.id === p.callsign_id)) : null;
   return {
     ...a, personnel_name: p ? p.name : null,
     personnel_callsign: callsign ? callsign.name || null : null,
     on_leave_conflict: onApprovedLeave(a.personnel_id, shift.starts_at, idx && idx.approvedLeave),
+    pay_override: (user && user.role === 'SYSTEM_ADMIN') ? (a.pay_override || null) : undefined,
   };
 }
 function publicVehicleAllocation(a, idx) {
@@ -941,11 +947,11 @@ function publicAssetAllocation(a, idx) {
   const asset = idx ? idx.assetsById.get(a.asset_id) : db.assets.find((x) => x.id === a.asset_id);
   return { ...a, asset_description: asset ? asset.description : null, asset_tag: asset ? asset.tag : null };
 }
-function publicShift(s, idx) {
+function publicShift(s, idx, user) {
   const site = s.site_id ? (idx ? idx.sitesById.get(s.site_id) : db.sites.find((x) => x.id === s.site_id)) : null;
   const type = s.shift_type_id ? (idx ? idx.typesById.get(s.shift_type_id) : db.shift_types.find((x) => x.id === s.shift_type_id)) : null;
   const rawAssignments = idx ? (idx.assignmentsByShift.get(s.id) || []) : db.shift_assignments.filter((a) => a.shift_id === s.id);
-  const assignments = rawAssignments.filter((a) => a.status !== 'REMOVED').map((a) => publicAssignment(a, s, idx));
+  const assignments = rawAssignments.filter((a) => a.status !== 'REMOVED').map((a) => publicAssignment(a, s, idx, user));
   const activeCount = assignments.filter((a) => ['ASSIGNED', 'CONFIRMED'].includes(a.status)).length;
   const rawVehicleAllocs = idx ? (idx.vehicleAllocsByShift.get(s.id) || []) : db.shift_vehicle_allocations.filter((x) => x.shift_id === s.id);
   const rawAssetAllocs = idx ? (idx.assetAllocsByShift.get(s.id) || []) : db.shift_asset_allocations.filter((x) => x.shift_id === s.id);
@@ -4195,7 +4201,7 @@ route('GET', '/api/shifts', ALL, ({ query, user }) => {
   const idx = buildShiftIndex();
   const personnelId = query.get('personnel_id') ? Number(query.get('personnel_id')) : null;
   if (personnelId) rows = rows.filter((s) => (idx.assignmentsByShift.get(s.id) || []).some((a) => a.status !== 'REMOVED' && a.personnel_id === personnelId));
-  const out = rows.sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)).map((s) => publicShift(s, idx));
+  const out = rows.sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)).map((s) => publicShift(s, idx, user));
   // Convenience for a single-person view (officer.html): that person's own
   // assignment on each shift, so the caller doesn't have to search
   // `assignments` itself for the one row it actually asked about.
@@ -4247,14 +4253,16 @@ route('POST', '/api/shifts', ADMIN, ({ body, user }) => {
     };
     db.shift_assignments.push(firstAssignment);
   }
-  const pub = publicShift(s);
   // A draft is "not ready to show staff" — the assigned officer doesn't
   // find out over the socket either, the same boundary GET /api/shifts
-  // enforces on a fetch.
-  broadcast('shift.created', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: firstAssignment ? [firstAssignment.personnel_id] : [] });
+  // enforces on a fetch. The socket payload also reaches DISPATCHER/
+  // SUPERVISOR (isControlRole), not just SYSTEM_ADMIN, so it stays
+  // unredacted (no user passed) — only the HTTP response below goes to
+  // the admin who actually made this request.
+  broadcast('shift.created', publicShift(s), s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: firstAssignment ? [firstAssignment.personnel_id] : [] });
   if (s.status !== 'DRAFT' && firstAssignment) notifyShiftEvent('ASSIGNED', s, [firstAssignment.personnel_id]);
   logEvent('shift.created', `SHIFT CREATED (${type.name}) ${s.starts_at} — ${s.ends_at}${firstAssignment ? ` FOR ${findPersonnel(firstAssignment.personnel_id).name}` : ''}`, { shift_id: s.id });
-  return { __status: 201, __body: pub };
+  return { __status: 201, __body: publicShift(s, undefined, user) };
 });
 route('PATCH', '/api/shifts/:id', ADMIN, ({ params, body, query, user }) => {
   const s = findShift(params.id);
@@ -4291,10 +4299,13 @@ route('PATCH', '/api/shifts/:id', ADMIN, ({ params, body, query, user }) => {
     if (body.status === 'CANCELLED') shiftApplications.expireApplicationsForShift(s.id);
   }
   s.revision = (s.revision || 0) + 1;
-  const pub = publicShift(s);
+  const pub = publicShift(s, undefined, user);
   // Editing a still-draft shift (e.g. fixing its time before publishing)
   // must not tip off its assignee any sooner than publishing itself would.
-  broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: assignedPersonnelIds(s.id) });
+  // The socket payload also reaches DISPATCHER/SUPERVISOR (isControlRole),
+  // not just SYSTEM_ADMIN, so it's built unredacted (no user) — pub itself,
+  // returned below to the admin who made this request, keeps pay_override.
+  broadcast('shift.updated', publicShift(s), s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: assignedPersonnelIds(s.id) });
   if (!wasDraft && s.status !== 'DRAFT') {
     const affected = assignedPersonnelIds(s.id);
     if (justCancelled) notifyShiftEvent('CANCELLED', s, affected);
@@ -4509,16 +4520,46 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
     if (body.attendance !== null && !ATTENDANCE_STATES.includes(body.attendance)) throw httpError(400, 'invalid attendance');
     a.attendance = body.attendance;
   }
+  // A one-off pay rate for this specific person on this specific shift —
+  // a late-notice cover shift, say — distinct from a payroll_rate_days
+  // entry (routes-payroll.js), which applies to whoever works a given
+  // calendar date. An override here always takes precedence over a
+  // rate day for this assignment's hours, never stacks with one.
+  // bill_client is the admin's own choice whether the client is charged
+  // the same uplift, or it stays an internal staffing-cost decision.
+  if ('pay_override' in body && isAdmin) {
+    if (body.pay_override === null) { a.pay_override = null; }
+    else {
+      const o = body.pay_override || {};
+      const kind = o.kind === 'FLAT' ? 'FLAT' : 'MULTIPLIER';
+      let multiplier = null, flat_rate = null;
+      if (kind === 'MULTIPLIER') {
+        multiplier = Number(o.multiplier);
+        if (!Number.isFinite(multiplier) || multiplier <= 1) throw httpError(400, 'multiplier must be a number greater than 1');
+      } else {
+        flat_rate = Math.round(Number(o.flat_rate) * 100) / 100;
+        if (!Number.isFinite(flat_rate) || flat_rate <= 0) throw httpError(400, 'flat_rate must be a positive number');
+      }
+      const reason = String(o.reason || '').trim().slice(0, 200);
+      if (!reason) throw httpError(400, 'a reason is required for a pay override');
+      a.pay_override = { kind, multiplier, flat_rate, bill_client: o.bill_client === true, reason, set_by: user.display_name, set_at: new Date().toISOString() };
+    }
+    logEvent('shift_assignment.pay_override', `${user.username} ${body.pay_override === null ? 'REMOVED' : 'SET'} A PAY OVERRIDE FOR ASSIGNMENT ${a.id}`, { shift_id: s.id, personnel_id: a.personnel_id });
+  }
   a.updated_at = new Date().toISOString();
   s.revision = (s.revision || 0) + 1;
-  const pub = publicShift(s);
-  broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [a.personnel_id] });
+  // broadcast() fans the SAME payload out over the socket to every control
+  // role (DISPATCHER, SUPERVISOR, SYSTEM_ADMIN — see isControlRole) and to
+  // the assignee themselves, not just the admin who made this request — so
+  // it must stay unredacted (no user passed). Only the HTTP response below
+  // goes to the admin who actually asked, and may safely include pay_override.
+  broadcast('shift.updated', publicShift(s), s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [a.personnel_id] });
   // An admin-initiated removal is news to the officer; their own
   // confirm/decline is something they just did, so it needs no echo back.
   if (justRemoved && isAdmin && s.status !== 'DRAFT') notifyShiftEvent('REMOVED', s, [a.personnel_id]);
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   logEvent('shift_assignment.updated', `${p ? p.name : 'PERSON'} ON SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: a.personnel_id });
-  return pub;
+  return publicShift(s, undefined, user);
 });
 route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user }) => {
   const a = findAssignment(params.id);

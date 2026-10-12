@@ -239,6 +239,41 @@ test('hours worked on a pay rate day (e.g. Christmas Day) are billed on their ow
   assert.equal(xmasLine.amount, 320);
 });
 
+test('a per-assignment pay override only reaches the invoice when flagged bill_client, and replaces a rate day when it does', async () => {
+  // Same shift_assignments.pay_override set from Rota — only the admin's
+  // explicit bill_client flag decides whether the client is charged the
+  // uplift; unset, it's purely an internal staffing-cost decision and
+  // bills as plain normal hours, same as any other shift.
+  const mk = (day, hours, override) => {
+    const id = app.seq.shifts = (app.seq.shifts || 0) + 1;
+    app.db.shifts.push({ id, site_id: siteA.id, shift_type_id: app.db.shift_types[0].id, status: 'PUBLISHED',
+      starts_at: `2027-01-${day}T08:00:00Z`, ends_at: `2027-01-${day}T${String(8 + hours).padStart(2, '0')}:00:00Z`, break_minutes: 0 });
+    const aid = app.seq.shift_assignments = (app.seq.shift_assignments || 0) + 1;
+    app.db.shift_assignments.push({ id: aid, shift_id: id, personnel_id: app.db.personnel[0].id, status: 'CONFIRMED',
+      clocked_in_at: `2027-01-${day}T08:00:00Z`, clocked_out_at: `2027-01-${day}T${String(8 + hours).padStart(2, '0')}:00:00Z`, breaks: [],
+      pay_override: override });
+  };
+  mk('05', 4, { kind: 'MULTIPLIER', multiplier: 2, flat_rate: null, reason: 'late-notice cover', bill_client: true, set_by: 'Test Admin', set_at: new Date().toISOString() });
+  mk('06', 4, { kind: 'FLAT', multiplier: null, flat_rate: 100, reason: 'internal cover decision', bill_client: false, set_by: 'Test Admin', set_at: new Date().toISOString() });
+
+  const g = await call('POST', '/api/invoices/generate', { from: '2027-01-01', to: '2027-01-31', contract_id: contract.id }, adminT);
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const inv = g.body.made[0];
+  const hourlyLines = inv.lines.filter((l) => l.kind === 'HOURLY');
+  assert.equal(hourlyLines.length, 2, 'one normal line (the unbilled override\'s hours included) and one billed-override line');
+
+  const normal = hourlyLines.find((l) => /— hours,/.test(l.description));
+  assert.ok(normal, JSON.stringify(inv.lines));
+  assert.equal(normal.quantity, 4, 'the bill_client:false override still bills as plain normal hours');
+  assert.equal(normal.unit_amount, 20, 'not the internal £100/h override rate — the client is never billed for it');
+
+  const overrideLine = hourlyLines.find((l) => /pay override/.test(l.description));
+  assert.ok(overrideLine, JSON.stringify(inv.lines));
+  assert.equal(overrideLine.quantity, 4);
+  assert.equal(overrideLine.unit_amount, 40, '×2 the contract\'s £20/hour rate');
+  assert.match(overrideLine.description, /late-notice cover/);
+});
+
 test('generate can be narrowed to one site', async () => {
   // Both contracts (siteA and siteB, from the tests above) are running by
   // October, with nothing invoiced yet for it.
