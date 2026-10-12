@@ -4931,22 +4931,32 @@ route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) =>
     throw httpError(404, account ? 'CCCS account has no personnel record linked' : 'no CCCS account matches this Windows sign-in');
   }
 
+  // Clock-in state lives on the shift_assignment, not the shift itself —
+  // a shift has its own PUBLISHED/IN_PROGRESS lifecycle and can carry more
+  // than one person. "Current" means an assignment whose shift is live and
+  // due to start within the hour (or already under way), same window the
+  // real clock-in button uses, excluding one already fully completed.
   const now = Date.now();
-  const current = db.shifts
-    .filter((s) => s.personnel_id === p.id && ['SCHEDULED', 'CONFIRMED', 'CLOCKED_IN'].includes(s.status)
+  const current = db.shift_assignments
+    .filter((a) => a.personnel_id === p.id && a.status !== 'REMOVED' && !(a.clocked_in_at && a.clocked_out_at))
+    .map((a) => ({ a, s: db.shifts.find((x) => x.id === a.shift_id) }))
+    .filter(({ s }) => s && ['PUBLISHED', 'IN_PROGRESS'].includes(s.status)
       && Date.parse(s.starts_at) - CLOCK_IN_EARLY_MS <= now && now < Date.parse(s.ends_at))
-    .sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
-  const s = current.find((x) => x.status === 'CLOCKED_IN') || current[0];
-  if (!s) {
+    .sort((x, y) => Date.parse(x.s.starts_at) - Date.parse(y.s.starts_at));
+  const match = current.find(({ a }) => a.clocked_in_at) || current[0];
+  if (!match) {
     logEvent('shift.clock_in_no_shift', `${p.name} SIGNED IN AT ${workstation || 'A WORKSTATION'} WITH NO SHIFT ON THE ROTA`, { personnel_id: p.id, workstation });
     throw httpError(409, 'no shift on the rota now or in the next hour');
   }
-  if (s.status === 'CLOCKED_IN') return { result: 'ALREADY_CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
+  const { a, s } = match;
+  if (a.clocked_in_at) return { result: 'ALREADY_CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
 
-  s.status = 'CLOCKED_IN'; s.clocked_in_at = new Date().toISOString();
-  broadcast('shift.updated', publicShift(s), { personnelIds: [s.personnel_id] });
-  logEvent('shift.clocked_in', `${p.name} CLOCKED IN AT ${workstation || 'A WORKSTATION'}`, { shift_id: s.id, personnel_id: s.personnel_id, workstation });
-  return { result: 'CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
+  a.clocked_in_at = new Date().toISOString(); a.updated_at = a.clocked_in_at;
+  if (s.status === 'PUBLISHED') s.status = 'IN_PROGRESS';
+  const pub = publicShift(s);
+  broadcast('shift.updated', pub, { personnelIds: [a.personnel_id] });
+  logEvent('shift.clocked_in', `${p.name} CLOCKED IN AT ${workstation || 'A WORKSTATION'}`, { shift_id: s.id, personnel_id: a.personnel_id, workstation });
+  return { result: 'CLOCKED_IN', personnel_name: p.name, shift: pub };
 });
 
 /* ---- Control room click-to-dial relay -----------------------------------
