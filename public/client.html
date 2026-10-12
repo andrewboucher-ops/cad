@@ -55,7 +55,7 @@
   </div>
 
   <div id="adminBanner" class="hide" style="border:1px solid var(--priority);border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px">
-    <strong>Admin view</strong> — you are seeing exactly what <span id="adminAsName">this client</span> sees. Read only: requests can't be raised from here.
+    <strong>Admin view</strong> — you are seeing exactly what <span id="adminAsName">this client</span> sees. Read only: signing contracts, accepting quotes and raising requests are done by the client from their own login — give them one with <em>Admin → Clients → Send password link</em>.
     <a href="/client.html" style="margin-left:8px">Choose another client</a> · <a href="/admin.html">Back to admin</a>
   </div>
   <div id="adminPicker" class="hide"></div>
@@ -133,6 +133,7 @@
         <button type="button" class="btn primary" id="reqSend" style="align-self:flex-start">Send request</button>
         <p class="err" id="reqError" style="margin:0"></p>
       </div>
+      <p class="dim hide" id="reqAdminNote" style="font-size:13px;margin:0 0 12px">The client raises requests here from their own login (Admin → Clients → Send password link). Their requests are listed below.</p>
       <div id="reqList"><p class="empty-note">Loading…</p></div>
     </div>
   </div>
@@ -291,7 +292,7 @@ async function paintAgreements() {
       <div style="font-size:12.5px;margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <a target="_blank" href="${withAs(`/api/client/agreements/${a.id}/pdf?token=${t}`)}">${quote ? 'Quotation' : 'Contract'} (PDF)</a>
         ${waiting && !isAdminView ? (quote ? `<button class="btn primary" data-ag-accept="${a.id}">Accept</button><button class="btn" data-ag-decline="${a.id}">Decline</button>` : `<button class="btn primary" data-ag-sign="${a.id}">Read &amp; sign</button>`) : ''}
-        ${waiting && isAdminView ? '<span class="dim">waiting for the client</span>' : ''}
+        ${waiting && isAdminView ? `<span class="dim">waiting for the client to ${quote ? 'accept or decline' : 'sign'} it from their own login</span>` : ''}
       </div></div>`;
   }).join('') : '<p class="empty-note">No quotes or contracts.</p>';
   document.querySelectorAll('[data-ag-accept]').forEach((b) => (b.onclick = () => agAccept(agreements.find((a) => a.id === Number(b.dataset.agAccept)))));
@@ -420,6 +421,7 @@ async function loadSite() {
   if (isAdminView) {
     el('#adminBanner').classList.remove('hide');
     el('#reqSubject').closest('.stack').classList.add('hide');
+    el('#reqAdminNote').classList.remove('hide');
     document.title = 'CCCS — client portal (admin view)';
   }
   client = await api('GET', withAs('/api/client/me'));
