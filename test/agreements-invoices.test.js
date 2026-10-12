@@ -458,3 +458,16 @@ test('mark-signed can email a copy when asked, and refuses a quote', async () =>
   const q = (await call('POST', '/api/agreements', { kind: 'QUOTE', site_id: siteA.id, lines: LINES }, adminT)).body;
   assert.equal((await call('POST', `/api/agreements/${q.id}/mark-signed`, { name: 'x' }, adminT)).status, 400, 'a quote is accepted, not signed');
 });
+
+test('a withdrawn contract disappears from the client portal — it was taken back before it ever went live for them', async () => {
+  const a = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: siteA.id, lines: [LINES[0]], start_date: '2026-01-01' }, adminT)).body;
+  await call('POST', `/api/agreements/${a.id}/send`, {}, adminT);
+  const seenBeforeWithdraw = (await call('GET', '/api/client/agreements', undefined, clientT)).body;
+  assert.ok(seenBeforeWithdraw.some((x) => x.id === a.id), 'visible once sent, same as any other');
+
+  const withdrawn = await call('POST', `/api/agreements/${a.id}/withdraw`, {}, adminT);
+  assert.equal(withdrawn.body.status, 'WITHDRAWN');
+  const seenAfterWithdraw = (await call('GET', '/api/client/agreements', undefined, clientT)).body;
+  assert.ok(!seenAfterWithdraw.some((x) => x.id === a.id), 'gone from the list once withdrawn');
+  assert.equal((await call('GET', `/api/client/agreements/${a.id}/pdf`, undefined, clientT)).status, 404, 'and not reachable directly by id either');
+});

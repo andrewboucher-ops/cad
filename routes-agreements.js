@@ -382,7 +382,10 @@ module.exports = function registerAgreements({
     if (user.role === 'SYSTEM_ADMIN') { const c = (db.clients || []).find((x) => x.id === Number(query.get('as_client'))); if (!c) throw httpError(404, 'client not found'); return c; }
     const c = (db.clients || []).find((x) => x.id === user.client_id); if (!c) throw httpError(403, 'no client is linked to this login'); return c;
   }
-  const theirs = (a, c) => a.status !== 'DRAFT' && (a.client_id === c.id || (c.site_ids || []).includes(a.site_id));
+  // A withdrawn quote/contract was taken back before it ever went live for
+  // them — not something they ever agreed to or need on file, same
+  // reasoning as never showing a DRAFT.
+  const theirs = (a, c) => !['DRAFT', 'WITHDRAWN'].includes(a.status) && (a.client_id === c.id || (c.site_ids || []).includes(a.site_id));
   const own = (user, query, id) => { const c = clientFor(user, query); const a = db.agreements.find((x) => x.id === Number(id)); if (!a || !theirs(a, c)) throw httpError(404, 'not found'); return { a, c }; };
   route('GET', '/api/client/agreements', CLIENT_OR_ADMIN, ({ user, query }) => {
     const c = clientFor(user, query);
