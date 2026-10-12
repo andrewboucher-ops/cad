@@ -73,7 +73,7 @@ These are deliberately weak demo credentials for a POC. Replace them before the 
 | `WORKSTATION_SECRET` | — | shared secret for control room PCs' `POST /api/integrations/workstation/clock-in` |
 | `AMI_HOST` / `AMI_PORT` / `AMI_USER` / `AMI_SECRET` | — / `5038` | phone system AMI login for the click-to-dial relay; unset disables it |
 | `AMI_CONTEXT` / `AMI_LOCAL_EXTENSIONS` | `from-internal` / — | dialplan context, and extensions (comma-separated) that ring as `Local/ext@context` instead of `PJSIP/ext` |
-| `DIAL_ALLOW` / `DIAL_MAX_PER_HOUR` | UK landline/mobile / `60` | numbers the relay may dial (a regex), and calls per workstation per hour |
+| `DIAL_ALLOW` / `DIAL_MAX_PER_HOUR` | any UK number except premium rate / `200` | numbers the relay may dial (a regex), and calls per workstation per hour |
 | `MS_TENANT_ID` / `MS_CLIENT_ID` / `MS_CLIENT_SECRET` / `MS_REDIRECT_URI` | — | Microsoft Entra ID SSO — see `docs/SSO.md` |
 
 No secrets are hardcoded. If `AUTH_SECRET` is unset the server generates an ephemeral one and warns; sessions then drop on restart.
@@ -418,8 +418,8 @@ extension through the phone system's AMI and connects it to the number. It
 uses the same `WORKSTATION_SECRET` as clock-in. Because it lets the phone
 system dial out from the internet it is deliberately narrow: the channel is
 built server-side from the extension, only numbers matching `DIAL_ALLOW` (by
-default UK landline and mobile numbers and short internal numbers, never
-international or premium rate) are dialled, each workstation is held to
+default any UK number and short internal numbers, except premium rate -
+`09`, `118`, `070` and `0871`-`0873` - and never international) are dialled, each workstation is held to
 `DIAL_MAX_PER_HOUR`, and every dial or refusal is audited.
 
 ## Deployment
