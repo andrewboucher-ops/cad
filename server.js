@@ -4920,8 +4920,9 @@ function assertWorkstationSecret(req) {
     throw httpError(401, 'bad workstation secret');
   }
 }
-route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) => {
-  assertWorkstationSecret(req);
+/** The Windows account in a workstation request, matched to its person.
+ * Shared by clock-in and clock-out so both match exactly the same way. */
+function workstationPerson(body, action) {
   const upn = String(body.upn || '').trim().toLowerCase();
   const username = String(body.username || '').trim().toLowerCase();
   const workstation = String(body.workstation || '').slice(0, 64);
@@ -4931,9 +4932,14 @@ route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) =>
     || (username && db.users.find((u) => u.username === username)) || null;
   const p = account && account.personnel_id ? db.personnel.find((x) => x.id === account.personnel_id) : null;
   if (!p) {
-    logEvent('shift.clock_in_unmatched', `WORKSTATION ${workstation} COULD NOT CLOCK IN ${upn || username}: NO LINKED CCCS ACCOUNT`, { upn, username, workstation });
+    logEvent(`shift.${action.replace('-', '_')}_unmatched`, `WORKSTATION ${workstation} COULD NOT ${action.toUpperCase().replace('-', ' ')} ${upn || username}: NO LINKED CCCS ACCOUNT`, { upn, username, workstation });
     throw httpError(404, account ? 'CCCS account has no personnel record linked' : 'no CCCS account matches this Windows sign-in');
   }
+  return { p, workstation };
+}
+route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) => {
+  assertWorkstationSecret(req);
+  const { p, workstation } = workstationPerson(body, 'clock-in');
 
   // Clock-in state lives on the shift_assignment, not the shift itself —
   // a shift has its own PUBLISHED/IN_PROGRESS lifecycle and can carry more
@@ -4963,6 +4969,37 @@ route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) =>
   broadcast('shift.updated', pub, { personnelIds: [a.personnel_id] });
   logEvent('shift.clocked_in', `${p.name} CLOCKED IN AT ${workstation || 'A WORKSTATION'}`, { shift_id: s.id, personnel_id: a.personnel_id, workstation });
   return { result: 'CLOCKED_IN', personnel_name: p.name, clocked_in_at: a.clocked_in_at, shift: pub };
+});
+
+/* Clock-out at Windows sign-out. Operators also sign out to move desks or
+ * hand a PC over, so this only clocks someone out in the last hour of their
+ * shift (or after it has ended); earlier than that it is refused and
+ * logged, and they stay clocked in. Like clock-in it never touches a shift
+ * the person isn't already clocked into. */
+const CLOCK_OUT_EARLY_MS = 60 * 60 * 1000;
+route('POST', '/api/integrations/workstation/clock-out', null, ({ body, req }) => {
+  assertWorkstationSecret(req);
+  const { p, workstation } = workstationPerson(body, 'clock-out');
+  const open = db.shift_assignments
+    .filter((a) => a.personnel_id === p.id && a.status !== 'REMOVED' && a.clocked_in_at && !a.clocked_out_at)
+    .map((a) => ({ a, s: db.shifts.find((x) => x.id === a.shift_id) }))
+    .filter(({ s }) => s)
+    .sort((x, y) => Date.parse(x.s.ends_at) - Date.parse(y.s.ends_at));
+  if (!open.length) throw httpError(409, 'not clocked in');
+  const { a, s } = open[0];
+  if (Date.now() < Date.parse(s.ends_at) - CLOCK_OUT_EARLY_MS) {
+    logEvent('shift.clock_out_too_early', `${p.name} SIGNED OUT AT ${workstation || 'A WORKSTATION'} MORE THAN AN HOUR BEFORE THEIR SHIFT ENDS - STILL CLOCKED IN`, { shift_id: s.id, personnel_id: p.id, workstation });
+    return { result: 'STILL_CLOCKED_IN', personnel_name: p.name, clocked_in_at: a.clocked_in_at, shift: publicShift(s) };
+  }
+
+  a.clocked_out_at = new Date().toISOString(); a.updated_at = a.clocked_out_at;
+  attendance.closeBreaks(a, a.clocked_out_at);
+  attendance.finishAdHoc(a, s);
+  if (!a.attendance) a.attendance = 'ATTENDED';
+  const pub = publicShift(s);
+  broadcast('shift.updated', pub, { personnelIds: [a.personnel_id] });
+  logEvent('shift.clocked_out', `${p.name} CLOCKED OUT AT ${workstation || 'A WORKSTATION'}`, { shift_id: s.id, personnel_id: a.personnel_id, workstation });
+  return { result: 'CLOCKED_OUT', personnel_name: p.name, clocked_in_at: a.clocked_in_at, clocked_out_at: a.clocked_out_at, shift: pub };
 });
 
 /* ---- Control room click-to-dial relay -----------------------------------

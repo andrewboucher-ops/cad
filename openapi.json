@@ -352,6 +352,26 @@
         }
       }
     },
+    "/api/integrations/workstation/clock-out": {
+      "post": {
+        "summary": "Control room PC clocks its Windows user out at sign-out (shared-secret auth via X-Workstation-Secret). Only in the last hour of the shift or after it; earlier returns result STILL_CLOCKED_IN and changes nothing. Body: upn, username, workstation",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "result CLOCKED_OUT or STILL_CLOCKED_IN, personnel_name, clocked_in_at, clocked_out_at, shift"
+          },
+          "401": {
+            "description": "bad secret"
+          },
+          "404": {
+            "description": "no CCCS account or personnel record matches"
+          },
+          "409": {
+            "description": "not clocked in"
+          }
+        }
+      }
+    },
     "/api/integrations/workstation/dial": {
       "post": {
         "summary": "Click-to-dial relay for control room PCs off the VPN: ring the extension, then dial the number (shared-secret auth via X-Workstation-Secret). Body: extension, number, workstation",
