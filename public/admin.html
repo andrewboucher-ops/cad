@@ -1625,8 +1625,8 @@ function siteForm(s) {
 
       <label>Assignment instructions — versioned; the current version is what staff see</label>
       <div id="sInstructionsList" class="dim">Loading…</div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input id="sInstrTitle" autocomplete="off" placeholder="Title, e.g. General assignment instructions" style="flex:1">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input id="sInstrTitle" autocomplete="off" placeholder="Title, e.g. General assignment instructions" style="flex:1;min-width:180px">
         <input type="file" id="sInstrFile" accept="application/pdf,image/png,image/jpeg">
         <button type="button" class="btn" id="sInstrUpload">Upload</button>
       </div>
@@ -1634,8 +1634,8 @@ function siteForm(s) {
 
       <label>Site maps — versioned; uploading the same title again supersedes it</label>
       <div id="sMapsGallery" class="dim">Loading…</div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input id="sMapTitle" autocomplete="off" placeholder="Title, e.g. Perimeter, Building layout" style="flex:1">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input id="sMapTitle" autocomplete="off" placeholder="Title, e.g. Perimeter, Building layout" style="flex:1;min-width:180px">
         <input type="file" id="sMapFile" accept="application/pdf,image/png,image/jpeg">
         <button type="button" class="btn" id="sMapUpload">Upload</button>
       </div>
@@ -1643,8 +1643,8 @@ function siteForm(s) {
 
       <label>Inductions — versioned; the current version is what staff see</label>
       <div id="sInductionsList" class="dim">Loading…</div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input id="sIndTitle" autocomplete="off" placeholder="Title, e.g. Site induction pack" style="flex:1">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input id="sIndTitle" autocomplete="off" placeholder="Title, e.g. Site induction pack" style="flex:1;min-width:180px">
         <input type="file" id="sIndFile" accept="application/pdf,image/png,image/jpeg">
         <button type="button" class="btn" id="sIndUpload">Upload</button>
       </div>
