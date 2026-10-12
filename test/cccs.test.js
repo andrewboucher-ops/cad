@@ -1187,9 +1187,11 @@ test('a control room PC clocks its Windows user into their current shift with a 
   assert.equal(first.body.result, 'CLOCKED_IN', 'matched by UPN, case-insensitively');
   assert.equal(first.body.shift.id, soon.body.id, 'the shift starting within the hour, not the later one');
   assert.equal(first.body.personnel_name, 'Ryan Cole');
+  assert.ok(!Number.isNaN(Date.parse(first.body.clocked_in_at)), 'the PC shows the operator their own clock-in time');
 
   const again = await clock({ upn: 'ryan.cole@example.com', workstation: 'CONTROL-01' });
   assert.equal(again.body.result, 'ALREADY_CLOCKED_IN', 'signing in twice is harmless');
+  assert.equal(again.body.clocked_in_at, first.body.clocked_in_at, 'and keeps the first clock-in time');
   const laterNow = (await call('GET', `/api/shifts?personnel_id=${ryanId}`, undefined, dispT)).body.find((x) => x.id === later.body.id);
   assert.equal(laterNow.status, 'PUBLISHED', 'the later shift is untouched — still just published, not in progress');
   delete process.env.WORKSTATION_SECRET;

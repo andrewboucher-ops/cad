@@ -4949,14 +4949,16 @@ route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) =>
     throw httpError(409, 'no shift on the rota now or in the next hour');
   }
   const { a, s } = match;
-  if (a.clocked_in_at) return { result: 'ALREADY_CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
+  // clocked_in_at is the person's own time, from the assignment: the shift
+  // itself no longer carries one, and the PC shows it to the operator.
+  if (a.clocked_in_at) return { result: 'ALREADY_CLOCKED_IN', personnel_name: p.name, clocked_in_at: a.clocked_in_at, shift: publicShift(s) };
 
   a.clocked_in_at = new Date().toISOString(); a.updated_at = a.clocked_in_at;
   if (s.status === 'PUBLISHED') s.status = 'IN_PROGRESS';
   const pub = publicShift(s);
   broadcast('shift.updated', pub, { personnelIds: [a.personnel_id] });
   logEvent('shift.clocked_in', `${p.name} CLOCKED IN AT ${workstation || 'A WORKSTATION'}`, { shift_id: s.id, personnel_id: a.personnel_id, workstation });
-  return { result: 'CLOCKED_IN', personnel_name: p.name, shift: pub };
+  return { result: 'CLOCKED_IN', personnel_name: p.name, clocked_in_at: a.clocked_in_at, shift: pub };
 });
 
 /* ---- Control room click-to-dial relay -----------------------------------
