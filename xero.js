@@ -21,7 +21,12 @@ const CLIENT_SECRET = process.env.XERO_CLIENT_SECRET || '';
 const LOGIN = (process.env.XERO_LOGIN_BASE || 'https://login.xero.com').replace(/\/+$/, '');
 const IDENTITY = (process.env.XERO_IDENTITY_BASE || 'https://identity.xero.com').replace(/\/+$/, '');
 const API = (process.env.XERO_API_BASE || 'https://api.xero.com').replace(/\/+$/, '');
-const SCOPES = 'openid profile email offline_access accounting.transactions accounting.contacts accounting.settings.read';
+// Xero's granular scopes: apps created on or after 2 March 2026 can't ask for
+// the old broad accounting.transactions (Xero answers "invalid_scope"), and
+// older apps must move by September 2027. CCCS creates, emails and reads
+// invoices (accounting.invoices) and finds or creates contacts
+// (accounting.contacts) — nothing else. XERO_SCOPES overrides the list.
+const SCOPES = process.env.XERO_SCOPES || 'openid profile email offline_access accounting.invoices accounting.contacts';
 
 module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
   const configured = () => Boolean(CLIENT_ID && CLIENT_SECRET);
