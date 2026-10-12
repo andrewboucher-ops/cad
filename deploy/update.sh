@@ -75,7 +75,7 @@ if [ -f "$DATA_FILE" ]; then
     const db = new DatabaseSync(process.argv[1], { readOnly: true });
     const row = db.prepare("SELECT payload FROM collections WHERE name = ?").get("users");
     const users = row ? JSON.parse(row.payload) : [];
-    const known = ["SYSTEM_ADMIN", "DISPATCHER", "SUPERVISOR", "FIELD_USER", "MDT_USER"];
+    const known = ["SYSTEM_ADMIN", "DISPATCHER", "SUPERVISOR", "FIELD_USER", "MDT_USER", "CLIENT", "FINANCE"];
     const bad = users.filter((u) => !known.includes(u.role));
     const counts = {}; for (const u of users) counts[u.role] = (counts[u.role] || 0) + 1;
     console.log("   " + users.length + " accounts: " + JSON.stringify(counts));
