@@ -4901,6 +4901,132 @@ route('GET', '/api/sites/:id/report', CONTROL, ({ params, query, user }) => {
   };
 });
 
+/* ---- Control room workstation clock-in --------------------------------
+ * A control room PC clocks its operator in when they sign in to Windows.
+ * The PC is a system, not a CCCS operator, so like GuardM8 it authenticates
+ * with a shared secret (WORKSTATION_SECRET) - and this route can do nothing
+ * but clock a person into a shift already on the rota. It never creates one.
+ * The Windows account is matched to a CCCS login by email (the account's UPN)
+ * or by username, then to that login's personnel record. */
+const CLOCK_IN_EARLY_MS = 60 * 60 * 1000; // a shift starting within the hour counts as current
+function assertWorkstationSecret(req) {
+  const secret = process.env.WORKSTATION_SECRET;
+  const given = Buffer.from(String(req.headers['x-workstation-secret'] || ''));
+  if (!secret || given.length !== Buffer.byteLength(secret) || !crypto.timingSafeEqual(given, Buffer.from(secret))) {
+    throw httpError(401, 'bad workstation secret');
+  }
+}
+route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) => {
+  assertWorkstationSecret(req);
+  const upn = String(body.upn || '').trim().toLowerCase();
+  const username = String(body.username || '').trim().toLowerCase();
+  const workstation = String(body.workstation || '').slice(0, 64);
+  if (!upn && !username) throw httpError(400, 'upn or username required');
+
+  const account = (upn && db.users.find((u) => u.email && u.email.toLowerCase() === upn))
+    || (username && db.users.find((u) => u.username === username)) || null;
+  const p = account && account.personnel_id ? db.personnel.find((x) => x.id === account.personnel_id) : null;
+  if (!p) {
+    logEvent('shift.clock_in_unmatched', `WORKSTATION ${workstation} COULD NOT CLOCK IN ${upn || username}: NO LINKED CCCS ACCOUNT`, { upn, username, workstation });
+    throw httpError(404, account ? 'CCCS account has no personnel record linked' : 'no CCCS account matches this Windows sign-in');
+  }
+
+  const now = Date.now();
+  const current = db.shifts
+    .filter((s) => s.personnel_id === p.id && ['SCHEDULED', 'CONFIRMED', 'CLOCKED_IN'].includes(s.status)
+      && Date.parse(s.starts_at) - CLOCK_IN_EARLY_MS <= now && now < Date.parse(s.ends_at))
+    .sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
+  const s = current.find((x) => x.status === 'CLOCKED_IN') || current[0];
+  if (!s) {
+    logEvent('shift.clock_in_no_shift', `${p.name} SIGNED IN AT ${workstation || 'A WORKSTATION'} WITH NO SHIFT ON THE ROTA`, { personnel_id: p.id, workstation });
+    throw httpError(409, 'no shift on the rota now or in the next hour');
+  }
+  if (s.status === 'CLOCKED_IN') return { result: 'ALREADY_CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
+
+  s.status = 'CLOCKED_IN'; s.clocked_in_at = new Date().toISOString();
+  broadcast('shift.updated', publicShift(s), { personnelIds: [s.personnel_id] });
+  logEvent('shift.clocked_in', `${p.name} CLOCKED IN AT ${workstation || 'A WORKSTATION'}`, { shift_id: s.id, personnel_id: s.personnel_id, workstation });
+  return { result: 'CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
+});
+
+/* ---- Control room click-to-dial relay -----------------------------------
+ * A control room PC dials through the phone system's AMI directly when it is
+ * on the office network or VPN. Off it, it falls back to this relay, which
+ * does the same from inside the network: ring the operator's extension, then
+ * connect it to the number. Same shared secret as clock-in.
+ *
+ * Because this lets the phone system dial out from the internet, it is kept
+ * narrow: the channel is built here from the extension, never taken from the
+ * request; only numbers matching DIAL_ALLOW can be dialled - by default any
+ * UK number except premium rate (09, 118, 070 personal numbers and 0871-3),
+ * and no international; each
+ * workstation is held to DIAL_MAX_PER_HOUR calls; and every dial is audited. */
+const DIAL_EXT_RE = /^\d{2,6}$/;
+const DIAL_ALLOW_DEFAULT = '^(?!118)(0(?!9|70|87[1-3])\\d{9,10}|\\d{2,6})$';
+const dialLog = new Map(); // workstation -> recent dial timestamps
+function amiOriginate({ channel, number, context, ringSeconds = 30 }) {
+  const host = process.env.AMI_HOST, port = Number(process.env.AMI_PORT || 5038);
+  return new Promise((resolve, reject) => {
+    const sock = net.connect({ host, port });
+    const actionId = crypto.randomBytes(8).toString('hex');
+    let buf = '', loggedIn = false, settled = false;
+    const done = (err) => {
+      if (settled) return; settled = true; clearTimeout(timer);
+      sock.destroy();
+      err ? reject(err) : resolve();
+    };
+    const timer = setTimeout(() => done(new Error('phone system did not answer')), 8000);
+    sock.on('error', (e) => done(new Error(`phone system unreachable (${e.code || e.message})`)));
+    sock.on('connect', () => sock.write(
+      `Action: Login\r\nUsername: ${process.env.AMI_USER}\r\nSecret: ${process.env.AMI_SECRET}\r\nEvents: off\r\n\r\n`));
+    sock.on('data', (d) => {
+      buf += d.toString();
+      let i;
+      while ((i = buf.indexOf('\r\n\r\n')) >= 0) {
+        const msg = buf.slice(0, i); buf = buf.slice(i + 4);
+        if (!/^Response:/m.test(msg)) continue;
+        const ok = /^Response:\s*Success/im.test(msg);
+        if (!loggedIn) {
+          if (!ok) return done(new Error('phone system refused the login'));
+          loggedIn = true;
+          sock.write(`Action: Originate\r\nActionID: ${actionId}\r\nChannel: ${channel}\r\nContext: ${context}\r\n` +
+            `Exten: ${number}\r\nPriority: 1\r\nCallerID: Echelon <${number}>\r\nTimeout: ${ringSeconds * 1000}\r\nAsync: true\r\n\r\n`);
+        } else if (msg.includes(actionId)) {
+          return ok ? done() : done(new Error('phone system rejected the call'));
+        }
+      }
+    });
+  });
+}
+route('POST', '/api/integrations/workstation/dial', null, async ({ body, req }) => {
+  assertWorkstationSecret(req);
+  if (!process.env.AMI_HOST || !process.env.AMI_USER || !process.env.AMI_SECRET) throw httpError(503, 'dial relay not configured');
+  const ext = String(body.extension || '');
+  const number = String(body.number || '');
+  const workstation = String(body.workstation || '').slice(0, 64) || 'unknown';
+  if (!DIAL_EXT_RE.test(ext)) throw httpError(400, 'extension must be 2-6 digits');
+  if (!new RegExp(process.env.DIAL_ALLOW || DIAL_ALLOW_DEFAULT).test(number)) {
+    logEvent('dial.refused', `DIAL FROM ${ext} TO ${number} REFUSED: NUMBER NOT ALLOWED`, { extension: ext, number, workstation });
+    throw httpError(403, 'that number cannot be dialled through the relay');
+  }
+  const now = Date.now();
+  const recent = (dialLog.get(workstation) || []).filter((t) => now - t < 3600000);
+  if (recent.length >= Number(process.env.DIAL_MAX_PER_HOUR || 200)) throw httpError(429, 'too many calls from this workstation this hour');
+  recent.push(now); dialLog.set(workstation, recent);
+
+  const context = process.env.AMI_CONTEXT || 'from-internal';
+  const local = String(process.env.AMI_LOCAL_EXTENSIONS || '').split(',').map((x) => x.trim()).includes(ext);
+  const channel = local ? `Local/${ext}@${context}` : `PJSIP/${ext}`;
+  try {
+    await amiOriginate({ channel, number, context });
+  } catch (e) {
+    logEvent('dial.failed', `DIAL FROM ${ext} TO ${number} FAILED: ${e.message}`, { extension: ext, number, workstation });
+    throw httpError(502, e.message);
+  }
+  logEvent('dial.relayed', `DIAL FROM ${ext} TO ${number} AT ${workstation}`, { extension: ext, number, workstation });
+  return { ok: true };
+});
+
 route('GET', '/api/config', ALL, () => ({
   audio: process.env.AUDIO !== 'off',
   foot_tracking: process.env.FOOT_TRACKING === 'on',
