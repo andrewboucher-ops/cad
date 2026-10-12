@@ -36,8 +36,9 @@
   .site-picker select { max-width: 320px; }
   #siteAddress { font-size: 12.5px; }
   .section-card { background: var(--panel-mixed); backdrop-filter: blur(var(--panel-blur)); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 16px; transition: border-color .15s var(--ease); }
-  .section-card > header { padding: 13px 16px; border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); font-weight: 700; display: flex; align-items: center; gap: 10px; }
-  .section-card > header svg { width: 16px; height: 16px; flex: none; }
+  .section-card > header { padding: 11px 16px; border-bottom: 1px solid var(--line); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-dim); font-weight: 700; display: flex; align-items: center; gap: 11px; }
+  .h-icon { width: 27px; height: 27px; border-radius: 8px; display: grid; place-items: center; flex: none; }
+  .h-icon svg { width: 15px; height: 15px; flex: none; }
   .section-card .body { padding: 12px 16px 14px; }
   .list-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
   .list-row:last-child { border-bottom: none; }
@@ -91,17 +92,17 @@
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" stroke-linecap="round"/></svg>Open jobs &amp; patrol visits</header>
+    <header><span class="h-icon" style="background:rgba(249,115,22,.15);color:var(--priority)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" stroke-linecap="round"/></svg></span>Open jobs &amp; patrol visits</header>
     <div class="body" id="activityBody"><p class="empty-note">Loading…</p></div>
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 8v5M12 16h.01" stroke-linecap="round"/></svg>Incident &amp; site reports</header>
+    <header><span class="h-icon" style="background:rgba(239,68,68,.15);color:var(--emergency)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 8v5M12 16h.01" stroke-linecap="round"/></svg></span>Incident &amp; site reports</header>
     <div class="body" id="incidentsBody"><p class="empty-note">Loading…</p></div>
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg>Service report</header>
+    <header><span class="h-icon" style="background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Service report</header>
     <div class="body">
       <div class="range-row">
         <div><label>From</label><input type="date" id="repFrom"></div>
@@ -113,7 +114,7 @@
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 3v3M16 3v3" stroke-linecap="round"/></svg>Rota &amp; patrols</header>
+    <header><span class="h-icon" style="background:rgba(59,130,246,.15);color:var(--on-task)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 3v3M16 3v3" stroke-linecap="round"/></svg></span>Rota &amp; patrols</header>
     <div class="body">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px" id="spRange">
         <button type="button" class="btn" data-sp="today">Today</button><button type="button" class="btn" data-sp="week">Last 7 days</button><button type="button" class="btn" data-sp="next">Next 7 days</button>
@@ -123,27 +124,27 @@
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l4 4v14H6z" stroke-linejoin="round"/><path d="M15 3v4h4M9 12h6M9 16h3" stroke-linecap="round"/><path d="M13 18c1-1.5 2-1.5 2.5 0s1.5 1 2.5-.5" stroke-linecap="round"/></svg>Quotes &amp; contracts</header>
+    <header><span class="h-icon" style="background:rgba(34,197,94,.15);color:var(--available)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l4 4v14H6z" stroke-linejoin="round"/><path d="M15 3v4h4M9 12h6M9 16h3" stroke-linecap="round"/><path d="M13 18c1-1.5 2-1.5 2.5 0s1.5 1 2.5-.5" stroke-linecap="round"/></svg></span>Quotes &amp; contracts</header>
     <div class="body" id="agreementsBody"><p class="empty-note">Loading…</p></div>
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h12v18l-2-1.5L14 21l-2-1.5L10 21l-2-1.5L6 21z" stroke-linejoin="round"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg>Invoices</header>
+    <header><span class="h-icon" style="background:rgba(234,179,8,.15);color:var(--busy)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h12v18l-2-1.5L14 21l-2-1.5L10 21l-2-1.5L6 21z" stroke-linejoin="round"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Invoices</header>
     <div class="body" id="invoicesBody"><p class="empty-note">Loading…</p></div>
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4" stroke-linecap="round"/><path d="M15 17l1.5 1.5L19 15" stroke-linecap="round" stroke-linejoin="round"/></svg>Equipment on hire</header>
+    <header><span class="h-icon" style="background:rgba(100,116,139,.18);color:var(--offline)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4" stroke-linecap="round"/><path d="M15 17l1.5 1.5L19 15" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Equipment on hire</header>
     <div class="body" id="rentalsBody"><p class="empty-note">Loading…</p></div>
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg>Documents</header>
+    <header><span class="h-icon" style="background:color-mix(in srgb, var(--accent-dim) 20%, transparent);color:var(--accent-dim)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Documents</header>
     <div class="body" id="docsBody"><p class="empty-note">Loading…</p></div>
   </div>
 
   <div class="section-card">
-    <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H9l-5 4z" stroke-linejoin="round"/></svg>Raise a request</header>
+    <header><span class="h-icon" style="background:rgba(244,63,94,.15);color:#f43f5e"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H9l-5 4z" stroke-linejoin="round"/></svg></span>Raise a request</header>
     <div class="body">
       <div class="stack" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
         <input id="reqSubject" placeholder="Subject" autocomplete="off">
