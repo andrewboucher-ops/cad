@@ -142,7 +142,7 @@ test('document upload validates type, mimetype and magic bytes', async () => {
 });
 
 /* ---------------- versioned assignment instructions / site maps ---------------- */
-test('assignment instructions and site maps are versioned by title, and never reach the client portal', async () => {
+test('assignment instructions and site maps are versioned by title, and only the CURRENT version reaches the client portal — inductions and generic site documents never do', async () => {
   const site = (await call('GET', '/api/sites', undefined, dispT)).body[0];
 
   assert.equal((await call('POST', `/api/sites/${site.id}/documents`, { type: 'ASSIGNMENT_INSTRUCTIONS', mimetype: 'application/pdf', data: PDF }, adminT)).status, 400, 'title is required for a versioned type');
@@ -161,14 +161,28 @@ test('assignment instructions and site maps are versioned by title, and never re
 
   const otherMap = await call('POST', `/api/sites/${site.id}/documents`, { type: 'SITE_MAP', title: 'Perimeter', mimetype: 'application/pdf', data: PDF }, adminT);
   assert.equal(otherMap.body.version, 1, 'a different title starts its own lineage');
+  const induction = await call('POST', `/api/sites/${site.id}/documents`, { type: 'INDUCTION', title: 'Induction pack', mimetype: 'application/pdf', data: PDF }, adminT);
+  const siteDoc = await call('POST', `/api/sites/${site.id}/documents`, { type: 'SITE_DOCUMENT', mimetype: 'application/pdf', data: PDF }, adminT);
 
-  // Never reaches the client portal, even for a client who owns this site.
   const client = (await call('POST', '/api/clients', { name: 'Doc Test Co', site_ids: [site.id] }, adminT)).body;
   await call('POST', '/api/users', { username: 'docclient', password: 'realpassword1', role: 'CLIENT', client_id: client.id }, adminT);
   const clientT = await login('docclient', 'realpassword1');
-  const clientDocs = await call('GET', '/api/client/documents', undefined, clientT);
-  assert.ok(!clientDocs.body.some((d) => ['ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP'].includes(d.type)), 'a client never sees internal operational documents');
-  assert.equal((await call('GET', `/api/client/documents/${v2.body.id}/file`, undefined, clientT)).status, 404, 'not reachable directly by id either');
+  const clientDocs = (await call('GET', '/api/client/documents', undefined, clientT)).body;
+
+  // Instructions and the site plan reach the client — but only the
+  // current version of the instructions, never a superseded one.
+  assert.ok(clientDocs.some((d) => d.id === v2.body.id), 'the current assignment instructions reach the client');
+  assert.ok(!clientDocs.some((d) => d.id === v1.body.id), 'the superseded version does not');
+  assert.ok(clientDocs.some((d) => d.id === otherMap.body.id), 'and the site plan');
+  assert.equal((await call('GET', `/api/client/documents/${v1.body.id}/file`, undefined, clientT)).status, 404, 'an old version is not reachable directly by id either');
+  assert.equal((await call('GET', `/api/client/documents/${v2.body.id}/file`, undefined, clientT)).status, 200, 'the current version is');
+
+  // Inductions (staff onboarding) and generic site documents never reach
+  // the portal at all, current version or not.
+  assert.ok(!clientDocs.some((d) => d.id === induction.body.id), 'inductions are staff onboarding, not client-facing');
+  assert.ok(!clientDocs.some((d) => d.id === siteDoc.body.id), 'nor generic site documents — only the contract and the two operational types');
+  assert.equal((await call('GET', `/api/client/documents/${induction.body.id}/file`, undefined, clientT)).status, 404);
+  assert.equal((await call('GET', `/api/client/documents/${siteDoc.body.id}/file`, undefined, clientT)).status, 404);
 });
 
 /* ---------------- broadcast is opt-in only for CLIENT ---------------- */

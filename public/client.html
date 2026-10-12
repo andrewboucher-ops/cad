@@ -226,11 +226,11 @@ async function runReport() {
 }
 el('#repRun').onclick = runReport;
 
-const DOC_LABEL = { CONTRACT: 'Contract', SITE_DOCUMENT: 'Site document' };
+const DOC_LABEL = { CONTRACT: 'Contract', SITE_DOCUMENT: 'Site document', ASSIGNMENT_INSTRUCTIONS: 'Site instructions', SITE_MAP: 'Site plan' };
 async function paintDocs() {
   const docs = await api('GET', withAs(`/api/client/documents?site_id=${currentSiteId}`));
   el('#docsBody').innerHTML = docs.length
-    ? docs.map((d) => `<div class="list-row doc-row"><span class="t">${esc(DOC_LABEL[d.type] || d.type)}</span><a href="${withAs(`/api/client/documents/${d.id}/file?token=${encodeURIComponent(getSession().token)}`)}" target="_blank" style="flex:1">${esc(d.filename)}</a><span class="dim" style="font-size:11px">${esc(fmtDate(d.uploaded_at))}</span></div>`).join('')
+    ? docs.map((d) => `<div class="list-row doc-row"><span class="t">${esc(DOC_LABEL[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</span><a href="${withAs(`/api/client/documents/${d.id}/file?token=${encodeURIComponent(getSession().token)}`)}" target="_blank" style="flex:1">${esc(d.filename)}</a><span class="dim" style="font-size:11px">${esc(fmtDate(d.uploaded_at))}</span></div>`).join('')
     : '<p class="empty-note">No documents on file for this site yet.</p>';
 }
 

@@ -43,6 +43,13 @@ const crypto = require('crypto');
 // independent-upload behaviour unchanged.
 const DOC_TYPES = ['CONTRACT', 'SITE_DOCUMENT', 'ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP', 'INDUCTION'];
 const VERSIONED_DOC_TYPES = ['ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP', 'INDUCTION'];
+// What a client sees in their portal: their contract, and the two
+// operational documents they need on site day to day — their assignment
+// instructions and the site plan. Not SITE_DOCUMENT (internal paperwork
+// with no fixed meaning), and not INDUCTION (staff onboarding, not
+// client-facing). Only ever the CURRENT version of a versioned type —
+// see is_current below.
+const CLIENT_VISIBLE_DOC_TYPES = ['CONTRACT', 'ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP'];
 const DOC_MAX_BYTES = 15e6;
 
 // Magic bytes, not the declared mimetype — same reasoning as routes-forms.js:
@@ -538,19 +545,20 @@ module.exports = function registerClientRoutes({
     const site = ownedSite(client, params.id);
     return forms.clientVisibleSubmissions([site.id]);
   });
+  // A versioned type's superseded copies are never shown — only is_current
+  // (see the upload route above, which flips the previous row's flag when
+  // a new one is uploaded under the same title).
+  const clientCanSeeDoc = (d) => CLIENT_VISIBLE_DOC_TYPES.includes(d.type) && (!VERSIONED_DOC_TYPES.includes(d.type) || d.is_current !== false);
   route('GET', '/api/client/documents', CLIENT_OR_ADMIN, ({ user, query }) => {
     const client = requireClient(user, query);
     const siteId = query.get('site_id') ? Number(query.get('site_id')) : null;
     if (siteId) ownedSite(client, siteId);
-    // Assignment instructions and site maps are internal operational
-    // documents — a client sees contracts and site paperwork about their
-    // own site, never the patrol route or access details staff work from.
-    return db.documents.filter((d) => client.site_ids.includes(d.site_id) && (!siteId || d.site_id === siteId) && !VERSIONED_DOC_TYPES.includes(d.type)).map(publicDocument);
+    return db.documents.filter((d) => client.site_ids.includes(d.site_id) && (!siteId || d.site_id === siteId) && clientCanSeeDoc(d)).map(publicDocument);
   });
   route('GET', '/api/client/documents/:id/file', CLIENT_OR_ADMIN, ({ params, user, query }) => {
     const client = requireClient(user, query);
     const d = db.documents.find((x) => x.id === Number(params.id));
-    if (!d || !client.site_ids.includes(d.site_id) || VERSIONED_DOC_TYPES.includes(d.type)) throw httpError(404, 'document not found');
+    if (!d || !client.site_ids.includes(d.site_id) || !clientCanSeeDoc(d)) throw httpError(404, 'document not found');
     const file = path.join(documentsDir(d.site_id), d.stored_name);
     if (!fs.existsSync(file)) throw httpError(404, 'document file missing');
     return { __stream: fs.createReadStream(file), __headers: { 'content-type': d.mimetype, 'cache-control': 'private, max-age=604800', 'content-disposition': `attachment; filename="${d.filename.replace(/"/g, '')}"` } };
