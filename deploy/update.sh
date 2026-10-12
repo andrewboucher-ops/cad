@@ -60,7 +60,12 @@ say "Deploying $(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD) @ $(git -C "$SRC
 
 say "1/6  Tests"
 if [ -n "$DRY_RUN" ]; then echo "   (dry run) skipping"; else
-  (cd "$SRC_DIR" && node --test test/*.test.js >/tmp/cccs-deploy-tests.log 2>&1) \
+  # A clean environment, not this shell's: the tests raise emergencies and
+  # submit job applications, so if the live cccs.env settings are exported
+  # here (MQTT, Graph mail, AMI, Twilio...), those go out for real -- panic
+  # alarms on the live GuardM8 account and bounced emails to test addresses.
+  (cd "$SRC_DIR" && env -i PATH="$PATH" HOME="${HOME:-/root}" NODE_NO_WARNINGS=1 \
+    node --test test/*.test.js >/tmp/cccs-deploy-tests.log 2>&1) \
     || { tail -30 /tmp/cccs-deploy-tests.log; die "tests failed (full log: /tmp/cccs-deploy-tests.log)"; }
   grep -E '^# (pass|fail)' /tmp/cccs-deploy-tests.log | sed 's/^/   /'
 fi
