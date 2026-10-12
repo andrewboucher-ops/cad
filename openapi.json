@@ -332,6 +332,52 @@
         }
       }
     },
+    "/api/integrations/workstation/clock-in": {
+      "post": {
+        "summary": "Control room PC clocks its Windows user into their current rota shift (shared-secret auth via X-Workstation-Secret, not a user session). Body: upn, username, workstation",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "clocked in, or already clocked in"
+          },
+          "401": {
+            "description": "bad secret"
+          },
+          "404": {
+            "description": "no CCCS account or personnel record matches"
+          },
+          "409": {
+            "description": "no shift on the rota now or in the next hour"
+          }
+        }
+      }
+    },
+    "/api/integrations/workstation/dial": {
+      "post": {
+        "summary": "Click-to-dial relay for control room PCs off the VPN: ring the extension, then dial the number (shared-secret auth via X-Workstation-Secret). Body: extension, number, workstation",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "call queued"
+          },
+          "401": {
+            "description": "bad secret"
+          },
+          "403": {
+            "description": "number not allowed"
+          },
+          "429": {
+            "description": "too many calls from this workstation"
+          },
+          "502": {
+            "description": "phone system unreachable or refused"
+          },
+          "503": {
+            "description": "relay not configured"
+          }
+        }
+      }
+    },
     "/api/emergency": {
       "get": {
         "summary": "List emergency events",

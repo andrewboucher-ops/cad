@@ -70,6 +70,10 @@ These are deliberately weak demo credentials for a POC. Replace them before the 
 | `RETAIN_MESSAGES_DAYS` | `180` | message metadata |
 | `RETAIN_JOBS_DAYS` | `730` | closed jobs |
 | `GUARDM8_SECRET` | — | shared secret for GuardM8's `POST /api/integrations/guardm8/jobs` |
+| `WORKSTATION_SECRET` | — | shared secret for control room PCs' `POST /api/integrations/workstation/clock-in` |
+| `AMI_HOST` / `AMI_PORT` / `AMI_USER` / `AMI_SECRET` | — / `5038` | phone system AMI login for the click-to-dial relay; unset disables it |
+| `AMI_CONTEXT` / `AMI_LOCAL_EXTENSIONS` | `from-internal` / — | dialplan context, and extensions (comma-separated) that ring as `Local/ext@context` instead of `PJSIP/ext` |
+| `DIAL_ALLOW` / `DIAL_MAX_PER_HOUR` | UK landline/mobile / `60` | numbers the relay may dial (a regex), and calls per workstation per hour |
 | `MS_TENANT_ID` / `MS_CLIENT_ID` / `MS_CLIENT_SECRET` / `MS_REDIRECT_URI` | — | Microsoft Entra ID SSO — see `docs/SSO.md` |
 
 No secrets are hardcoded. If `AUTH_SECRET` is unset the server generates an ephemeral one and warns; sessions then drop on restart.
@@ -395,6 +399,28 @@ guarding/alarm-receiving product) push an alarm straight in as a dispatchable
 job, authenticated with a shared secret (`GUARDM8_SECRET`) rather than a user
 session. `external_ref` lets GuardM8 retry a send without creating a
 duplicate job.
+
+## Control room clock-in
+
+`POST /api/integrations/workstation/clock-in` lets a control room PC clock its
+operator in when they sign in to Windows. It is authenticated with a shared
+secret (`WORKSTATION_SECRET`) and can only clock a person into a shift already
+on the rota: the one running now, or starting within the hour. The Windows
+account is matched to a CCCS login by email (its UPN) or username, and from
+there to the login's personnel record. A sign-in with no matching login, or
+with no shift, is written to the audit trail for a supervisor.
+
+## Control room click-to-dial relay
+
+`POST /api/integrations/workstation/dial` lets a control room PC that is off
+the office network or VPN still click to dial: CCCS rings the operator's
+extension through the phone system's AMI and connects it to the number. It
+uses the same `WORKSTATION_SECRET` as clock-in. Because it lets the phone
+system dial out from the internet it is deliberately narrow: the channel is
+built server-side from the extension, only numbers matching `DIAL_ALLOW` (by
+default UK landline and mobile numbers and short internal numbers, never
+international or premium rate) are dialled, each workstation is held to
+`DIAL_MAX_PER_HOUR`, and every dial or refusal is audited.
 
 ## Deployment
 
