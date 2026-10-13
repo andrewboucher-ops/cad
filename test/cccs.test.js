@@ -12,6 +12,7 @@ process.env.WELFARE_TICK_MS = '200';
 process.env.WELFARE_WARN_S = '2';
 process.env.PATROL_SCHEDULE_TICK_MS = '3600000'; // tests drive this by calling app.patrolScheduleTick() directly
 process.env.VISIT_MISSED_GRACE_MIN = '120';
+process.env.PRF_INTEGRATION_SECRET = 'test-prf-secret';
 
 const app = require('../server.js');
 const BASE = `http://127.0.0.1:${process.env.PORT}`;
@@ -1770,6 +1771,74 @@ test('different idempotency keys create separate jobs', async () => {
   const a = await mk('k-a-' + Date.now());
   const b = await mk('k-b-' + Date.now());
   assert.notEqual(a.id, b.id);
+});
+
+test('a medical job can carry patient questions, is filterable, and only control can set or change them', async () => {
+  const created = await call('POST', '/api/jobs', {
+    priority: 'GREEN', location: 'Main stage', is_medical: true,
+    patient_name: 'Jamie Smith', patient_dob: '1990-05-14', chief_complaint: 'sprain_strain',
+  }, dispT);
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.is_medical, true);
+  assert.equal(created.body.patient_name, 'Jamie Smith');
+  assert.equal(created.body.patient_dob, '1990-05-14');
+  assert.equal(created.body.chief_complaint, 'sprain_strain');
+
+  const invalid = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'X', chief_complaint: 'not-a-real-code' }, dispT);
+  assert.equal(invalid.status, 400);
+
+  const filtered = await call('GET', '/api/jobs?is_medical=true', undefined, dispT);
+  assert.equal(filtered.status, 200);
+  assert.ok(filtered.body.some((j) => j.id === created.body.id));
+  assert.ok(!filtered.body.some((j) => j.patient_name === undefined), 'every row carries the field even if blank');
+
+  const notMedical = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Y' }, dispT);
+  const filteredFalse = await call('GET', '/api/jobs?is_medical=false', undefined, dispT);
+  assert.ok(filteredFalse.body.some((j) => j.id === notMedical.body.id));
+  assert.ok(!filteredFalse.body.some((j) => j.id === created.body.id));
+
+  // Only control can edit the medical fields or priority after creation.
+  assert.equal((await call('PATCH', `/api/jobs/${created.body.id}`, { patient_name: 'Hacked' }, danT)).status, 403);
+  assert.equal((await call('PATCH', `/api/jobs/${created.body.id}`, { priority: 'RED' }, danT)).status, 403);
+  assert.equal((await call('PATCH', `/api/jobs/${created.body.id}`, { chief_complaint: 'not-a-real-code' }, dispT)).status, 400);
+
+  const updated = await call('PATCH', `/api/jobs/${created.body.id}`, {
+    patient_name: 'Jamie A. Smith', chief_complaint: 'fracture', priority: 'AMBER',
+  }, dispT);
+  assert.equal(updated.status, 200, JSON.stringify(updated.body));
+  assert.equal(updated.body.patient_name, 'Jamie A. Smith');
+  assert.equal(updated.body.chief_complaint, 'fracture');
+  assert.equal(updated.body.priority, 'AMBER');
+});
+
+test('the PRF system\'s CAD lookup is shared-secret gated and returns a job by reference or by raw id', async () => {
+  const job = await call('POST', '/api/jobs', {
+    priority: 'RED', location: 'Gate 3', is_medical: true,
+    patient_name: 'Pat Doe', patient_dob: '1975-01-01', chief_complaint: 'cardiac', description: 'Collapsed at the gate', caller: 'Steward on duty',
+  }, dispT);
+  assert.equal(job.status, 201);
+
+  const noSecret = await fetch(BASE + `/api/integrations/prf/jobs/${job.body.reference}`);
+  assert.equal(noSecret.status, 401);
+  const wrongSecret = await fetch(BASE + `/api/integrations/prf/jobs/${job.body.reference}`, { headers: { 'x-prf-integration-secret': 'nope' } });
+  assert.equal(wrongSecret.status, 401);
+
+  const notFound = await fetch(BASE + `/api/integrations/prf/jobs/INC-9999-99999`, { headers: { 'x-prf-integration-secret': 'test-prf-secret' } });
+  assert.equal(notFound.status, 404);
+
+  const byRef = await fetch(BASE + `/api/integrations/prf/jobs/${job.body.reference}`, { headers: { 'x-prf-integration-secret': 'test-prf-secret' } });
+  assert.equal(byRef.status, 200);
+  const byRefBody = await byRef.json();
+  assert.equal(byRefBody.patient_name, 'Pat Doe');
+  assert.equal(byRefBody.patient_dob, '1975-01-01');
+  assert.equal(byRefBody.chief_complaint, 'cardiac');
+  assert.match(byRefBody.chief_complaint_label, /Chest pain/);
+  assert.equal(byRefBody.description, 'Collapsed at the gate');
+  assert.equal(byRefBody.caller, 'Steward on duty');
+
+  const byId = await fetch(BASE + `/api/integrations/prf/jobs/${job.body.id}`, { headers: { 'x-prf-integration-secret': 'test-prf-secret' } });
+  assert.equal(byId.status, 200);
+  assert.equal((await byId.json()).id, job.body.id);
 });
 
 /* ---------------- callback requests ---------------- */

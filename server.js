@@ -38,6 +38,7 @@ const MS_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && M
 // with "bad integration secret", same fail-safe-closed default as the
 // workstation integration's own secret.
 const PRF_INTEGRATION_SECRET = process.env.PRF_INTEGRATION_SECRET || '';
+const { CHIEF_COMPLAINTS, CHIEF_COMPLAINT_CODES, complaintLabel } = require('./complaint-list.js');
 const { verifyMicrosoftIdToken } = require('./msauth.js');
 const webpush = require('./webpush.js');
 const sms = require('./sms.js');
@@ -2319,6 +2320,7 @@ route('DELETE', '/api/callsigns/:id/assign', CONTROL, ({ params, body }) => {
 route('GET', '/api/jobs', ALL, ({ query, user }) => {
   let jobs = db.jobs.filter((j) => siteVisibleTo(j.site_id, user)).map(publicJob);
   if (query.get('status')) jobs = jobs.filter((j) => j.status === query.get('status').toUpperCase());
+  if (query.get('is_medical') != null) jobs = jobs.filter((j) => Boolean(j.is_medical) === (query.get('is_medical') === 'true'));
   return jobs;
 });
 /* On-scene checklist — every job gets one, instantiated from the site's own
@@ -2349,6 +2351,8 @@ route('POST', '/api/jobs', CONTROL, ({ body, user }) => {
   if (!PRIORITIES.includes(priority)) throw httpError(400, 'invalid priority');
   const site = body.site ? db.sites.find((x) => x.id === Number(body.site) || x.name === String(body.site)) : null;
   if (!body.location && !site) throw httpError(400, 'location or site required');
+  const chiefComplaint = String(body.chief_complaint || '');
+  if (chiefComplaint && !CHIEF_COMPLAINT_CODES.includes(chiefComplaint)) throw httpError(400, 'invalid chief_complaint');
   const j = {
     id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
     incident_type: body.incident_type || 'UNSPECIFIED', priority,
@@ -2360,6 +2364,10 @@ route('POST', '/api/jobs', CONTROL, ({ body, user }) => {
     what3words: String(body.what3words || '').replace(/^\/+/, '').trim(),
     notes: body.notes || '', status: 'CREATED', created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     checklist: instantiateChecklist(site), media: [],
+    is_medical: Boolean(body.is_medical),
+    patient_name: String(body.patient_name || '').slice(0, 200),
+    patient_dob: String(body.patient_dob || '').slice(0, 20),
+    chief_complaint: chiefComplaint,
   };
   db.jobs.push(j);
   broadcast('job.created', publicJob(j));
@@ -2876,6 +2884,31 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
     for (const [f, max] of Object.entries(DETAIL_FIELDS)) if (body[f] !== undefined) j[f] = String(body[f]).slice(0, max);
     if (body.what3words !== undefined) j.what3words = String(body.what3words).replace(/^\/+/, '').trim();
   }
+  // Medical incident flag, the patient questions it unlocks, and priority
+  // — all control-gated like the incident details above. Priority has no
+  // other edit route (only set once at creation until now), which this
+  // feature needs: a dispatcher adjusts it as the chief complaint is
+  // entered or corrected, same as they would for any other triage change.
+  if (body.is_medical !== undefined) {
+    if (!isControlRole(user.role)) throw httpError(403, 'only control can edit incident details');
+    j.is_medical = Boolean(body.is_medical);
+  }
+  const MEDICAL_FIELDS = { patient_name: 200, patient_dob: 20 };
+  if (Object.keys(MEDICAL_FIELDS).some((f) => body[f] !== undefined) || body.chief_complaint !== undefined) {
+    if (!isControlRole(user.role)) throw httpError(403, 'only control can edit incident details');
+    for (const [f, max] of Object.entries(MEDICAL_FIELDS)) if (body[f] !== undefined) j[f] = String(body[f]).slice(0, max);
+    if (body.chief_complaint !== undefined) {
+      const cc = String(body.chief_complaint || '');
+      if (cc && !CHIEF_COMPLAINT_CODES.includes(cc)) throw httpError(400, 'invalid chief_complaint');
+      j.chief_complaint = cc;
+    }
+  }
+  if (body.priority !== undefined) {
+    if (!isControlRole(user.role)) throw httpError(403, 'only control can edit incident details');
+    const pr = String(body.priority).toUpperCase();
+    if (!PRIORITIES.includes(pr)) throw httpError(400, 'invalid priority');
+    j.priority = pr;
+  }
   j.updated_at = new Date().toISOString();
   broadcast('job.status_changed', publicJob(j));
   if (settingTimes) {
@@ -2883,6 +2916,30 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   }
   logEvent('job.status_changed', `JOB ${j.reference} → ${j.status}`, { job_id: j.id });
   return publicJob(j);
+});
+
+/** Read-only job lookup for the PRF system's own CAD search/sync — a
+ * first aider enters a CCCS job reference (or raw numeric id) and the
+ * PRF system pulls across whatever control already captured (patient
+ * name/DoB/chief complaint if it's a medical job, description, caller,
+ * site). Shared-secret gated, same pattern as the stock/medication/
+ * catalogue integration routes in routes-inventory.js/routes-medication.js
+ * — this system never holds a CCCS session. GET, not POST: it changes
+ * nothing on the CCCS side. */
+route('GET', '/api/integrations/prf/jobs/:reference', null, ({ params, req }) => {
+  if (!PRF_INTEGRATION_SECRET || req.headers['x-prf-integration-secret'] !== PRF_INTEGRATION_SECRET) throw httpError(401, 'bad integration secret');
+  const ref = String(params.reference || '').trim().toUpperCase();
+  const j = db.jobs.find((x) => x.reference.toUpperCase() === ref || String(x.id) === ref);
+  if (!j) throw httpError(404, 'job not found');
+  const site = j.site_id ? db.sites.find((s) => s.id === j.site_id) : null;
+  return {
+    id: j.id, reference: j.reference, is_medical: Boolean(j.is_medical),
+    incident_type: j.incident_type, location: j.location, site: site ? site.name : null,
+    description: j.description || '', notes: j.notes || '', caller: j.caller || '',
+    patient_name: j.patient_name || '', patient_dob: j.patient_dob || '',
+    chief_complaint: j.chief_complaint || '', chief_complaint_label: complaintLabel(j.chief_complaint),
+    priority: j.priority, status: j.status, created_at: j.created_at,
+  };
 });
 /** Only the assigned personnel/MDT (or control) may touch a job's checklist —
  * same "is this mine" check used by the general job PATCH above, pulled out

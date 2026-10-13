@@ -212,6 +212,41 @@ if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new E
 const localDT = (iso) => (iso ? new Date(Date.parse(iso) - new Date(iso).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '');
 const me = CCCS.getSession().user;
 
+// Mirrors server.js's complaint-list.js — duplicated here because this is
+// a plain static page with no shared-module step, same as how AVPU/
+// INJURY_TYPES are duplicated between the PRF system's routes-prfs.js and
+// app.html. NOT the real MPDS/AMPDS protocol (that's licensed IP) — our
+// own short list, priority is only ever a starting suggestion.
+const CHIEF_COMPLAINTS = [
+  { code: 'cardiac', label: 'Chest pain / cardiac symptoms', priority: 'RED' },
+  { code: 'breathing', label: 'Breathing difficulty / shortness of breath', priority: 'RED' },
+  { code: 'unresponsive', label: 'Unconscious / unresponsive', priority: 'RED' },
+  { code: 'bleeding_severe', label: 'Severe bleeding / haemorrhage', priority: 'RED' },
+  { code: 'anaphylaxis', label: 'Anaphylaxis / severe allergic reaction', priority: 'RED' },
+  { code: 'seizure', label: 'Seizure / fitting', priority: 'RED' },
+  { code: 'stroke', label: 'Stroke symptoms (face / arm / speech)', priority: 'RED' },
+  { code: 'choking', label: 'Choking', priority: 'RED' },
+  { code: 'major_trauma', label: 'Major trauma / fall from height', priority: 'RED' },
+  { code: 'burns_major', label: 'Burns — significant', priority: 'AMBER' },
+  { code: 'fracture', label: 'Fracture / suspected broken bone', priority: 'AMBER' },
+  { code: 'head_injury', label: 'Head injury', priority: 'AMBER' },
+  { code: 'abdo_pain', label: 'Abdominal pain — severe', priority: 'AMBER' },
+  { code: 'diabetic', label: 'Diabetic emergency', priority: 'AMBER' },
+  { code: 'intoxication', label: 'Alcohol / drug intoxication', priority: 'AMBER' },
+  { code: 'mental_health', label: 'Mental health crisis / self-harm', priority: 'AMBER' },
+  { code: 'allergic_mild', label: 'Allergic reaction — mild', priority: 'AMBER' },
+  { code: 'bleeding_minor', label: 'Minor bleeding / laceration', priority: 'GREEN' },
+  { code: 'sprain_strain', label: 'Sprain / strain', priority: 'GREEN' },
+  { code: 'burns_minor', label: 'Burns — minor', priority: 'GREEN' },
+  { code: 'nausea_vomiting', label: 'Nausea / vomiting', priority: 'GREEN' },
+  { code: 'headache', label: 'Headache — non-severe', priority: 'GREEN' },
+  { code: 'faint_dizzy', label: 'Fainting / dizziness — recovered', priority: 'GREEN' },
+  { code: 'other', label: 'Other / unspecified', priority: 'AMBER' },
+];
+const complaintLabel = (code) => (CHIEF_COMPLAINTS.find((c) => c.code === code) || {}).label || '';
+const complaintPriority = (code) => (CHIEF_COMPLAINTS.find((c) => c.code === code) || {}).priority || '';
+const PRIORITIES_LIST = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
+
 el('#whoName').textContent = me.display_name;
 el('#whoRole').textContent = me.role.replace('_', ' ');
 el('#avatar').textContent = me.display_name.split(/\s+/).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
@@ -470,6 +505,7 @@ function renderDispatch() {
         <span style="display:flex;gap:6px;align-items:center"><span class="kind ${it.kind}">${it.kind === 'job' ? 'JOB' : 'VISIT'}</span><span class="cs">${esc(r.reference)}</span></span>
         <span style="display:flex;gap:6px;align-items:center">
           ${it.kind === 'job' ? `<span class="pri pri-${r.priority}">${r.priority}</span>` : ''}
+          ${it.kind === 'job' && r.is_medical ? `<span class="pri pri-AMBER" title="Medical incident">MEDICAL</span>` : ''}
           <span class="status-pill ${busyCls(r.status)}">${jobStatusLabel(r.status)}</span>
         </span>
       </div>
@@ -659,7 +695,7 @@ function renderJob(body) {
   const stageAt = { DISPATCHED: j.dispatched_at, ACKNOWLEDGED: j.acknowledged_at, EN_ROUTE: j.en_route_at, ON_SCENE: j.on_scene_at, COMPLETED: j.completed_at };
   body.innerHTML = `
     <div class="dhead">
-      <div><div style="display:flex;gap:8px;align-items:center"><span class="pri pri-${j.priority}">${j.priority}</span><h3>${esc(j.incident_type)}</h3></div>
+      <div><div style="display:flex;gap:8px;align-items:center"><span class="pri pri-${j.priority}">${j.priority}</span>${j.is_medical ? `<span class="pri pri-AMBER" title="Medical incident">MEDICAL</span>` : ''}<h3>${esc(j.incident_type)}</h3></div>
         <div class="dim" style="margin-top:4px;font-size:12.5px">${esc(j.reference)} · ${esc(j.location)}</div></div>
       ${active ? `<div style="text-align:right"><div style="font-size:20px;font-weight:800" id="jElapsed">${fmtElapsed(j.created_at)}</div><div class="dim" style="font-size:10px">SINCE CREATED</div></div>`
         : `<span class="status-pill ${j.status === 'CANCELLED' ? 'off' : 'on'}">${esc(j.status)}</span>`}
@@ -673,12 +709,28 @@ function renderJob(body) {
     </dl>
     <div id="jEdit" class="hide">
       <label>Incident type</label><input id="eType" value="${esc(j.incident_type)}">
+      <label>Priority</label><select id="ePri">${PRIORITIES_LIST.map((p) => `<option ${j.priority === p ? 'selected' : ''}>${p}</option>`).join('')}</select>
       <label>Location</label><input id="eLoc" value="${esc(j.location)}">
       <label>What3Words</label><input id="eW3w" value="${esc(j.what3words || '')}">
       <label>Caller</label><input id="eCaller" value="${esc(j.caller || '')}">
       <label>Detail</label><textarea id="eDesc" rows="3">${esc(j.description || '')}</textarea>
       <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="eSave">Save details</button><button class="btn" id="eCancel">Cancel</button></div>
     </div>
+    ${j.is_medical ? `<div class="dsec"><div class="t">Medical info</div>
+      <dl class="kv" id="jMedView">
+        <dt>Patient</dt><dd>${esc(j.patient_name || '—')}</dd>
+        <dt>DoB</dt><dd>${esc(j.patient_dob || '—')}</dd>
+        <dt>Complaint</dt><dd>${esc(complaintLabel(j.chief_complaint) || '—')}</dd>
+      </dl>
+      ${active ? `<div id="jMedEdit" class="hide">
+        <label>Patient name</label><input id="eMedName" value="${esc(j.patient_name || '')}">
+        <label>Patient date of birth</label><input id="eMedDob" type="date" value="${esc(j.patient_dob || '')}">
+        <label>Presenting complaint</label>
+        <select id="eMedComplaint"><option value="">— select —</option>${CHIEF_COMPLAINTS.map((c) => `<option value="${c.code}" ${j.chief_complaint === c.code ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select>
+        <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="eMedSave">Save medical info</button><button class="btn" id="eMedCancel">Cancel</button></div>
+      </div>
+      <button class="btn" id="jMedEditBtn" style="margin-top:6px">Edit medical info</button>` : ''}
+    </div>` : ''}
     <div class="dsec"><div class="t">Resources</div>
       ${j.resources.length ? j.resources.map((r) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:3px">
         <span style="flex:1">${esc(r.callsign || r.personnel || r.mdt)}${r.personnel && r.callsign ? ` <span class="dim">(${esc(r.personnel)})</span>` : ''}${r.acknowledged ? ' ✓' : ''}</span>
@@ -713,8 +765,15 @@ function renderJob(body) {
   el('#jEditBtn').onclick = () => { el('#jView').classList.add('hide'); el('#jEdit').classList.remove('hide'); };
   el('#eCancel').onclick = () => renderDetail({ force: true });
   el('#eSave').onclick = () => api('PATCH', `/api/jobs/${j.id}`, {
-    incident_type: el('#eType').value, location: el('#eLoc').value, what3words: el('#eW3w').value, caller: el('#eCaller').value, description: el('#eDesc').value,
+    incident_type: el('#eType').value, priority: el('#ePri').value, location: el('#eLoc').value, what3words: el('#eW3w').value, caller: el('#eCaller').value, description: el('#eDesc').value,
   }).then(() => renderDetail({ force: true })).catch(showErr);
+  if (j.is_medical && active) {
+    el('#jMedEditBtn').onclick = () => { el('#jMedView').classList.add('hide'); el('#jMedEditBtn').classList.add('hide'); el('#jMedEdit').classList.remove('hide'); };
+    el('#eMedCancel').onclick = () => renderDetail({ force: true });
+    el('#eMedSave').onclick = () => api('PATCH', `/api/jobs/${j.id}`, {
+      patient_name: el('#eMedName').value, patient_dob: el('#eMedDob').value, chief_complaint: el('#eMedComplaint').value,
+    }).then(() => renderDetail({ force: true })).catch(showErr);
+  }
   armed(el('#jDone'), 'Confirm completed', () => {
     const onScene = el('#jOnScene').value, completedAt = el('#jCompletedAt').value;
     return api('PATCH', `/api/jobs/${j.id}`, {
@@ -945,6 +1004,15 @@ function renderNewJob(body) {
     <label>What3Words (optional)</label><input id="nW3w" placeholder="///filled.count.soap">
     <label>Description</label><textarea id="nDesc" rows="2"></textarea>
     <label>Caller</label><input id="nCaller">
+    <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;margin-top:10px">
+      <input type="checkbox" id="nMedical"> Medical incident
+    </label>
+    <div id="nMedicalPanel" class="hide">
+      <label>Patient name</label><input id="nPatName">
+      <label>Patient date of birth</label><input id="nPatDob" type="date">
+      <label>Presenting complaint</label>
+      <select id="nComplaint"><option value="">— select —</option>${CHIEF_COMPLAINTS.map((c) => `<option value="${c.code}">${esc(c.label)}</option>`).join('')}</select>
+    </div>
     <label>Dispatch now (optional)</label>
     <div class="chips" id="nRes">${state.personnel.filter((p) => liveShifts().some((s) => s.personnel_id === p.id && s.clocked_in) && isAvailable(p)).map((p) => `<button type="button" class="chip" data-v="${p.id}">${esc(p.callsign || p.name)}</button>`).join('')}
       ${state.mdts.filter((m) => m.connected && !m.job_id).map((m) => `<button type="button" class="chip" data-v="${esc(m.mdt_code)}">${esc(m.mdt_code)}</button>`).join('') || ''}</div>
@@ -952,11 +1020,14 @@ function renderNewJob(body) {
     <p class="err" id="detailErr"></p>`;
   els('#nRes .chip').forEach((c) => (c.onclick = () => c.classList.toggle('on')));
   el('#nBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
+  el('#nMedical').onchange = () => el('#nMedicalPanel').classList.toggle('hide', !el('#nMedical').checked);
+  el('#nComplaint').onchange = () => { const pr = complaintPriority(el('#nComplaint').value); if (pr) el('#nPri').value = pr; };
   el('#nGo').onclick = async () => {
     try {
       const job = await api('POST', '/api/jobs', {
         incident_type: el('#nType').value, priority: el('#nPri').value, location: el('#nLoc').value, site: el('#nSite').value || undefined,
         description: el('#nDesc').value, caller: el('#nCaller').value, what3words: el('#nW3w').value.replace(/^\/+/, '').trim() || undefined,
+        is_medical: el('#nMedical').checked, patient_name: el('#nPatName').value, patient_dob: el('#nPatDob').value, chief_complaint: el('#nComplaint').value,
       });
       const picks = els('#nRes .chip.on').map((c) => c.dataset.v);
       if (picks.length) await api('POST', `/api/jobs/${job.id}/assign`, { resources: picks });

@@ -37,6 +37,19 @@ const CCCSForms = (() => {
   const SUBJECT_LABEL = { JOB: 'Job', SITE_VISIT: 'Patrol visit', SITE: 'Site', PERSONNEL: 'Person', VEHICLE: 'Vehicle' };
   const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
   const SEVERITY_PRI = { LOW: 'ROUTINE', MEDIUM: 'GREEN', HIGH: 'AMBER', CRITICAL: 'RED' };
+  // Labels only, for the "Create full PRF" deep link below — mirrors
+  // server.js's complaint-list.js codes. Not the real MPDS/AMPDS
+  // protocol (licensed IP) — see that file's own note.
+  const CHIEF_COMPLAINT_LABELS = {
+    cardiac: 'Chest pain / cardiac symptoms', breathing: 'Breathing difficulty / shortness of breath', unresponsive: 'Unconscious / unresponsive',
+    bleeding_severe: 'Severe bleeding / haemorrhage', anaphylaxis: 'Anaphylaxis / severe allergic reaction', seizure: 'Seizure / fitting',
+    stroke: 'Stroke symptoms (face / arm / speech)', choking: 'Choking', major_trauma: 'Major trauma / fall from height',
+    burns_major: 'Burns — significant', fracture: 'Fracture / suspected broken bone', head_injury: 'Head injury',
+    abdo_pain: 'Abdominal pain — severe', diabetic: 'Diabetic emergency', intoxication: 'Alcohol / drug intoxication',
+    mental_health: 'Mental health crisis / self-harm', allergic_mild: 'Allergic reaction — mild', bleeding_minor: 'Minor bleeding / laceration',
+    sprain_strain: 'Sprain / strain', burns_minor: 'Burns — minor', nausea_vomiting: 'Nausea / vomiting',
+    headache: 'Headache — non-severe', faint_dizzy: 'Fainting / dizziness — recovered', other: 'Other / unspecified',
+  };
 
   /** Best-effort device location, never blocking a submission on it: resolves
    * null on denial, timeout, or a browser with no geolocation at all. Short
@@ -314,7 +327,32 @@ const CCCSForms = (() => {
           source_ref: sub.reference,
           site: sub.subject_label || '',
           time: sub.values.occurred_at || sub.submitted_at || '',
+          done_by: sub.submitted_by || '',
         });
+        // Best-effort: this report may have been filed against a CCCS
+        // job — pull its description/caller and (if control flagged it
+        // medical and filled them in) patient name/DoB/complaint across
+        // too. Never the caller as a patient name — they're often the
+        // person who reported it, not the casualty; that goes in as
+        // "Reported by" context instead (see routes-prfs.js's POST
+        // /api/prfs on the PRF side, which keeps that distinction).
+        if (sub.subject_type === 'JOB') {
+          try {
+            const jobs = await api('GET', '/api/jobs');
+            const job = Array.isArray(jobs) ? jobs.find((j) => j.id === sub.subject_id) : null;
+            if (job) {
+              const notes = [job.description, job.notes].filter(Boolean).join('\n');
+              if (notes) params.set('notes', notes);
+              if (job.caller) params.set('reported_by', job.caller);
+              if (job.reference) params.set('cad_number', job.reference);
+              if (job.is_medical) {
+                if (job.patient_name) params.set('patient_name', job.patient_name);
+                if (job.patient_dob) params.set('patient_dob', job.patient_dob);
+                if (job.chief_complaint) params.set('chief_complaint', CHIEF_COMPLAINT_LABELS[job.chief_complaint] || job.chief_complaint);
+              }
+            }
+          } catch { /* best-effort — the PRF still opens fine without this */ }
+        }
         window.open(`${base_url}/prf/new?${params}`, '_blank');
       } catch (e) { alert(e.message); }
       prfBtn.disabled = false; prfBtn.textContent = was;
