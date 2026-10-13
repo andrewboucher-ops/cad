@@ -1,5 +1,5 @@
-/* DVLA Vehicle Enquiry Service lookup (POST /api/vehicles/:id/dvla-lookup)
- * — node --test. global.fetch is monkey-patched only for calls to DVLA's
+/* Vehicle Data Global lookup (POST /api/vehicles/:id/dvla-lookup) — node
+ * --test. global.fetch is monkey-patched only for calls to the provider's
  * host; calls to this test's own server pass through to the real fetch, so
  * the test helper below keeps working undisturbed. */
 'use strict';
@@ -10,14 +10,14 @@ process.env.PORT = '4041';
 process.env.AUTH_SECRET = 'vehicle-dvla-test-secret';
 process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';
-process.env.DVLA_API_KEY = 'test-key'; // read once at module load by dvla.js
+process.env.VDG_API_KEY = 'test-key'; // read once at module load by dvla.js
 
 const app = require('../server.js');
 const BASE = `http://127.0.0.1:${process.env.PORT}`;
 const realFetch = global.fetch;
 function mockDvla(responder) {
   global.fetch = async (url, opts) => {
-    if (typeof url === 'string' && url.includes('driver-vehicle-licensing.api.gov.uk')) return responder(url, opts);
+    if (typeof url === 'string' && url.includes('ukvehicledata.co.uk')) return responder(url, opts);
     return realFetch(url, opts);
   };
 }
@@ -38,7 +38,7 @@ before(async () => {
 });
 after(() => { global.fetch = realFetch; app.server.closeAllConnections?.(); app.server.close(); });
 
-test('a dispatcher cannot run a DVLA lookup — fleet records are admin-only', async () => {
+test('a dispatcher cannot run a vehicle lookup — fleet records are admin-only', async () => {
   assert.equal((await call('POST', `/api/vehicles/${vehicleId}/dvla-lookup`, undefined, dispT)).status, 403);
 });
 
@@ -47,15 +47,23 @@ test('a lookup against a vehicle that does not exist 404s', async () => {
 });
 
 test('a successful lookup updates make, colour, tax/MOT status and due dates', async () => {
-  mockDvla(async () => ({
-    ok: true,
-    json: async () => ({
-      registrationNumber: 'AB12CDE', taxStatus: 'Taxed', taxDueDate: '2027-03-01',
-      motStatus: 'Valid', motExpiryDate: '2026-11-15', make: 'FORD', colour: 'BLUE',
-    }),
-  }));
+  mockDvla(async (url) => {
+    assert.match(url, /\/api\/datapackage\/VehicleData\?/, 'calls the configured package via GET query params');
+    assert.match(url, /key_VRM=AB12CDE/);
+    assert.match(url, /auth_apikey=test-key/);
+    return {
+      ok: true,
+      json: async () => ({
+        Response: {
+          StatusCode: 0, StatusMessage: 'Success',
+          VehicleRegistration: { Make: 'FORD', Colour: 'BLUE' },
+          DataItems: { VehicleStatus: { MotVed: { TaxStatus: 'Taxed', TaxDue: '2027-03-01', MotStatus: 'Valid', MotDue: '2026-11-15' } } },
+        },
+      }),
+    };
+  });
   const r = await call('POST', `/api/vehicles/${vehicleId}/dvla-lookup`, undefined, adminT);
-  assert.equal(r.status, 200);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.make, 'FORD');
   assert.equal(r.body.colour, 'BLUE');
   assert.equal(r.body.tax_status, 'Taxed');
@@ -65,14 +73,24 @@ test('a successful lookup updates make, colour, tax/MOT status and due dates', a
   assert.ok(r.body.dvla_checked_at, 'records when the check was made');
 });
 
-test('DVLA reporting the vehicle unknown is surfaced as an error, not silently ignored', async () => {
+test('a non-success status code from the provider is surfaced as an error, not silently ignored', async () => {
   mockDvla(async () => ({
-    ok: false, status: 404, statusText: 'Not Found',
-    json: async () => ({ errors: [{ status: '404', title: 'No details found for provided vehicle ID' }] }),
+    ok: true,
+    json: async () => ({ Response: { StatusCode: 7, StatusMessage: 'Invalid VRM supplied' } }),
   }));
   const r = await call('POST', `/api/vehicles/${vehicleId}/dvla-lookup`, undefined, adminT);
-  assert.equal(r.status, 404);
-  assert.match(r.body.error, /No details found/);
+  assert.equal(r.status, 502);
+  assert.match(r.body.error, /Invalid VRM supplied/);
+});
+
+test('a response with none of the expected fields is reported as an error rather than silently half-empty', async () => {
+  mockDvla(async () => ({
+    ok: true,
+    json: async () => ({ Response: { StatusCode: 0, StatusMessage: 'Success', SomeOtherShape: { Whatever: true } } }),
+  }));
+  const r = await call('POST', `/api/vehicles/${vehicleId}/dvla-lookup`, undefined, adminT);
+  assert.equal(r.status, 502);
+  assert.match(r.body.error, /no recognised|expected vehicle fields/i);
 });
 
 test('a transport failure is reported as an error rather than throwing an unhandled 500', async () => {

@@ -1607,11 +1607,13 @@ route('PATCH', '/api/vehicles/:id', ADMIN, ({ params, body }) => {
   logEvent('vehicle.updated', `VEHICLE ${v.registration} UPDATED`, { vehicle_id: v.id });
   return publicVehicle(v);
 });
-/* DVLA Vehicle Enquiry Service — tax/MOT status and basic details straight
- * from government records, keyed on the registration already on file. A
- * read on DVLA's end, but written here: updates the vehicle's make/colour
- * and tax/MOT status+dates so the Fleet view reflects what DVLA actually
- * has, not what was typed in by hand (or never updated) at creation. */
+/* Vehicle lookup (Vehicle Data Global — see dvla.js) — tax/MOT status and
+ * basic details keyed on the registration already on file. A read on the
+ * provider's end, but written here: updates the vehicle's make/colour and
+ * tax/MOT status+dates so the Fleet view reflects real data, not what was
+ * typed in by hand (or never updated) at creation. Route path and stored
+ * field names (dvla-lookup, dvla_checked_at) are unchanged from the
+ * previous DVLA-government-API version of this integration. */
 route('POST', '/api/vehicles/:id/dvla-lookup', ADMIN, async ({ params }) => {
   const v = db.vehicles.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'vehicle not found');
   const r = await dvla.lookup(v.registration);
