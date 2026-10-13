@@ -203,6 +203,13 @@
     <div id="viewForms" class="hide">
       <p class="dim" style="margin:0 0 10px;font-size:13px">Reports from a <strong>restricted</strong> form can be read only by the officer who filed them and by the people named on that form below — not by any role, including this one. Adding or removing a name is logged. <a href="/forms.html">Open reports &amp; review queue</a></p>
       <p class="dim" style="margin:0 0 10px;font-size:13px">The <strong>public job application</strong> form is the one filed against "Public job application" — anyone can fill it in at <a href="/apply.html" target="_blank">/apply.html</a> without logging in, and each one arrives under Applicants. It must keep its required <span class="mono">full_name</span> and <span class="mono">email</span> fields and can't have photo fields; retire it to close applications.</p>
+      <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin:0 0 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label style="margin:0;white-space:nowrap">Full PRF system address</label>
+        <input id="prfLinkUrl" placeholder="https://prf.example.com" style="flex:1;min-width:200px">
+        <button type="button" class="btn" id="prfLinkSave" style="padding:4px 12px;font-size:12px">Save</button>
+        <span class="dim" id="prfLinkMsg" style="font-size:12px"></span>
+      </div>
+      <p class="dim" style="margin:0 0 10px;font-size:12px">Where the separate full-PRF system lives (see the plan) — once set, a "Create full PRF" button appears on a <strong>Patient care / first aid report</strong> in the review queue, linking the two. Leave blank to hide that button.</p>
       <div id="fTableWrap"></div>
     </div>
 
@@ -1891,6 +1898,14 @@ function siteReportModal(s) {
 }
 
 /* ---------- forms ---------- */
+api('GET', '/api/settings/prf-link').then((s) => { el('#prfLinkUrl').value = s.base_url || ''; }).catch(() => {});
+el('#prfLinkSave').onclick = async () => {
+  el('#prfLinkMsg').textContent = '';
+  try {
+    await api('PUT', '/api/settings/prf-link', { base_url: el('#prfLinkUrl').value });
+    el('#prfLinkMsg').textContent = 'Saved.';
+  } catch (e) { el('#prfLinkMsg').textContent = e.message; }
+};
 const FORM_FIELD_TYPES = ['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime', 'signature', 'photo'];
 const FORM_SUBJECTS = { JOB: 'Job', SITE_VISIT: 'Patrol visit', SITE: 'Site', PERSONNEL: 'Person', VEHICLE: 'Vehicle', APPLICATION: 'Public job application (website, no login)' };
 function paintForms() {

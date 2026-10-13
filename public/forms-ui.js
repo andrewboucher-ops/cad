@@ -269,7 +269,8 @@ const CCCSForms = (() => {
           <span class="mono" style="font-weight:700">${esc(sub.reference)}</span>
           <span>${esc(sub.definition_name)}</span>
           ${sub.visibility === 'RESTRICTED' ? '<span class="pri pri-RED">RESTRICTED</span>' : ''}
-          <button type="button" class="btn" style="padding:2px 10px;font-size:11px;margin-left:auto" data-ff-pdf>PDF</button>
+          ${sub.definition_key === 'patient-care' ? '<button type="button" class="btn" style="padding:2px 10px;font-size:11px;margin-left:auto" data-ff-prf>Create full PRF</button>' : ''}
+          <button type="button" class="btn" style="padding:2px 10px;font-size:11px;${sub.definition_key === 'patient-care' ? '' : 'margin-left:auto'}" data-ff-pdf>PDF</button>
         </div>
         <p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[sub.subject_type] || sub.subject_type)} ${esc(sub.subject_label)} · filed by ${esc(sub.submitted_by)} · ${esc(fmt(sub.submitted_at))} · form v${sub.definition_version}</p>
         ${sub.geo ? `<p class="dim" style="margin:0;font-size:12px">Filed near <a href="https://www.openstreetmap.org/?mlat=${sub.geo.lat}&mlon=${sub.geo.lon}#map=17/${sub.geo.lat}/${sub.geo.lon}" target="_blank" rel="noopener">${sub.geo.lat.toFixed(5)}, ${sub.geo.lon.toFixed(5)}</a>${sub.geo.accuracy ? ` (±${sub.geo.accuracy}m)` : ''}</p>` : ''}
@@ -296,6 +297,27 @@ const CCCSForms = (() => {
         window.open(URL.createObjectURL(await res.blob()), '_blank');
       } catch (e) { alert(e.message); }
       pdfBtn.disabled = false; pdfBtn.textContent = was;
+    };
+    // A full PRF is a separate system — a pure deep link, no CCCS-side
+    // record of the link itself (see the plan: the new system owns that
+    // linkage via its own source_ref, keyed on this report's reference,
+    // so re-pressing the button there opens the same PRF rather than
+    // starting a duplicate). Hidden entirely if an admin hasn't set the
+    // new system's URL yet, rather than erroring.
+    const prfBtn = host.querySelector('[data-ff-prf]');
+    if (prfBtn) prfBtn.onclick = async () => {
+      prfBtn.disabled = true; const was = prfBtn.textContent; prfBtn.textContent = '…';
+      try {
+        const { base_url } = await fetch('/api/settings/prf-link', { headers: { authorization: `Bearer ${CCCS.getSession().token}` } }).then((r) => r.json());
+        if (!base_url) { alert('The full PRF system\'s address has not been set up yet — ask an admin to set it in Admin → Forms.'); return; }
+        const params = new URLSearchParams({
+          source_ref: sub.reference,
+          site: sub.subject_label || '',
+          time: sub.values.occurred_at || sub.submitted_at || '',
+        });
+        window.open(`${base_url}/prf/new?${params}`, '_blank');
+      } catch (e) { alert(e.message); }
+      prfBtn.disabled = false; prfBtn.textContent = was;
     };
     const btn = host.querySelector('[data-ff-edit]');
     if (btn) btn.onclick = () => edit(host, sub, {

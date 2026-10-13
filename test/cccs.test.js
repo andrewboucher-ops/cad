@@ -1639,6 +1639,16 @@ test('a checkpoint scan is recorded against the matching waypoint, and only for 
   await call('DELETE', `/api/beats/${beat.body.id}`, undefined, adminT);
 });
 
+test('the full-PRF system\'s link is readable by anyone but set by admin only, and starts blank', async () => {
+  assert.equal((await call('GET', '/api/settings/prf-link', undefined, dispT)).body.base_url, '', 'blank until configured');
+  assert.equal((await call('PUT', '/api/settings/prf-link', { base_url: 'https://prf.example.com' }, dispT)).status, 403, 'admin only to set');
+  const saved = await call('PUT', '/api/settings/prf-link', { base_url: 'https://prf.example.com/' }, adminT);
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.equal(saved.body.base_url, 'https://prf.example.com', 'trailing slash trimmed');
+  assert.equal((await call('GET', '/api/settings/prf-link', undefined, dispT)).body.base_url, 'https://prf.example.com', 'any authenticated role can read it');
+  await call('PUT', '/api/settings/prf-link', { base_url: '' }, adminT);
+});
+
 /* ---------------- UI preferences ---------------- */
 test('a login response includes default ui_prefs, and PATCH /api/me/preferences updates only your own account', async () => {
   const login = await call('POST', '/api/auth/login', { username: 'dwhitfield', password: 'field123' });
