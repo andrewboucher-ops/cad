@@ -31,6 +31,13 @@ const MS_CLIENT_ID = process.env.MS_CLIENT_ID || '';
 const MS_CLIENT_SECRET = process.env.MS_CLIENT_SECRET || '';
 const MS_REDIRECT_URI = process.env.MS_REDIRECT_URI || '';
 const MS_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && MS_REDIRECT_URI);
+// Shared secret the separate PRF system's backend sends on its
+// /api/integrations/prf/... calls (medication administered, stock used,
+// its read-only catalogue) — that system never holds a CCCS session, so
+// this is its front door instead. Unset means those routes all refuse
+// with "bad integration secret", same fail-safe-closed default as the
+// workstation integration's own secret.
+const PRF_INTEGRATION_SECRET = process.env.PRF_INTEGRATION_SECRET || '';
 const { verifyMicrosoftIdToken } = require('./msauth.js');
 const webpush = require('./webpush.js');
 const sms = require('./sms.js');
@@ -4798,13 +4805,14 @@ const shiftPatrols = require('./routes-shift-patrols.js')({
 const inventory = require('./routes-inventory.js')({
   route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, visibleToUser, isControlRole,
   publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, ASSET_CATEGORIES, flushNow: () => store.flushNow(),
+  prfIntegrationSecret: PRF_INTEGRATION_SECRET,
 });
 
 // Oxygen and Entonox cylinders, one record each — see routes-cylinders.js.
 require('./routes-cylinders.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent });
 
 // Medication and the controlled drugs register — see routes-medication.js.
-require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow() });
+require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow(), prfIntegrationSecret: PRF_INTEGRATION_SECRET });
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
 require('./routes-rentals.js')({ route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, UPLOADS_DIR, publicAsset, flushNow: () => store.flushNow() });
@@ -5518,7 +5526,8 @@ function start() {
     console.log(`  MDT          : http://localhost:${PORT}/mdt.html`);
     console.log(`  Demo logins  : dispatcher/dispatch123 · dwhitfield/field123 · mdt001/mdt123 · admin/admin123`);
     console.log(`  Storage      : ${store.enabled ? store.file : 'in memory only (PERSISTENCE=off)'}`);
-    console.log(`  Microsoft SSO: ${MS_ENABLED ? 'enabled (tenant ' + MS_TENANT_ID + ')' : 'not configured — set MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET/MS_REDIRECT_URI'}\n`);
+    console.log(`  Microsoft SSO: ${MS_ENABLED ? 'enabled (tenant ' + MS_TENANT_ID + ')' : 'not configured — set MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET/MS_REDIRECT_URI'}`);
+    console.log(`  PRF integration: ${PRF_INTEGRATION_SECRET ? 'enabled' : 'not configured — set PRF_INTEGRATION_SECRET'}\n`);
   });
   if (httpsServer) {
     const tlsPort = Number(process.env.TLS_PORT || 443);

@@ -7,6 +7,7 @@ process.env.PORT = '4044';
 process.env.AUTH_SECRET = 'medication-test-secret';
 process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';
+process.env.PRF_INTEGRATION_SECRET = 'prf-test-secret';
 
 const app = require('../server.js');
 const BASE = `http://127.0.0.1:${process.env.PORT}`;
@@ -112,4 +113,39 @@ test('entries are never edited or deleted — a correction points at the origina
   assert.equal((await call('DELETE', `/api/medication/medicines/${morphine.id}`, undefined, adminT)).status, 409, 'a medicine with entries cannot be deleted');
   assert.equal((await call('PATCH', `/api/medication/medicines/${morphine.id}`, { strength: '30 mg/1 ml' }, adminT)).status, 409, "a CD's strength is fixed once it has entries");
   assert.equal((await call('PATCH', `/api/medication/medicines/${morphine.id}`, { reorder_level: 8 }, adminT)).status, 200);
+});
+
+/* ---------------- the separate PRF system's integration route ---------------- */
+// No CCCS session exists for that system's backend to hold — the acting
+// person is identified explicitly by email instead, resolved to a real
+// CCCS account, same validation and ledger shape as a logged-in /administer.
+async function callSecret(path, body, secret) {
+  const res = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/json', ...(secret !== undefined ? { 'x-prf-integration-secret': secret } : {}) }, body: JSON.stringify(body) });
+  const text = await res.text();
+  let parsed = null; try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+  return { status: res.status, body: parsed };
+}
+
+test('the PRF integration route for administering medication needs the shared secret and a real CCCS account by email, not a session', async () => {
+  const dan = app.db.users.find((u) => u.username === 'dwhitfield');
+  dan.email = 'dwhitfield@test.local';
+  const body = { acting_email: dan.email, quantity: 2, location_id: safe.id, dose_given: '1g oral', patient_ref: 'PRF-501' };
+
+  assert.equal((await callSecret(`/api/integrations/prf/medication/${paracetamol.id}/administer`, body, undefined)).status, 401, 'no secret header at all');
+  assert.equal((await callSecret(`/api/integrations/prf/medication/${paracetamol.id}/administer`, body, 'wrong-secret')).status, 401);
+  assert.equal((await callSecret(`/api/integrations/prf/medication/${paracetamol.id}/administer`, { ...body, acting_email: 'nobody@nowhere.test' }, process.env.PRF_INTEGRATION_SECRET)).status, 400, 'no matching CCCS account');
+
+  const ok = await callSecret(`/api/integrations/prf/medication/${paracetamol.id}/administer`, body, process.env.PRF_INTEGRATION_SECRET);
+  assert.equal(ok.status, 201, JSON.stringify(ok.body));
+  assert.equal(ok.body[0].by, dan.username, 'attributed to the real person, exactly as a logged-in administer would be');
+  assert.equal(ok.body[0].patient_ref, 'PRF-501');
+  assert.equal(ok.body[0].source, 'PRF');
+
+  // A controlled drug via this route still needs the patient's name and a
+  // witness — none of the existing /administer validation is loosened.
+  const cdBody = { acting_email: dan.email, quantity: 1, location_id: bag.id, dose_given: '5 mg IV', patient_ref: 'PRF-502' };
+  assert.equal((await callSecret(`/api/integrations/prf/medication/${morphine.id}/administer`, cdBody, process.env.PRF_INTEGRATION_SECRET)).status, 400, "a CD still needs the patient's name");
+  const cdOk = await callSecret(`/api/integrations/prf/medication/${morphine.id}/administer`, { ...cdBody, patient_name: 'Mary May', ...W }, process.env.PRF_INTEGRATION_SECRET);
+  assert.equal(cdOk.status, 201, JSON.stringify(cdOk.body));
+  assert.equal(cdOk.body[0].witness, 'supervisor');
 });

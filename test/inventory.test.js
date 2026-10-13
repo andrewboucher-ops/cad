@@ -7,6 +7,7 @@ process.env.PORT = '4032';
 process.env.AUTH_SECRET = 'inventory-test-secret';
 process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';
+process.env.PRF_INTEGRATION_SECRET = 'prf-test-secret';
 
 const app = require('../server.js');
 const BASE = `http://127.0.0.1:${process.env.PORT}`;
@@ -95,6 +96,62 @@ test('adjustments take a reason, and a stocktake books only the differences', as
   const again = await call('POST', '/api/stock/stocktake', { location_id: main.id, counts: [{ item_id: vest.id, counted: 16 }] }, adminT);
   assert.equal(again.body.lines[0].diff, 0, 'a matching count changes nothing');
   assert.equal((await call('GET', '/api/stock/stocktakes', undefined, adminT)).body.length, 2);
+});
+
+/* ---------------- /use: a frontline consumption, distinct from admin-only /issue ----------------
+ * Uses its own freshly-created, freshly-stocked item throughout (never
+ * `vest`) — several tests further down make exact absolute assertions
+ * about vest's cumulative stock history, and a /use deduction against it
+ * here would quietly throw those off by whatever this section consumed. */
+
+async function freshBandage() {
+  const bandage = (await call('POST', '/api/assets', { description: 'Bandage', category: 'FIRST_AID', unit: 'each', is_stock_tracked: true }, adminT)).body;
+  await call('POST', `/api/stock/${bandage.id}/receive`, { quantity: 10, location_id: main.id }, adminT);
+  return bandage;
+}
+
+test('/use is STAFF-level (unlike admin-only /issue), needs a patient/report reference, and deducts stock the same way', async () => {
+  const bandage = await freshBandage();
+  assert.equal((await call('POST', `/api/stock/${bandage.id}/use`, { quantity: 1, location_id: main.id }, danT)).status, 400, 'a reference is required');
+  const ok = await call('POST', `/api/stock/${bandage.id}/use`, { quantity: 2, location_id: main.id, patient_ref: 'JOB-900' }, danT);
+  assert.equal(ok.status, 201, JSON.stringify(ok.body));
+  assert.equal(ok.body[0].patient_ref, 'JOB-900');
+  assert.equal((await item(bandage.id)).levels[main.id], 8);
+  assert.equal((await call('POST', `/api/stock/${bandage.id}/use`, { quantity: 1, location_id: main.id, patient_ref: 'x' }, undefined)).status, 401, 'still needs authentication at all');
+});
+
+/* ---------------- the separate PRF system's integration routes ---------------- */
+async function callSecret(method, path, body, secret) {
+  const res = await fetch(BASE + path, { method, headers: { 'content-type': 'application/json', ...(secret !== undefined ? { 'x-prf-integration-secret': secret } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  let parsed = null; try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+  return { status: res.status, body: parsed };
+}
+
+test('the PRF integration catalogue is read-only, secret-gated, and lists real CCCS items for the PRF system\'s own supplies-used picker', async () => {
+  assert.equal((await callSecret('GET', '/api/integrations/prf/catalogue', undefined, undefined)).status, 401);
+  assert.equal((await callSecret('GET', '/api/integrations/prf/catalogue', undefined, 'wrong')).status, 401);
+  const cat = await callSecret('GET', '/api/integrations/prf/catalogue', undefined, process.env.PRF_INTEGRATION_SECRET);
+  assert.equal(cat.status, 200, JSON.stringify(cat.body));
+  assert.ok(cat.body.stock_items.some((x) => x.id === vest.id && x.description === 'Hi-vis vest'));
+  assert.ok(cat.body.locations.some((l) => l.id === main.id));
+});
+
+test('the PRF integration /use route needs the shared secret and a real CCCS account by email, same validation and ledger shape as a logged-in /use', async () => {
+  const bandage = await freshBandage();
+  const dan = app.db.users.find((u) => u.username === 'dwhitfield');
+  dan.email = 'dwhitfield@test.local';
+  const body = { acting_email: dan.email, quantity: 1, location_id: main.id, patient_ref: 'PRF-700' };
+
+  assert.equal((await callSecret('POST', `/api/integrations/prf/stock/${bandage.id}/use`, body, undefined)).status, 401);
+  assert.equal((await callSecret('POST', `/api/integrations/prf/stock/${bandage.id}/use`, { ...body, acting_email: 'nobody@nowhere.test' }, process.env.PRF_INTEGRATION_SECRET)).status, 400, 'no matching CCCS account');
+
+  const ok = await callSecret('POST', `/api/integrations/prf/stock/${bandage.id}/use`, body, process.env.PRF_INTEGRATION_SECRET);
+  assert.equal(ok.status, 201, JSON.stringify(ok.body));
+  assert.equal(ok.body[0].recorded_by, dan.display_name, 'attributed to the real person, exactly as a logged-in /use would be');
+  assert.equal(ok.body[0].patient_ref, 'PRF-700');
+  assert.equal(ok.body[0].source, 'PRF');
+  assert.equal((await item(bandage.id)).levels[main.id], 9);
 });
 
 test('at or under the reorder level an item is listed with a quantity to order', async () => {

@@ -49,7 +49,7 @@ const SCHEDULES = [2, 3, 4, 5];
 const DUE_SOON_DAYS = 60;
 const round = (n) => Math.round(n * 100) / 100;
 
-module.exports = function registerMedicationRoutes({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow = () => {} }) {
+module.exports = function registerMedicationRoutes({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow = () => {}, prfIntegrationSecret = '' }) {
   for (const t of ['medicines', 'med_movements', 'stock_locations', 'users']) if (!Array.isArray(db[t])) db[t] = [];
 
   const str = (raw, max = 120) => String(raw ?? '').trim().slice(0, max);
@@ -297,6 +297,37 @@ module.exports = function registerMedicationRoutes({ route, httpError, CONTROL, 
     const rows = record(m, take(m, l.id, n, { batch_no: body.batch_no, expiry_date: body.expiry_date }).map((r) => ({ ...r, type: 'ADMINISTERED' })), user,
       { patient_name: patient, patient_ref: ref, dose_given: dose, dose_wasted: str(body.dose_wasted, 60), route: str(body.route, 30), authority: str(body.authority, 80), note: str(body.note, 300), ...w });
     entryLog(m, 'ADMINISTERED', rows, user);
+    return { __status: 201, __body: rows };
+  });
+
+  /** The same administration, called by the separate PRF system's own
+   * backend (see the plan: a full PRF records medication given to a
+   * patient, and this is how that reaches the SAME controlled-drugs
+   * register a logged-in CCCS administration would use) — never a CCCS
+   * session, since the caller is another system's server, not a browser
+   * holding a CCCS token. Authenticated by a shared secret instead, with
+   * the acting person identified explicitly by email and resolved to a
+   * real CCCS account, so the ledger entry is attributed to them exactly
+   * as if they'd logged in and done this themselves — same validation,
+   * same witness rule for a controlled drug, same everything, just a
+   * different front door. Additive: the existing /administer route above
+   * is completely unchanged. */
+  route('POST', '/api/integrations/prf/medication/:id/administer', null, ({ params, body, req }) => {
+    if (!prfIntegrationSecret || req.headers['x-prf-integration-secret'] !== prfIntegrationSecret) throw httpError(401, 'bad integration secret');
+    const email = str(body.acting_email, 120).toLowerCase();
+    const user = email ? db.users.find((u) => u.email && u.email.toLowerCase() === email) : null;
+    if (!user) throw httpError(400, 'acting_email does not match a CCCS account');
+    if (!STAFF.includes(user.role)) throw httpError(403, `${user.username} is not a CCCS staff role`);
+    const m = findMed(params.id);
+    const n = qty(body.quantity), l = findLoc(body.location_id, 'location it came from');
+    const patient = str(body.patient_name, 80), ref = str(body.patient_ref, 60), dose = str(body.dose_given, 60);
+    if (m.controlled && !patient) throw httpError(400, "a controlled drug administration needs the patient's name");
+    if (!patient && !ref) throw httpError(400, 'enter the patient or the job / patient report number');
+    if (!dose) throw httpError(400, 'enter the dose given');
+    const w = wit(m, body, user);
+    const rows = record(m, take(m, l.id, n, { batch_no: body.batch_no, expiry_date: body.expiry_date }).map((r) => ({ ...r, type: 'ADMINISTERED' })), user,
+      { patient_name: patient, patient_ref: ref, dose_given: dose, dose_wasted: str(body.dose_wasted, 60), route: str(body.route, 30), authority: str(body.authority, 80), note: str(body.note, 300), source: 'PRF', ...w });
+    entryLog(m, 'ADMINISTERED', rows, user, ' (VIA PRF)');
     return { __status: 201, __body: rows };
   });
 

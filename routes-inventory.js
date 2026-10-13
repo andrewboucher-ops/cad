@@ -51,9 +51,18 @@ const LOCATION_KINDS = ['STORE', 'CUPBOARD', 'BAG', 'VEHICLE', 'SITE', 'OTHER'];
 const ADJUST_REASONS = { DAMAGED: 'Damaged', EXPIRED: 'Expired', LOST: 'Lost', AUDIT_CORRECTION: 'Count correction', FOUND: 'Found' };
 const DUE_SOON_DAYS = 30;
 
+// A first aider using a dressing on a casualty is a frontline clinical
+// action, same tier as routes-medication.js's own /administer — not a
+// back-office stock decision, so it gets its own STAFF role gate rather
+// than reusing ADMIN-only /issue or /adjust. Mirrors routes-medication.js's
+// own STAFF constant exactly (not imported from there to avoid a cross-file
+// dependency for four role names).
+const STAFF = ['FIELD_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
+
 module.exports = function registerInventoryRoutes({
   route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, visibleToUser, isControlRole,
   publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, ASSET_CATEGORIES = [], flushNow = () => {},
+  prfIntegrationSecret = '',
 }) {
   for (const t of ['stock_locations', 'stock_subcategories', 'asset_events', 'stocktakes', 'stock_movements', 'assets', 'asset_checkouts']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -398,6 +407,58 @@ module.exports = function registerInventoryRoutes({
     logEvent('stock.issued', `ISSUED ${n} × ${label(item)} TO ${p ? p.name : site.name}`, { asset_id: item.id, stock_movement_id: ms[0].id });
     flushNow();
     return { __status: 201, __body: ms.map(publicMovement) };
+  });
+
+  /** Consumed treating someone — a bandage used, not kit handed over to
+   * keep (that's /issue, above, and stays ADMIN-only). STAFF-gated like
+   * routes-medication.js's own /administer, because this is the same
+   * tier of frontline clinical action, not a back-office stock decision.
+   * Needs a patient/report reference for the same reason /administer
+   * needs one — what the ledger row is actually for. */
+  function useInTreatment(item, body, user, extra = {}) {
+    const location = findLocation(body.location_id), n = qty(body.quantity);
+    const ref = String(body.patient_ref || '').trim().slice(0, 60);
+    if (!ref) throw httpError(400, 'enter the patient or patient report reference');
+    const ms = takeStock(item, n, 'USED_IN_TREATMENT', { location, user, note: body.note, batch_no: body.batch_no, expiry_date: body.expiry_date || undefined, patient_ref: ref, ...extra });
+    logEvent('stock.used', `${n} × ${label(item)} USED IN TREATMENT (${ref}) BY ${user.username}${extra.source ? ` (VIA ${extra.source})` : ''}`, { asset_id: item.id, stock_movement_id: ms[0].id });
+    flushNow();
+    return ms;
+  }
+  route('POST', '/api/stock/:id/use', STAFF, ({ params, body, user }) => {
+    const item = findItem(params.id, user);
+    return { __status: 201, __body: useInTreatment(item, body, user).map(publicMovement) };
+  });
+
+  /** The same consumption, called by the separate PRF system's own
+   * backend — see routes-medication.js's parallel
+   * /api/integrations/prf/medication/:id/administer route for the full
+   * reasoning (shared secret, acting person identified explicitly by
+   * email and resolved to a real CCCS account, same validation and
+   * ledger shape as a logged-in STAFF request). Additive: /issue, /adjust
+   * and the new /use route above are all unchanged. */
+  route('POST', '/api/integrations/prf/stock/:id/use', null, ({ params, body, req }) => {
+    if (!prfIntegrationSecret || req.headers['x-prf-integration-secret'] !== prfIntegrationSecret) throw httpError(401, 'bad integration secret');
+    const email = String(body.acting_email || '').trim().toLowerCase();
+    const user = email ? db.users.find((u) => u.email && u.email.toLowerCase() === email) : null;
+    if (!user) throw httpError(400, 'acting_email does not match a CCCS account');
+    if (!STAFF.includes(user.role)) throw httpError(403, `${user.username} is not a CCCS staff role`);
+    const item = findItem(params.id, user);
+    return { __status: 201, __body: useInTreatment(item, body, user, { source: 'PRF' }).map(publicMovement) };
+  });
+
+  /** Read-only catalogue for the PRF system's own "supplies used" picker
+   * — medicines and stock-tracked items, enough to pick the real CCCS
+   * item (id, name/description, unit, and whether a medicine is
+   * controlled, since that decides whether the PRF UI needs to also
+   * collect a witness). Shared-secret gated like the write routes above;
+   * nothing here is a CCCS session concern since it is simply a read. */
+  route('GET', '/api/integrations/prf/catalogue', null, ({ req }) => {
+    if (!prfIntegrationSecret || req.headers['x-prf-integration-secret'] !== prfIntegrationSecret) throw httpError(401, 'bad integration secret');
+    return {
+      medicines: db.medicines.filter((m) => m.active !== false).map((m) => ({ id: m.id, name: m.name, strength: m.strength, form: m.form, unit: m.unit, controlled: Boolean(m.controlled) })),
+      stock_items: db.assets.filter((a) => a.is_stock_tracked && a.status !== 'RETIRED').map((a) => ({ id: a.id, description: a.description, size: a.size || null, unit: a.unit || null, category: a.category || null })),
+      locations: db.stock_locations.filter((l) => l.active !== false).map((l) => ({ id: l.id, name: l.name })),
+    };
   });
 
   /** Back from a person: into stock if reusable, otherwise written off —
