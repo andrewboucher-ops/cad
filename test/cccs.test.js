@@ -1841,6 +1841,85 @@ test('the PRF system\'s CAD lookup is shared-secret gated and returns a job by r
   assert.equal((await byId.json()).id, job.body.id);
 });
 
+test('the monthly ops report lists sites by job/patrol activity for the given month only', async () => {
+  const sites = await call('GET', '/api/sites', undefined, dispT);
+  const meridian = sites.body.find((x) => x.name === 'Meridian Business Park');
+  const inMonth = new Date(2031, 2, 15); // a month far from any other test's real-world run date
+
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', site: meridian.id }, dispT);
+  app.db.jobs.find((j) => j.id === job.body.id).created_at = new Date(2031, 2, 10).toISOString();
+  // A job the same month before the one above, and one outside the month —
+  // only the in-month one should count.
+  const outOfMonth = await call('POST', '/api/jobs', { priority: 'GREEN', site: meridian.id }, dispT);
+  app.db.jobs.find((j) => j.id === outOfMonth.body.id).created_at = new Date(2031, 3, 1).toISOString();
+  const noSiteJob = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Ad-hoc spot' }, dispT);
+  app.db.jobs.find((j) => j.id === noSiteJob.body.id).created_at = new Date(2031, 2, 12).toISOString();
+
+  const html = app.buildMonthlyOpsReportHtml(inMonth);
+  assert.match(html, /Meridian Business Park/);
+  assert.match(html, /Meridian Business Park\s*—\s*1 job/, 'counts only the in-month job, not the one in the following month');
+  assert.match(html, /1 further job logged against an ad-hoc location/);
+  assert.match(html, /March 2031/);
+  assert.match(html, /AURA/);
+  assert.match(html, /due on the 1st/);
+});
+
+test('sending the monthly report records a notify-log entry addressed to Kayleigh, and fails clearly with no contact email on file', async () => {
+  if (!app.db.personnel.some((p) => p.name === 'Kayleigh Boucher')) {
+    await call('POST', '/api/personnel', { name: 'Kayleigh Boucher' }, adminT);
+  }
+  // Re-found from the live array (not the HTTP response) so mutating
+  // contact_email below actually affects what sendMonthlyKayleighReport
+  // reads — it does its own db.personnel.find() each call.
+  const kayleigh = app.db.personnel.find((p) => p.name === 'Kayleigh Boucher');
+  const originalEmail = kayleigh.contact_email;
+  kayleigh.contact_email = 'kayleigh.test@example.com';
+
+  const before = app.db.dial_log.length;
+  const result = await app.sendMonthlyKayleighReport(new Date(2031, 4, 31), { test: true });
+  assert.equal(result.ok, false, 'mail is not configured in this test environment, so the send itself fails');
+  assert.match(result.error, /graph mail not configured/);
+  const entry = app.db.dial_log.at(-1);
+  assert.equal(app.db.dial_log.length, before + 1, 'the attempt is logged regardless of whether the send itself succeeded');
+  assert.equal(entry.channel, 'EMAIL');
+  assert.equal(entry.outcome, 'FAILED');
+  // writeNotifyLog folds the address into body as a prefix rather than a
+  // separate to_email column (see its own implementation) — same as every
+  // other email-channel entry in dial_log.
+  assert.match(entry.body, /^kayleigh\.test@example\.com: \[TEST\] Monthly ops summary/);
+
+  kayleigh.contact_email = '';
+  const noEmail = await app.sendMonthlyKayleighReport(new Date(2031, 4, 31));
+  assert.equal(noEmail.ok, false);
+  assert.match(noEmail.error, /no contact email on file/);
+
+  kayleigh.contact_email = originalEmail;
+});
+
+test('the monthly report tick only fires on the last day of the month, and never twice for the same month', async () => {
+  const kayleigh = app.db.personnel.find((p) => p.name === 'Kayleigh Boucher');
+  const originalEmail = kayleigh.contact_email;
+  kayleigh.contact_email = 'kayleigh.tick-test@example.com';
+  const row = { key: 'kayleigh_monthly_report', settings: {} };
+  app.db.ui_settings = app.db.ui_settings.filter((x) => x.key !== 'kayleigh_monthly_report');
+  app.db.ui_settings.push(row);
+
+  const before = app.db.dial_log.length;
+  app.monthlyReportTick(new Date(2031, 5, 15)); // not the last day of June
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(app.db.dial_log.length, before, 'not the last day of the month — no attempt made');
+
+  // Pre-mark June 2031 as already sent (simulating a real successful send,
+  // which this test environment's unconfigured mail can't produce) and
+  // confirm the tick skips it rather than re-sending.
+  row.settings.last_sent_period = '2031-06';
+  app.monthlyReportTick(new Date(2031, 5, 30)); // last day of June 2031
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(app.db.dial_log.length, before, 'already recorded as sent for this period — skipped, not re-sent');
+
+  kayleigh.contact_email = originalEmail;
+});
+
 /* ---------------- callback requests ---------------- */
 test('an officer requests a callback and control is alerted', async () => {
   const control = await wsClient(dispT);

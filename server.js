@@ -2830,6 +2830,98 @@ function notifyShiftEvent(eventKey, s, personnelIds) {
   for (const pid of personnelIds || []) notifyPersonnelAboutShift(pid, eventKey, s).catch((e) => console.warn('[cccs] shift notify failed:', e.message));
 }
 
+/** Kayleigh's monthly ops summary — which sites had job/patrol activity,
+ * a reminder to check AURA, and a nudge that invoices are due on the 1st
+ * (so it goes out on the LAST day of the month, the day before). Looked
+ * up by name rather than a stored id/flag since this is a one-off,
+ * specific-recipient reminder, not a general scheduled-reports feature —
+ * deliberately not built as one. */
+const MONTHLY_REPORT_TICK_MS = Number(process.env.MONTHLY_REPORT_TICK_MS || 6 * 3600000);
+const MONTHLY_REPORT_RECIPIENT_NAME = 'Kayleigh Boucher';
+
+function monthActivitySummary(monthDate) {
+  const start = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const end = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1);
+  const inMonth = (iso) => { const t = Date.parse(iso); return Number.isFinite(t) && t >= start.getTime() && t < end.getTime(); };
+  const bySite = new Map(); // site_id -> { jobs, visits }
+  let noSiteJobs = 0;
+  for (const j of db.jobs) {
+    if (!inMonth(j.created_at)) continue;
+    if (!j.site_id) { noSiteJobs += 1; continue; }
+    const row = bySite.get(j.site_id) || { jobs: 0, visits: 0 };
+    row.jobs += 1; bySite.set(j.site_id, row);
+  }
+  for (const v of db.site_visits) {
+    if (!v.site_id || !inMonth(v.scheduled_for)) continue;
+    const row = bySite.get(v.site_id) || { jobs: 0, visits: 0 };
+    row.visits += 1; bySite.set(v.site_id, row);
+  }
+  const rows = [...bySite.entries()]
+    .map(([siteId, r]) => ({ name: (db.sites.find((s) => s.id === siteId) || {}).name || `Site #${siteId}`, jobs: r.jobs, visits: r.visits, total: r.jobs + r.visits }))
+    .sort((a, b) => b.total - a.total);
+  return { rows, noSiteJobs, start };
+}
+
+function buildMonthlyOpsReportHtml(monthDate) {
+  const { rows, noSiteJobs, start } = monthActivitySummary(monthDate);
+  const monthLabel = start.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  const siteRows = rows.length
+    ? rows.map((r) => `<li>${r.name} — ${r.jobs} job${r.jobs === 1 ? '' : 's'}${r.visits ? `, ${r.visits} patrol${r.visits === 1 ? '' : 's'}` : ''}</li>`).join('')
+    : '<li>No job or patrol activity recorded at a contracted site this month.</li>';
+  return `
+    <p>Hi Kayleigh,</p>
+    <p>Here's the ops summary for <strong>${monthLabel}</strong>:</p>
+    <p><strong>Sites with activity this month</strong></p>
+    <ul>${siteRows}</ul>
+    ${noSiteJobs ? `<p>${noSiteJobs} further job${noSiteJobs === 1 ? '' : 's'} logged against an ad-hoc location (no contracted site on file).</p>` : ''}
+    <p><strong>Don't forget to:</strong></p>
+    <ul>
+      <li>Check AURA for anything that hasn't made it across here.</li>
+      <li>Generate, approve and send this month's invoices — they're due on the 1st.</li>
+    </ul>
+    <p><a href="${PUBLIC_BASE_URL}/admin.html">Open Admin</a></p>`;
+}
+
+async function sendMonthlyKayleighReport(monthDate, { test = false } = {}) {
+  const p = db.personnel.find((x) => x.name === MONTHLY_REPORT_RECIPIENT_NAME);
+  if (!p || !p.contact_email) {
+    console.warn('[cccs] monthly report: no contact email on file for', MONTHLY_REPORT_RECIPIENT_NAME);
+    return { ok: false, error: 'no contact email on file for ' + MONTHLY_REPORT_RECIPIENT_NAME };
+  }
+  const monthLabel = monthDate.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  const subject = `${test ? '[TEST] ' : ''}Monthly ops summary — ${monthLabel}`;
+  const html = buildMonthlyOpsReportHtml(monthDate);
+  const result = await sendGraphEmail(p.contact_email, subject, html);
+  writeNotifyLog({
+    channel: 'EMAIL', personnel_id: p.id, to_email: p.contact_email, body: subject,
+    provider: result.ok ? 'graph' : 'none', outcome: result.ok ? 'QUEUED' : 'FAILED', error_code: result.ok ? null : result.error,
+  });
+  logEvent('ops.monthly_report_sent', `MONTHLY OPS REPORT (${monthLabel}) SENT TO ${p.name}${test ? ' (test send)' : ''}`, { personnel_id: p.id });
+  return { ok: Boolean(result.ok), error: result.ok ? null : result.error };
+}
+
+function monthlyReportPeriodKey(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; }
+/** Fires on the last calendar day of the month, at most once per month —
+ * idempotency tracked in ui_settings (same generic key/settings shape the
+ * PRF-link setting uses), not a new collection, since one key-value row
+ * is all a single "last period sent" marker needs. */
+function monthlyReportTick(now = new Date()) {
+  const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  if (now.getDate() !== lastDayOfMonth) return;
+  const period = monthlyReportPeriodKey(now);
+  let row = db.ui_settings.find((x) => x.key === 'kayleigh_monthly_report');
+  if (!row) { row = { key: 'kayleigh_monthly_report', settings: {} }; db.ui_settings.push(row); }
+  if (row.settings.last_sent_period === period) return;
+  sendMonthlyKayleighReport(now).then((r) => { if (r.ok) { row.settings.last_sent_period = period; store.flushNow(); } })
+    .catch((e) => console.warn('[cccs] monthly report failed:', e.message));
+}
+route('POST', '/api/ops/monthly-report/send-test', ADMIN, async ({ user }) => {
+  const r = await sendMonthlyKayleighReport(new Date(), { test: true });
+  if (!r.ok) throw httpError(502, r.error || 'send failed');
+  logEvent('ops.monthly_report_test', `${user.display_name} SENT A TEST MONTHLY OPS REPORT`, {});
+  return { ok: true };
+});
+
 const JOB_TS_FIELDS = ['dispatched_at', 'acknowledged_at', 'en_route_at', 'on_scene_at', 'completed_at'];
 route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
@@ -5588,6 +5680,8 @@ function start() {
   setInterval(welfareTick, WELFARE_TICK_MS).unref?.();
   patrolScheduleTick();
   setInterval(patrolScheduleTick, PATROL_SCHEDULE_TICK_MS).unref?.();
+  monthlyReportTick();
+  setInterval(monthlyReportTick, MONTHLY_REPORT_TICK_MS).unref?.();
   shiftRecurrenceTick();
   setInterval(shiftRecurrenceTick, Number(process.env.SHIFT_RECURRENCE_TICK_MS || 60 * 60 * 1000)).unref?.();
   if (process.env.RETENTION !== 'off') {
@@ -5619,4 +5713,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, RETENTION, hashPassword, verifyPassword, sign, PORT };
