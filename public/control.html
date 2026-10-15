@@ -1067,6 +1067,13 @@ async function renderAssign(body) {
     const job = state.jobs.find((j) => j.id === jobId);
     if (!job) { body.innerHTML = '<p class="dim">That job is no longer open.</p>'; return; }
     const unassigned = state.personnel.filter((p) => !job.resources.some((r) => r.personnel === p.name));
+    // An MDT with no callsign record linked to it (its own code is the
+    // de facto callsign) was previously unreachable from this screen —
+    // the only paths were "pick a callsign" and "assign a person" — so
+    // dispatching such an MDT to an already-created job had nowhere to
+    // go even though the backend (POST /api/jobs/:id/assign) already
+    // falls back to matching a bare mdt_code when no callsign matches.
+    const unassignedMdts = state.mdts.filter((m) => m.connected && !m.job_id && !job.resources.some((r) => r.mdt === m.mdt_code));
     body.innerHTML = `
       <p class="dim" style="margin:0 0 8px">Tap a call sign to dispatch every officer and MDT on it to <strong>${esc(job.reference)}</strong>.</p>
       <div class="chips">${callsigns.map((c) => {
@@ -1080,6 +1087,13 @@ async function renderAssign(body) {
           <button class="btn primary" id="asPersonGo" ${unassigned.length ? '' : 'disabled'}>Assign</button>
         </div>
       </div>
+      <div class="dsec">
+        <div class="t">Or assign an MDT directly — no call sign needed</div>
+        <div style="display:flex;gap:6px">
+          <select id="asMdt" style="flex:1">${unassignedMdts.map((m) => `<option value="${esc(m.mdt_code)}">${esc(m.mdt_code)}${m.callsign ? ` — ${esc(m.callsign)}` : ''}</option>`).join('') || '<option value="">— no free MDT online —</option>'}</select>
+          <button class="btn primary" id="asMdtGo" ${unassignedMdts.length ? '' : 'disabled'}>Assign</button>
+        </div>
+      </div>
       <div class="btn-row" style="margin-top:10px"><button class="btn" id="asBack">Back to ${esc(job.reference)}</button></div>
       <p class="err" id="detailErr"></p>`;
     els('[data-cs]', body).forEach((b) => (b.onclick = async () => {
@@ -1088,6 +1102,10 @@ async function renderAssign(body) {
     }));
     if (el('#asPersonGo')) el('#asPersonGo').onclick = async () => {
       try { upsert(state.jobs, await api('POST', `/api/jobs/${jobId}/assign`, { resources: [el('#asPerson').value] })); paint(); renderDispatch(); }
+      catch (e) { showErr(e); }
+    };
+    if (el('#asMdtGo')) el('#asMdtGo').onclick = async () => {
+      try { upsert(state.jobs, await api('POST', `/api/jobs/${jobId}/assign`, { resources: [el('#asMdt').value] })); paint(); renderDispatch(); }
       catch (e) { showErr(e); }
     };
     el('#asBack').onclick = () => select('j', jobId);
