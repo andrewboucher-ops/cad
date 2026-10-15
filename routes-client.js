@@ -66,7 +66,7 @@ const CLIENT_REQUEST_STATUSES = ['OPEN', 'ACKNOWLEDGED', 'CLOSED'];
 
 module.exports = function registerClientRoutes({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl, sign, hashPassword, forms,
+  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl, sign, hashPassword, forms, gocardless,
 }) {
   for (const t of ['clients', 'documents', 'client_requests']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -563,5 +563,103 @@ module.exports = function registerClientRoutes({
     const file = path.join(documentsDir(d.site_id), d.stored_name);
     if (!fs.existsSync(file)) throw httpError(404, 'document file missing');
     return { __stream: fs.createReadStream(file), __headers: { 'content-type': d.mimetype, 'cache-control': 'private, max-age=604800', 'content-disposition': contentDisposition('attachment', d.filename) } };
+  });
+
+  /* ---------------- GoCardless Direct Debit ----------------
+   * A client's own mandate setup (hosted Billing Request Flow) and its
+   * status. The webhook that actually confirms the outcome lives here
+   * too, since the client record is what it updates — GoCardless's own
+   * docs say explicitly not to trust the browser redirect back as
+   * confirmation, only the webhook (see gocardless.js's header comment).
+   * -------------------------------------------------------------- */
+  route('GET', '/api/client/gocardless/status', CLIENT_OR_ADMIN, ({ user, query }) => {
+    const client = requireClient(user, query);
+    const gc = client.gocardless || {};
+    return { configured: gocardless.configured(), mandate_status: gc.mandate_status || null, bank_name: gc.bank_name || null, account_ending: gc.account_ending || null };
+  });
+  route('POST', '/api/client/gocardless/start', CLIENT_OR_ADMIN, async ({ user, query }) => {
+    const client = requireClient(user, query);
+    if (!gocardless.configured()) throw httpError(409, 'Direct Debit is not set up on this server');
+    if (!client.gocardless) client.gocardless = {};
+    const { billingRequestId, authorisationUrl } = await gocardless.startMandateSetup({
+      existingCustomerId: client.gocardless.customer_id || undefined,
+      redirectUri: `${publicBaseUrl}/client.html`,
+      prefilledEmail: client.billing_email || client.contact_email || undefined,
+      prefilledName: client.name,
+    }).catch((e) => { throw httpError(502, e.message); });
+    client.gocardless.billing_request_id = billingRequestId;
+    client.gocardless.mandate_status = 'pending';
+    logEvent('client.gocardless_setup_started', `${client.name} STARTED DIRECT DEBIT SETUP`, { client_id: client.id });
+    return { authorisation_url: authorisationUrl };
+  });
+
+  /** Matches an incoming mandate event back to a CCCS client. The event
+   * only ever carries the mandate id, never which billing request it
+   * came from — the first time we learn a client's mandate id IS this
+   * event, so for one not yet linked, every client mid-setup (a stored
+   * billing_request_id, no mandate_id yet) is checked against GoCardless
+   * to see whose billing request just produced this mandate. Cheap in
+   * practice: there are only ever as many "mid-setup" clients at once as
+   * people are actively filling in the hosted flow right now. */
+  async function resolveClientForMandateEvent(mandateId) {
+    let client = db.clients.find((c) => c.gocardless && c.gocardless.mandate_id === mandateId);
+    if (client) return client;
+    const pending = db.clients.filter((c) => c.gocardless && c.gocardless.billing_request_id && !c.gocardless.mandate_id);
+    for (const c of pending) {
+      try {
+        const br = await gocardless.getBillingRequest(c.gocardless.billing_request_id);
+        if (br.mandate_request && br.mandate_request.links && br.mandate_request.links.mandate === mandateId) {
+          c.gocardless.mandate_id = mandateId;
+          if (br.links && br.links.customer) c.gocardless.customer_id = br.links.customer;
+          return c;
+        }
+      } catch { /* this one client's lookup failed — keep checking the rest */ }
+    }
+    return null;
+  }
+
+  /** GoCardless webhook. Authenticated purely by the HMAC signature on the
+   * RAW request body (see gocardless.js) — registered in server.js's
+   * RAW_BODY_PATHS so the dispatcher never buffers/parses it first, since
+   * the signature must be computed over the exact bytes received. Always
+   * answers 200 once the signature checks out, even for an event this
+   * installation has no use for — GoCardless retries anything else
+   * indefinitely, which would retry forever for, say, a resource type
+   * CCCS doesn't track. */
+  route('POST', '/api/webhooks/gocardless', null, async ({ req }) => {
+    const raw = await new Promise((resolve, reject) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+      req.on('error', reject);
+    });
+    if (!gocardless.verifyWebhookSignature(raw, req.headers['webhook-signature'])) throw httpError(498, 'bad webhook signature');
+    let payload;
+    try { payload = JSON.parse(raw); } catch { throw httpError(400, 'invalid JSON'); }
+
+    for (const ev of payload.events || []) {
+      if (ev.resource_type === 'mandates' && ev.links && ev.links.mandate) {
+        const client = await resolveClientForMandateEvent(ev.links.mandate);
+        if (client) {
+          client.gocardless.mandate_status = ev.action;
+          logEvent('client.gocardless_mandate_updated', `${client.name} DIRECT DEBIT MANDATE → ${String(ev.action).toUpperCase()}`, { client_id: client.id });
+        }
+      } else if (ev.resource_type === 'payments' && ev.links && ev.links.payment) {
+        const inv = db.invoices.find((i) => i.gocardless && i.gocardless.payment_id === ev.links.payment);
+        if (inv) {
+          inv.gocardless.status = ev.action;
+          if (['confirmed', 'paid_out'].includes(ev.action) && inv.status !== 'PAID') {
+            inv.status = 'PAID'; inv.paid_at = new Date().toISOString();
+            inv.history.push({ at: inv.paid_at, by: 'GoCardless', what: `Direct Debit collected (${ev.action})` });
+            logEvent('invoice.paid', `INVOICE ${inv.number || inv.reference} PAID (DIRECT DEBIT)`, { invoice_id: inv.id });
+          } else if (['failed', 'cancelled', 'customer_approval_denied', 'charged_back'].includes(ev.action)) {
+            inv.gocardless.last_error = `Direct Debit ${ev.action}`;
+            inv.history.push({ at: new Date().toISOString(), by: 'GoCardless', what: `Direct Debit ${ev.action}` });
+            logEvent('invoice.direct_debit_failed', `INVOICE ${inv.number || inv.reference} DIRECT DEBIT ${String(ev.action).toUpperCase()}`, { invoice_id: inv.id });
+          }
+        }
+      }
+    }
+    return { __body: 'ok', __headers: { 'content-type': 'text/plain' } };
   });
 };

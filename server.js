@@ -1108,8 +1108,10 @@ const MIME = {
  * can make a signed-in browser send. */
 const FORM_BODY_PATHS = new Set(['/api/sms/status']);
 // Routes that read the request stream themselves (a PC installer upload is a
-// few hundred MB), so the dispatcher must not buffer or parse it first.
-const RAW_BODY_PATHS = new Set(['/api/integrations/checkcall-host/release']);
+// few hundred MB; a GoCardless webhook's signature must be computed over the
+// exact raw bytes received, not a re-serialised JSON.parse/stringify round
+// trip), so the dispatcher must not buffer or parse it first.
+const RAW_BODY_PATHS = new Set(['/api/integrations/checkcall-host/release', '/api/webhooks/gocardless']);
 
 const requestHandler = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -4996,8 +4998,9 @@ const agreements = require('./routes-agreements.js')({
   UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
 const xero = require('./xero.js')({ db, flushNow: () => store.flushNow(), redirectUri: `${PUBLIC_BASE_URL}/api/xero/callback` });
+const gocardless = require('./gocardless.js');
 require('./routes-invoices.js')({
-  route, httpError, ADMIN, FINANCE, CLIENT, db, nextId, logEvent, attendance, agreements, xero, sendEmail: (...a) => mailer.send(...a), UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+  route, httpError, ADMIN, FINANCE, CLIENT, db, nextId, logEvent, attendance, agreements, xero, gocardless, sendEmail: (...a) => mailer.send(...a), UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
 
 // Which roles see which section of the menus — see ui-sections.js.
@@ -5015,7 +5018,7 @@ const forms = require('./routes-forms.js')({
 // Client portal — see routes-client.js for the trust-boundary invariants.
 require('./routes-client.js')({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, sign, hashPassword, forms,
+  isControlRole, assertPassdownAccess, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, sign, hashPassword, forms, gocardless,
 });
 
 // Finance — a read-only view of cost/billing figures. See routes-finance.js.

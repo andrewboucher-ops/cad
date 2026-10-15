@@ -130,7 +130,10 @@
 
   <div class="section-card">
     <header><span class="h-icon" style="background:rgba(234,179,8,.15);color:var(--busy)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h12v18l-2-1.5L14 21l-2-1.5L10 21l-2-1.5L6 21z" stroke-linejoin="round"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Invoices</header>
-    <div class="body" id="invoicesBody"><p class="empty-note">Loading…</p></div>
+    <div class="body">
+      <div id="ddBody" style="margin-bottom:10px"></div>
+      <div id="invoicesBody"><p class="empty-note">Loading…</p></div>
+    </div>
   </div>
 
   <div class="section-card">
@@ -352,6 +355,28 @@ async function paintShifts() {
   }).join('') + (patrols.some((p) => !p.shift_id) ? `<div style="margin-top:6px"><strong style="font-size:13px">Other patrol visits</strong>${patrols.filter((p) => !p.shift_id).map(patrolRow).join('')}</div>` : '');
 }
 
+async function paintDirectDebit() {
+  const s = await api('GET', withAs('/api/client/gocardless/status')).catch(() => null);
+  if (!s || !s.configured) { el('#ddBody').innerHTML = ''; return; }
+  if (s.mandate_status === 'active') {
+    el('#ddBody').innerHTML = `<p class="empty-note" style="color:var(--available)">Direct Debit is set up${s.bank_name ? ` — ${esc(s.bank_name)}${s.account_ending ? ` ending ${esc(s.account_ending)}` : ''}` : ''}.</p>`;
+    return;
+  }
+  const pending = s.mandate_status && s.mandate_status !== 'active';
+  el('#ddBody').innerHTML = `
+    <div class="list-row">
+      <span style="flex:1">${pending ? `Direct Debit setup is ${esc(s.mandate_status)} — this can take a moment to confirm.` : 'Pay your invoices automatically by Direct Debit instead of bank transfer.'}</span>
+      ${isAdminView ? '' : `<button type="button" class="btn" id="ddStart">${pending ? 'Set up again' : 'Set up Direct Debit'}</button>`}
+    </div>
+    <p class="err" id="ddError" style="margin:4px 0 0"></p>`;
+  if (!isAdminView && el('#ddStart')) el('#ddStart').onclick = async () => {
+    const btn = el('#ddStart'); btn.disabled = true; const was = btn.textContent; btn.textContent = '…';
+    try {
+      const { authorisation_url } = await api('POST', withAs('/api/client/gocardless/start'));
+      location.href = authorisation_url;
+    } catch (e) { el('#ddError').textContent = e.message; btn.disabled = false; btn.textContent = was; }
+  };
+}
 async function paintInvoices() {
   const rows = await api('GET', withAs('/api/client/invoices')).catch(() => []);
   const t = encodeURIComponent(getSession().token);
@@ -448,6 +473,7 @@ async function loadSite() {
   paintRentals();
   paintAgreements();
   paintInvoices();
+  paintDirectDebit();
   if (isAdminView) el('#adminAsName').textContent = client.name;
   sites = client.sites;
   el('#clientName').textContent = client.name;

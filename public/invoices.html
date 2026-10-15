@@ -181,12 +181,13 @@ async function view(id) {
   if (draft) acts.push(act('void', 'Void'), act('save', 'Save changes'), act('approve', 'Approve', 'primary'));
   if (i.number && i.status !== 'VOID') acts.push(act('email', i.emails && i.emails.some((e) => e.ok) ? 'Email again' : 'Email to client'));
   if (i.status === 'APPROVED') acts.push(act('void', 'Void'), act('paid', 'Mark paid'), act('xero', 'Send to Xero', 'primary'));
+  if (i.status === 'APPROVED' && (!i.gocardless || !i.gocardless.payment_id)) acts.push(act('direct-debit', 'Collect via Direct Debit'));
   if (i.status === 'IN_XERO' || (i.status === 'PAID' && i.xero)) acts.push(act('sync', 'Check Xero'));
   const shiftTable = (l) => l.shifts && l.shifts.length ? `<details><summary class="dim" style="font-size:12px">${l.shifts.length} shift${l.shifts.length === 1 ? '' : 's'}</summary>
     <table class="k shifts"><tbody>${l.shifts.map((s) => `<tr><td>${esc(date(s.date))}</td><td>${esc(s.person)}</td><td class="num">${s.hours} h</td><td class="dim">${esc(s.source)}</td></tr>`).join('')}</tbody></table></details>` : '';
   modal(i.number ? `Invoice ${i.number}` : 'Draft invoice', `
     <p style="margin-top:0"><span class="pill ${sc}">${sl}</span> <strong>${esc(i.client_name)}</strong> — ${esc(i.site_name)}</p>
-    <p class="dim" style="font-size:12.5px;margin:0 0 6px">Contract ${esc(i.contract_reference)} · ${esc(date(i.period_from))} to ${esc(date(i.period_to))} · hours ${i.billing_basis === 'ROSTERED' ? 'rostered' : 'worked'} · issued ${esc(date(i.issue_date))}${i.xero && i.xero.number ? ` · Xero ${esc(i.xero.number)} (${esc(i.xero.status)})` : ''}</p>
+    <p class="dim" style="font-size:12.5px;margin:0 0 6px">Contract ${esc(i.contract_reference)} · ${esc(date(i.period_from))} to ${esc(date(i.period_to))} · hours ${i.billing_basis === 'ROSTERED' ? 'rostered' : 'worked'} · issued ${esc(date(i.issue_date))}${i.xero && i.xero.number ? ` · Xero ${esc(i.xero.number)} (${esc(i.xero.status)})` : ''}${i.gocardless && i.gocardless.payment_id ? ` · Direct Debit ${esc(i.gocardless.status)}${i.gocardless.last_error ? ` — ${esc(i.gocardless.last_error)}` : ''}` : ''}</p>
     ${i.checks && i.checks.length ? `<div class="checks"><strong>Check before approving:</strong><ul>${i.checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul><span class="dim">Fix the clock times on the rota, then void this draft and make it again — or change the hours below.</span></div>` : ''}
     <div style="overflow-x:auto"><table class="k lines"><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Amount</th>${draft ? '<th></th>' : ''}</tr></thead>
     <tbody id="iLines">${i.lines.map((l) => `<tr data-line="${l.id}">
@@ -226,6 +227,7 @@ async function view(id) {
         if (k === 'paid') { const note = prompt('Mark as paid — note (optional), e.g. "BACS 12 Oct"'); if (note === null) return; await api('POST', `/api/invoices/${i.id}/paid`, { note }); }
         if (k === 'void') { const reason = prompt('Why is it being voided? (optional)'); if (reason === null) return; await api('POST', `/api/invoices/${i.id}/void`, { reason }); }
         if (k === 'xero') { b.textContent = 'Sending…'; await api('POST', `/api/invoices/${i.id}/xero`); }
+        if (k === 'direct-debit') { if (!confirm(`Collect ${money(i.total)} from ${i.client_name} by Direct Debit now?`)) return; b.textContent = 'Submitting…'; await api('POST', `/api/invoices/${i.id}/direct-debit`); }
         if (k === 'sync') await api('POST', `/api/invoices/${i.id}/xero-sync`);
         await load(); view(i.id);
       } catch (e) { err.textContent = e.message; } finally { b.disabled = false; }

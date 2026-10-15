@@ -17,6 +17,11 @@ process.env.XERO_LOGIN_BASE = XBASE;
 process.env.XERO_IDENTITY_BASE = XBASE;
 process.env.XERO_API_BASE = XBASE;
 
+const GCPORT = 4037, GCBASE = `http://127.0.0.1:${GCPORT}`;
+process.env.GOCARDLESS_ACCESS_TOKEN = 'test-gc-token';
+process.env.GOCARDLESS_WEBHOOK_SECRET = 'test-gc-webhook-secret';
+process.env.GOCARDLESS_API_BASE = GCBASE;
+
 /* ---- a fake Xero: just the endpoints xero.js uses ---- */
 const X = { tokens: [], contacts: [], invoices: [], calls: [], emailed: [] };
 const fake = http.createServer((req, res) => {
@@ -64,6 +69,52 @@ const fake = http.createServer((req, res) => {
   });
 });
 
+/* ---- a fake GoCardless: just the endpoints gocardless.js uses ---- */
+const GC = { billingRequests: [], flows: [], payments: [] };
+const fakeGC = http.createServer((req, res) => {
+  let raw = '';
+  req.on('data', (c) => (raw += c));
+  req.on('end', () => {
+    const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    const u = new URL(req.url, GCBASE);
+    if (req.headers.authorization !== 'Bearer test-gc-token') return send(401, { error: { message: 'invalid token' } });
+    const body = raw ? JSON.parse(raw) : {};
+    if (u.pathname === '/billing_requests' && req.method === 'POST') {
+      const id = `BRQ${GC.billingRequests.length + 1}`;
+      const br = { id, mandate_request: { ...body.billing_requests.mandate_request, links: {} }, links: body.billing_requests.links || {} };
+      GC.billingRequests.push(br);
+      return send(201, { billing_requests: br });
+    }
+    const getBR = u.pathname.match(/^\/billing_requests\/([^/]+)$/);
+    if (getBR && req.method === 'GET') {
+      const br = GC.billingRequests.find((x) => x.id === getBR[1]);
+      return br ? send(200, { billing_requests: br }) : send(404, { error: { message: 'not found' } });
+    }
+    if (u.pathname === '/billing_request_flows' && req.method === 'POST') {
+      const id = `BRF${GC.flows.length + 1}`;
+      const flow = { id, authorisation_url: `https://pay-sandbox.gocardless.com/billing/static/flow?id=${id}`, links: body.billing_request_flows.links };
+      GC.flows.push(flow);
+      return send(201, { billing_request_flows: flow });
+    }
+    if (u.pathname === '/payments' && req.method === 'POST') {
+      const p = body.payments;
+      if (p.links.mandate === 'MD-REJECT') return send(422, { error: { message: 'mandate_is_inactive' } });
+      const id = `PM${GC.payments.length + 1}`;
+      const payment = { id, status: 'pending_submission', amount: p.amount, currency: p.currency, reference: p.reference, links: { mandate: p.links.mandate } };
+      GC.payments.push(payment);
+      return send(201, { payments: payment });
+    }
+    send(404, { error: { message: 'no such fake endpoint' } });
+  });
+});
+/** Signs a webhook body exactly as GoCardless would, for posting to CCCS's
+ * own /api/webhooks/gocardless. */
+function gcWebhookBody(events) {
+  const raw = JSON.stringify({ events });
+  const sig = require('crypto').createHmac('sha256', 'test-gc-webhook-secret').update(raw).digest('hex');
+  return { raw, sig };
+}
+
 const app = require('../server.js');
 const BASE = `http://127.0.0.1:${process.env.PORT}`;
 async function call(method, path, body, token, raw = false) {
@@ -80,6 +131,7 @@ let adminT, dispT, clientT, otherT, finT, siteA, siteB, client, other;
 const mails = [];
 before(async () => {
   await new Promise((r) => fake.listen(XPORT, '127.0.0.1', r));
+  await new Promise((r) => fakeGC.listen(GCPORT, '127.0.0.1', r));
   app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, attachments: opts.attachments || [] }); return { ok: true }; };
   app.start();
   await new Promise((r) => setTimeout(r, 200));
@@ -92,7 +144,7 @@ before(async () => {
   await call('POST', '/api/users', { username: 'accounts', password: 'realpassword1', role: 'FINANCE' }, adminT);
   clientT = await login('meridian', 'realpassword1'); otherT = await login('otherco', 'realpassword1'); finT = await login('accounts', 'realpassword1');
 });
-after(() => { app.server.closeAllConnections?.(); app.server.close(); fake.close(); });
+after(() => { app.server.closeAllConnections?.(); app.server.close(); fake.close(); fakeGC.close(); });
 
 const LINES = [
   { description: 'Static guarding', kind: 'HOURLY', rate: 20, est_quantity: 160 },
@@ -556,4 +608,89 @@ test('invoicing on the CLOCKED basis rounds the clocked span to the nearest 15 m
   // from — is untouched: the exact, unrounded span.
   const a = app.db.shift_assignments.find((x) => x.shift_id === app.db.shifts.find((s) => s.site_id === site.id).id);
   assert.equal(app.attendance.worked(a).worked_min, 526, 'payroll still sees the real 8h46m, not the bill-rounded figure');
+});
+
+/* ---------------- GoCardless Direct Debit ---------------- */
+
+test('GoCardless: a client starts Direct Debit setup, the webhook confirms the mandate is active (never the browser redirect), and the portal reflects it', async () => {
+  const start = await call('POST', '/api/client/gocardless/start', {}, clientT);
+  assert.equal(start.status, 200, JSON.stringify(start.body));
+  assert.match(start.body.authorisation_url, /pay-sandbox\.gocardless\.com/);
+
+  const statusBefore = await call('GET', '/api/client/gocardless/status', undefined, clientT);
+  assert.equal(statusBefore.body.mandate_status, 'pending');
+
+  // Simulate the payer completing GoCardless's hosted flow: the billing
+  // request now carries the resulting mandate id — this is exactly what
+  // resolveClientForMandateEvent (routes-client.js) reads back, since the
+  // webhook event itself never says which of our clients it's for.
+  const br = GC.billingRequests.at(-1);
+  br.mandate_request.links.mandate = 'MD1';
+  br.links.customer = 'CU1';
+
+  const { raw, sig } = gcWebhookBody([{ id: 'EV1', resource_type: 'mandates', action: 'active', links: { mandate: 'MD1' } }]);
+  const wh = await fetch(BASE + '/api/webhooks/gocardless', { method: 'POST', headers: { 'content-type': 'application/json', 'webhook-signature': sig }, body: raw });
+  assert.equal(wh.status, 200);
+
+  const statusAfter = await call('GET', '/api/client/gocardless/status', undefined, clientT);
+  assert.equal(statusAfter.body.mandate_status, 'active');
+});
+
+test('GoCardless webhook rejects a bad signature outright — never processed, never a 200', async () => {
+  const wh = await fetch(BASE + '/api/webhooks/gocardless', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'webhook-signature': 'not-the-real-signature' }, body: JSON.stringify({ events: [] }),
+  });
+  assert.equal(wh.status, 498);
+});
+
+test('an admin can only collect via Direct Debit once the client has an active mandate, and the webhook — not the submit call itself — is what marks the invoice paid', async () => {
+  const site = (await call('POST', '/api/sites', { name: 'GC Test Site' }, adminT)).body;
+  const gcClient = (await call('POST', '/api/clients', { name: 'GC Test Client', site_ids: [site.id] }, adminT)).body;
+  const contract = (await call('POST', '/api/agreements', {
+    kind: 'CONTRACT', site_id: site.id, lines: [{ description: 'Static guarding', kind: 'FIXED_PERIOD', rate: 500 }], start_date: '2026-08-01',
+  }, adminT)).body;
+  await call('POST', `/api/agreements/${contract.id}/mark-signed`, { name: 'Test' }, adminT);
+  const gen = await call('POST', '/api/invoices/generate', { from: '2026-08-01', to: '2026-08-31', contract_id: contract.id }, adminT);
+  const inv = gen.body.made[0];
+  await call('POST', `/api/invoices/${inv.id}/approve`, {}, adminT);
+
+  const blocked = await call('POST', `/api/invoices/${inv.id}/direct-debit`, {}, adminT);
+  assert.equal(blocked.status, 409);
+  assert.match(blocked.body.error, /no active Direct Debit mandate/);
+
+  // Give the client an active mandate directly, as if an earlier webhook
+  // had already confirmed it (this test is about collection, not setup —
+  // setup itself is covered above).
+  app.db.clients.find((c) => c.id === gcClient.id).gocardless = { mandate_id: 'MD2', mandate_status: 'active', customer_id: 'CU2' };
+
+  const collected = await call('POST', `/api/invoices/${inv.id}/direct-debit`, {}, adminT);
+  assert.equal(collected.status, 200, JSON.stringify(collected.body));
+  assert.ok(collected.body.gocardless.payment_id);
+  assert.equal(collected.body.status, 'APPROVED', 'stays APPROVED until GoCardless actually confirms the payment — submitting is not the same as being paid');
+
+  const dup = await call('POST', `/api/invoices/${inv.id}/direct-debit`, {}, adminT);
+  assert.equal(dup.status, 409, 'already submitted — never collected twice');
+
+  const { raw, sig } = gcWebhookBody([{ id: 'EV2', resource_type: 'payments', action: 'confirmed', links: { payment: collected.body.gocardless.payment_id } }]);
+  const wh = await fetch(BASE + '/api/webhooks/gocardless', { method: 'POST', headers: { 'content-type': 'application/json', 'webhook-signature': sig }, body: raw });
+  assert.equal(wh.status, 200);
+  const after = await call('GET', `/api/invoices/${inv.id}`, undefined, adminT);
+  assert.equal(after.body.status, 'PAID');
+});
+
+test('a Direct Debit collection failure is recorded on the invoice, not silently dropped', async () => {
+  const site = (await call('POST', '/api/sites', { name: 'GC Fail Site' }, adminT)).body;
+  const gcClient = (await call('POST', '/api/clients', { name: 'GC Fail Client', site_ids: [site.id] }, adminT)).body;
+  const contract = (await call('POST', '/api/agreements', {
+    kind: 'CONTRACT', site_id: site.id, lines: [{ description: 'Static guarding', kind: 'FIXED_PERIOD', rate: 500 }], start_date: '2026-08-01',
+  }, adminT)).body;
+  await call('POST', `/api/agreements/${contract.id}/mark-signed`, { name: 'Test' }, adminT);
+  const gen = await call('POST', '/api/invoices/generate', { from: '2026-08-01', to: '2026-08-31', contract_id: contract.id }, adminT);
+  const inv = gen.body.made[0];
+  await call('POST', `/api/invoices/${inv.id}/approve`, {}, adminT);
+  app.db.clients.find((c) => c.id === gcClient.id).gocardless = { mandate_id: 'MD-REJECT', mandate_status: 'active' };
+
+  const collected = await call('POST', `/api/invoices/${inv.id}/direct-debit`, {}, adminT);
+  assert.equal(collected.status, 502, JSON.stringify(collected.body));
+  assert.match(collected.body.error, /mandate_is_inactive/);
 });

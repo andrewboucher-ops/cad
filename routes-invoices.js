@@ -37,7 +37,7 @@ const path = require('path');
 const { Doc, A4 } = require('./pdf.js');
 
 module.exports = function registerInvoices({
-  route, httpError, ADMIN, FINANCE, CLIENT = ['CLIENT'], db, nextId, logEvent, attendance, agreements, xero, sendEmail = null, publicBaseUrl = '', flushNow = () => {},
+  route, httpError, ADMIN, FINANCE, CLIENT = ['CLIENT'], db, nextId, logEvent, attendance, agreements, xero, gocardless, sendEmail = null, publicBaseUrl = '', flushNow = () => {},
 }) {
   if (!Array.isArray(db.invoices)) db.invoices = [];
   const MONEY = [...ADMIN, ...FINANCE];
@@ -460,6 +460,35 @@ module.exports = function registerInvoices({
       return inv;
     } catch (e) { throw httpError(502, e.message); }
   });
+  /** Submits an approved invoice to GoCardless for Direct Debit collection
+   * against the client's active mandate — admin-triggered, same manual
+   * spirit as every other invoicing action here (nothing auto-collects).
+   * inv.status deliberately stays APPROVED, not a new intermediate value —
+   * only the webhook (routes-client.js) flips it to PAID once GoCardless
+   * actually confirms the payment; inv.gocardless.status tracks
+   * GoCardless's own in-flight state (pending_submission, submitted, …)
+   * in the meantime, same role Xero's own inv.xero.status plays. */
+  route('POST', '/api/invoices/:id/direct-debit', MONEY, async ({ params, user }) => {
+    const inv = findInv(params.id);
+    if (inv.status !== 'APPROVED') throw httpError(409, 'approve the invoice first');
+    if (inv.gocardless && inv.gocardless.payment_id) throw httpError(409, 'already submitted for Direct Debit collection');
+    const client = (db.clients || []).find((c) => c.id === inv.client_id);
+    if (!client) throw httpError(400, 'the client for this invoice no longer exists');
+    const gc = client.gocardless || {};
+    if (gc.mandate_status !== 'active' || !gc.mandate_id) throw httpError(409, `this client has no active Direct Debit mandate (status: ${gc.mandate_status || 'not set up'})`);
+    try {
+      const payment = await gocardless.createPayment({
+        mandateId: gc.mandate_id, amountPence: Math.round(inv.total * 100), currency: 'GBP',
+        reference: inv.number || inv.reference, description: `Invoice ${inv.number || inv.reference}`,
+      });
+      inv.gocardless = { payment_id: payment.id, status: payment.status, submitted_at: new Date().toISOString(), submitted_by: user.display_name, last_error: null };
+      inv.history.push({ at: inv.gocardless.submitted_at, by: user.display_name, what: `submitted for Direct Debit collection (£${inv.total.toFixed(2)})` });
+      logEvent('invoice.direct_debit_submitted', `${user.display_name} SUBMITTED INVOICE ${inv.number || inv.reference} FOR DIRECT DEBIT (£${inv.total.toFixed(2)})`, { invoice_id: inv.id });
+      flushNow();
+      return inv;
+    } catch (e) { throw httpError(502, e.message); }
+  });
+
   /** Brings one invoice up to date with what Xero says (paid, voided…). */
   function applyXero(inv, x) {
     const was = inv.status;
