@@ -120,6 +120,27 @@ module.exports = function registerPayroll({
     return { priorCumulativeGrossYTD, priorCumulativeTaxYTD: last ? last.cumulative_tax_ytd : 0 };
   }
 
+  /** Pay on the WORKED basis rounds the clocked span to the nearest 15
+   * minutes IN THE COMPANY'S FAVOUR before converting to hours: clock-in
+   * rounds UP to the next boundary (arriving early never earns extra),
+   * clock-out rounds DOWN to the previous one (staying late never earns
+   * extra past it) — a shift is never paid for more minutes than it
+   * actually ran. Deliberately NOT applied inside attendance.worked()
+   * itself, which routes-invoices.js also reads from to bill clients —
+   * rounding pay down must never also round down what a client is
+   * billed for the same worked time. Break minutes are left exact
+   * (nothing to round in the company's favour there — a break already
+   * reduces payable time). */
+  const PAY_ROUND_MIN = 15;
+  function workedHoursForPay(a) {
+    const stepMs = PAY_ROUND_MIN * 60000;
+    const roundedIn = Math.ceil(Date.parse(a.clocked_in_at) / stepMs) * stepMs;
+    const roundedOut = Math.floor(Date.parse(a.clocked_out_at) / stepMs) * stepMs;
+    const { break_min } = attendance.worked(a);
+    const minutes = Math.max(0, Math.round((roundedOut - roundedIn) / 60000) - break_min);
+    return minutes / 60;
+  }
+
   /* ---------------------------------------------------------------- *
    * Hours: mirrors routes-invoices.js's hoursFor(), but across every
    * site a person worked, not one contract's — payroll isn't scoped to
@@ -142,7 +163,7 @@ module.exports = function registerPayroll({
       if (payBasis === 'ROSTERED') {
         shiftHours = Math.max(0, (Date.parse(s.ends_at) - startsAt) / 3600000 - (Number(s.break_minutes) || 0) / 60);
       } else if (a.clocked_in_at && a.clocked_out_at) {
-        shiftHours = attendance.worked(a).worked_min / 60;
+        shiftHours = workedHoursForPay(a);
       } else if (a.attendance === 'NO_SHOW') {
         // 0 hours, not unresolved — a no-show is a known outcome.
       } else if (Date.parse(s.ends_at) > Date.now()) {

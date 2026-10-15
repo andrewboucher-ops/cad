@@ -195,6 +195,24 @@ module.exports = function registerInvoices({
 
   const dayStart = (d) => new Date(`${d}T00:00:00.000Z`).getTime();
 
+  /** Billing on the CLOCKED basis rounds the clocked span to the nearest
+   * 15 minutes IN THE COMPANY'S FAVOUR before converting to hours — the
+   * mirror image of routes-payroll.js's workedHoursForPay(), and
+   * deliberately the opposite direction: clock-in rounds DOWN to the
+   * previous boundary, clock-out rounds UP to the next one, so a client
+   * is never billed for fewer minutes than were actually worked. Nothing
+   * here touches attendance.worked() itself, which payroll also reads
+   * from — rounding a bill up must never also round a wage up. */
+  const BILL_ROUND_MIN = 15;
+  function workedHoursForInvoice(a) {
+    const stepMs = BILL_ROUND_MIN * 60000;
+    const roundedIn = Math.floor(Date.parse(a.clocked_in_at) / stepMs) * stepMs;
+    const roundedOut = Math.ceil(Date.parse(a.clocked_out_at) / stepMs) * stepMs;
+    const { break_min } = attendance.worked(a);
+    const minutes = Math.max(0, Math.round((roundedOut - roundedIn) / 60000) - break_min);
+    return minutes / 60;
+  }
+
   /** Hours for one HOURLY line in [from, to]: per shift, per person. */
   function hoursFor(contract, line, from, to) {
     const t0 = dayStart(from), t1 = dayStart(to) + 86400000;
@@ -211,7 +229,7 @@ module.exports = function registerInvoices({
         } else if (a.time_rejected) {
           source = 'not approved';
         } else if (a.clocked_in_at && a.clocked_out_at) {
-          hours = attendance.worked(a).worked_min / 60; source = (a.exceptions || []).some((x) => x.status === 'PENDING') ? 'awaiting approval' : 'clocked';
+          hours = workedHoursForInvoice(a); source = (a.exceptions || []).some((x) => x.status === 'PENDING') ? 'awaiting approval' : 'clocked';
         } else if (a.attendance === 'NO_SHOW') {
           source = 'no-show';
         } else {

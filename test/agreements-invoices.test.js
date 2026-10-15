@@ -530,3 +530,30 @@ test('a withdrawn contract disappears from the client portal — it was taken ba
   assert.ok(!seenAfterWithdraw.some((x) => x.id === a.id), 'gone from the list once withdrawn');
   assert.equal((await call('GET', `/api/client/agreements/${a.id}/pdf`, undefined, clientT)).status, 404, 'and not reachable directly by id either');
 });
+
+test('invoicing on the CLOCKED basis rounds the clocked span to the nearest 15 minutes in the company\'s favour — the opposite direction from payroll\'s rounding, since here the company bills the client rather than pays the worker', async () => {
+  const site = (await call('POST', '/api/sites', { name: 'Rounding Test Site' }, adminT)).body;
+  await call('POST', '/api/clients', { name: 'Rounding Test Client', site_ids: [site.id] }, adminT);
+  const contract = (await call('POST', '/api/agreements', {
+    kind: 'CONTRACT', site_id: site.id, lines: [{ description: 'Static guarding', kind: 'HOURLY', rate: 20, est_quantity: 160 }], start_date: '2026-08-01',
+  }, adminT)).body;
+  await call('POST', `/api/agreements/${contract.id}/mark-signed`, { name: 'Test' }, adminT);
+
+  // 08:07 clock-in rounds DOWN to 08:00 (billing starts earlier — more
+  // billable time); 16:53 clock-out rounds UP to 17:00 (billing ends
+  // later — more again). Exact span would be 8h46m = £175.33 at £20/h;
+  // rounded in the company's favour it's a clean 9.0h = £180.
+  addShift(site.id, '20', 8, 8, { clocked_in_at: '2026-08-20T08:07:00Z', clocked_out_at: '2026-08-20T16:53:00Z' });
+
+  const g = await call('POST', '/api/invoices/generate', { from: '2026-08-01', to: '2026-08-31', contract_id: contract.id }, adminT);
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const inv = g.body.made[0];
+  const hourly = inv.lines.find((l) => l.kind === 'HOURLY');
+  assert.equal(hourly.quantity, 9, 'rounded up to a full 9 hours, not the exact 8h46m');
+  assert.equal(inv.subtotal, 180);
+
+  // attendance.worked() itself — what routes-payroll.js pays a worker
+  // from — is untouched: the exact, unrounded span.
+  const a = app.db.shift_assignments.find((x) => x.shift_id === app.db.shifts.find((s) => s.site_id === site.id).id);
+  assert.equal(app.attendance.worked(a).worked_min, 526, 'payroll still sees the real 8h46m, not the bill-rounded figure');
+});

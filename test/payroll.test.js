@@ -191,6 +191,30 @@ test('an unresolved clock-out blocks approval; clocking out and recalculating cl
   assert.equal(approveNow.status, 200, JSON.stringify(approveNow.body));
 });
 
+test('pay on the WORKED basis rounds the clocked span to the nearest 15 minutes in the company\'s favour, but client invoicing is untouched', async () => {
+  const p = await newPayrollPerson('Payroll Test Rounding', { pay_basis: 'WORKED', hourly_rate: 20 });
+  // The shift's own scheduled start/end don't matter for the WORKED basis
+  // — only the clock-in/out times do — so a plain 08:00-09:00 fixture
+  // shift is fine even though the actual clocked span below runs later.
+  const { assignment } = await oneHourShift(p.id, '2027-03-10');
+  // Clock in late, clock out early-ish against 15-min boundaries — never
+  // exactly on one, which is the point: 08:07 rounds UP to 08:15, 16:53
+  // rounds DOWN to 16:45.
+  assignment.clocked_in_at = '2027-03-10T08:07:00.000Z';
+  assignment.clocked_out_at = '2027-03-10T16:53:00.000Z';
+
+  const run = await generateAndApprove('2027-03-01', '2027-03-31');
+  const slip = run.payslips.find((x) => x.personnel_id === p.id);
+  // Exact span would be 8h46m = 8.7667h → £175.33 at £20/h. Rounded in
+  // the company's favour (in UP to 08:15, out DOWN to 16:45) it's a
+  // clean 8.5h → £170.00 — less than the exact figure, as intended.
+  assert.equal(slip.gross_from_hours, 170, JSON.stringify(slip));
+
+  // attendance.worked() itself — what routes-invoices.js bills a client
+  // from — is untouched by this: the exact, unrounded span.
+  assert.equal(app.attendance.worked(assignment).worked_min, 526, 'invoicing still sees the real 8h46m, not the pay-rounded figure');
+});
+
 test('missing bank details blocks approval; adding them clears it', async () => {
   const p = await newPayrollPerson('Payroll Test NoBank', {}, { bank: false });
   await oneHourShift(p.id, '2026-09-05');
