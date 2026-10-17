@@ -170,6 +170,12 @@ if [ -n "$DRY_RUN" ]; then echo "   (dry run) copy $SRC_DIR → $APP_DIR"; else
   tar -C "$SRC_DIR" --exclude=./data --exclude=./.git --exclude=./node_modules --exclude=./seed.json -cf - . | tar -C "$APP_DIR" -xf -
 fi
 run chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+# Uploaded files (report photos and signatures, staff photos, documents)
+# live next to the database. Anything that ever wrote there as root — a
+# script run by hand, a restore — leaves folders the service can't write
+# to, and submitting a report then fails with EACCES. Hand them back.
+UPLOADS_DIR="$(dirname "$DATA_FILE")/uploads"
+[ -d "$UPLOADS_DIR" ] && run chown -R "$APP_USER:$APP_USER" "$UPLOADS_DIR"
 
 say "5/6  Restarting $SERVICE"
 run systemctl restart "$SERVICE"
