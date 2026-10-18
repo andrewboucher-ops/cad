@@ -77,6 +77,11 @@ const TABLES = [
   // check call host applies them (routes-checkcalls.js). A queued stop must
   // survive a restart, or the calls carry on.
   'checkcall_commands',
+  // Live BroadNet radio handset state (GPS/status), mirrored onto the
+  // control-room map — losing this on restart just means a brief gap until
+  // the next terminal webhook arrives, but it's cheap to keep and avoids an
+  // empty map on every deploy.
+  'broadnet_terminals',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

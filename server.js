@@ -43,6 +43,7 @@ const { verifyMicrosoftIdToken } = require('./msauth.js');
 const webpush = require('./webpush.js');
 const sms = require('./sms.js');
 const dvla = require('./dvla.js');
+const broadnet = require('./broadnet.js');
 const ami = require('./asterisk.js');
 const payrollCalc = require('./payroll-calc.js');
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@echeloncic.com';
@@ -108,6 +109,7 @@ const db = {
   agreements: [], invoices: [],
   payroll_runs: [], payslips: [],
   checkcall_commands: [],
+  broadnet_terminals: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -2573,6 +2575,72 @@ route('POST', '/api/integrations/aura/jobs', null, ({ body: b, req }) => {
   return { __status: 200, __body: publicJob(existing) };
 });
 
+/* ---- BroadNet Dispatch bridge --------------------------------------------
+ * Outbound: an operator presses "Push to BroadNet" on a job (not automatic —
+ * not every job is BroadNet-relevant, and there's no live channel/terminal
+ * data yet to auto-route by). MVP targets one configured default channel;
+ * per-resource terminal targeting is a follow-up once a real account exists
+ * and actual channel/terminal UUIDs are visible in BroadNet's portal.
+ *
+ * Inbound: one webhook URL (registered in BroadNet's portal) receives three
+ * payload shapes discriminated by which top-level key is present, same
+ * spirit as AURA's single endpoint discriminated by body.message. BroadNet
+ * documents no webhook signature scheme (unlike GoCardless), so the URL
+ * itself carries an unguessable token as the only authenticity check. */
+const BROADNET_GRADE = { RED: 1, AMBER: 2, GREEN: 4, ROUTINE: 5 };
+function publicBroadnetTerminal(t) {
+  return { network_id: t.network_id, username: t.username, lat: t.lat, lon: t.lon, status: t.status, channel: t.channel, ptt_pressed: t.ptt_pressed, updated_at: t.updated_at };
+}
+
+route('POST', '/api/jobs/:id/broadnet-push', CONTROL, async ({ params, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  if (j.broadnet_incident_uuid) throw httpError(409, 'already pushed to BroadNet');
+  const incident = await broadnet.createIncident({
+    description: `${j.reference} — ${j.incident_type}: ${j.description || j.location}`,
+    grade: BROADNET_GRADE[j.priority] || 3,
+    lat: j.lat, lon: j.lon, label: j.location,
+    channelUuid: process.env.BROADNET_DEFAULT_CHANNEL_UUID || undefined,
+  });
+  j.broadnet_incident_uuid = incident.uuid;
+  j.broadnet_pushed_at = new Date().toISOString();
+  j.updated_at = j.broadnet_pushed_at;
+  broadcast('job.updated', publicJob(j));
+  logEvent('job.updated', `JOB ${j.reference} — pushed to BroadNet (${incident.uuid})`, { job_id: j.id, by: user.display_name });
+  return publicJob(j);
+});
+
+route('POST', '/api/integrations/broadnet/webhook/:token', null, ({ params, body: b }) => {
+  if (!process.env.BROADNET_WEBHOOK_TOKEN || params.token !== process.env.BROADNET_WEBHOOK_TOKEN) throw httpError(401, 'bad BroadNet webhook token');
+  logInboundAlarmPayload('broadnet', 'BroadNet', b);
+
+  if (b.terminal) {
+    const t = b.terminal;
+    let rec = db.broadnet_terminals.find((x) => x.network_id === t.network_id);
+    if (!rec) { rec = { network_id: t.network_id }; db.broadnet_terminals.push(rec); }
+    Object.assign(rec, {
+      username: t.username, lat: t.latitude != null ? Number(t.latitude) : null, lon: t.longitude != null ? Number(t.longitude) : null,
+      status: broadnet.canonicalStatus(t.incident_status), channel: t.channel || null, ptt_pressed: Boolean(t.ptt_pressed),
+      updated_at: new Date().toISOString(),
+    });
+    broadcast('broadnet_terminal.location', publicBroadnetTerminal(rec));
+    return { ok: true };
+  }
+
+  if (b.incident || b.allocation) {
+    const incidentUuid = (b.incident && b.incident.uuid) || (b.allocation && b.allocation.incident_uuid);
+    const existing = incidentUuid ? db.jobs.find((x) => x.broadnet_incident_uuid === incidentUuid) : null;
+    if (!existing) return { ok: true, note: 'no job matches this BroadNet incident — logged only' };
+    const stamp = `[BroadNet ${b.reason || 'update'} — ${new Date().toISOString()}]`;
+    existing.notes = existing.notes ? `${existing.notes}\n${stamp}` : stamp;
+    existing.updated_at = new Date().toISOString();
+    broadcast('job.updated', publicJob(existing));
+    logEvent('job.updated', `JOB ${existing.reference} — BroadNet ${b.reason || 'update'}`, { job_id: existing.id, incident_uuid: incidentUuid });
+    return publicJob(existing);
+  }
+
+  return { ok: true, note: 'unrecognised BroadNet payload shape — logged only' };
+});
+
 route('POST', '/api/jobs/:id/assign', CONTROL, ({ params, body }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
   const targets = body.resources || body.to || [];
@@ -3433,6 +3501,7 @@ route('GET', '/api/state', ALL, ({ user }) => ({
   personnel: db.personnel.filter((p) => visibleToUser(p, user)).map(publicPersonnel),
   sites: db.sites.filter((s) => siteVisibleTo(s.id, user)),
   site_visits: db.site_visits.filter((v) => siteVisibleTo(v.site_id, user)).map(publicSiteVisit),
+  broadnet_terminals: db.broadnet_terminals.map(publicBroadnetTerminal),
   emergencies: db.emergency_events.filter((e) => e.state !== 'RESOLVED'),
   events: db.audit_logs.slice(-80), server_time: new Date().toISOString(),
 }));

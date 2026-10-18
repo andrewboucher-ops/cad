@@ -254,7 +254,7 @@ el('#signout').onclick = () => { CCCS.clearSession(); location.href = '/index.ht
 setInterval(() => (el('#clock').textContent = CCCS.hhmmss()), 250);
 
 const state = {
-  personnel: [], mdts: [], jobs: [], sites: [], site_visits: [], shifts: [], requests: [], emergencies: [], events: [], reports: [],
+  personnel: [], mdts: [], jobs: [], sites: [], site_visits: [], shifts: [], requests: [], emergencies: [], events: [], reports: [], broadnet_terminals: [],
   selected: null,          // { kind: 'j'|'v'|'p'|'m', id }
   mode: null,              // non-selection Detail modes: newJob, newVisit, assign, message, notify, callsigns, report
   modeArg: null,
@@ -601,7 +601,13 @@ function renderMap() {
   const personnelUnits = state.personnel.filter((p) => p.lat != null).map((p) => ({
     ...p, _kind: 'p', callsign: p.callsign || p.name, status: 'ON_TASK',
   }));
-  const units = [...mdtUnits, ...personnelUnits];
+  // BroadNet terminals arrive already translated to this same status
+  // vocabulary server-side (broadnet.js's canonicalStatus) — self-contained
+  // from the webhook payload, no personnel/MDT linkage needed.
+  const broadnetUnits = (state.broadnet_terminals || []).filter((t) => t.lat != null).map((t) => ({
+    ...t, _kind: 't', id: t.network_id, callsign: t.username || t.network_id,
+  }));
+  const units = [...mdtUnits, ...personnelUnits, ...broadnetUnits];
   // Visits ride the job-marker layer with their own reference, so the map
   // shows every place someone is due to attend, not only incidents.
   const markers = [
@@ -737,7 +743,7 @@ function renderJob(body) {
         ${r.personnel ? `<button class="btn" data-contact="${esc(r.personnel)}" style="padding:1px 8px;font-size:11px">Contact</button>` : ''}
         ${active ? `<button class="btn danger" data-standdown="${esc(r.personnel ? 'p:' + r.personnel : 'm:' + r.mdt)}" style="padding:1px 8px;font-size:11px">Stand down</button>` : ''}
       </div>`).join('') : '<p class="dim" style="margin:0">Nobody assigned.</p>'}
-      ${active ? `<div class="btn-row" style="margin-top:6px"><button class="btn primary" id="jAssign">Assign</button><button class="btn" id="jEditBtn">Edit details</button></div>` : ''}
+      ${active ? `<div class="btn-row" style="margin-top:6px"><button class="btn primary" id="jAssign">Assign</button><button class="btn" id="jEditBtn">Edit details</button>${j.broadnet_incident_uuid ? '<span class="dim" style="align-self:center;font-size:12px">Pushed to BroadNet</span>' : '<button class="btn" id="jBroadnetPush">Push to BroadNet</button>'}</div>` : ''}
     </div>
     <div class="dsec"><div class="t">Notes — visible to every assigned call sign</div>
       <textarea id="jNotes" rows="2">${esc(j.notes || '')}</textarea>
@@ -762,6 +768,12 @@ function renderJob(body) {
   els('[data-contact]', body).forEach((b) => (b.onclick = () => { const p = state.personnel.find((x) => x.name === b.dataset.contact); if (p) select('p', p.id); }));
   if (!active) return;
   el('#jAssign').onclick = () => setMode('assign', j.id);
+  if (el('#jBroadnetPush')) el('#jBroadnetPush').onclick = async (e) => {
+    if (!confirm('Push this job to BroadNet radio handsets now?')) return;
+    const b = e.target; b.disabled = true; b.textContent = 'Pushing…';
+    try { await api('POST', `/api/jobs/${j.id}/broadnet-push`); renderDetail({ force: true }); }
+    catch (err) { showErr(err); b.disabled = false; b.textContent = 'Push to BroadNet'; }
+  };
   el('#jEditBtn').onclick = () => { el('#jView').classList.add('hide'); el('#jEdit').classList.remove('hide'); };
   el('#eCancel').onclick = () => renderDetail({ force: true });
   el('#eSave').onclick = () => api('PATCH', `/api/jobs/${j.id}`, {
@@ -1262,6 +1274,7 @@ bus.on('mdt.status_changed', (m) => { upsert(state.mdts, m); renderShift(); rend
    .on('welfare.checked_in', onPersonChange)
    .on('welfare.stopped', onPersonChange)
    .on('personnel.location', (p) => { upsert(state.personnel, p); renderMap(); })
+   .on('broadnet_terminal.location', (t) => { const i = state.broadnet_terminals.findIndex((x) => x.network_id === t.network_id); if (i >= 0) state.broadnet_terminals[i] = t; else state.broadnet_terminals.push(t); renderMap(); })
    // RESTRICTED submissions never broadcast (see routes-forms.js's header) —
    // every row this ever receives is one this login was already allowed to
    // read, same as the per-job/visit/person Reports lists elsewhere on this
@@ -1300,7 +1313,7 @@ async function boot() {
   const s = await api('GET', '/api/state');
   Object.assign(state, {
     mdts: s.mdts, jobs: s.jobs, personnel: s.personnel, emergencies: s.emergencies, events: s.events,
-    sites: s.sites || [], site_visits: s.site_visits || [],
+    sites: s.sites || [], site_visits: s.site_visits || [], broadnet_terminals: s.broadnet_terminals || [],
   });
   const from = new Date(Date.now() - 18 * 3600e3).toISOString(), to = new Date(Date.now() + 3600e3).toISOString();
   state.shifts = await api('GET', `/api/shifts?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`).catch(() => []);
