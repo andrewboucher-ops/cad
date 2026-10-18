@@ -92,6 +92,26 @@ const VISIBILITIES = ['STANDARD', 'RESTRICTED'];
 const SUBJECT_TYPES = ['JOB', 'SITE_VISIT', 'SITE', 'PERSONNEL', 'VEHICLE', 'APPLICATION'];
 const SUBJECT_LABEL = { JOB: 'Job', SITE_VISIT: 'Patrol visit', SITE: 'Site', PERSONNEL: 'Person', VEHICLE: 'Vehicle' };
 const REVIEW_OUTCOMES = ['APPROVED', 'REJECTED', 'NOTED'];
+// A report that needs more than a single review action: a manager (any
+// ADMIN — the review "pool", same bar as /action already uses, not a
+// named assignee) claims it, investigates, assesses risk, and either
+// closes it (the existing /action route, now also reachable from these
+// states) or sends it back to the officer for correction. Generic across
+// every form type, not hardcoded to incident/safeguarding/use-of-force —
+// those just happen to be the ones anyone uses it on.
+const RISK_LEVELS = ['LOW', 'MEDIUM', 'HIGH'];
+const RISK_MATRIX = {
+  LOW: { LOW: 'LOW', MEDIUM: 'LOW', HIGH: 'MEDIUM' },
+  MEDIUM: { LOW: 'LOW', MEDIUM: 'MEDIUM', HIGH: 'HIGH' },
+  HIGH: { LOW: 'MEDIUM', MEDIUM: 'HIGH', HIGH: 'HIGH' },
+};
+const CLOSEABLE_STATUSES = ['OPEN', 'UNDER_INVESTIGATION', 'RETURNED_FOR_CORRECTION'];
+function blankInvestigation() {
+  return { started_by: null, started_by_user_id: null, started_at: null, findings: '', witnesses: '', evidence_reviewed: '', root_cause: '', recommendations: '' };
+}
+function blankRiskAssessment() {
+  return { likelihood: null, severity: null, risk_rating: null, control_measures: '', review_date: null, assessed_by: null, assessed_at: null };
+}
 const EFFECTS = ['FUEL_UP', 'DEEP_CLEAN', 'INSPECTION'];
 /** The fields each effect reads: [id, type, required]. */
 const EFFECT_FIELDS = {
@@ -393,6 +413,8 @@ module.exports = function registerFormRoutes({
       status: sub.status || 'OPEN', outcome: sub.outcome || null, feedback: sub.feedback || null,
       actioned_by: sub.actioned_by || null, actioned_at: sub.actioned_at || null,
       amendments: sub.amendments || [],
+      investigation: sub.investigation || null, risk_assessment: sub.risk_assessment || null,
+      correction_requests: sub.correction_requests || [],
       kit_check: sub.kit_check || null,
       client_shareable: CLIENT_SHAREABLE_SUBJECT_TYPES.includes(sub.subject_type),
       client_share: sub.client_share || null,
@@ -406,6 +428,8 @@ module.exports = function registerFormRoutes({
     visibility: effectiveVisibility(sub), severity: severityOf(sub), subject_type: sub.subject_type, subject_id: sub.subject_id,
     subject_label: sub.subject_label, submitted_by: sub.submitted_by_name, submitted_at: sub.submitted_at,
     status: sub.status || 'OPEN', outcome: sub.outcome || null,
+    under_investigation: Boolean(sub.investigation && sub.investigation.started_at),
+    risk_rating: (sub.risk_assessment && sub.risk_assessment.risk_rating) || null,
   });
 
   function publicDefinition(d, user) {
@@ -966,7 +990,7 @@ module.exports = function registerFormRoutes({
    */
   route('POST', '/api/form-submissions/:id/action', ADMIN, ({ params, body, user }) => {
     const sub = readableSubmission(params.id, user);
-    if ((sub.status || 'OPEN') !== 'OPEN') throw httpError(409, `already actioned (${sub.outcome}) by ${sub.actioned_by}`);
+    if (!CLOSEABLE_STATUSES.includes(sub.status || 'OPEN')) throw httpError(409, `already actioned (${sub.outcome}) by ${sub.actioned_by}`);
     const outcome = String(body.outcome || '').toUpperCase();
     if (!REVIEW_OUTCOMES.includes(outcome)) throw httpError(400, `outcome must be one of ${REVIEW_OUTCOMES.join(', ')}`);
     const feedback = String(body.feedback || '').trim().slice(0, 2000);
@@ -991,6 +1015,89 @@ module.exports = function registerFormRoutes({
     logEvent(restricted ? 'form.reviewed_restricted' : 'form.actioned',
       restricted ? `RESTRICTED REPORT ${sub.reference} REVIEWED` : `${sub.definition_name.toUpperCase()} ${sub.reference} ${outcome} BY ${user.display_name}`,
       { submission_id: sub.id });
+    flushNow();
+    return publicSubmission(sub);
+  });
+
+  /** Pushes to whoever can already read this submission — the same
+   * grant-holders for a RESTRICTED report, or every ADMIN for a STANDARD
+   * one — rather than a named assignee, matching "a pool, not a person". */
+  function notifyReviewPool(sub, title, body) {
+    if (effectiveVisibility(sub) === 'RESTRICTED') {
+      const readers = db.form_grants.filter((g) => g.definition_id === sub.definition_id).map((g) => g.user_id);
+      pushToUsers(readers, { title, body, url: `/forms.html?id=${sub.id}`, tag: 'cccs-investigation' });
+    } else {
+      pushToRoles(ADMIN, { title, body, url: `/forms.html?id=${sub.id}`, tag: 'cccs-investigation' });
+    }
+  }
+
+  /** Claims a report for investigation — any ADMIN who can already read
+   * it, first one in. Not a named assignment: whoever starts it is who
+   * it's "assigned to" in the sense of ownership, but anyone in the same
+   * pool could equally have claimed it. */
+  route('POST', '/api/form-submissions/:id/investigation/start', ADMIN, ({ params, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if ((sub.status || 'OPEN') !== 'OPEN') throw httpError(409, `cannot start an investigation from status ${sub.status}`);
+    sub.status = 'UNDER_INVESTIGATION';
+    sub.investigation = { ...blankInvestigation(), started_by: user.display_name, started_by_user_id: user.id, started_at: new Date().toISOString() };
+    if (!sub.risk_assessment) sub.risk_assessment = blankRiskAssessment();
+    logEvent('form.investigation_started', `${user.display_name} STARTED INVESTIGATING ${effectiveVisibility(sub) === 'RESTRICTED' ? 'A RESTRICTED REPORT' : sub.reference}`, { submission_id: sub.id });
+    flushNow();
+    return publicSubmission(sub);
+  });
+
+  const INVESTIGATION_FIELDS = ['findings', 'witnesses', 'evidence_reviewed', 'root_cause', 'recommendations'];
+  route('PATCH', '/api/form-submissions/:id/investigation', ADMIN, ({ params, body, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if (!['UNDER_INVESTIGATION', 'RETURNED_FOR_CORRECTION'].includes(sub.status)) throw httpError(409, 'start an investigation first');
+    if (!sub.investigation) sub.investigation = blankInvestigation();
+    for (const f of INVESTIGATION_FIELDS) if (f in body) sub.investigation[f] = String(body[f] ?? '').trim().slice(0, 4000);
+    flushNow();
+    return publicSubmission(sub);
+  });
+
+  route('PATCH', '/api/form-submissions/:id/risk-assessment', ADMIN, ({ params, body, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if (!['UNDER_INVESTIGATION', 'RETURNED_FOR_CORRECTION'].includes(sub.status)) throw httpError(409, 'start an investigation first');
+    if (!sub.risk_assessment) sub.risk_assessment = blankRiskAssessment();
+    const ra = sub.risk_assessment;
+    if ('likelihood' in body) { const v = String(body.likelihood || '').toUpperCase(); if (v && !RISK_LEVELS.includes(v)) throw httpError(400, `likelihood must be one of ${RISK_LEVELS.join(', ')}`); ra.likelihood = v || null; }
+    if ('severity' in body) { const v = String(body.severity || '').toUpperCase(); if (v && !RISK_LEVELS.includes(v)) throw httpError(400, `severity must be one of ${RISK_LEVELS.join(', ')}`); ra.severity = v || null; }
+    if ('control_measures' in body) ra.control_measures = String(body.control_measures || '').trim().slice(0, 4000);
+    if ('review_date' in body) { if (body.review_date && isNaN(Date.parse(body.review_date))) throw httpError(400, 'review_date must be a date'); ra.review_date = body.review_date ? String(body.review_date).slice(0, 10) : null; }
+    ra.risk_rating = ra.likelihood && ra.severity ? RISK_MATRIX[ra.likelihood][ra.severity] : null;
+    if (ra.risk_rating) { ra.assessed_by = user.display_name; ra.assessed_at = new Date().toISOString(); }
+    flushNow();
+    return publicSubmission(sub);
+  });
+
+  /** Sends it back to whoever filed it, with a reason, and opens an edit
+   * window on the original report — see canEdit()/the PATCH route below.
+   * Every round of this is kept (correction_requests), not just the last. */
+  route('POST', '/api/form-submissions/:id/return-for-correction', ADMIN, ({ params, body, user }) => {
+    const sub = readableSubmission(params.id, user);
+    if (sub.status !== 'UNDER_INVESTIGATION') throw httpError(409, 'only a report under investigation can be returned for correction');
+    const reason = String(body.reason || '').trim().slice(0, 1000);
+    if (!reason) throw httpError(400, 'say what needs correcting or adding');
+    sub.status = 'RETURNED_FOR_CORRECTION';
+    if (!Array.isArray(sub.correction_requests)) sub.correction_requests = [];
+    sub.correction_requests.push({ at: new Date().toISOString(), by: user.display_name, by_user_id: user.id, reason });
+    const restricted = effectiveVisibility(sub) === 'RESTRICTED';
+    if (sub.submitted_by_personnel_id && !restricted) {
+      const msg = {
+        id: nextId('messages'),
+        body: `${sub.reference} (${sub.definition_name}) was returned to you for correction by ${user.display_name}: ${reason}`.slice(0, 1000),
+        from_label: 'CONTROL', from_personnel_id: null, from_mdt_id: null,
+        to_personnel_id: sub.submitted_by_personnel_id, to_mdt_id: null, to_label: sub.submitted_by_name,
+        state: 'DELIVERED', sent_at: new Date().toISOString(), read_at: null,
+      };
+      if (Array.isArray(db.messages)) db.messages.push(msg);
+      broadcast('message.received', msg, { personnelIds: [sub.submitted_by_personnel_id] });
+    }
+    if (sub.submitted_by_user_id) {
+      pushToUsers([sub.submitted_by_user_id], { title: 'Report returned for correction', body: `${sub.reference} needs more information — open it to see what's needed`, url: `/forms.html?id=${sub.id}`, tag: 'cccs-returned' });
+    }
+    logEvent(restricted ? 'form.returned_restricted' : 'form.returned', restricted ? `RESTRICTED REPORT ${sub.reference} RETURNED FOR CORRECTION` : `${sub.definition_name.toUpperCase()} ${sub.reference} RETURNED FOR CORRECTION BY ${user.display_name}: ${reason}`, { submission_id: sub.id });
     flushNow();
     return publicSubmission(sub);
   });
@@ -1144,15 +1251,24 @@ module.exports = function registerFormRoutes({
    */
   const EDIT_WINDOW_MS = Number(process.env.FORM_EDIT_WINDOW_HOURS || 24) * 3600000;
   const EDITABLE_TYPES = new Set(['text', 'textarea', 'number', 'select', 'checkbox', 'date', 'datetime']);
+  /** Two different reasons a report is editable: a vehicle report, self-
+   * service, within a short window — or ANY report a manager has
+   * explicitly returned for correction, no time limit (the manager asked,
+   * so there's no "too late" for answering them), open to the original
+   * officer (or SYSTEM_ADMIN) regardless of form type. */
   function canEdit(sub, user) {
+    if (sub.status === 'RETURNED_FOR_CORRECTION') {
+      return user.role === 'SYSTEM_ADMIN' || sub.submitted_by_user_id === user.id;
+    }
     if (sub.subject_type !== 'VEHICLE') return false;
     if (user.role === 'SYSTEM_ADMIN') return true;
     return sub.submitted_by_user_id === user.id && (sub.status || 'OPEN') === 'OPEN' && Date.now() - Date.parse(sub.submitted_at) < EDIT_WINDOW_MS;
   }
   route('PATCH', '/api/form-submissions/:id', ALL, ({ params, body, user }) => {
     const sub = readableSubmission(params.id, user);
-    if (sub.subject_type !== 'VEHICLE') throw httpError(400, 'only vehicle reports can be edited — other reports stay as filed');
-    if (!canEdit(sub, user)) throw httpError(403, 'you can edit your own vehicle report only while it is open and for 24 hours after filing — ask an admin');
+    const returning = sub.status === 'RETURNED_FOR_CORRECTION';
+    if (sub.subject_type !== 'VEHICLE' && !returning) throw httpError(400, 'only vehicle reports can be edited — other reports stay as filed unless a manager returns them for correction');
+    if (!canEdit(sub, user)) throw httpError(403, returning ? 'only the officer who filed this (or an admin) can make the correction' : 'you can edit your own vehicle report only while it is open and for 24 hours after filing — ask an admin');
     const reason = String((body && body.reason) || '').trim().slice(0, 300);
     if (!reason) throw httpError(400, 'say why you are changing it');
     const raw = body && body.values;
@@ -1178,8 +1294,18 @@ module.exports = function registerFormRoutes({
       catch (e) { console.warn(`[forms] re-applying ${sub.effect_applied} for ${sub.reference} failed:`, e.message); sub.effect_error = e.message; }
     }
     const restricted = effectiveVisibility(sub) === 'RESTRICTED';
-    logEvent('form.amended', restricted ? `RESTRICTED REPORT ${sub.reference} EDITED`
-      : `${sub.definition_name.toUpperCase()} ${sub.reference} EDITED BY ${user.display_name}: ${changes.map((c) => c.label).join(', ')} — ${reason}`, { submission_id: sub.id });
+    if (returning) {
+      // Ball back in the reviewing manager's court — same pool that
+      // returned it, not necessarily the same individual.
+      sub.status = 'UNDER_INVESTIGATION';
+      notifyReviewPool(sub, 'Correction received', `${sub.reference} was corrected and is ready to review again`);
+      logEvent(restricted ? 'form.correction_submitted_restricted' : 'form.correction_submitted',
+        restricted ? `RESTRICTED REPORT ${sub.reference} CORRECTED BY ${user.display_name}` : `${sub.definition_name.toUpperCase()} ${sub.reference} CORRECTED BY ${user.display_name}: ${changes.map((c) => c.label).join(', ')} — ${reason}`,
+        { submission_id: sub.id });
+    } else {
+      logEvent('form.amended', restricted ? `RESTRICTED REPORT ${sub.reference} EDITED`
+        : `${sub.definition_name.toUpperCase()} ${sub.reference} EDITED BY ${user.display_name}: ${changes.map((c) => c.label).join(', ')} — ${reason}`, { submission_id: sub.id });
+    }
     flushNow();
     return { ...publicSubmission(sub), editable: canEdit(sub, user) };
   });

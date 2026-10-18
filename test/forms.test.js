@@ -469,3 +469,117 @@ test('a RESTRICTED HIGH/CRITICAL report reminds its named readers only, content-
   assert.ok(!JSON.stringify(restrictedReminders[0]).includes('Confidential'), 'content-free, same as the original filing push');
   assert.equal(app.db.audit_logs.filter((e) => e.type === 'form.severity_reminder' && e.data.submission_id === filed.body.id).length, 0, 'never the non-restricted variant for a restricted report');
 });
+
+/* ---------------- investigation / risk assessment / return for correction ---------------- */
+
+function fileIncidentReport(token) {
+  return call('POST', '/api/form-submissions', {
+    definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
+    values: {
+      occurred_at: new Date().toISOString(), severity: 'LOW', incident_type: 'Suspicious activity',
+      description: 'Someone was seen near the fence line.', officer_signature: sig('Dan Whitfield'),
+    },
+  }, token);
+}
+
+test('a report can be claimed for investigation, worked on, and closed without ever being returned — the existing fast path (OPEN straight to ACTIONED) still works unchanged', async () => {
+  const filed = await fileIncidentReport(danT);
+  const id = filed.body.id;
+
+  assert.equal((await call('POST', `/api/form-submissions/${id}/investigation/start`, {}, dispT)).status, 403, 'dispatcher is not in the review pool — ADMIN only, same bar as /action');
+  const started = await call('POST', `/api/form-submissions/${id}/investigation/start`, {}, adminT);
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+  assert.equal(started.body.status, 'UNDER_INVESTIGATION');
+  assert.equal(started.body.investigation.started_by, 'System Admin');
+  assert.ok(started.body.investigation.started_at);
+
+  assert.equal((await call('POST', `/api/form-submissions/${id}/investigation/start`, {}, adminT)).status, 409, 'already started');
+
+  const findings = await call('PATCH', `/api/form-submissions/${id}/investigation`, { findings: 'CCTV reviewed, nothing of concern.', witnesses: 'None' }, adminT);
+  assert.equal(findings.status, 200);
+  assert.equal(findings.body.investigation.findings, 'CCTV reviewed, nothing of concern.');
+  assert.equal(findings.body.investigation.witnesses, 'None');
+
+  const risk = await call('PATCH', `/api/form-submissions/${id}/risk-assessment`, { likelihood: 'LOW', severity: 'medium' }, adminT);
+  assert.equal(risk.status, 200, JSON.stringify(risk.body));
+  assert.equal(risk.body.risk_assessment.likelihood, 'LOW');
+  assert.equal(risk.body.risk_assessment.severity, 'MEDIUM', 'case-insensitive, stored upper');
+  assert.equal(risk.body.risk_assessment.risk_rating, 'LOW', 'LOW x MEDIUM = LOW on the 3x3 matrix');
+  assert.equal(risk.body.risk_assessment.assessed_by, 'System Admin');
+
+  // Closed straight from UNDER_INVESTIGATION — the pre-existing /action
+  // route, now also reachable from here, not just OPEN.
+  const closed = await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT);
+  assert.equal(closed.status, 200, JSON.stringify(closed.body));
+  assert.equal(closed.body.status, 'ACTIONED');
+  assert.equal((await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT)).status, 409, 'already actioned');
+});
+
+test('a report can be returned to the officer for correction, edited (any form type, not just vehicle reports), and comes back to the review pool', async () => {
+  const filed = await fileIncidentReport(danT);
+  const id = filed.body.id;
+  await call('POST', `/api/form-submissions/${id}/investigation/start`, {}, adminT);
+
+  assert.equal((await call('POST', `/api/form-submissions/${id}/return-for-correction`, {}, adminT)).status, 400, 'a reason is required');
+  const returned = await call('POST', `/api/form-submissions/${id}/return-for-correction`, { reason: 'Need the exact time this was first noticed' }, adminT);
+  assert.equal(returned.status, 200, JSON.stringify(returned.body));
+  assert.equal(returned.body.status, 'RETURNED_FOR_CORRECTION');
+  assert.equal(returned.body.correction_requests.length, 1);
+  assert.equal(returned.body.correction_requests[0].reason, 'Need the exact time this was first noticed');
+
+  const msg = app.db.messages.find((m) => m.to_personnel_id === dan.id && /returned to you for correction/.test(m.body));
+  assert.ok(msg, 'the officer is told, in-app, for a STANDARD form');
+
+  // Someone else who CAN read it (a supervisor — control can already read
+  // any STANDARD report) still cannot make the correction — only Dan, who
+  // filed it, or a SYSTEM_ADMIN. (An officer with no read access at all,
+  // like Ellie here, would 404 instead — readableSubmission() never
+  // confirms existence to someone who can't see it in the first place.)
+  assert.equal((await call('PATCH', `/api/form-submissions/${id}`, { reason: 'x', values: { description: 'edited' } }, supT)).status, 403);
+
+  const edited = await call('PATCH', `/api/form-submissions/${id}`, {
+    reason: 'Added the time it was first noticed', values: { description: 'Someone was seen near the fence line, first noticed at 22:14.' },
+  }, danT);
+  assert.equal(edited.status, 200, JSON.stringify(edited.body));
+  assert.equal(edited.body.status, 'UNDER_INVESTIGATION', 'back in the review pool\'s court, automatically');
+  assert.equal(edited.body.values.description, 'Someone was seen near the fence line, first noticed at 22:14.');
+  assert.equal(edited.body.amendments.length, 1);
+  assert.equal(edited.body.amendments[0].reason, 'Added the time it was first noticed');
+
+  const correctionLog = app.db.audit_logs.find((e) => e.type === 'form.correction_submitted' && e.data.submission_id === id);
+  assert.ok(correctionLog);
+});
+
+test('return-for-correction and a direct PATCH edit both refuse a report that was never put under investigation', async () => {
+  const filed = await fileIncidentReport(danT);
+  const id = filed.body.id;
+  assert.equal((await call('POST', `/api/form-submissions/${id}/return-for-correction`, { reason: 'x' }, adminT)).status, 409, 'still OPEN — nobody has started investigating');
+  // An incident report (not VEHICLE) that was never returned still cannot be self-edited.
+  assert.equal((await call('PATCH', `/api/form-submissions/${id}`, { reason: 'x', values: { description: 'y' } }, danT)).status, 400);
+});
+
+test('investigation and risk assessment on a RESTRICTED form respect the same grant-based pool as everything else — admin without a grant is refused, same as /action', async () => {
+  const d = def('safeguarding');
+  const filed = await call('POST', '/api/form-submissions', {
+    definition_id: d.id, subject_type: 'JOB', subject_id: job.id,
+    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
+  }, danT);
+  const id = filed.body.id;
+
+  assert.equal((await call('POST', `/api/form-submissions/${id}/investigation/start`, {}, adminT)).status, 404, 'admin has no grant yet — same "not found" as reading it directly');
+  await call('POST', `/api/form-definitions/${d.id}/grants`, { username: 'admin' }, adminT);
+  const started = await call('POST', `/api/form-submissions/${id}/investigation/start`, {}, adminT);
+  assert.equal(started.status, 200, JSON.stringify(started.body));
+
+  const messagesBefore = app.db.messages.length;
+  const returned = await call('POST', `/api/form-submissions/${id}/return-for-correction`, { reason: 'Need more detail on what action was taken' }, adminT);
+  assert.equal(returned.status, 200);
+  // Restricted: no in-app message at all for this one (unlike the earlier
+  // STANDARD-form test, which does get one) — same as the original
+  // filing/action notifications — just told to look, nothing in the body.
+  assert.equal(app.db.messages.length, messagesBefore, 'a restricted return never creates an in-app message');
+
+  const edited = await call('PATCH', `/api/form-submissions/${id}`, { reason: 'Added detail', values: { action_taken: 'Site manager informed immediately, adult safeguarding lead notified.' } }, danT);
+  assert.equal(edited.status, 200, JSON.stringify(edited.body));
+  assert.equal(edited.body.status, 'UNDER_INVESTIGATION');
+});
