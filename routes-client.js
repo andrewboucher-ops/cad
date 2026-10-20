@@ -273,17 +273,28 @@ module.exports = function registerClientRoutes({
     const attachments = fs.existsSync(logoFile)
       ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
       : [];
-    const result = await sendEmail(c.contact_email, 'Welcome to your Echelon client portal', buildWelcomeEmailHtml(c), { attachments });
-    writeNotifyLog({
-      channel: 'EMAIL', personnel_id: null, to_email: c.contact_email, body: 'Welcome to your Echelon client portal',
-      provider: result && result.ok ? 'graph' : 'none', outcome: result && result.ok ? 'QUEUED' : 'FAILED', error_code: result && result.ok ? null : (result && result.error) || 'send failed',
-    });
-    if (!result || result.ok === false) {
-      logEvent('client.welcome_email_failed', `WELCOME EMAIL TO ${c.name} FAILED: ${(result && result.error) || 'send failed'}`, { client_id: c.id });
-      throw httpError(502, (result && result.error) || 'email send failed');
-    }
-    logEvent('client.welcome_email_sent', `WELCOME EMAIL SENT TO ${c.name}`, { client_id: c.id });
-    return { ok: true };
+    // Graph mail has been seen to take long enough that whatever sits in
+    // front of this server (even without Caddy actively proxying it here,
+    // something upstream still times out the connection) gives up and
+    // shows the admin a 504 — even on a send that goes on to succeed. So
+    // this kicks the send off and responds immediately rather than making
+    // the admin's browser hold the connection open for it; the outcome
+    // (success or failure) lands in the notify log either way, same as
+    // every other async email path in this codebase (e.g. emailInvoice).
+    Promise.resolve(sendEmail(c.contact_email, 'Welcome to your Echelon client portal', buildWelcomeEmailHtml(c), { attachments }))
+      .then((result) => {
+        writeNotifyLog({
+          channel: 'EMAIL', personnel_id: null, to_email: c.contact_email, body: 'Welcome to your Echelon client portal',
+          provider: result && result.ok ? 'graph' : 'none', outcome: result && result.ok ? 'QUEUED' : 'FAILED', error_code: result && result.ok ? null : (result && result.error) || 'send failed',
+        });
+        if (!result || result.ok === false) logEvent('client.welcome_email_failed', `WELCOME EMAIL TO ${c.name} FAILED: ${(result && result.error) || 'send failed'}`, { client_id: c.id });
+        else logEvent('client.welcome_email_sent', `WELCOME EMAIL SENT TO ${c.name}`, { client_id: c.id });
+      })
+      .catch((e) => {
+        writeNotifyLog({ channel: 'EMAIL', personnel_id: null, to_email: c.contact_email, body: 'Welcome to your Echelon client portal', provider: 'none', outcome: 'FAILED', error_code: e.message });
+        logEvent('client.welcome_email_failed', `WELCOME EMAIL TO ${c.name} FAILED: ${e.message}`, { client_id: c.id });
+      });
+    return { ok: true, queued: true };
   });
 
   /** Same shell as the welcome email, a narrower job: get them to a working
@@ -344,17 +355,26 @@ module.exports = function registerClientRoutes({
     const attachments = fs.existsSync(logoFile)
       ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
       : [];
-    const result = await sendEmail(c.contact_email, 'Set your password for the Echelon client portal', buildPasswordLinkEmailHtml(c, link), { attachments });
-    writeNotifyLog({
-      channel: 'EMAIL', personnel_id: null, to_email: c.contact_email, body: 'Set your password for the Echelon client portal',
-      provider: result && result.ok ? 'graph' : 'none', outcome: result && result.ok ? 'QUEUED' : 'FAILED', error_code: result && result.ok ? null : (result && result.error) || 'send failed',
-    });
-    if (!result || result.ok === false) {
-      logEvent('client.password_link_failed', `PASSWORD LINK TO ${c.name} (${u.username}) FAILED: ${(result && result.error) || 'send failed'}`, { client_id: c.id, user_id: u.id });
-      throw httpError(502, (result && result.error) || 'email send failed');
-    }
-    logEvent('client.password_link_sent', `PASSWORD LINK SENT TO ${c.name} (${u.username})`, { client_id: c.id, user_id: u.id });
-    return { ok: true, username: u.username };
+    // Same reasoning as the welcome-email route above: don't make the
+    // admin's browser hold the connection open for Graph mail, which has
+    // been seen to run long enough to trip an upstream timeout even on a
+    // send that goes on to succeed. The login (and its username, returned
+    // below) is created synchronously either way — only the email itself
+    // is backgrounded, with its outcome landing in the notify log.
+    Promise.resolve(sendEmail(c.contact_email, 'Set your password for the Echelon client portal', buildPasswordLinkEmailHtml(c, link), { attachments }))
+      .then((result) => {
+        writeNotifyLog({
+          channel: 'EMAIL', personnel_id: null, to_email: c.contact_email, body: 'Set your password for the Echelon client portal',
+          provider: result && result.ok ? 'graph' : 'none', outcome: result && result.ok ? 'QUEUED' : 'FAILED', error_code: result && result.ok ? null : (result && result.error) || 'send failed',
+        });
+        if (!result || result.ok === false) logEvent('client.password_link_failed', `PASSWORD LINK TO ${c.name} (${u.username}) FAILED: ${(result && result.error) || 'send failed'}`, { client_id: c.id, user_id: u.id });
+        else logEvent('client.password_link_sent', `PASSWORD LINK SENT TO ${c.name} (${u.username})`, { client_id: c.id, user_id: u.id });
+      })
+      .catch((e) => {
+        writeNotifyLog({ channel: 'EMAIL', personnel_id: null, to_email: c.contact_email, body: 'Set your password for the Echelon client portal', provider: 'none', outcome: 'FAILED', error_code: e.message });
+        logEvent('client.password_link_failed', `PASSWORD LINK TO ${c.name} (${u.username}) FAILED: ${e.message}`, { client_id: c.id, user_id: u.id });
+      });
+    return { ok: true, queued: true, username: u.username };
   });
 
   /* -------------------------------------------------------------- *

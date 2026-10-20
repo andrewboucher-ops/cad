@@ -2344,10 +2344,15 @@ async function deleteClient(id) {
   try { await api('DELETE', `/api/clients/${id}`); closeModal(); await load(); showTab('clients'); }
   catch (e) { alert(e.message); }
 }
+// The server kicks the actual send off in the background rather than
+// making this wait on Graph mail (which has been slow enough in practice
+// to trip an upstream timeout even on a send that goes on to succeed) —
+// so this only confirms the request was accepted, not that the email
+// landed. Check Admin → Log a moment later for the real outcome.
 async function sendWelcomeEmail(id) {
   const c = allClients.find((x) => x.id === id);
   if (!c || !confirm(`Send a welcome email to ${c.name} (${c.contact_email})?`)) return;
-  try { await api('POST', `/api/clients/${id}/welcome-email`); alert('Welcome email sent.'); }
+  try { await api('POST', `/api/clients/${id}/welcome-email`); alert('Welcome email queued — check the log in a moment to confirm it sent.'); }
   catch (e) { alert(e.message); }
 }
 /** Creates the client's login first if one doesn't exist yet (the server
@@ -2358,7 +2363,7 @@ async function sendWelcomeEmail(id) {
 async function sendPasswordLink(id) {
   const c = allClients.find((x) => x.id === id);
   if (!c || !confirm(`Email ${c.name} (${c.contact_email}) a link to set their portal password? This creates their login first if they don't have one yet.`)) return;
-  try { const r = await api('POST', `/api/clients/${id}/send-password-link`); alert(`Password link sent. Their username is "${r.username}".`); }
+  try { const r = await api('POST', `/api/clients/${id}/send-password-link`); alert(`Password link queued for "${r.username}" — check the log in a moment to confirm it sent.`); }
   catch (e) { alert(e.message); }
 }
 function clientForm(c) {

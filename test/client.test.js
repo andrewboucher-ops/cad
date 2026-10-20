@@ -232,7 +232,13 @@ test('sending a password link creates the client\'s login if needed, is admin-on
   const before = mails.length;
   const sent = await call('POST', `/api/clients/${client.id}/send-password-link`, {}, adminT);
   assert.equal(sent.status, 200, JSON.stringify(sent.body));
-  assert.ok(sent.body.username, 'a login was created and its username returned');
+  assert.ok(sent.body.username, 'a login was created and its username returned synchronously');
+  assert.equal(sent.body.queued, true, 'the email itself is backgrounded, not awaited');
+  // The send is fire-and-forget (so a slow Graph response can't make the
+  // admin's browser hang/time out) — give the background promise a tick
+  // to land before checking the mock mailer, same pattern this file's
+  // other tick-based assertions already use elsewhere in this codebase.
+  await new Promise((r) => setTimeout(r, 30));
   assert.equal(mails.length, before + 1);
   const mail = mails[mails.length - 1];
   assert.equal(mail.to, 'pwlink@example.test');
