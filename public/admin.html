@@ -2373,6 +2373,10 @@ function clientForm(c) {
       <input id="nclBillEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(c.billing_email || '')}" placeholder="e.g. accounts@client.co.uk">
       <label>Billing address (shown on invoices)</label>
       <textarea id="nclBillAddr" rows="3">${isNew ? '' : esc(c.billing_address || '')}</textarea>
+      <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-weight:400">
+        <input type="checkbox" id="nclWeekly" style="width:auto" ${isNew || c.weekly_report_enabled !== false ? 'checked' : ''}>
+        Send the weekly site-activity email (every Monday)
+      </label>
       <label>Sites this client can see</label>
       <div id="nclSites" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:10px">
         ${allSites.map((s) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;text-transform:none;letter-spacing:0;font-weight:400">
@@ -2387,7 +2391,7 @@ function clientModal(c) {
     const foot = document.querySelector('#modalHost .foot');
     foot.innerHTML = `
       <div class="foot-split">
-        <span>${c ? '<button class="btn danger" id="clDelete">Delete client</button>' : ''} ${c && c.contact_email ? '<button class="btn" id="clWelcome">Send welcome email</button> <button class="btn" id="clPwLink">Send password link</button>' : ''}</span>
+        <span>${c ? '<button class="btn danger" id="clDelete">Delete client</button>' : ''} ${c && c.contact_email ? '<button class="btn" id="clWelcome">Send welcome email</button> <button class="btn" id="clPwLink">Send password link</button>' : ''} ${c && c.site_ids.length ? '<button class="btn" id="clWeeklyTest">Send test weekly report</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
           <button class="btn" id="clCancel">Cancel</button>
           <button class="btn primary" id="clSave">${c ? 'Save changes' : 'Create client'}</button>
@@ -2397,11 +2401,15 @@ function clientModal(c) {
     if (el('#clDelete')) el('#clDelete').onclick = () => deleteClient(c.id);
     if (el('#clWelcome')) el('#clWelcome').onclick = () => sendWelcomeEmail(c.id);
     if (el('#clPwLink')) el('#clPwLink').onclick = () => sendPasswordLink(c.id);
+    if (el('#clWeeklyTest')) el('#clWeeklyTest').onclick = async () => {
+      try { const r = await api('POST', '/api/ops/weekly-client-report/send-test', { client_id: c.id }); alert(r.sent ? 'Sent.' : r.skipped ? 'Nothing to report this week — no email sent.' : 'Send failed — check the email is set up (Admin → check Microsoft 365 connection).'); }
+      catch (e) { alert(e.message); }
+    };
     el('#clSave').onclick = async () => {
       const name = el('#nclName').value.trim();
       if (!name) { el('#clError').textContent = 'name is required'; return; }
       const site_ids = els('#nclSites [data-siteid]:checked').map((cb) => Number(cb.dataset.siteid));
-      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), site_ids };
+      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), weekly_report_enabled: el('#nclWeekly').checked, site_ids };
       try {
         if (c) await api('PATCH', `/api/clients/${c.id}`, body);
         else await api('POST', '/api/clients', body);

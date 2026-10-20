@@ -2993,6 +2993,141 @@ route('POST', '/api/ops/monthly-report/send-test', ADMIN, async ({ user }) => {
   return { ok: true };
 });
 
+/** Weekly client activity email — every Monday at 00:00 London time, each
+ * client with at least one site and the toggle on gets a summary of the
+ * shifts worked and any reports an admin has already shared with them
+ * (routes-forms.js's client_share — this never bypasses that gate, it
+ * only surfaces what's already been explicitly redacted and shared) for
+ * the week that just ended (Monday 00:00 through the following Sunday
+ * 23:59, London time).
+ *
+ * Unlike the Kayleigh monthly report above, this genuinely needs to land
+ * in a specific hour, not just "sometime on the right day" — both the
+ * fire-guard and the week-boundary math go through
+ * londonParts()/londonToUtc() (defined further down this file, but
+ * function declarations hoist) rather than the server process's own
+ * local clock, which may not even be set to Europe/London. weekBounds()
+ * is written to work from any day of the week — it always resolves to
+ * the most recently completed Monday-Sunday week — so the same function
+ * serves both the Monday-only tick and the admin's on-demand test-send,
+ * which can be clicked any day. */
+const WEEKLY_CLIENT_REPORT_TICK_MS = Number(process.env.WEEKLY_CLIENT_REPORT_TICK_MS || 10 * 60000);
+const opsTo = (c) => (c ? c.contact_email || c.billing_email || '' : '');
+
+function weekBounds(nowMs) {
+  const n = londonParts(nowMs);
+  const todayDateOnly = Date.UTC(n.y, n.mo, n.d);
+  const weekday = new Date(todayDateOnly).getUTCDay(); // 0=Sun,1=Mon,...,6=Sat
+  const daysSinceMonday = (weekday + 6) % 7; // Mon->0, Tue->1, ..., Sun->6
+  const mrm = new Date(todayDateOnly - daysSinceMonday * 86400000); // most recent Monday, date-only
+  const weekEndUtc = londonToUtc(mrm.getUTCFullYear(), mrm.getUTCMonth(), mrm.getUTCDate(), 0, 0, 0);
+  const pm = new Date(todayDateOnly - (daysSinceMonday + 7) * 86400000); // the Monday before that
+  const weekStartUtc = londonToUtc(pm.getUTCFullYear(), pm.getUTCMonth(), pm.getUTCDate(), 0, 0, 0);
+  const weekKey = `${mrm.getUTCFullYear()}-${String(mrm.getUTCMonth() + 1).padStart(2, '0')}-${String(mrm.getUTCDate()).padStart(2, '0')}`;
+  return { weekStartUtc, weekEndUtc, weekKey };
+}
+
+function weeklyShiftsForClient(client, weekStartUtc, weekEndUtc) {
+  const siteIds = new Set(client.site_ids || []);
+  const shifts = db.shifts.filter((s) => siteIds.has(s.site_id) && s.status !== 'CANCELLED' && s.status !== 'DRAFT'
+    && Date.parse(s.starts_at) >= weekStartUtc && Date.parse(s.starts_at) < weekEndUtc);
+  const rows = [];
+  for (const s of shifts) {
+    const site = db.sites.find((x) => x.id === s.site_id);
+    for (const a of db.shift_assignments.filter((x) => x.shift_id === s.id && ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
+      const p = db.personnel.find((x) => x.id === a.personnel_id);
+      // Raw worked time, not either rounding direction payroll/invoicing
+      // apply — this is an informational digest, not a billing or pay
+      // figure, so neither party's favour belongs here.
+      let hoursLabel;
+      if (a.clocked_in_at && a.clocked_out_at) { const { worked_min } = attendance.worked(a); hoursLabel = `${(worked_min / 60).toFixed(2)} h`; }
+      else if (a.attendance === 'NO_SHOW') hoursLabel = 'No-show';
+      else if (Date.parse(s.ends_at) > Date.now()) hoursLabel = 'Not finished';
+      else hoursLabel = 'Not clocked';
+      rows.push({ site_name: site ? site.name : `Site #${s.site_id}`, date: s.starts_at.slice(0, 10), person: p ? p.name : '—', starts_at: s.starts_at, hoursLabel });
+    }
+  }
+  return rows.sort((a, b) => (a.starts_at < b.starts_at ? -1 : 1));
+}
+
+function weeklySharedReportsForClient(client, weekStartUtc, weekEndUtc) {
+  return forms.clientVisibleSubmissions(client.site_ids || [])
+    .filter((r) => { const t = Date.parse(r.occurred_at); return Number.isFinite(t) && t >= weekStartUtc && t < weekEndUtc; })
+    .sort((a, b) => (a.occurred_at < b.occurred_at ? 1 : -1));
+}
+
+function buildWeeklyClientReportHtml(client, rows, reports, weekStartUtc) {
+  const weekLabel = new Date(weekStartUtc).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/London' });
+  const shiftRows = rows.length
+    ? rows.map((r) => `<tr><td>${r.date}</td><td>${r.site_name}</td><td>${r.person}</td><td>${r.hoursLabel}</td></tr>`).join('')
+    : '<tr><td colspan="4">No shifts recorded this week.</td></tr>';
+  const reportRows = reports.length
+    ? reports.map((r) => `<li>${r.definition_name} — ${r.subject_label || ''} (${new Date(r.occurred_at).toLocaleDateString('en-GB', { timeZone: 'Europe/London' })})</li>`).join('')
+    : '<li>No reports shared this week.</li>';
+  return `
+    <p>Hi,</p>
+    <p>Here's the activity summary for <strong>${client.name}</strong> for the week of <strong>${weekLabel}</strong>:</p>
+    <p><strong>Shifts</strong></p>
+    <table border="1" cellpadding="6" cellspacing="0"><tr><th>Date</th><th>Site</th><th>Officer</th><th>Hours</th></tr>${shiftRows}</table>
+    <p><strong>Reports shared this week</strong></p>
+    <ul>${reportRows}</ul>
+    <p><a href="${PUBLIC_BASE_URL}/client.html">Open your client portal</a></p>`;
+}
+
+async function sendWeeklyClientReport(client, weekStartUtc, weekEndUtc, { test = false } = {}) {
+  const to = opsTo(client);
+  if (!to) return { ok: false, skipped: false, error: 'no contact or billing email on file for ' + client.name };
+  const rows = weeklyShiftsForClient(client, weekStartUtc, weekEndUtc);
+  const reports = weeklySharedReportsForClient(client, weekStartUtc, weekEndUtc);
+  if (!test && !rows.length && !reports.length) return { ok: true, skipped: true };
+  const weekLabel = new Date(weekStartUtc).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'Europe/London' });
+  const subject = `${test ? '[TEST] ' : ''}Weekly site summary — ${client.name} — week of ${weekLabel}`;
+  const html = buildWeeklyClientReportHtml(client, rows, reports, weekStartUtc);
+  const result = await sendGraphEmail(to, subject, html);
+  writeNotifyLog({
+    channel: 'EMAIL', personnel_id: null, to_email: to, body: subject,
+    provider: result.ok ? 'graph' : 'none', outcome: result.ok ? 'QUEUED' : 'FAILED', error_code: result.ok ? null : result.error,
+  });
+  logEvent('client.weekly_report_sent', `WEEKLY REPORT SENT TO ${client.name}${test ? ' (test send)' : ''}`, { client_id: client.id });
+  return { ok: Boolean(result.ok), skipped: false, error: result.ok ? null : result.error };
+}
+
+async function sendWeeklyClientReports(weekStartUtc, weekEndUtc, { test = false, onlyClientId = null } = {}) {
+  const clients = db.clients.filter((c) => (c.site_ids || []).length && c.weekly_report_enabled !== false && (!onlyClientId || c.id === onlyClientId));
+  const out = { sent: 0, skipped: 0, failed: 0 };
+  for (const c of clients) {
+    const r = await sendWeeklyClientReport(c, weekStartUtc, weekEndUtc, { test });
+    if (r.skipped) out.skipped += 1; else if (r.ok) out.sent += 1; else out.failed += 1;
+  }
+  return out;
+}
+
+/** Fires once, in the Monday 00:00-00:59 London hour, at most once per
+ * week — idempotency tracked the same single-key way as the monthly
+ * report. Marked sent once the batch runs, regardless of individual
+ * client outcomes (unlike the monthly report's single-recipient success
+ * check): a retry here would resend to every client that already
+ * succeeded, not just the ones that failed. A failed client is retried
+ * by hand, scoped to just that client, via the admin test-send route. */
+function weeklyClientReportTick(nowMs = Date.now()) {
+  const n = londonParts(nowMs);
+  const weekday = new Date(Date.UTC(n.y, n.mo, n.d)).getUTCDay();
+  if (weekday !== 1 || n.h !== 0) return;
+  const { weekStartUtc, weekEndUtc, weekKey } = weekBounds(nowMs);
+  let row = db.ui_settings.find((x) => x.key === 'weekly_client_reports');
+  if (!row) { row = { key: 'weekly_client_reports', settings: {} }; db.ui_settings.push(row); }
+  if (row.settings.last_sent_week === weekKey) return;
+  sendWeeklyClientReports(weekStartUtc, weekEndUtc).then(() => { row.settings.last_sent_week = weekKey; store.flushNow(); })
+    .catch((e) => console.warn('[cccs] weekly client report failed:', e.message));
+}
+route('POST', '/api/ops/weekly-client-report/send-test', ADMIN, async ({ user, body }) => {
+  const { weekStartUtc, weekEndUtc } = weekBounds(Date.now());
+  const onlyClientId = body && body.client_id ? Number(body.client_id) : null;
+  const r = await sendWeeklyClientReports(weekStartUtc, weekEndUtc, { test: true, onlyClientId });
+  logEvent('client.weekly_report_test', `${user.display_name} SENT A TEST WEEKLY CLIENT REPORT`, { onlyClientId, ...r });
+  return r;
+});
+
 const JOB_TS_FIELDS = ['dispatched_at', 'acknowledged_at', 'en_route_at', 'on_scene_at', 'completed_at'];
 route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
@@ -5762,6 +5897,8 @@ function start() {
   setInterval(patrolScheduleTick, PATROL_SCHEDULE_TICK_MS).unref?.();
   monthlyReportTick();
   setInterval(monthlyReportTick, MONTHLY_REPORT_TICK_MS).unref?.();
+  weeklyClientReportTick();
+  setInterval(weeklyClientReportTick, WEEKLY_CLIENT_REPORT_TICK_MS).unref?.();
   shiftRecurrenceTick();
   setInterval(shiftRecurrenceTick, Number(process.env.SHIFT_RECURRENCE_TICK_MS || 60 * 60 * 1000)).unref?.();
   if (process.env.RETENTION !== 'off') {
@@ -5793,4 +5930,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, RETENTION, hashPassword, verifyPassword, sign, PORT };
