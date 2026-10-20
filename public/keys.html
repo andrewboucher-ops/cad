@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — keys</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+</head>
+<body>
+<div class="k-top">
+  <h1>Keys</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary admin-only hide" id="bNewSafe">New safe</button>
+  <button class="btn admin-only hide" id="bNewWallet">New wallet</button>
+</div>
+<div class="k-body">
+  <div class="bar" id="views">
+    <button class="chip on" data-view="safes">Safes</button>
+    <button class="chip" data-view="wallets">Wallets</button>
+    <button class="chip" data-view="keys">Keys</button>
+    <button class="chip" data-view="activity">Activity</button>
+  </div>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script src="/forms-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
+if (isAdmin) els('.admin-only').forEach((b) => b.classList.remove('hide'));
+const { modal, close, foot, wire, v, when, words, options } = KIT;
+
+let safes = [], wallets = [], keys = [], sites = [], view = 'safes';
+let activity = null; // loaded lazily, [{ at, by, subject, type, note, ...data }]
+
+const safeTag = (id) => (safes.find((s) => s.id === id) || {}).tag_id || '—';
+const walletTag = (id) => (wallets.find((w) => w.id === id) || {}).tag_id || '—';
+const STATUS_PILL = { IN_OFFICE: 'ok', SIGNED_OUT: 'warn', SEALED: 'ok', OPEN: 'warn', IN_WALLET: 'ok', LOST: 'bad', RETURNED_TO_CLIENT: 'off', DISPOSED: 'off' };
+const pill = (s) => `<span class="pill ${STATUS_PILL[s] || 'info'}">${esc(words(s))}</span>`;
+
+async function load() {
+  try {
+    [safes, wallets, keys, sites] = await Promise.all([
+      api('GET', '/api/safes'), api('GET', '/api/wallets'), api('GET', '/api/keys'),
+      sites.length ? sites : api('GET', '/api/sites'),
+    ]);
+  } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  activity = null;
+  render();
+}
+function render() {
+  if (view === 'safes') return renderSafes();
+  if (view === 'wallets') return renderWallets();
+  if (view === 'keys') return renderKeys();
+  return renderActivity();
+}
+els('[data-view]').forEach((b) => (b.onclick = () => {
+  els('[data-view]').forEach((x) => x.classList.toggle('on', x === b));
+  view = b.dataset.view; render();
+}));
+
+/* ---- Safes ---- */
+function renderSafes() {
+  el('#main').innerHTML = `<table class="k"><thead><tr><th>Tag</th><th>Label</th><th>Status</th><th>Held by</th><th>Wallets</th><th>Notes</th><th></th></tr></thead>
+    <tbody>${safes.map((s) => `<tr>
+      <td class="mono">${esc(s.tag_id)}</td><td>${esc(s.label || '—')}</td><td>${pill(s.status)}</td>
+      <td>${esc(s.current_holder || '—')}</td><td>${s.wallets.length}</td><td class="dim">${esc(s.notes || '—')}</td>
+      <td class="acts">
+        ${s.status === 'IN_OFFICE' ? `<button class="btn" data-safe-out="${s.id}">Sign out</button>` : `<button class="btn" data-safe-in="${s.id}">Sign in</button>`}
+        <button class="btn" data-safe-check="${s.id}">Tag check</button>
+        ${isAdmin ? `<button class="btn" data-safe-edit="${s.id}">Edit</button>` : ''}
+      </td></tr>`).join('') || `<tr><td colspan="7" class="dim">No safes yet.</td></tr>`}</tbody></table>`;
+  els('[data-safe-out]').forEach((b) => (b.onclick = () => safeCheckoutModal(Number(b.dataset.safeOut))));
+  els('[data-safe-in]').forEach((b) => (b.onclick = () => safeCheckinModal(Number(b.dataset.safeIn))));
+  els('[data-safe-check]').forEach((b) => (b.onclick = () => tagCheckModal('safes', Number(b.dataset.safeCheck), safeTag(Number(b.dataset.safeCheck)))));
+  els('[data-safe-edit]').forEach((b) => (b.onclick = () => safeEditModal(safes.find((s) => s.id === Number(b.dataset.safeEdit)))));
+}
+el('#bNewSafe').onclick = () => modal('New safe', `<div class="k-form">
+  <div><label>Tag</label><input data-tag autocomplete="off"></div>
+  <div><label>Label</label><input data-label autocomplete="off"></div>
+  <div class="full"><label>Notes</label><textarea data-notes rows="2"></textarea></div>
+  </div>${foot('Create')}`, (root) => wire(root, async () => {
+  const tag_id = v(root, '[data-tag]'); if (!tag_id) throw new Error('tag is required');
+  await api('POST', '/api/safes', { tag_id, label: v(root, '[data-label]'), notes: v(root, '[data-notes]') });
+  close(); load();
+}));
+function safeEditModal(s) {
+  modal(`Edit safe ${s.tag_id}`, `<div class="k-form">
+    <div><label>Label</label><input data-label value="${esc(s.label || '')}"></div>
+    <div><label>New seal code (leave blank to keep)</label><input data-seal autocomplete="off"></div>
+    <div class="full"><label>Notes</label><textarea data-notes rows="2">${esc(s.notes || '')}</textarea></div>
+    </div>${foot('Save')}`, (root) => wire(root, async () => {
+    const body = { label: v(root, '[data-label]'), notes: v(root, '[data-notes]') };
+    const seal = v(root, '[data-seal]'); if (seal) body.seal_code = seal;
+    await api('PATCH', `/api/safes/${s.id}`, body);
+    close(); load();
+  }));
+}
+function safeCheckoutModal(id) {
+  modal(`Sign out ${safeTag(id)}`, `<div class="k-form">
+    ${isAdmin ? `<div class="full"><label>Personnel</label><select data-pid></select></div>` : ''}
+    <label class="full" style="display:flex;align-items:center;gap:8px;font-weight:400;text-transform:none;letter-spacing:0"><input type="checkbox" data-tags style="width:auto"> I have checked all tags</label>
+    <label class="full" style="display:flex;align-items:center;gap:8px;font-weight:400;text-transform:none;letter-spacing:0"><input type="checkbox" data-veh style="width:auto"> This safe will not be left in a vehicle overnight</label>
+    <div class="full"><label>Notes</label><textarea data-notes rows="2"></textarea></div>
+    </div>${foot('Sign out')}`, async (root) => {
+    if (isAdmin) { const people = await api('GET', '/api/personnel'); root.querySelector('[data-pid]').innerHTML = options(people.filter((p) => (p.employment_status || 'ACTIVE') === 'ACTIVE').map((p) => [p.id, p.name]), null, '— choose —'); }
+    wire(root, async () => {
+      if (!root.querySelector('[data-tags]').checked) throw new Error('confirm all tags have been checked');
+      if (!root.querySelector('[data-veh]').checked) throw new Error('confirm it will not be left in a vehicle overnight');
+      const body = { tags_confirmed: true, not_left_in_vehicle_confirmed: true, notes: v(root, '[data-notes]') };
+      if (isAdmin) body.personnel_id = v(root, '[data-pid]');
+      await api('POST', `/api/safes/${id}/checkout`, body);
+      close(); load();
+    });
+  });
+}
+function safeCheckinModal(id) {
+  modal(`Sign in ${safeTag(id)}`, `<div class="k-form">
+    <label class="full" style="display:flex;align-items:center;gap:8px;font-weight:400;text-transform:none;letter-spacing:0"><input type="checkbox" data-tags style="width:auto"> I have checked all tags</label>
+    <div class="full"><label>Notes</label><textarea data-notes rows="2"></textarea></div>
+    </div>${foot('Sign in')}`, (root) => wire(root, async () => {
+    if (!root.querySelector('[data-tags]').checked) throw new Error('confirm all tags have been checked');
+    await api('POST', `/api/safes/${id}/checkin`, { tags_confirmed: true, notes: v(root, '[data-notes]') });
+    close(); load();
+  }));
+}
+function tagCheckModal(kind, id, label) {
+  modal(`Tag check — ${label}`, `<div class="k-form">
+    <div class="full"><label>Result</label><select data-result><option value="PASS">Pass</option><option value="FAIL">Fail</option></select></div>
+    <div class="full"><label>Note</label><textarea data-note rows="2" placeholder="e.g. scheduled monthly check, or a random spot-check"></textarea></div>
+    </div>${foot('Record')}`, (root) => wire(root, async () => {
+    await api('POST', `/api/${kind}/${id}/tag-check`, { result: v(root, '[data-result]'), note: v(root, '[data-note]') });
+    close(); load();
+  }));
+}
+
+/* ---- Wallets ---- */
+function renderWallets() {
+  el('#main').innerHTML = `<table class="k"><thead><tr><th>Tag</th><th>Label</th><th>Safe</th><th>Status</th><th>Keys</th><th></th></tr></thead>
+    <tbody>${wallets.map((w) => `<tr>
+      <td class="mono">${esc(w.tag_id)}</td><td>${esc(w.label || '—')}</td><td>${esc(w.safe_tag || '—')}</td><td>${pill(w.status)}</td><td>${w.keys.length}</td>
+      <td class="acts">
+        ${w.status === 'SEALED' ? `<button class="btn" data-w-open="${w.id}">Open</button>` : `<button class="btn" data-w-reseal="${w.id}">Reseal</button>`}
+        <button class="btn" data-w-transfer="${w.id}">Transfer</button>
+        <button class="btn" data-w-check="${w.id}">Tag check</button>
+        ${isAdmin ? `<button class="btn" data-w-keys="${w.id}">Keys</button>` : ''}
+      </td></tr>`).join('') || `<tr><td colspan="6" class="dim">No wallets yet.</td></tr>`}</tbody></table>`;
+  els('[data-w-open]').forEach((b) => (b.onclick = () => walletOpenModal(Number(b.dataset.wOpen))));
+  els('[data-w-reseal]').forEach((b) => (b.onclick = () => walletResealModal(Number(b.dataset.wReseal))));
+  els('[data-w-transfer]').forEach((b) => (b.onclick = () => walletTransferModal(Number(b.dataset.wTransfer))));
+  els('[data-w-check]').forEach((b) => (b.onclick = () => tagCheckModal('wallets', Number(b.dataset.wCheck), walletTag(Number(b.dataset.wCheck)))));
+  els('[data-w-keys]').forEach((b) => (b.onclick = () => walletKeysModal(wallets.find((w) => w.id === Number(b.dataset.wKeys)))));
+}
+el('#bNewWallet').onclick = () => modal('New wallet', `<div class="k-form">
+  <div class="full"><label>Safe</label><select data-safe>${options(safes.map((s) => [s.id, s.tag_id]), null, '— choose —')}</select></div>
+  <div><label>Tag</label><input data-tag autocomplete="off"></div>
+  <div><label>Label</label><input data-label autocomplete="off"></div>
+  <div class="full"><label>Seal code (the seal applied now, when first packed)</label><input data-seal autocomplete="off"></div>
+  </div>${foot('Create')}`, (root) => wire(root, async () => {
+  const tag_id = v(root, '[data-tag]'); if (!tag_id) throw new Error('tag is required');
+  const seal_code = v(root, '[data-seal]'); if (!seal_code) throw new Error('seal code is required');
+  await api('POST', '/api/wallets', { safe_id: v(root, '[data-safe]'), tag_id, label: v(root, '[data-label]'), seal_code });
+  close(); load();
+}));
+function walletOpenModal(id) {
+  modal(`Open ${walletTag(id)}`, `<div class="k-form">
+    <div class="full"><label>Job number</label><input data-job autocomplete="off" placeholder="e.g. 1042"></div>
+    <div class="full"><label>Seal code</label><input data-seal autocomplete="off"></div>
+    </div>${foot('Open')}`, (root) => wire(root, async () => {
+    await api('POST', `/api/wallets/${id}/open`, { job_id: v(root, '[data-job]'), seal_code: v(root, '[data-seal]') });
+    close(); load();
+  }));
+}
+function walletResealModal(id) {
+  modal(`Reseal ${walletTag(id)}`, `<div class="k-form">
+    <div class="full"><label>New seal code</label><input data-seal autocomplete="off"></div>
+    <div class="full"><label>Notes</label><textarea data-notes rows="2"></textarea></div>
+    </div>${foot('Reseal')}`, (root) => wire(root, async () => {
+    await api('POST', `/api/wallets/${id}/reseal`, { new_seal_code: v(root, '[data-seal]'), notes: v(root, '[data-notes]') });
+    close(); load();
+  }));
+}
+function walletTransferModal(id) {
+  const w = wallets.find((x) => x.id === id);
+  modal(`Transfer ${walletTag(id)}`, `<div class="k-form">
+    <div class="full"><label>To safe</label><select data-to>${options(safes.filter((s) => s.id !== w.safe_id).map((s) => [s.id, s.tag_id]), null, '— choose —')}</select></div>
+    <div class="full"><label>Notes</label><textarea data-notes rows="2"></textarea></div>
+    </div>${foot('Transfer')}`, (root) => wire(root, async () => {
+    await api('POST', `/api/wallets/${id}/transfer`, { to_safe_id: v(root, '[data-to]'), notes: v(root, '[data-notes]') });
+    close(); load();
+  }));
+}
+function walletKeysModal(w) {
+  modal(`Keys in ${w.tag_id}`, `<div id="wkList">${w.keys.map((k) => `
+    <div class="field" style="display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line-soft);padding:6px 0">
+      <span style="flex:1"><strong>${esc(k.tag_id)}</strong> — ${esc(k.description)}</span>
+      <button class="btn" data-retire="${k.id}" style="padding:3px 9px;font-size:12px">Retire</button>
+    </div>`).join('') || '<p class="dim">No keys registered yet.</p>'}</div>
+    <div class="k-section">Register a new key</div>
+    <div class="k-form">
+      <div><label>Tag</label><input data-ntag autocomplete="off"></div>
+      <div><label>Site (optional)</label><select data-nsite>${options(sites.map((s) => [s.id, s.name]), null, '— none —')}</select></div>
+      <div class="full"><label>Description</label><input data-ndesc autocomplete="off" placeholder="e.g. Fire exit, east wing"></div>
+    </div>
+    <div class="btn-row" style="margin-top:8px"><button class="btn primary" data-addkey>Add key</button></div>
+    <p class="err" data-k-err style="min-height:16px"></p>`, (root) => {
+    root.querySelector('[data-addkey]').onclick = async () => {
+      const err = root.querySelector('[data-k-err]'); err.textContent = '';
+      try {
+        const tag_id = v(root, '[data-ntag]'); if (!tag_id) throw new Error('tag is required');
+        const description = v(root, '[data-ndesc]'); if (!description) throw new Error('description is required');
+        await api('POST', `/api/wallets/${w.id}/keys`, { tag_id, description, site_id: v(root, '[data-nsite]') || undefined });
+        close(); await load();
+        walletKeysModal(wallets.find((x) => x.id === w.id));
+      } catch (e) { err.textContent = e.message; }
+    };
+    root.querySelectorAll('[data-retire]').forEach((b) => (b.onclick = () => retireKeyModal(Number(b.dataset.retire))));
+  }, { wide: true });
+}
+
+/* ---- Keys ---- */
+function renderKeys() {
+  el('#main').innerHTML = `<table class="k"><thead><tr><th>Tag</th><th>Description</th><th>Wallet</th><th>Status</th><th></th></tr></thead>
+    <tbody>${keys.map((k) => `<tr>
+      <td class="mono">${esc(k.tag_id)}</td><td>${esc(k.description)}</td><td>${esc(k.wallet_tag || '—')}</td><td>${pill(k.status)}</td>
+      <td class="acts">
+        ${k.status === 'IN_WALLET' ? `<button class="btn" data-retire="${k.id}">Retire</button>` : ''}
+        ${k.status === 'DISPOSED' ? `<a class="btn" href="/api/keys/${k.id}/certificate?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">Certificate</a>` : ''}
+      </td></tr>`).join('') || `<tr><td colspan="5" class="dim">No keys registered yet.</td></tr>`}</tbody></table>`;
+  els('[data-retire]').forEach((b) => (b.onclick = () => retireKeyModal(Number(b.dataset.retire))));
+}
+function retireKeyModal(id) {
+  const k = keys.find((x) => x.id === id) || { id, tag_id: '', description: '' };
+  modal(`Retire ${k.tag_id}`, `<div class="k-form">
+    <div class="full"><label>Disposition</label><select data-disp><option value="RETURNED_TO_CLIENT">Returned to client</option><option value="DISPOSED">Disposed</option></select></div>
+    <div class="full"><label>Notes</label><textarea data-notes rows="2"></textarea></div>
+    <div class="full hide" data-return-fields>
+      <label>Signed by (client contact name)</label><input data-signedby autocomplete="off">
+      <div style="margin-top:8px" data-padhost></div>
+    </div>
+    <div class="full" data-dispose-note><p class="dim" style="margin:0">A Certificate of Destruction will be generated and emailed to the client on file, if one is on record.</p></div>
+    </div>${foot('Retire')}`, (root) => {
+    let pad = null;
+    const dispSel = root.querySelector('[data-disp]');
+    const sync = () => {
+      const isReturn = dispSel.value === 'RETURNED_TO_CLIENT';
+      root.querySelector('[data-return-fields]').classList.toggle('hide', !isReturn);
+      root.querySelector('[data-dispose-note]').classList.toggle('hide', isReturn);
+      if (isReturn && !pad) pad = CCCSForms.signaturePad(root.querySelector('[data-padhost]'));
+    };
+    dispSel.onchange = sync; sync();
+    wire(root, async () => {
+      const disposition = dispSel.value;
+      const body = { disposition, notes: v(root, '[data-notes]') };
+      if (disposition === 'RETURNED_TO_CLIENT') {
+        const name = v(root, '[data-signedby]'); if (!name) throw new Error("the client's name is required");
+        if (!pad || !pad.inked) throw new Error('a signature is required');
+        body.signed_by_name = name;
+        body.signature = { mimetype: 'image/jpeg', data: pad.jpeg() };
+      }
+      await api('POST', `/api/keys/${id}/retire`, body);
+      close(); load();
+    });
+  });
+}
+
+/* ---- Activity ---- */
+async function renderActivity() {
+  el('#main').innerHTML = '<p class="dim">Loading…</p>';
+  if (!activity) {
+    const [safeEv, safeCo, walletEv] = await Promise.all([
+      Promise.all(safes.map((s) => api('GET', `/api/safes/${s.id}/events`))),
+      Promise.all(safes.map((s) => api('GET', `/api/safes/${s.id}/checkouts`))),
+      Promise.all(wallets.map((w) => api('GET', `/api/wallets/${w.id}/events`))),
+    ]);
+    const rows = [];
+    safes.forEach((s, i) => safeEv[i].forEach((e) => rows.push({ ...e, subjectLabel: `Safe ${s.tag_id}` })));
+    safes.forEach((s, i) => safeCo[i].forEach((c) => {
+      rows.push({ at: c.checked_out_at, by: '—', type: 'CHECKED_OUT', note: c.notes, subjectLabel: `Safe ${s.tag_id}` });
+      if (c.returned_at) rows.push({ at: c.returned_at, by: '—', type: 'RETURNED', note: c.return_notes, subjectLabel: `Safe ${s.tag_id}` });
+    }));
+    wallets.forEach((w, i) => walletEv[i].forEach((e) => rows.push({ ...e, subjectLabel: `Wallet ${w.tag_id}` })));
+    activity = rows.sort((a, b) => new Date(b.at) - new Date(a.at));
+  }
+  el('#main').innerHTML = `<ul class="tl">${activity.map((e) => `<li>
+    <span class="when">${esc(when(e.at))}</span> — <strong>${esc(e.subjectLabel)}</strong> — ${esc(words(e.type))}${e.result ? ` (${esc(e.result)})` : ''}
+    ${e.by && e.by !== '—' ? ` · ${esc(e.by)}` : ''}${e.job_id ? ` · job #${e.job_id}` : ''}${e.note ? `<br><span class="dim">${esc(e.note)}</span>` : ''}
+    </li>`).join('') || '<li class="dim">Nothing recorded yet.</li>'}</ul>`;
+}
+
+load();
+</script>
+</body>
+</html>

@@ -82,6 +82,10 @@ const TABLES = [
   // the next terminal webhook arrives, but it's cheap to keep and avoids an
   // empty map on every deploy.
   'broadnet_terminals',
+  // Key management chain-of-custody (routes-keys.js) — physical seal
+  // codes, who has which safe/wallet, and the key register. Losing this
+  // on restart loses who has what keys right now, not just history.
+  'safes', 'safe_checkouts', 'key_wallets', 'keys', 'key_events',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

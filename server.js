@@ -110,6 +110,7 @@ const db = {
   payroll_runs: [], payslips: [],
   checkcall_commands: [],
   broadnet_terminals: [],
+  safes: [], safe_checkouts: [], key_wallets: [], keys: [], key_events: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -5055,6 +5056,13 @@ require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
 require('./routes-rentals.js')({ route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, UPLOADS_DIR, publicAsset, flushNow: () => store.flushNow() });
+
+// Key management / chain-of-custody — see routes-keys.js.
+require('./routes-keys.js')({
+  route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, isControlRole,
+  UPLOADS_DIR, sendEmail: (to, subject, html, opts) => sendGraphEmail(to, subject, html, opts),
+  flushNow: () => store.flushNow(),
+});
 
 // Quotes and contracts on sites, signed in the client portal — see
 // routes-agreements.js. Invoices built from signed contracts and hours

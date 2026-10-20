@@ -884,6 +884,7 @@ function paintJob() {
       <button class="btn" id="jEnr">En route</button>
       <button class="btn" id="jScene">On scene</button>
       <button class="btn" id="jDone">Completed</button>
+      <button class="btn" id="jKeys">Keys</button>
     </div>
     ${checklist.length ? `<label style="margin-top:10px">Checklist</label><div id="checklistHost"></div>` : ''}
     <div class="btn-row" style="margin-top:10px"><button class="btn" id="jAddPhoto">Add photo</button></div>`;
@@ -918,11 +919,54 @@ function paintJob() {
   el('#jEnr').onclick = () => setJobStatus('EN_ROUTE');
   el('#jScene').onclick = () => setJobStatus('ON_SCENE');
   el('#jDone').onclick = () => setJobStatus('COMPLETED');
+  el('#jKeys').onclick = () => openKeysModal();
   if (el('#jobBody [data-sitedocs]')) el('#jobBody [data-sitedocs]').onclick = () => openSiteDocsModal(job.site_id);
 }
 async function setJobStatus(status) {
   const r = await CCCS.send('PATCH', `/api/jobs/${job.id}`, { status }, `${job.reference} → ${status}`);
   if (!r.queued) { job = r; paintJob(); }
+}
+
+/* Opening/resealing a wallet needs an immediate, live answer from the
+ * server (the seal code check is only meaningful against current state),
+ * so this uses api() directly rather than CCCS.send's offline queue —
+ * same reasoning forms-ui.js documents for bypassing it on submissions. */
+async function openKeysModal() {
+  modal('Keys', '<p class="dim">Loading…</p>', async () => {
+    try {
+      const wallets = await api('GET', '/api/wallets');
+      const open = wallets.filter((w) => w.status === 'OPEN');
+      el('#modalHost .content').innerHTML = `
+        ${open.length ? `<label>Currently open — reseal</label>
+          <div>${open.map((w) => `
+            <div class="field" style="display:flex;align-items:center;gap:8px">
+              <span style="flex:1">${esc(w.tag_id)}${w.label ? ` — ${esc(w.label)}` : ''}</span>
+              <button class="btn" data-reseal="${w.id}" style="padding:4px 10px;font-size:12px">Reseal</button>
+            </div>`).join('')}</div>` : ''}
+        <label style="margin-top:10px">Open a wallet on ${esc(job.reference)}</label>
+        <input id="kTag" placeholder="Wallet tag" autocomplete="off">
+        <input id="kSealOpen" placeholder="Seal code" autocomplete="off" style="margin-top:6px">
+        <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="kOpenGo">Open</button></div>
+        <p class="err" id="kErr"></p>`;
+      el('#kOpenGo').onclick = async () => {
+        const tag = el('#kTag').value.trim();
+        const w = wallets.find((x) => x.tag_id.toLowerCase() === tag.toLowerCase());
+        if (!w) { el('#kErr').textContent = 'no wallet with that tag'; return; }
+        try {
+          await api('POST', `/api/wallets/${w.id}/open`, { seal_code: el('#kSealOpen').value.trim(), job_id: job.id });
+          toast('Wallet opened'); closeModal();
+        } catch (e) { el('#kErr').textContent = e.message; }
+      };
+      document.querySelectorAll('#modalHost [data-reseal]').forEach((b) => (b.onclick = () => resealWallet(b.dataset.reseal)));
+    } catch (e) { el('#modalHost .content').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  });
+}
+function resealWallet(walletId) {
+  const code = prompt('New seal code for this wallet:');
+  if (!code) return;
+  api('POST', `/api/wallets/${walletId}/reseal`, { new_seal_code: code })
+    .then(() => { toast('Wallet resealed'); openKeysModal(); })
+    .catch((e) => alert(e.message));
 }
 
 function paintVisit() {

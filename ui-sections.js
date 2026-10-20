@@ -64,6 +64,10 @@ const SECTIONS = [
   // staff role; by default only control sees it — an admin can add field staff.
   { key: 'medication', label: 'Medication', group: 'Stock & assets', icon: 'medication', desktop: '/medication.html', mobile: '/medication.html', allowed: STAFF, default: CONTROL },
   { key: 'stock', label: 'Stock', group: 'Stock & assets', icon: 'stock', desktop: '/stock.html', mobile: '/stock.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
+  // Keys: creation stays ADMIN-gated at the API, but CONTROL (not just
+  // SYSTEM_ADMIN) needs this page — they're the ones running tag-check
+  // audits and transferring wallets between safes day to day.
+  { key: 'keys', label: 'Keys', group: 'Stock & assets', icon: 'asset', desktop: '/keys.html', mobile: '/keys.html', allowed: CONTROL, default: CONTROL },
   // Finance
   { key: 'contracts', label: 'Quotes & contracts', group: 'Finance', icon: 'contract', desktop: '/contracts.html', mobile: '/contracts.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'invoices', label: 'Invoices', group: 'Finance', icon: 'invoice', desktop: '/invoices.html', mobile: '/invoices.html', allowed: ['SYSTEM_ADMIN', 'FINANCE'], default: ['SYSTEM_ADMIN', 'FINANCE'] },
