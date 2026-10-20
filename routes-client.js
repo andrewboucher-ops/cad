@@ -66,7 +66,7 @@ const CLIENT_REQUEST_STATUSES = ['OPEN', 'ACKNOWLEDGED', 'CLOSED'];
 
 module.exports = function registerClientRoutes({
   route, httpError, ALL, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, broadcast, pushToRoles, UPLOADS_DIR, MIME,
-  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl, sign, hashPassword, forms, gocardless,
+  isControlRole, assertPassdownAccess, sendEmail, publicBaseUrl, sign, hashPassword, forms, gocardless, writeNotifyLog,
 }) {
   for (const t of ['clients', 'documents', 'client_requests']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -274,7 +274,14 @@ module.exports = function registerClientRoutes({
       ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
       : [];
     const result = await sendEmail(c.contact_email, 'Welcome to your Echelon client portal', buildWelcomeEmailHtml(c), { attachments });
-    if (!result || result.ok === false) throw httpError(502, (result && result.error) || 'email send failed');
+    writeNotifyLog({
+      channel: 'EMAIL', personnel_id: null, to_email: c.contact_email, body: 'Welcome to your Echelon client portal',
+      provider: result && result.ok ? 'graph' : 'none', outcome: result && result.ok ? 'QUEUED' : 'FAILED', error_code: result && result.ok ? null : (result && result.error) || 'send failed',
+    });
+    if (!result || result.ok === false) {
+      logEvent('client.welcome_email_failed', `WELCOME EMAIL TO ${c.name} FAILED: ${(result && result.error) || 'send failed'}`, { client_id: c.id });
+      throw httpError(502, (result && result.error) || 'email send failed');
+    }
     logEvent('client.welcome_email_sent', `WELCOME EMAIL SENT TO ${c.name}`, { client_id: c.id });
     return { ok: true };
   });
@@ -338,7 +345,14 @@ module.exports = function registerClientRoutes({
       ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
       : [];
     const result = await sendEmail(c.contact_email, 'Set your password for the Echelon client portal', buildPasswordLinkEmailHtml(c, link), { attachments });
-    if (!result || result.ok === false) throw httpError(502, (result && result.error) || 'email send failed');
+    writeNotifyLog({
+      channel: 'EMAIL', personnel_id: null, to_email: c.contact_email, body: 'Set your password for the Echelon client portal',
+      provider: result && result.ok ? 'graph' : 'none', outcome: result && result.ok ? 'QUEUED' : 'FAILED', error_code: result && result.ok ? null : (result && result.error) || 'send failed',
+    });
+    if (!result || result.ok === false) {
+      logEvent('client.password_link_failed', `PASSWORD LINK TO ${c.name} (${u.username}) FAILED: ${(result && result.error) || 'send failed'}`, { client_id: c.id, user_id: u.id });
+      throw httpError(502, (result && result.error) || 'email send failed');
+    }
     logEvent('client.password_link_sent', `PASSWORD LINK SENT TO ${c.name} (${u.username})`, { client_id: c.id, user_id: u.id });
     return { ok: true, username: u.username };
   });
