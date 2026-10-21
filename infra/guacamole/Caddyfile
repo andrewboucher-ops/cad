@@ -1,0 +1,20 @@
+{$GUAC_DOMAIN} {
+	encode zstd gzip
+
+	# WebSockets are proxied without extra config. Long idle timeouts keep
+	# quiet RDP sessions from being cut off.
+	reverse_proxy guacamole:8080 {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}
