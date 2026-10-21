@@ -72,6 +72,7 @@ services:
       - "443:443/udp"
     environment:
       GUAC_DOMAIN: ${GUAC_DOMAIN:?set GUAC_DOMAIN in .env}
+      GUAC_LAN_IP: ${GUAC_LAN_IP:-127.0.0.1}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data/caddy:/data

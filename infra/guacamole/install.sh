@@ -30,6 +30,7 @@ cp docker-compose.yml Caddyfile backup.sh openid.env.example "$APP_DIR/"
 echo "==> Generating secrets"
 if [[ ! -f "$APP_DIR/.env" ]]; then
   sed -e "s|^GUAC_DOMAIN=.*|GUAC_DOMAIN=$DOMAIN|" \
+      -e "s|^GUAC_LAN_IP=.*|GUAC_LAN_IP=$(hostname -I | awk '{print $1}')|" \
       -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|" \
       .env.example > "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
