@@ -119,10 +119,17 @@ the Entra group's **Object ID** (e.g. `3f2a…`). Give it connections. Members
 of that Entra group get those connections on sign-in. For example:
 `IT Admins` → all servers; `Support` → staff PCs only.
 
-When SSO works, set `TOTP_ENABLED=false` in `.env` and run
-`docker compose up -d`. Otherwise SSO users get asked for a second, Guacamole-specific
-TOTP on top of Entra MFA. Only do this after guacadmin has been removed or
-given a long random password.
+**Make Microsoft the only sign-in** once your own Microsoft account has admin
+rights in Guacamole: set `EXTENSION_PRIORITY=openid` in `openid.env` and
+`TOTP_ENABLED=false` in `.env`, then `docker compose up -d`. Visitors now go
+straight to Microsoft, with Entra MFA instead of a separate Guacamole
+TOTP code. If Microsoft sign-in ever breaks, set it back to
+`EXTENSION_PRIORITY=*, openid` from the Proxmox console to get the local
+login form back.
+
+To limit who can sign in at all, open **Enterprise applications → Guacamole →
+Properties** and set **Assignment required** to Yes. Then assign your IT
+group under **Users and groups**.
 
 ## 5. Add machines
 
