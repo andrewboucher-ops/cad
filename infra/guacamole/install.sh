@@ -39,8 +39,14 @@ else
 fi
 
 echo "==> Generating the database schema"
-if [[ ! -f "$APP_DIR/initdb/001-schema.sql" ]]; then
-  docker run --rm "$GUAC_IMAGE" /opt/guacamole/bin/initdb.sh --postgresql > "$APP_DIR/initdb/001-schema.sql"
+# Postgres only runs initdb/ on its very first start, so an empty schema file
+# leaves an empty database ("relation guacamole_user does not exist").
+SCHEMA="$APP_DIR/initdb/001-schema.sql"
+if ! grep -q "CREATE TABLE guacamole_user " "$SCHEMA" 2>/dev/null; then
+  docker pull -q "$GUAC_IMAGE"
+  docker run --rm "$GUAC_IMAGE" /opt/guacamole/bin/initdb.sh --postgresql > "$SCHEMA.tmp"
+  grep -q "CREATE TABLE guacamole_user " "$SCHEMA.tmp" || { echo "Schema generation failed (empty output)."; exit 1; }
+  mv "$SCHEMA.tmp" "$SCHEMA"
 fi
 
 # guacd (uid 1000) writes recordings; the web app (gid 1001) plays them back.
