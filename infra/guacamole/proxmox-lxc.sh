@@ -36,10 +36,16 @@ pct create "$CTID" "local:vztmpl/$TEMPLATE" \
   --start 1
 
 echo "==> Waiting for network"
+ONLINE=no
 for _ in $(seq 1 30); do
-  pct exec "$CTID" -- getent hosts deb.debian.org &>/dev/null && break
+  if pct exec "$CTID" -- timeout 5 bash -c "</dev/tcp/deb.debian.org/80" &>/dev/null; then ONLINE=yes; break; fi
   sleep 2
 done
+if [[ $ONLINE != yes ]]; then
+  echo "Container $CTID can't reach the internet (deb.debian.org:80). Check its IP, gateway and DNS:"
+  echo "  pct exec $CTID -- bash -c 'ip -4 addr; ip route; cat /etc/resolv.conf'"
+  exit 1
+fi
 
 echo "==> Copying the kit into the container"
 tar czf /tmp/guacamole-kit.tgz --exclude=proxmox-lxc.sh .
@@ -49,7 +55,7 @@ pct exec "$CTID" -- tar xzf /root/guacamole-kit.tgz -C /root/guacamole-kit
 rm -f /tmp/guacamole-kit.tgz
 
 echo "==> Installing Guacamole inside the container"
-pct exec "$CTID" -- bash -c "apt-get update -qq && apt-get install -y -qq curl ca-certificates openssl"
+pct exec "$CTID" -- bash -c "apt-get update && apt-get install -y curl ca-certificates openssl"
 pct exec "$CTID" -- bash /root/guacamole-kit/install.sh "$DOMAIN"
 
 echo
