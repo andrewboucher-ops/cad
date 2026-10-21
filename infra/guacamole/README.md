@@ -68,6 +68,35 @@ point an internal DNS name at the VM. Caddy then needs a
 [DNS challenge](https://caddyserver.com/docs/automatic-https#dns-challenge)
 or `tls internal` to get a certificate.
 
+### Behind an existing edge proxy
+
+If another proxy already holds ports 80/443 and handles HTTPS for your sites,
+point it at `http://<container-ip>:80`. Then make Caddy serve the public name
+over plain HTTP, so it doesn't redirect back to HTTPS and loop
+(`ERR_TOO_MANY_REDIRECTS`). In `/opt/guacamole/Caddyfile`:
+
+```
+{
+    default_sni 192.168.7.170
+    servers {
+        trusted_proxies static private_ranges
+    }
+}
+
+http://remote.yourdomain.com {
+    reverse_proxy guacamole:8080
+}
+
+https://192.168.7.170 {
+    tls internal
+    reverse_proxy guacamole:8080
+}
+```
+
+`trusted_proxies` passes the visitor's real IP through from the edge proxy.
+Without it, Guacamole bans the proxy's IP after 5 failed logins and blocks
+everyone. The edge proxy must send `X-Forwarded-For` and allow WebSockets.
+
 ## 2. Install (VM only — the container script already did this)
 
 ```bash
