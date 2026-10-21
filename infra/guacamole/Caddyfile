@@ -1,3 +1,10 @@
+{
+	# Browsers send no SNI when you browse to an IP, and inside Docker Caddy
+	# sees its container address rather than the LAN IP, so tell it which
+	# certificate to use for those connections.
+	default_sni {$GUAC_LAN_IP:127.0.0.1}
+}
+
 (guacamole) {
 	encode zstd gzip
 
