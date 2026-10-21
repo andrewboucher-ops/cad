@@ -33,24 +33,42 @@ component that connects to target machines, so **the Guacamole VM needs
 network access to every machine you want to reach**, on 3389 (RDP), 5900
 (VNC) or 22 (SSH).
 
-## 1. Create the VM
+## 1. Create its own container on Proxmox (one command)
 
-On Proxmox, create a **VM** (not an LXC container, which needs extra nesting
-config to run Docker), on the LAN/VLAN that can reach your servers and PCs:
+Copy this folder to the Proxmox host, then run as root there:
 
-- Debian 12 or Ubuntu 24.04, 2 vCPU, 4 GB RAM, 20 GB disk. Allow about 1
-  vCPU per 10–15 simultaneous RDP sessions. Recordings need extra disk if
-  you turn them on.
+```bash
+scp -r infra/guacamole root@<proxmox-host>:/root/
+ssh root@<proxmox-host>
+cd /root/guacamole
+bash proxmox-lxc.sh 150 192.168.1.150/24 192.168.1.1 remote.yourdomain.com
+#                   ctid  ip/cidr          gateway     domain   [bridge] [storage]
+```
+
+[`proxmox-lxc.sh`](proxmox-lxc.sh) downloads a Debian 12 template if needed
+and creates an unprivileged LXC container with 2 cores, 4 GB RAM and 20 GB
+disk. It turns on `nesting` and `keyctl` (which Docker needs), sets the
+container to start on boot, copies the kit in and runs `install.sh` inside.
+It defaults to bridge `vmbr0` and storage `local-lvm`. Pass the last two
+arguments to change them. The container then runs on its own, separate from
+CCCS. The install step continues at section 3.
+
+- Put it on the LAN/VLAN that can reach your servers and PCs, and through
+  your VPN to any remote sites. Allow about 1 vCPU per 10–15 simultaneous
+  RDP sessions. Recordings need extra disk if you turn them on.
 - Static IP (e.g. `192.168.1.150`). Endpoints only allow RDP from this IP.
 - DNS: `remote.yourdomain.com` → your public IP. Router: forward TCP 80/443
-  (and UDP 443) to the VM.
+  (and UDP 443) to the container's IP.
+
+If you'd rather use a full VM, create a Debian 12 VM with the same
+specs and follow section 2 inside it.
 
 If you only want Guacamole reachable over the VPN, skip the port forward and
 point an internal DNS name at the VM. Caddy then needs a
 [DNS challenge](https://caddyserver.com/docs/automatic-https#dns-challenge)
 or `tls internal` to get a certificate.
 
-## 2. Install
+## 2. Install (VM only — the container script already did this)
 
 ```bash
 git clone <this repo> && cd cad/infra/guacamole
