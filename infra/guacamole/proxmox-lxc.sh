@@ -35,6 +35,11 @@ pct create "$CTID" "local:vztmpl/$TEMPLATE" \
   --onboot 1 \
   --start 1
 
+# Prefer IPv4: on networks where DNS returns IPv6 addresses but IPv6 doesn't
+# route, apt and curl otherwise hang trying them.
+pct exec "$CTID" -- bash -c 'echo "Acquire::ForceIPv4 \"true\";" > /etc/apt/apt.conf.d/99force-ipv4
+  grep -q "^precedence ::ffff:0:0/96" /etc/gai.conf 2>/dev/null || echo "precedence ::ffff:0:0/96  100" >> /etc/gai.conf'
+
 echo "==> Waiting for network"
 ONLINE=no
 for _ in $(seq 1 30); do
