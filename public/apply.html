@@ -134,6 +134,14 @@ function readFile(file) {
       window.scrollTo(0, 0);
     },
   });
+  // A careers page can link straight to one role: /apply.html?role=Door%20Supervisor
+  // picks it in the "role applied for" list, if it is one of the options there.
+  const wanted = (new URLSearchParams(location.search).get('role') || '').trim().toLowerCase();
+  const roleSel = el('#formHost').querySelector('[data-ff="role_applied_for"]');
+  if (wanted && roleSel && roleSel.options) {
+    const opt = [...roleSel.options].find((o) => o.value.trim().toLowerCase() === wanted || o.textContent.trim().toLowerCase() === wanted);
+    if (opt) { roleSel.value = opt.value; roleSel.dispatchEvent(new Event('change', { bubbles: true })); }
+  }
   // The CV picker sits inside the card, after the form's own fields.
   el('#formHost').querySelector('.ff-stack').insertBefore(el('#siaWrap'), el('#formHost').querySelector('[data-ff-err]'));
   el('#formHost').querySelector('.ff-stack').insertBefore(el('#cvWrap'), el('#formHost').querySelector('[data-ff-err]'));
