@@ -113,8 +113,10 @@ function lineRow(l = {}) {
 function editor(a, siteId, kind) {
   a = a || { kind, site_id: siteId, lines: [{ kind: 'HOURLY' }], billing_basis: 'HOURS_WORKED', invoice_period: 'MONTHLY', vat_rate: 20, payment_terms_days: 30 };
   const isQ = a.kind === 'QUOTE';
+  const amending = Boolean(a.id) && a.status !== 'DRAFT';
   const c = clientOf(a.site_id);
-  modal(`${a.id ? 'Edit' : 'New'} ${isQ ? 'quote' : 'contract'}${a.reference ? ` — ${a.reference}` : ''}`, `<div class="k-form">
+  modal(`${amending ? 'Amend' : a.id ? 'Edit' : 'New'} ${isQ ? 'quote' : 'contract'}${a.reference ? ` — ${a.reference}` : ''}`, `<div class="k-form">
+    ${amending ? `<div class="full"><label>Reason for this change (required)</label><textarea id="eReason" rows="2" placeholder="e.g. corrected a rate entry error, or client agreed to a rate increase from 1 Nov"></textarea></div>` : ''}
     <div><label>Site</label><select id="eSite" ${a.id ? 'disabled' : ''}>${options(sites.map((s) => [s.id, s.name]), a.site_id, '— choose site —')}</select></div>
     <div><label>Client</label><div id="eClient" class="note" style="padding-top:8px">${c ? esc(c.name) : '<span class="err">not linked to a client yet</span>'}</div></div>
     <div class="full"><label>Title</label><input id="eTitle" value="${esc(a.title || '')}" placeholder="${isQ ? 'Quotation' : 'Contract'} — site name"></div>
@@ -134,7 +136,7 @@ function editor(a, siteId, kind) {
     <div><label>Payment terms (days)</label><input id="eTerms" type="number" min="0" max="180" value="${a.payment_terms_days}"></div>
     <div class="full"><label>Notes shown to the client</label><textarea id="eNotes" rows="2">${esc(a.notes || '')}</textarea></div>
     <div class="full"><label>Internal notes (never shown to the client)</label><textarea id="eInt" rows="2">${esc(a.internal_notes || '')}</textarea></div>
-  </div>${foot(a.id ? 'Save draft' : 'Save as draft', '<button type="button" class="btn primary" id="eSend">Save &amp; send to client</button>')}`, (root) => {
+  </div>${amending ? foot('Save amendment') : foot(a.id ? 'Save draft' : 'Save as draft', '<button type="button" class="btn primary" id="eSend">Save &amp; send to client</button>')}`, (root) => {
     const recalc = () => {
       let p = 0, o = 0;
       root.querySelectorAll('[data-line]').forEach((tr) => {
@@ -160,7 +162,11 @@ function editor(a, siteId, kind) {
         ...(isQ ? { valid_until: v(root, '#eValid') } : { start_date: v(root, '#eStart'), end_date: v(root, '#eEnd') || null }),
       };
       let saved;
-      if (a.id) saved = await api('PATCH', `/api/agreements/${a.id}`, body);
+      if (amending) {
+        const reason = root.querySelector('#eReason').value.trim();
+        if (!reason) throw new Error('enter a reason for this change');
+        saved = await api('POST', `/api/agreements/${a.id}/amend`, { ...body, reason });
+      } else if (a.id) saved = await api('PATCH', `/api/agreements/${a.id}`, body);
       else {
         if (!v(root, '#eSite')) throw new Error('choose the site');
         saved = await api('POST', '/api/agreements', { ...body, kind: a.kind, site_id: Number(v(root, '#eSite')) });
@@ -169,7 +175,7 @@ function editor(a, siteId, kind) {
       return saved;
     };
     wire(root, async () => { const saved = await save(); close(); await load(); view(rows.find((x) => x.id === saved.id)); });
-    root.querySelector('#eSend').onclick = async () => {
+    if (!amending) root.querySelector('#eSend').onclick = async () => {
       const err = root.querySelector('[data-k-err]'); err.textContent = '';
       try {
         const saved = await save();
@@ -192,6 +198,7 @@ function view(a) {
   const act = (id, label, cls = '') => `<button class="btn ${cls}" data-a="${id}">${label}</button>`;
   const acts = [];
   if (a.status === 'DRAFT') acts.push(act('edit', 'Edit'), act('del', 'Delete'), act('send', `Send to client`, 'primary'));
+  if (['SENT', 'ACCEPTED', 'SIGNED'].includes(a.status)) acts.push(act('amend', 'Amend'));
   if (a.status === 'SENT') acts.push(act('withdraw', 'Withdraw'));
   if (a.kind === 'QUOTE' && ['DRAFT', 'SENT'].includes(a.status)) acts.push(act('markacc', 'Mark accepted'));
   if (a.kind === 'CONTRACT' && ['DRAFT', 'SENT'].includes(a.status)) acts.push(act('marksign', 'Mark signed'));
@@ -225,7 +232,7 @@ function view(a) {
     root.querySelectorAll('[data-a]').forEach((b) => (b.onclick = () => run(async () => {
       const k = b.dataset.a;
       if (k === 'close') return close();
-      if (k === 'edit') return editor(a);
+      if (k === 'edit' || k === 'amend') return editor(a);
       let out;
       if (k === 'del') { if (!confirm('Delete this draft?')) return; await api('DELETE', `/api/agreements/${a.id}`); close(); return load(); }
       if (k === 'send') { if (!confirm(`Send ${a.reference} to ${c ? c.name : 'the client'}? It appears in their portal and they are emailed. It can't be edited after.`)) return; out = await api('POST', `/api/agreements/${a.id}/send`); }

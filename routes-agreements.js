@@ -260,6 +260,22 @@ module.exports = function registerAgreements({
     a.history.push({ at: new Date().toISOString(), by: user.display_name, what: 'edited' });
     return publicAgreement(a);
   });
+  route('POST', '/api/agreements/:id/amend', ADMIN, ({ params, body, user }) => {
+    const a = find(params.id);
+    if (!['SENT', 'ACCEPTED', 'SIGNED'].includes(a.status)) throw httpError(409, 'only a sent, accepted or signed agreement can be amended this way');
+    const reason = String(body.reason || '').trim().slice(0, 1000);
+    if (!reason) throw httpError(400, 'a reason for this change is required');
+    const AMENDABLE = ['title', 'lines', 'valid_until', 'start_date', 'end_date', 'billing_basis', 'invoice_period', 'vat_rate', 'payment_terms_days', 'notes', 'internal_notes'];
+    const previous = {};
+    for (const k of AMENDABLE) previous[k] = JSON.parse(JSON.stringify(a[k]));
+    apply(a, body);
+    if (!a.amendments) a.amendments = [];
+    a.amendments.push({ at: new Date().toISOString(), by: user.display_name, reason, previous });
+    a.history.push({ at: new Date().toISOString(), by: user.display_name, what: `amended — ${reason}` });
+    logEvent('agreement.amended', `${a.kind} ${a.reference} AMENDED BY ${user.display_name}: ${reason}`, { agreement_id: a.id });
+    flushNow();
+    return publicAgreement(a);
+  });
   route('DELETE', '/api/agreements/:id', ADMIN, ({ params }) => {
     const a = find(params.id);
     if (a.status !== 'DRAFT') throw httpError(409, 'only a draft can be deleted — withdraw it instead');

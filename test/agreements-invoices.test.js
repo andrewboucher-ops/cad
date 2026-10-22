@@ -807,3 +807,57 @@ test('a site\'s accounts_email is CC\'d on its invoice email; a consolidated inv
   await call('POST', `/api/invoices/${combined.id}/email`, {}, adminT);
   assert.deepEqual(mails[mails.length - 1].cc, ['ops@grouping.example'], 'only the site with an accounts email contributes one');
 });
+
+test('a sent or signed agreement is amended through a dedicated, audited endpoint — not the draft-only PATCH, and only once it has actually gone out', async () => {
+  const site = (await call('POST', '/api/sites', { name: 'Amend Test Site' }, adminT)).body;
+  await call('POST', '/api/clients', { name: 'Amend Test Client', contact_email: 'amend@example.test', site_ids: [site.id] }, adminT);
+
+  const draft = (await call('POST', '/api/agreements', { kind: 'QUOTE', site_id: site.id, lines: [LINES[0]] }, adminT)).body;
+  assert.equal((await call('POST', `/api/agreements/${draft.id}/amend`, { title: 'x', reason: 'no reason needed yet' }, adminT)).status, 409, 'a draft is edited directly, not amended');
+
+  await call('POST', `/api/agreements/${draft.id}/send`, {}, adminT);
+  assert.equal((await call('PATCH', `/api/agreements/${draft.id}`, { title: 'x' }, adminT)).status, 409, 'the draft-only PATCH still refuses once sent');
+  assert.equal((await call('POST', `/api/agreements/${draft.id}/amend`, { title: 'Renamed quote' }, adminT)).status, 400, 'a reason is required');
+  const amendedQ = await call('POST', `/api/agreements/${draft.id}/amend`, { title: 'Renamed quote', reason: 'typo in the original title' }, adminT);
+  assert.equal(amendedQ.status, 200, JSON.stringify(amendedQ.body));
+  assert.equal(amendedQ.body.title, 'Renamed quote');
+  assert.equal(amendedQ.body.status, 'SENT', 'amending does not change status');
+
+  await call('POST', `/api/agreements/${draft.id}/withdraw`, {}, adminT);
+  assert.equal((await call('POST', `/api/agreements/${draft.id}/amend`, { title: 'y', reason: 'z' }, adminT)).status, 409, 'a withdrawn agreement is dead — not amendable either');
+});
+
+test("amending a signed contract's rate changes future invoices but leaves the signed terms, PDF and already-generated invoices untouched", async () => {
+  const site = (await call('POST', '/api/sites', { name: 'Amend Rate Test Site' }, adminT)).body;
+  await call('POST', '/api/clients', { name: 'Amend Rate Test Client', contact_email: 'amend-rate@example.test', site_ids: [site.id] }, adminT);
+  const c = (await call('POST', '/api/agreements', {
+    kind: 'CONTRACT', site_id: site.id, lines: [{ description: 'Static guarding', kind: 'HOURLY', rate: 20, est_quantity: 160 }], start_date: '2026-01-01',
+  }, adminT)).body;
+  await call('POST', `/api/agreements/${c.id}/mark-signed`, { name: 'Jo Bloggs', position: 'Ops Manager' }, adminT);
+  const signed = app.db.agreements.find((a) => a.id === c.id);
+  const snapshotBefore = signed.terms_snapshot, pdfBefore = signed.pdf_file;
+
+  pushShift(site.id, '2026-02-10', 8, 16);
+  const before = await call('POST', '/api/invoices/generate', { from: '2026-02-01', to: '2026-02-28', contract_id: c.id }, adminT);
+  assert.equal(before.body.made[0].lines[0].unit_amount, 20, 'billed at the original rate before any amendment');
+
+  const amended = await call('POST', `/api/agreements/${c.id}/amend`, {
+    lines: [{ description: 'Static guarding', kind: 'HOURLY', rate: 25, est_quantity: 160 }], reason: 'client agreed a rate increase from March',
+  }, adminT);
+  assert.equal(amended.status, 200, JSON.stringify(amended.body));
+  assert.equal(amended.body.lines[0].rate, 25);
+  assert.equal(amended.body.status, 'SIGNED', 'still signed — amending does not revert to draft');
+  assert.equal(amended.body.terms_snapshot, snapshotBefore, 'the original signed terms are never touched');
+  assert.equal(amended.body.pdf_file, pdfBefore, 'the stored signed PDF is not regenerated');
+  assert.equal(amended.body.amendments.length, 1);
+  assert.equal(amended.body.amendments[0].reason, 'client agreed a rate increase from March');
+  assert.equal(amended.body.amendments[0].previous.lines[0].rate, 20, 'the amendment snapshot keeps the pre-amendment rate');
+  assert.ok(amended.body.history.some((h) => /amended — client agreed a rate increase/.test(h.what)));
+
+  const feb = app.db.invoices.find((i) => i.contract_id === c.id && String(i.period_from).startsWith('2026-02'));
+  assert.equal(feb.lines[0].unit_amount, 20, 'an invoice already generated is not retroactively changed');
+
+  pushShift(site.id, '2026-03-10', 8, 16);
+  const after = await call('POST', '/api/invoices/generate', { from: '2026-03-01', to: '2026-03-31', contract_id: c.id }, adminT);
+  assert.equal(after.body.made[0].lines[0].unit_amount, 25, 'a new invoice reads the amended, live rate');
+});
