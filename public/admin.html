@@ -1605,6 +1605,8 @@ function siteForm(s) {
       <input id="nsKeyholder" autocomplete="off" value="${isNew ? '' : esc(s.keyholder || '')}">
       <label>Contact email (resolution reports are sent here)</label>
       <input id="nsEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(s.contact_email || '')}">
+      <label>Accounts email (optional — CC'd on invoices for this site, alongside the client's own email)</label>
+      <input id="nsAccountsEmail" type="email" autocomplete="off" value="${isNew ? '' : esc(s.accounts_email || '')}">
       ${isNew ? '' : `<label>Quotes &amp; contracts</label>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn" style="padding:4px 10px;font-size:12px" href="/contracts.html?site_id=${s.id}&new=QUOTE">New quote</a><a class="btn" style="padding:4px 10px;font-size:12px" href="/contracts.html?site_id=${s.id}&new=CONTRACT">New contract</a><a class="btn" style="padding:4px 10px;font-size:12px" href="/contracts.html?site_id=${s.id}">This site's quotes &amp; contracts</a></div>`}
       <label>Clock-in area (geofence)</label>
@@ -1828,7 +1830,7 @@ function siteModal(s) {
       if (!name) { el('#sError').textContent = 'name is required'; return; }
       const body = {
         name, address: el('#nsAddress').value.trim(), keyholder: el('#nsKeyholder').value.trim(),
-        contact_email: el('#nsEmail').value.trim(), checklist: editor.get(),
+        contact_email: el('#nsEmail').value.trim(), accounts_email: el('#nsAccountsEmail').value.trim(), checklist: editor.get(),
         response_sla_minutes: el('#nsSla').value ? Number(el('#nsSla').value) : null,
         branch_id: el('#nsBranch').value ? Number(el('#nsBranch').value) : null,
         code: el('#nsCode').value.trim(), postcode: el('#nsPostcode').value.trim(),
@@ -2382,6 +2384,11 @@ function clientForm(c) {
         <input type="checkbox" id="nclWeekly" style="width:auto" ${isNew || c.weekly_report_enabled !== false ? 'checked' : ''}>
         Send the weekly site-activity email (every Monday)
       </label>
+      <label>Invoicing</label>
+      <select id="nclInvoiceGrouping">
+        <option value="PER_CONTRACT" ${isNew || c.invoice_grouping !== 'PER_CLIENT' ? 'selected' : ''}>One invoice per contract (default)</option>
+        <option value="PER_CLIENT" ${!isNew && c.invoice_grouping === 'PER_CLIENT' ? 'selected' : ''}>One combined invoice per client</option>
+      </select>
       <label>Sites this client can see</label>
       <div id="nclSites" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:10px">
         ${allSites.map((s) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;text-transform:none;letter-spacing:0;font-weight:400">
@@ -2414,7 +2421,7 @@ function clientModal(c) {
       const name = el('#nclName').value.trim();
       if (!name) { el('#clError').textContent = 'name is required'; return; }
       const site_ids = els('#nclSites [data-siteid]:checked').map((cb) => Number(cb.dataset.siteid));
-      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), weekly_report_enabled: el('#nclWeekly').checked, site_ids };
+      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), weekly_report_enabled: el('#nclWeekly').checked, invoice_grouping: el('#nclInvoiceGrouping').value, site_ids };
       try {
         if (c) await api('PATCH', `/api/clients/${c.id}`, body);
         else await api('POST', '/api/clients', body);

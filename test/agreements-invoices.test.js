@@ -132,7 +132,7 @@ const mails = [];
 before(async () => {
   await new Promise((r) => fake.listen(XPORT, '127.0.0.1', r));
   await new Promise((r) => fakeGC.listen(GCPORT, '127.0.0.1', r));
-  app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, attachments: opts.attachments || [] }); return { ok: true }; };
+  app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, cc: opts.cc || [], attachments: opts.attachments || [] }); return { ok: true }; };
   app.start();
   await new Promise((r) => setTimeout(r, 200));
   adminT = await login('admin', 'admin123'); dispT = await login('dispatcher', 'dispatch123');
@@ -693,4 +693,117 @@ test('a Direct Debit collection failure is recorded on the invoice, not silently
   const collected = await call('POST', `/api/invoices/${inv.id}/direct-debit`, {}, adminT);
   assert.equal(collected.status, 502, JSON.stringify(collected.body));
   assert.match(collected.body.error, /mandate_is_inactive/);
+});
+
+/* ---------------- per-client invoice consolidation, monthly fixed
+ * charges, and accounts-email CC ---------------- */
+
+function pushShift(siteId, isoDate, startH, endH, personIdx = 0) {
+  const id = app.seq.shifts = (app.seq.shifts || 0) + 1;
+  app.db.shifts.push({
+    id, site_id: siteId, shift_type_id: app.db.shift_types[0].id, status: 'PUBLISHED',
+    starts_at: `${isoDate}T${String(startH).padStart(2, '0')}:00:00Z`, ends_at: `${isoDate}T${String(endH).padStart(2, '0')}:00:00Z`, break_minutes: 0,
+  });
+  const aid = app.seq.shift_assignments = (app.seq.shift_assignments || 0) + 1;
+  app.db.shift_assignments.push({
+    id: aid, shift_id: id, personnel_id: app.db.personnel[personIdx].id, status: 'CONFIRMED',
+    clocked_in_at: `${isoDate}T${String(startH).padStart(2, '0')}:00:00Z`, clocked_out_at: `${isoDate}T${String(endH).padStart(2, '0')}:00:00Z`, breaks: [],
+  });
+}
+
+let gc, gs1, gs2, gc1, gc2;
+test('a client left on PER_CONTRACT (the default) still gets one invoice per contract', async () => {
+  gs1 = (await call('POST', '/api/sites', { name: 'Grouping Site One' }, adminT)).body;
+  gs2 = (await call('POST', '/api/sites', { name: 'Grouping Site Two' }, adminT)).body;
+  gc = (await call('POST', '/api/clients', { name: 'Grouping Test Ltd', contact_email: 'g@example.test', site_ids: [gs1.id, gs2.id] }, adminT)).body;
+  assert.equal(gc.invoice_grouping, 'PER_CONTRACT', 'defaults to per-contract');
+
+  const mkContract = async (siteId) => {
+    const c = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: siteId, lines: [LINES[0]], start_date: '2027-03-01' }, adminT)).body;
+    await call('POST', `/api/agreements/${c.id}/mark-signed`, { name: 'Test' }, adminT);
+    return c;
+  };
+  gc1 = await mkContract(gs1.id); gc2 = await mkContract(gs2.id);
+  pushShift(gs1.id, '2027-03-10', 8, 16); pushShift(gs2.id, '2027-03-10', 8, 16, 1);
+
+  const g = await call('POST', '/api/invoices/generate', { from: '2027-03-01', to: '2027-03-31' }, adminT);
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const made = g.body.made.filter((i) => i.client_id === gc.id);
+  assert.equal(made.length, 2, 'one invoice per contract, the default behaviour');
+  assert.ok(made.every((i) => i.contract_ids.length === 1));
+});
+
+test('switching a client to PER_CLIENT combines every running contract into one invoice', async () => {
+  await call('PATCH', `/api/clients/${gc.id}`, { invoice_grouping: 'PER_CLIENT' }, adminT);
+  pushShift(gs1.id, '2027-04-10', 8, 16); pushShift(gs2.id, '2027-04-10', 8, 16, 1);
+
+  const g = await call('POST', '/api/invoices/generate', { from: '2027-04-01', to: '2027-04-30' }, adminT);
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const made = g.body.made.filter((i) => i.client_id === gc.id);
+  assert.equal(made.length, 1, 'one combined invoice for the client');
+  const inv = made[0];
+  assert.deepEqual([...inv.contract_ids].sort((a, b) => a - b), [gc1.id, gc2.id].sort((a, b) => a - b));
+  const siteNames = [...new Set(inv.lines.map((l) => l.site_name))].sort();
+  assert.deepEqual(siteNames, ['Grouping Site One', 'Grouping Site Two'].sort());
+});
+
+test('a PER_CLIENT consolidation still skips a contract that already clashes, and bills the rest', async () => {
+  // Bill contract one alone for May, so it already has a May invoice —
+  // then ask for a combined May invoice: contract one clashes and is
+  // skipped, contract two (never billed for May) is still billed.
+  pushShift(gs1.id, '2027-05-10', 8, 16);
+  const solo = await call('POST', '/api/invoices/generate', { from: '2027-05-01', to: '2027-05-31', contract_id: gc1.id }, adminT);
+  assert.equal(solo.body.made.length, 1);
+
+  pushShift(gs2.id, '2027-05-11', 8, 16, 1);
+  const g = await call('POST', '/api/invoices/generate', { from: '2027-05-01', to: '2027-05-31' }, adminT);
+  const made = g.body.made.filter((i) => i.client_id === gc.id);
+  assert.equal(made.length, 1, 'still one invoice, for the non-clashing contract');
+  assert.deepEqual(made[0].contract_ids, [gc2.id]);
+  assert.ok(g.body.skipped.some((s) => s.reason && /already invoiced/.test(s.reason)));
+});
+
+test('a FIXED_PERIOD line bills once per calendar month, regardless of how many invoices are generated that month', async () => {
+  // A fresh month the original contract has never been invoiced for.
+  pushShift(siteA.id, '2027-06-03', 8, 12);
+  const first = await call('POST', '/api/invoices/generate', { from: '2027-06-01', to: '2027-06-15', contract_id: contract.id }, adminT);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.ok(first.body.made[0].lines.some((l) => l.kind === 'FIXED_PERIOD'), 'the fixed line is on the first invoice this month');
+
+  pushShift(siteA.id, '2027-06-20', 8, 12);
+  const second = await call('POST', '/api/invoices/generate', { from: '2027-06-16', to: '2027-06-30', contract_id: contract.id }, adminT);
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  const inv2 = second.body.made[0];
+  assert.ok(!inv2.lines.some((l) => l.kind === 'FIXED_PERIOD'), 'not repeated later the same month');
+  assert.ok(inv2.checks.some((c) => /already billed this month/.test(c)));
+
+  pushShift(siteA.id, '2027-07-05', 8, 12);
+  const next = await call('POST', '/api/invoices/generate', { from: '2027-07-01', to: '2027-07-31', contract_id: contract.id }, adminT);
+  assert.equal(next.status, 200, JSON.stringify(next.body));
+  assert.ok(next.body.made[0].lines.some((l) => l.kind === 'FIXED_PERIOD'), 'reappears the following month');
+});
+
+test('a site\'s accounts_email is CC\'d on its invoice email; a consolidated invoice CCs the union across its sites, deduplicated and blank-free', async () => {
+  await call('PATCH', `/api/sites/${siteA.id}`, { accounts_email: 'accounts@meridian.example' }, adminT);
+  pushShift(siteA.id, '2027-08-03', 8, 12);
+  const g = await call('POST', '/api/invoices/generate', { from: '2027-08-01', to: '2027-08-31', contract_id: contract.id }, adminT);
+  const inv = g.body.made[0];
+  await call('POST', `/api/invoices/${inv.id}/approve`, {}, adminT);
+  const before = mails.length;
+  await call('POST', `/api/invoices/${inv.id}/email`, {}, adminT);
+  assert.equal(mails.length, before + 1);
+  assert.deepEqual(mails[mails.length - 1].cc, ['accounts@meridian.example']);
+
+  // Consolidated: one site with an accounts email, one without — only the
+  // one that has it is CC'd, deduplicated, no blank entry for the other.
+  await call('PATCH', `/api/sites/${gs1.id}`, { accounts_email: 'ops@grouping.example' }, adminT);
+  pushShift(gs1.id, '2027-09-03', 8, 12);
+  pushShift(gs2.id, '2027-09-03', 8, 12, 1);
+  const g2 = await call('POST', '/api/invoices/generate', { from: '2027-09-01', to: '2027-09-30' }, adminT);
+  const combined = g2.body.made.find((i) => i.client_id === gc.id);
+  assert.ok(combined, JSON.stringify(g2.body));
+  await call('POST', `/api/invoices/${combined.id}/approve`, {}, adminT);
+  const before2 = mails.length;
+  await call('POST', `/api/invoices/${combined.id}/email`, {}, adminT);
+  assert.deepEqual(mails[mails.length - 1].cc, ['ops@grouping.example'], 'only the site with an accounts email contributes one');
 });

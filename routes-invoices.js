@@ -125,14 +125,30 @@ module.exports = function registerInvoices({
     doc.text(dueStr, rightEdge - doc.textWidth(dueStr, 9), A4.h - 70, { size: 9, color: LIGHT });
     doc.y = A4.h - bandH - 26;
 
+    // A consolidated per-client invoice (contract_ids.length > 1) shows
+    // every site/contract it covers instead of the single Site/Contract
+    // pair, and groups the line-item table by site underneath — a
+    // single-contract invoice (the default, unchanged path) renders
+    // exactly as before either way.
+    const multi = inv.contract_ids && inv.contract_ids.length > 1;
+    const siteNames = multi ? [...new Set(inv.lines.map((l) => l.site_name).filter(Boolean))] : [inv.site_name];
     doc.pairs([
       ['Invoice date', longDate(inv.issue_date)],
       ['Bill to', [client.name || inv.client_name, client.billing_address].filter(Boolean).join('\n')],
-      ['Site', inv.site_name], ['Period', span(inv.period_from, inv.period_to)], ['Contract', inv.contract_reference],
+      multi ? ['Sites', siteNames.join(', ')] : ['Site', inv.site_name],
+      ['Period', span(inv.period_from, inv.period_to)],
+      multi ? ['Contracts', String(inv.contract_ids.length)] : ['Contract', inv.contract_reference],
       ...(st.vat_number ? [['Our VAT number', st.vat_number]] : []),
     ]);
-    doc.table([{ title: 'Description', width: 0.55 }, { title: 'Qty', width: 0.13, align: 'right' }, { title: 'Unit price', width: 0.16, align: 'right' }, { title: 'Amount', width: 0.16, align: 'right' }],
-      inv.lines.map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
+    const lineCols = [{ title: 'Description', width: 0.55 }, { title: 'Qty', width: 0.13, align: 'right' }, { title: 'Unit price', width: 0.16, align: 'right' }, { title: 'Amount', width: 0.16, align: 'right' }];
+    if (multi) {
+      for (const siteName of siteNames) {
+        doc.heading(siteName, 11);
+        doc.table(lineCols, inv.lines.filter((l) => l.site_name === siteName).map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
+      }
+    } else {
+      doc.table(lineCols, inv.lines.map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
+    }
     const total = (label, value, bold = false) => {
       doc.room(16); doc.y -= 14;
       doc.text(label, doc.margin + doc.width * 0.55, doc.y, { size: 10, bold });
@@ -185,11 +201,17 @@ module.exports = function registerInvoices({
     if (!sendEmail) return;
     if (!to) { log({ ok: false, error: 'the client has no billing or contact email (Admin → Clients)' }); return; }
     const c = company(), st = settingsRow();
+    // Every site referenced on this invoice contributes its accounts
+    // email as a CC — one site normally, the union across sites for a
+    // consolidated per-client invoice. Deduplicated, blanks dropped.
+    const siteIds = new Set((inv.lines || []).map((l) => l.site_id).filter(Boolean));
+    if (!siteIds.size && inv.site_id) siteIds.add(inv.site_id);
+    const cc = [...new Set([...siteIds].map((id) => { const s = db.sites.find((x) => x.id === id); return s ? s.accounts_email : ''; }).filter(Boolean))];
     const pay = st.account_number ? `<p>Please pay by bank transfer to ${st.account_name || c.company_name}, sort code ${st.sort_code}, account ${st.account_number}, quoting <strong>${inv.number}</strong>.</p>` : '';
     const html = `<p>Hello,</p><p>Please find attached invoice <strong>${inv.number}</strong> for ${inv.site_name}, ${span(inv.period_from, inv.period_to)}: <strong>${money(inv.total)}</strong> including VAT, due by ${longDate(inv.due_date)}.</p>${pay}
       <p>Your invoices are also in your client portal: <a href="${publicBaseUrl}/client.html">${publicBaseUrl}/client.html</a></p><p>Kind regards,<br>${c.company_name}</p>`;
-    Promise.resolve(sendEmail(to, `Invoice ${inv.number} from ${c.company_name}`, html, { attachments: [{ name: `${inv.number}.pdf`, contentType: 'application/pdf', content: invoicePdf(inv) }] }))
-      .then((r) => { log({ to, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); if (r && r.ok) inv.history.push({ at: new Date().toISOString(), by, what: `emailed to ${to}` }); flushNow(); })
+    Promise.resolve(sendEmail(to, `Invoice ${inv.number} from ${c.company_name}`, html, { cc, attachments: [{ name: `${inv.number}.pdf`, contentType: 'application/pdf', content: invoicePdf(inv) }] }))
+      .then((r) => { log({ to, cc, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); if (r && r.ok) inv.history.push({ at: new Date().toISOString(), by, what: `emailed to ${to}${cc.length ? ` (cc ${cc.join(', ')})` : ''}` }); flushNow(); })
       .catch((e) => log({ to, ok: false, error: e.message }));
   }
 
@@ -248,10 +270,17 @@ module.exports = function registerInvoices({
     inv.vat = r2(inv.subtotal * inv.vat_rate / 100);
     inv.total = r2(inv.subtotal + inv.vat);
   }
-  function build(c, from, to, user) {
-    const client = (db.clients || []).find((x) => x.id === c.client_id);
+  /** The lines one contract contributes to an invoice for [from, to] —
+   * pulled out of build() so a consolidated per-client invoice can call
+   * it once per contract and merge the results, while a normal
+   * single-contract invoice (build(), below) uses it exactly the same
+   * way it always built its own lines inline. Each line carries
+   * contract_id/site_id/site_name so a multi-contract invoice can group
+   * and CC correctly; a single-contract invoice just ignores them. */
+  function linesForContract(c, from, to) {
     const site = db.sites.find((s) => s.id === c.site_id);
-    const first = !db.invoices.some((i) => i.contract_id === c.id && i.status !== 'VOID');
+    const siteName = site ? site.name : '—';
+    const first = !db.invoices.some((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && i.status !== 'VOID');
     const lines = [], checks = [];
     for (const l of c.lines) {
       if (l.kind === 'HOURLY') {
@@ -285,33 +314,86 @@ module.exports = function registerInvoices({
         }
         const normalHours = r2(normalRows.reduce((n, x) => n + x.hours, 0));
         if (normalHours > 0 || (byRateDay.size === 0 && byOverride.size === 0)) {
-          lines.push({ id: crypto.randomUUID(), description: `${label} — hours, ${span(from, to)}`, kind: 'HOURLY', quantity: normalHours, unit_amount: l.rate, shifts: normalRows });
+          lines.push({ id: crypto.randomUUID(), description: `${label} — hours, ${span(from, to)}`, kind: 'HOURLY', quantity: normalHours, unit_amount: l.rate, shifts: normalRows, contract_id: c.id, site_id: c.site_id, site_name: siteName });
         }
         for (const { rd, rows: rdRows } of byRateDay.values()) {
           const rdHours = r2(rdRows.reduce((n, x) => n + x.hours, 0));
           const rate = rateDayRate(rd, l.rate);
           const how = rd.kind === 'FLAT' ? 'override rate' : `×${rd.multiplier}`;
-          lines.push({ id: crypto.randomUUID(), description: `${label} — ${rd.label}, ${longDate(rd.date)} (${how})`, kind: 'HOURLY', quantity: rdHours, unit_amount: rate, shifts: rdRows });
+          lines.push({ id: crypto.randomUUID(), description: `${label} — ${rd.label}, ${longDate(rd.date)} (${how})`, kind: 'HOURLY', quantity: rdHours, unit_amount: rate, shifts: rdRows, contract_id: c.id, site_id: c.site_id, site_name: siteName });
         }
         for (const { override, rows: orRows } of byOverride.values()) {
           const orHours = r2(orRows.reduce((n, x) => n + x.hours, 0));
           const rate = overrideRate(override, l.rate);
           const how = override.kind === 'FLAT' ? 'override rate' : `×${override.multiplier}`;
-          lines.push({ id: crypto.randomUUID(), description: `${label} — pay override, ${span(from, to)} (${how}: ${override.reason})`, kind: 'HOURLY', quantity: orHours, unit_amount: rate, shifts: orRows });
+          lines.push({ id: crypto.randomUUID(), description: `${label} — pay override, ${span(from, to)} (${how}: ${override.reason})`, kind: 'HOURLY', quantity: orHours, unit_amount: rate, shifts: orRows, contract_id: c.id, site_id: c.site_id, site_name: siteName });
         }
       } else if (l.kind === 'FIXED_PERIOD') {
-        lines.push({ id: crypto.randomUUID(), description: `${l.description}, ${span(from, to)}`, kind: l.kind, quantity: 1, unit_amount: l.rate });
+        // "Per invoice period" has always been this line's own label —
+        // bill it once per calendar month regardless of how often (or
+        // how short a period) invoices are generated for this contract,
+        // confirmed with the user rather than tying it to the contract's
+        // own invoice_period (a monthly fee stays monthly even once a
+        // contract's hourly charges move to weekly invoicing). There is
+        // no stable id on a contract line (cleanLines rebuilds the array
+        // on every edit), so the dedup key is the line's own description
+        // text, kept verbatim as source_description — never parsed back
+        // out of the rendered "<description>, <period>" line below.
+        const monthKey = String(from).slice(0, 7);
+        const alreadyBilled = db.invoices.some((i) => i.status !== 'VOID'
+          && (i.contract_ids || [i.contract_id]).includes(c.id)
+          && String(i.period_from).slice(0, 7) === monthKey
+          && (i.lines || []).some((x) => x.kind === 'FIXED_PERIOD' && x.source_description === l.description));
+        if (alreadyBilled) checks.push(`${l.description}: already billed this month, not repeated`);
+        else lines.push({ id: crypto.randomUUID(), description: `${l.description}, ${span(from, to)}`, kind: l.kind, quantity: 1, unit_amount: l.rate, source_description: l.description, contract_id: c.id, site_id: c.site_id, site_name: siteName });
       } else if (first) {
-        lines.push({ id: crypto.randomUUID(), description: l.description, kind: l.kind, quantity: 1, unit_amount: l.rate });
+        lines.push({ id: crypto.randomUUID(), description: l.description, kind: l.kind, quantity: 1, unit_amount: l.rate, contract_id: c.id, site_id: c.site_id, site_name: siteName });
       }
     }
+    return { lines, checks };
+  }
+
+  function build(c, from, to, user) {
+    const client = (db.clients || []).find((x) => x.id === c.client_id);
+    const site = db.sites.find((s) => s.id === c.site_id);
+    const { lines, checks } = linesForContract(c, from, to);
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
     const inv = {
-      id, reference: `${c.reference}/${String(id).padStart(4, '0')}`, status: 'DRAFT', contract_id: c.id, contract_reference: c.reference,
+      id, reference: `${c.reference}/${String(id).padStart(4, '0')}`, status: 'DRAFT', contract_id: c.id, contract_reference: c.reference, contract_ids: [c.id],
       client_id: c.client_id, client_name: client ? client.name : '—', site_id: c.site_id, site_name: site ? site.name : '—',
       period_from: from, period_to: to, issue_date: issue, due_date: new Date(Date.parse(issue) + (c.payment_terms_days || 30) * 86400000).toISOString().slice(0, 10),
       vat_rate: c.vat_rate, billing_basis: c.billing_basis, lines, checks, notes: '',
       created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: 'generated from the contract' }],
+      xero: null,
+    };
+    totals(inv);
+    return inv;
+  }
+
+  /** One invoice combining every one of a client's running contracts —
+   * only used for a client whose invoice_grouping is PER_CLIENT. Invoice-
+   * level settings (VAT rate, billing basis, payment terms) come from the
+   * first contract in the group; most clients keep these consistent
+   * across their own contracts, and this mirrors contract_id/
+   * contract_reference also defaulting to the first contract for
+   * anything that still only knows about a single contract. */
+  function buildForClient(contracts, from, to, user) {
+    const first = contracts[0];
+    const client = (db.clients || []).find((x) => x.id === first.client_id);
+    const site = db.sites.find((s) => s.id === first.site_id);
+    let lines = [], checks = [];
+    for (const c of contracts) {
+      const r = linesForContract(c, from, to);
+      lines = lines.concat(r.lines);
+      checks = checks.concat(r.checks);
+    }
+    const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
+    const inv = {
+      id, reference: `${first.reference}/${String(id).padStart(4, '0')}`, status: 'DRAFT', contract_id: first.id, contract_reference: first.reference, contract_ids: contracts.map((c) => c.id),
+      client_id: first.client_id, client_name: client ? client.name : '—', site_id: first.site_id, site_name: site ? site.name : '—',
+      period_from: from, period_to: to, issue_date: issue, due_date: new Date(Date.parse(issue) + (first.payment_terms_days || 30) * 86400000).toISOString().slice(0, 10),
+      vat_rate: first.vat_rate, billing_basis: first.billing_basis, lines, checks, notes: '',
+      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: `generated from ${contracts.length} contracts` }],
       xero: null,
     };
     totals(inv);
@@ -327,12 +409,36 @@ module.exports = function registerInvoices({
     if (body.contract_id && !contracts.length) throw httpError(400, 'that contract is not signed or was not running in this period');
     if (body.site_id && !body.contract_id && !contracts.length) throw httpError(400, 'that site has no signed contract running in this period');
     const made = [], skipped = [];
+    const notClashing = (c) => {
+      const clash = db.invoices.find((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && overlaps(i, from, to));
+      if (clash) { skipped.push({ contract: c.reference, reason: `already invoiced (${clash.reference}, ${clash.period_from} to ${clash.period_to})` }); return false; }
+      return true;
+    };
+    // A client opted into PER_CLIENT invoice_grouping gets every one of
+    // their running, non-clashing contracts combined into one invoice;
+    // every other client keeps today's one-invoice-per-contract path,
+    // untouched.
+    const byClient = new Map();
+    const singly = [];
     for (const c of contracts) {
       if (!c.client_id) { skipped.push({ contract: c.reference, reason: 'no client' }); continue; }
-      const clash = db.invoices.find((i) => i.contract_id === c.id && overlaps(i, from, to));
-      if (clash) { skipped.push({ contract: c.reference, reason: `already invoiced (${clash.reference}, ${clash.period_from} to ${clash.period_to})` }); continue; }
+      const client = (db.clients || []).find((x) => x.id === c.client_id);
+      if (client && client.invoice_grouping === 'PER_CLIENT') {
+        if (!byClient.has(c.client_id)) byClient.set(c.client_id, []);
+        byClient.get(c.client_id).push(c);
+      } else singly.push(c);
+    }
+    for (const c of singly) {
+      if (!notClashing(c)) continue;
       const inv = build(c, from, to, user);
       if (!inv.lines.length) { skipped.push({ contract: c.reference, reason: 'nothing to charge in this period' }); continue; }
+      db.invoices.push(inv); made.push(inv);
+    }
+    for (const group of byClient.values()) {
+      const ok = group.filter(notClashing);
+      if (!ok.length) continue;
+      const inv = buildForClient(ok, from, to, user);
+      if (!inv.lines.length) { skipped.push({ contract: ok.map((c) => c.reference).join(', '), reason: 'nothing to charge in this period' }); continue; }
       db.invoices.push(inv); made.push(inv);
     }
     if (made.length) logEvent('invoice.generated', `${made.length} INVOICE(S) GENERATED FOR ${from} TO ${to} BY ${user.display_name}`, {});

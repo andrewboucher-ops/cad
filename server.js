@@ -2828,9 +2828,13 @@ async function sendGraphEmail(to, subject, html, opts = {}) {
       contentBytes: Buffer.from(f.content).toString('base64'),
       ...(f.contentId ? { contentId: f.contentId, isInline: Boolean(f.isInline) } : {}),
     }));
+    // cc is an optional array of addresses (e.g. a site's accounts
+    // email, alongside the client's own contact) — empty/blank entries
+    // filtered out so a site with nothing set never sends a blank CC.
+    const cc = (opts.cc || []).map((a) => String(a || '').trim()).filter(Boolean);
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }], ...(attachments.length ? { attachments } : {}) } }),
+      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }], ...(cc.length ? { ccRecipients: cc.map((a) => ({ emailAddress: { address: a } })) } : {}), ...(attachments.length ? { attachments } : {}) } }),
     });
     if (!res.ok) return { ok: false, error: `${res.status} ${await res.text()}` };
     return { ok: true };
@@ -3967,7 +3971,7 @@ route('POST', '/api/sites', CONTROL, ({ body }) => {
   if (body.risk_level && !RISK_LEVELS.includes(body.risk_level)) throw httpError(400, `risk_level must be one of ${RISK_LEVELS.join(', ')}`);
   const site = {
     id: nextId('sites'), name, address: body.address || '', lat: Number(body.lat) || null, lon: Number(body.lon) || null,
-    keyholder: body.keyholder || '', contact_email: body.contact_email || '', contract: 'ACTIVE', checklist: [],
+    keyholder: body.keyholder || '', contact_email: body.contact_email || '', accounts_email: String(body.accounts_email || '').trim(), contract: 'ACTIVE', checklist: [],
     response_sla_minutes: body.response_sla_minutes ? Number(body.response_sla_minutes) : null,
     geofence_m: body.geofence_m === undefined || body.geofence_m === null || body.geofence_m === '' ? null : Math.min(Math.max(Number(body.geofence_m) || 0, 0), 5000),
     branch_id: normalizedBranchId(body.branch_id),
@@ -4002,6 +4006,7 @@ route('PATCH', '/api/sites/:id', ADMIN, ({ params, body }) => {
   if ('lon' in body) site.lon = body.lon === null || body.lon === '' ? null : Number(body.lon);
   if ('keyholder' in body) site.keyholder = body.keyholder || '';
   if ('contact_email' in body) site.contact_email = body.contact_email || '';
+  if ('accounts_email' in body) site.accounts_email = String(body.accounts_email || '').trim();
   if ('response_sla_minutes' in body) {
     if (body.response_sla_minutes !== null && (!Number.isFinite(Number(body.response_sla_minutes)) || Number(body.response_sla_minutes) <= 0)) {
       throw httpError(400, 'response_sla_minutes must be a positive number of minutes, or null');

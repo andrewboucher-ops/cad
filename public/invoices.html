@@ -123,8 +123,9 @@ function paint() {
     <thead><tr><th>Invoice</th><th>Client / site</th><th>Period</th><th class="num">Net</th><th class="num">Total</th><th>Due</th><th>Status</th></tr></thead>
     <tbody>${list.map((i) => {
       const [sl, sc] = STATUS[i.status] || [i.status, 'off'];
-      return `<tr data-open="${i.id}" style="cursor:pointer"><td class="mono" style="white-space:nowrap"><strong>${esc(i.number || 'Draft')}</strong><div class="dim" style="font-size:11px">${esc(i.contract_reference)}</div></td>
-        <td>${esc(i.client_name)}<div class="dim" style="font-size:11.5px">${esc(i.site_name)}</div></td>
+      const multi = i.contract_ids && i.contract_ids.length > 1;
+      return `<tr data-open="${i.id}" style="cursor:pointer"><td class="mono" style="white-space:nowrap"><strong>${esc(i.number || 'Draft')}</strong><div class="dim" style="font-size:11px">${multi ? `${i.contract_ids.length} contracts` : esc(i.contract_reference)}</div></td>
+        <td>${esc(i.client_name)}<div class="dim" style="font-size:11.5px">${multi ? `${[...new Set(i.lines.map((l) => l.site_name))].length} sites` : esc(i.site_name)}</div></td>
         <td class="dim" style="white-space:nowrap;font-size:12.5px">${esc(date(i.period_from))} – ${esc(date(i.period_to))}</td>
         <td class="num">${money(i.subtotal)}</td><td class="num"><strong>${money(i.total)}</strong></td>
         <td class="dim" style="white-space:nowrap">${esc(date(i.due_date))}</td>
@@ -185,9 +186,11 @@ async function view(id) {
   if (i.status === 'IN_XERO' || (i.status === 'PAID' && i.xero)) acts.push(act('sync', 'Check Xero'));
   const shiftTable = (l) => l.shifts && l.shifts.length ? `<details><summary class="dim" style="font-size:12px">${l.shifts.length} shift${l.shifts.length === 1 ? '' : 's'}</summary>
     <table class="k shifts"><tbody>${l.shifts.map((s) => `<tr><td>${esc(date(s.date))}</td><td>${esc(s.person)}</td><td class="num">${s.hours} h</td><td class="dim">${esc(s.source)}</td></tr>`).join('')}</tbody></table></details>` : '';
+  const multiC = i.contract_ids && i.contract_ids.length > 1;
+  const siteLabel = multiC ? `${[...new Set(i.lines.map((l) => l.site_name))].join(', ')}` : i.site_name;
   modal(i.number ? `Invoice ${i.number}` : 'Draft invoice', `
-    <p style="margin-top:0"><span class="pill ${sc}">${sl}</span> <strong>${esc(i.client_name)}</strong> — ${esc(i.site_name)}</p>
-    <p class="dim" style="font-size:12.5px;margin:0 0 6px">Contract ${esc(i.contract_reference)} · ${esc(date(i.period_from))} to ${esc(date(i.period_to))} · hours ${i.billing_basis === 'ROSTERED' ? 'rostered' : 'worked'} · issued ${esc(date(i.issue_date))}${i.xero && i.xero.number ? ` · Xero ${esc(i.xero.number)} (${esc(i.xero.status)})` : ''}${i.gocardless && i.gocardless.payment_id ? ` · Direct Debit ${esc(i.gocardless.status)}${i.gocardless.last_error ? ` — ${esc(i.gocardless.last_error)}` : ''}` : ''}</p>
+    <p style="margin-top:0"><span class="pill ${sc}">${sl}</span> <strong>${esc(i.client_name)}</strong> — ${esc(siteLabel)}</p>
+    <p class="dim" style="font-size:12.5px;margin:0 0 6px">${multiC ? `${i.contract_ids.length} contracts` : `Contract ${esc(i.contract_reference)}`} · ${esc(date(i.period_from))} to ${esc(date(i.period_to))} · hours ${i.billing_basis === 'ROSTERED' ? 'rostered' : 'worked'} · issued ${esc(date(i.issue_date))}${i.xero && i.xero.number ? ` · Xero ${esc(i.xero.number)} (${esc(i.xero.status)})` : ''}${i.gocardless && i.gocardless.payment_id ? ` · Direct Debit ${esc(i.gocardless.status)}${i.gocardless.last_error ? ` — ${esc(i.gocardless.last_error)}` : ''}` : ''}</p>
     ${i.checks && i.checks.length ? `<div class="checks"><strong>Check before approving:</strong><ul>${i.checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul><span class="dim">Fix the clock times on the rota, then void this draft and make it again — or change the hours below.</span></div>` : ''}
     <div style="overflow-x:auto"><table class="k lines"><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Amount</th>${draft ? '<th></th>' : ''}</tr></thead>
     <tbody id="iLines">${i.lines.map((l) => `<tr data-line="${l.id}">
