@@ -120,6 +120,7 @@ function paint() {
           ${a.status !== 'ON_HIRE' ? `<button class="btn" data-a="status" data-id="${a.id}">Status</button>` : ''}
           <button class="btn" data-a="history" data-id="${a.id}">History</button>
           ${isAdmin ? `<button class="btn" data-a="edit" data-id="${a.id}">Edit</button>` : ''}
+          ${isAdmin && !a.is_stock_tracked ? `<button class="btn" data-a="duplicate" data-id="${a.id}">Duplicate</button>` : ''}
         </div></td></tr>`;
     }).join('')}</tbody></table></div>`
     : `<p class="dim">${data.assets.length ? 'No assets match.' : 'No assets yet.' + (isAdmin ? ' Press <strong>New asset</strong> to add radios, body cameras, keys and other tagged kit.' : ' An admin adds them.')}</p>`;
@@ -129,7 +130,54 @@ function paint() {
 const done = async (msg) => { close(); await load(); if (msg) { el('#updated').textContent = msg; } };
 const name = (a) => `${a.tag ? a.tag + ' — ' : ''}${a.description}`;
 const condOpts = (sel) => options(CONDITIONS.map((c) => [c, words(c)]), sel, '—');
+/** Next free tag after RAD-014 → RAD-015, keeping its zero padding. */
+function nextTags(tag, n) {
+  const taken = new Set(data.assets.map((x) => x.tag).filter(Boolean));
+  const m = String(tag || '').match(/^(.*?)(\d+)$/);
+  const out = [];
+  if (!m) return Array(n).fill('');
+  let i = Number(m[2]);
+  while (out.length < n && i < Number(m[2]) + 100000) { i++; const t = `${m[1]}${String(i).padStart(m[2].length, '0')}`; if (!taken.has(t)) out.push(t); }
+  return out;
+}
 const ACTIONS = {
+  duplicate(a) {
+    let count = 1;
+    const rowsHtml = (n, keep = []) => nextTags(a.tag, n).map((t, i) => `<tr><td class="dim" style="width:28px">${i + 1}</td>
+      <td><input data-dt="${i}" value="${esc((keep[i] && keep[i].tag) || t)}" placeholder="Asset tag"></td>
+      <td><input data-ds="${i}" value="${esc((keep[i] && keep[i].serial_no) || '')}" placeholder="Serial number"></td></tr>`).join('');
+    modal(`Duplicate — ${name(a)}`, `<p style="margin-top:0;font-size:13.5px">Each copy gets everything from <strong>${esc(name(a))}</strong> — ${esc([a.make, a.model].filter(Boolean).join(' ') || words(a.category))}${a.pat_required ? ', PAT schedule' : ''}${a.check_interval_days ? ', inspection schedule' : ''}, supplier, cost, store location — except its own tag and serial number. Copies start in store with no history.</p>
+      <div class="k-form"><div><label>How many copies</label><input id="dN" type="number" min="1" max="100" value="1"></div>
+        <div><label>Serial numbers (optional)</label><button type="button" class="btn" id="dPaste">Paste a list…</button></div></div>
+      <div style="max-height:46vh;overflow:auto;margin-top:10px"><table class="k"><thead><tr><th></th><th>Asset tag</th><th>Serial number</th></tr></thead><tbody id="dRows">${rowsHtml(1)}</tbody></table></div>
+      <p class="dim" style="font-size:12px">Tags are suggested from ${esc(a.tag || 'this asset')}, skipping ones already used — change any of them. With a barcode scanner, scan into a box and it moves to the next.</p>${foot('Create copies')}`, (root) => {
+      const read = () => [...root.querySelectorAll('[data-dt]')].map((x) => ({ tag: x.value.trim(), serial_no: root.querySelector(`[data-ds="${x.dataset.dt}"]`).value.trim() }));
+      const bindKeys = () => {
+        const inputs = [...root.querySelectorAll('#dRows input')];
+        inputs.forEach((x, i) => (x.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); const nx = x.dataset.dt != null ? root.querySelector(`[data-ds="${x.dataset.dt}"]`) : root.querySelector(`[data-dt="${Number(x.dataset.ds) + 1}"]`); if (nx) nx.focus(); } }));
+      };
+      root.querySelector('#dN').oninput = () => {
+        const n = Math.max(1, Math.min(100, Number(root.querySelector('#dN').value) || 1));
+        if (n === count) return;
+        const keep = read(); count = n;
+        root.querySelector('#dRows').innerHTML = rowsHtml(n, keep); bindKeys();
+      };
+      root.querySelector('#dPaste').onclick = () => {
+        const text = prompt('Paste the serial numbers, one per line (or separated by commas):');
+        if (!text) return;
+        const list = text.split(/[\n,;\t]+/).map((x) => x.trim()).filter(Boolean);
+        if (list.length > count) { count = Math.min(100, list.length); root.querySelector('#dN').value = count; root.querySelector('#dRows').innerHTML = rowsHtml(count, read()); bindKeys(); }
+        list.slice(0, count).forEach((sn, i) => { root.querySelector(`[data-ds="${i}"]`).value = sn; });
+      };
+      bindKeys();
+      wire(root, async () => {
+        const copies = read();
+        if (copies.some((c) => !c.tag)) throw new Error('every copy needs an asset tag');
+        const made = await api('POST', `/api/assets/${a.id}/duplicate`, { copies });
+        await done(`${made.length} cop${made.length === 1 ? 'y' : 'ies'} added: ${made.map((x) => x.tag).join(', ')}`);
+      });
+    }, { wide: true });
+  },
   checkout(a) {
     const inWeek = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
     modal(`Check out — ${name(a)}`, `<div class="k-form">

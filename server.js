@@ -1933,6 +1933,46 @@ route('POST', '/api/assets', ADMIN, ({ body, user }) => {
   logEvent('asset.created', `ASSET ${tag || description} ADDED`, { asset_id: a.id });
   return { __status: 201, __body: publicAsset(a) };
 });
+/** Copies of an asset: the same item, each with its own tag and serial
+ * number. Everything about WHAT it is is copied (category, name, make,
+ * model, supplier, cost, warranty, PAT/inspection schedule, store location,
+ * kit, notes); nothing about the individual item is — each copy starts in
+ * store, with no check-outs, no test or inspection results (its first due
+ * dates are worked out from today, as for any new asset), not kept in a
+ * vehicle, not holding stock. All tags are checked before any copy is
+ * made: either every copy is created or none is. */
+route('POST', '/api/assets/:id/duplicate', ADMIN, ({ params, body, user }) => {
+  const src = db.assets.find((x) => x.id === Number(params.id)); if (!src) throw httpError(404, 'asset not found');
+  if (src.is_stock_tracked) throw httpError(400, 'stock items are counted, not copied — change the quantity instead');
+  const copies = Array.isArray(body.copies) ? body.copies : [];
+  if (!copies.length) throw httpError(400, 'add at least one copy');
+  if (copies.length > 100) throw httpError(400, 'at most 100 copies at a time');
+  const rows = copies.map((c, i) => {
+    const tag = String((c && c.tag) || '').trim().slice(0, 60);
+    if (!tag) throw httpError(400, `copy ${i + 1}: an asset tag is required`);
+    return { tag, serial_no: String((c && c.serial_no) || '').trim().slice(0, 120) };
+  });
+  const clash = rows.filter((r, i) => db.assets.some((x) => x.tag === r.tag) || rows.findIndex((o) => o.tag === r.tag) !== i).map((r) => r.tag);
+  if (clash.length) throw httpError(409, `these tags are already used: ${[...new Set(clash)].join(', ')}`);
+  const sameSerial = rows.filter((r, i) => r.serial_no && rows.findIndex((o) => o.serial_no === r.serial_no) !== i).map((r) => r.serial_no);
+  if (sameSerial.length) throw httpError(400, `the same serial number is entered twice: ${[...new Set(sameSerial)].join(', ')}`);
+  const COPY = ['make', 'model', 'supplier', 'unit', 'size', 'check_type', 'purchase_cost', 'unit_cost', 'check_interval_days', 'pat_interval_days',
+    'pat_required', 'warranty_expires_at', 'condition', 'location_id'];
+  const made = rows.map((r) => {
+    const a = {
+      id: nextId('assets'), tag: r.tag, category: src.category, description: src.description, serial_no: r.serial_no,
+      assigned_to: null, site_id: src.site_id || null, status: 'IN_STORE', purchase_date: src.purchase_date || null, last_checked_at: null,
+      notes: src.notes || '', branch_id: src.branch_id || null, is_stock_tracked: false, low_stock_threshold: null, expiry_date: null,
+      parent_asset_id: src.parent_asset_id || null, subcategory_id: src.subcategory_id || null, duplicated_from: src.id,
+    };
+    for (const k of COPY) if (src[k] !== undefined) a[k] = src[k];
+    inventory.firstDueDates(a);
+    db.assets.push(a);
+    return a;
+  });
+  logEvent('asset.duplicated', `${made.length} COP${made.length === 1 ? 'Y' : 'IES'} OF ${src.tag || src.description} ADDED BY ${user.display_name} (${made.map((a) => a.tag).join(', ')})`, { asset_id: src.id });
+  return { __status: 201, __body: made.map(publicAsset) };
+});
 route('PATCH', '/api/assets/:id', ADMIN, ({ params, body }) => {
   const a = db.assets.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'asset not found');
   if ('tag' in body) {

@@ -5,7 +5,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 
-process.env.PORT = '4037';
+process.env.PORT = '4055';
 process.env.AUTH_SECRET = 'timeclock-test-secret';
 process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';
