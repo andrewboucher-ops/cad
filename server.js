@@ -2768,6 +2768,11 @@ function buildResolutionReportHtml({ reference, kindLabel, locationLabel, siteId
   </body></html>`;
 }
 const MS_GRAPH_SENDER = process.env.MS_GRAPH_SENDER || '';
+// Every email is sent as MS_GRAPH_SENDER (e.g. donotreply@echeloncic.com).
+// MAIL_REPLY_TO, when set, is where a recipient's reply goes instead — so
+// "reply to this email" in an interview invite reaches someone.
+const MAIL_REPLY_TO = (process.env.MAIL_REPLY_TO || '').trim();
+const replyTo = () => (MAIL_REPLY_TO ? { replyTo: [{ emailAddress: { address: MAIL_REPLY_TO } }] } : {});
 const RESOLUTION_REPORT_CC = process.env.RESOLUTION_REPORT_CC || '';
 const GRAPH_MAIL_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && MS_GRAPH_SENDER);
 let graphTokenCache = { token: null, exp: 0 };
@@ -2803,7 +2808,7 @@ async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: m
     const token = await getGraphAppToken();
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ message: { subject: `Resolution report — ${reference}`, body: { contentType: 'HTML', content: html }, toRecipients: recipients.map((address) => ({ emailAddress: { address } })), attachments } }),
+      body: JSON.stringify({ message: { subject: `Resolution report — ${reference}`, body: { contentType: 'HTML', content: html }, toRecipients: recipients.map((address) => ({ emailAddress: { address } })), ...replyTo(), attachments } }),
     });
     if (!res.ok) console.warn(`[cccs] resolution report email failed for ${reference}:`, res.status, await res.text());
     else logEvent(logType, `RESOLUTION REPORT EMAILED FOR ${reference}`, { [logIdKey]: logId, to: recipients });
@@ -2834,7 +2839,7 @@ async function sendGraphEmail(to, subject, html, opts = {}) {
     const cc = (opts.cc || []).map((a) => String(a || '').trim()).filter(Boolean);
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }], ...(cc.length ? { ccRecipients: cc.map((a) => ({ emailAddress: { address: a } })) } : {}), ...(attachments.length ? { attachments } : {}) } }),
+      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }], ...replyTo(), ...(cc.length ? { ccRecipients: cc.map((a) => ({ emailAddress: { address: a } })) } : {}), ...(attachments.length ? { attachments } : {}) } }),
     });
     if (!res.ok) return { ok: false, error: `${res.status} ${await res.text()}` };
     return { ok: true };
