@@ -524,6 +524,9 @@ function broadcast(type, payload, opts = {}) {
     }
     if (deliver) c.send(type, payload);
   }
+  // Every rota change already announces itself here, whichever route or
+  // module made it, so this one line keeps the Outlook rota calendar in step.
+  if (type === 'shift.created' || type === 'shift.updated' || type === 'shift.deleted') queueRotaCalendarSync(payload && payload.id);
 }
 const isControlRole = (role) => ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(role);
 
@@ -2950,6 +2953,35 @@ async function notifyPersonnelAboutShift(personnelId, eventKey, s) {
 function notifyShiftEvent(eventKey, s, personnelIds) {
   for (const pid of personnelIds || []) notifyPersonnelAboutShift(pid, eventKey, s).catch((e) => console.warn('[cccs] shift notify failed:', e.message));
 }
+
+/* Outlook rota calendar — every published shift as an event in one
+ * mailbox's "Echelon Rota" calendar, for the morning brief. One-way and
+ * best-effort: see rota-calendar.js. A no-op until the Graph env vars are
+ * set. Live changes come through broadcast(); a reconcile shortly after
+ * boot and each night at 02:00 London backfills today → +14 days and
+ * repairs anything a failed call or an un-broadcast change (a retention
+ * sweep, a deleted person) left behind. */
+const rotaCalendar = require('./rota-calendar.js').createRotaCalendar({ baseUrl: PUBLIC_BASE_URL });
+function queueRotaCalendarSync(shiftId) {
+  try { if (shiftId != null) rotaCalendar.queue(db, shiftId); } catch (e) { console.warn('[rota-calendar] queue failed:', e.message); }
+}
+const ROTA_CALENDAR_RECONCILE_HOUR = Number(process.env.ROTA_CALENDAR_RECONCILE_HOUR || 2);
+let rotaCalendarReconciledOn = null;
+function rotaCalendarTick() {
+  if (!rotaCalendar.enabled) return;
+  const london = new Date().toLocaleString('en-GB', { timeZone: 'Europe/London', hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit' });
+  const [day, hour] = [london.slice(0, 10), Number(london.slice(-2))];
+  if (hour !== ROTA_CALENDAR_RECONCILE_HOUR || rotaCalendarReconciledOn === day) return;
+  rotaCalendarReconciledOn = day;
+  rotaCalendar.reconcile(db).catch((e) => console.warn('[rota-calendar] reconcile failed:', e.message));
+}
+route('GET', '/api/rota-calendar', ADMIN, () => rotaCalendar.status());
+route('POST', '/api/rota-calendar/reconcile', ADMIN, async ({ body }) => {
+  if (!rotaCalendar.enabled) throw httpError(409, 'rota calendar sync is not configured — set MS_TENANT_ID, MS_CLIENT_ID and MS_CLIENT_SECRET');
+  const days = body && body.days != null ? Number(body.days) : 14;
+  if (!Number.isInteger(days) || days < 0 || days > 90) throw httpError(400, 'days must be a whole number from 0 to 90');
+  return rotaCalendar.reconcile(db, { days });
+});
 
 /** Kayleigh's monthly ops summary — which sites had job/patrol activity,
  * a reminder to check AURA, and a nudge that invoices are due on the 1st
@@ -5974,6 +6006,10 @@ function start() {
   }
   complianceTick();
   setInterval(complianceTick, COMPLIANCE_TICK_MS).unref?.();
+  if (rotaCalendar.enabled) {
+    setTimeout(() => rotaCalendar.reconcile(db).catch((e) => console.warn('[rota-calendar] reconcile failed:', e.message)), 30000).unref?.();
+    setInterval(rotaCalendarTick, 10 * 60000).unref?.();
+  }
   server.listen(PORT, HOST, () => {
     console.log(`\n  CCCS POC — simulation only, not for operational use`);
     console.log(`  Control Room : http://localhost:${PORT}/control.html`);
@@ -5981,6 +6017,7 @@ function start() {
     console.log(`  Demo logins  : dispatcher/dispatch123 · dwhitfield/field123 · mdt001/mdt123 · admin/admin123`);
     console.log(`  Storage      : ${store.enabled ? store.file : 'in memory only (PERSISTENCE=off)'}`);
     console.log(`  Microsoft SSO: ${MS_ENABLED ? 'enabled (tenant ' + MS_TENANT_ID + ')' : 'not configured — set MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET/MS_REDIRECT_URI'}`);
+    console.log(`  Rota calendar: ${rotaCalendar.enabled ? `syncing to "${rotaCalendar.calendarName}" in ${rotaCalendar.owner}` : 'not configured — set MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET'}`);
     console.log(`  PRF integration: ${PRF_INTEGRATION_SECRET ? 'enabled' : 'not configured — set PRF_INTEGRATION_SECRET'}\n`);
   });
   if (httpsServer) {
@@ -5997,4 +6034,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, RETENTION, hashPassword, verifyPassword, sign, PORT };

@@ -75,6 +75,8 @@ These are deliberately weak demo credentials for a POC. Replace them before the 
 | `AMI_CONTEXT` / `AMI_LOCAL_EXTENSIONS` | `from-internal` / — | dialplan context, and extensions (comma-separated) that ring as `Local/ext@context` instead of `PJSIP/ext` |
 | `DIAL_ALLOW` / `DIAL_MAX_PER_HOUR` | any UK number except premium rate / `200` | numbers the relay may dial (a regex), and calls per workstation per hour |
 | `MS_TENANT_ID` / `MS_CLIENT_ID` / `MS_CLIENT_SECRET` / `MS_REDIRECT_URI` | — | Microsoft Entra ID SSO — see `docs/SSO.md` |
+| `ROTA_MS_CLIENT_ID` / `ROTA_MS_CLIENT_SECRET` | `MS_CLIENT_ID` / `MS_CLIENT_SECRET` | app registration for the Outlook rota calendar sync (`rota-calendar.js`); sync is off until a tenant, client id and secret are all set |
+| `ROTA_CALENDAR_OWNER` / `ROTA_CALENDAR_NAME` | `andrew.boucher@echeloncic.com` / `Echelon Rota` | mailbox and calendar every published shift is copied into; `deploy/rota-calendar-sync.sh` backfills by hand |
 
 No secrets are hardcoded. If `AUTH_SECRET` is unset the server generates an ephemeral one and warns; sessions then drop on restart.
 
