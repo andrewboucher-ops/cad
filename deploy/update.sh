@@ -177,6 +177,13 @@ run chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 UPLOADS_DIR="$(dirname "$DATA_FILE")/uploads"
 [ -d "$UPLOADS_DIR" ] && run chown -R "$APP_USER:$APP_USER" "$UPLOADS_DIR"
 
+# Which version is live, for Admin → Updates and for deploy/autodeploy.sh.
+if [ -z "$DRY_RUN" ]; then
+  COMMIT="$(git -C "$SRC_DIR" rev-parse HEAD)" SUBJECT="$(git -C "$SRC_DIR" log -1 --format=%s)" BRANCH="$(git -C "$SRC_DIR" rev-parse --abbrev-ref HEAD)" \
+    node -e 'const e=process.env;require("fs").writeFileSync(process.argv[1],JSON.stringify({commit:e.COMMIT,subject:e.SUBJECT,branch:e.BRANCH,deployed_at:new Date().toISOString(),by:process.env.SUDO_USER||process.env.USER||"root"}))' "$APP_DIR/VERSION.json"
+  chown "$APP_USER:$APP_USER" "$APP_DIR/VERSION.json"
+fi
+
 say "5/6  Restarting $SERVICE"
 run systemctl restart "$SERVICE"
 

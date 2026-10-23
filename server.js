@@ -2846,6 +2846,7 @@ async function sendGraphEmail(to, subject, html, opts = {}) {
   } catch (e) { return { ok: false, error: e.message }; }
 }
 
+const SERVER_STARTED_AT = new Date().toISOString();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://comms.echeloncic.com').replace(/\/+$/, '');
 
 // Shift SMS/email notifications — one place for "tell this person what just
@@ -3729,6 +3730,22 @@ function retentionSweep() {
   return removed;
 }
 
+/* Admin → Updates: which version is live (VERSION.json, written into the app
+ * folder by deploy/update.sh) and how the last automatic deploy went
+ * (deploy-status.json next to the database, written by deploy/autodeploy.sh).
+ * Lets an admin see a deploy happened — or why it didn't — without getting
+ * onto the server. Neither file exists on a dev copy; that's fine. */
+route('GET', '/api/admin/deploy-status', ADMIN, () => {
+  const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+  const dataDir = path.dirname(process.env.DATA_FILE || path.join(__dirname, 'data', 'cccs.db'));
+  return {
+    running: readJson(path.join(__dirname, 'VERSION.json')),
+    last_attempt: readJson(path.join(dataDir, 'deploy-status.json')),
+    auto_paused: fs.existsSync('/etc/cccs/autodeploy.off'),
+    auto_installed: fs.existsSync('/etc/systemd/system/cccs-autodeploy.timer'),
+    started_at: SERVER_STARTED_AT,
+  };
+});
 route('GET', '/api/retention', CONTROL, () => ({
   policy_days: RETENTION,
   counts: Object.fromEntries(['locations', 'audit_logs', 'messages', 'jobs', 'site_visits', 'dial_log', 'passdown_logs']
