@@ -1093,6 +1093,28 @@ function rateLimit(ip) {
   return win.count <= 600;
 }
 
+/* Per-account login lockout — on top of the general per-IP rateLimit()
+ * above, which caps request volume but does nothing to stop a slow,
+ * distributed credential-stuffing run against one known username. Keyed
+ * by username, not IP, and only ever populated for a username that
+ * actually exists (see the login route) — so this can't be grown
+ * unbounded by throwing junk usernames at it, and checking it for a
+ * username that doesn't exist is just a harmless Map miss. */
+const failedLogins = new Map();
+const LOGIN_LOCKOUT_THRESHOLD = 5;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+function loginLockedUntil(username) {
+  const rec = failedLogins.get(username);
+  return rec && rec.lockedUntil > Date.now() ? rec.lockedUntil : null;
+}
+function recordLoginFailure(username) {
+  const rec = failedLogins.get(username) || { count: 0, lockedUntil: 0 };
+  rec.count++;
+  if (rec.count >= LOGIN_LOCKOUT_THRESHOLD) { rec.lockedUntil = Date.now() + LOGIN_LOCKOUT_MS; rec.count = 0; }
+  failedLogins.set(username, rec);
+}
+function clearLoginFailures(username) { failedLogins.delete(username); }
+
 function authFrom(req, url) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : url.searchParams.get('token');
@@ -1286,11 +1308,19 @@ function normalizeUiPrefs(p) {
 const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, branch_id: u.branch_id || null, site_ids: Array.isArray(u.site_ids) ? u.site_ids : null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs), password_set_at: u.password_set_at || null, last_login_at: u.last_login_at || null });
 
 route('POST', '/api/auth/login', null, ({ body }) => {
-  const user = db.users.find((u) => u.username === String(body.username || '').toLowerCase());
+  const username = String(body.username || '').toLowerCase();
+  const lockedUntil = loginLockedUntil(username);
+  if (lockedUntil) {
+    logEvent('auth.locked', `Login blocked for ${username} — too many recent failures`);
+    throw httpError(429, `too many failed attempts — try again in ${Math.ceil((lockedUntil - Date.now()) / 1000)}s`);
+  }
+  const user = db.users.find((u) => u.username === username);
   if (!user || !verifyPassword(String(body.password || ''), user.password_hash)) {
+    if (user) recordLoginFailure(username);
     logEvent('auth.failed', `Failed login for ${body.username}`);
     throw httpError(401, 'invalid credentials');
   }
+  clearLoginFailures(username);
   const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
   const token = sign({ sub: user.id, role: user.role, exp: Date.now() + ttl });
   user.last_login_at = new Date().toISOString();

@@ -162,6 +162,22 @@ test('a "set your password" link signs in with the new password, rejects a bad/e
   await call('DELETE', `/api/users/${userId}`, undefined, adminT);
 });
 
+test('5 failed logins lock an account out for a time, without affecting other accounts', async () => {
+  const created = await call('POST', '/api/users', { username: 'lockout-test', password: 'correctpass1', role: 'FIELD_USER' }, adminT);
+  const userId = created.body.id;
+
+  for (let i = 0; i < 5; i++) {
+    assert.equal((await call('POST', '/api/auth/login', { username: 'lockout-test', password: 'wrong' })).status, 401, `attempt ${i + 1}`);
+  }
+  const locked = await call('POST', '/api/auth/login', { username: 'lockout-test', password: 'correctpass1' });
+  assert.equal(locked.status, 429, JSON.stringify(locked.body));
+  assert.match(locked.body.error, /too many failed attempts/);
+
+  assert.equal((await call('POST', '/api/auth/login', { username: 'admin', password: 'admin123' })).status, 200, 'an unrelated account is unaffected');
+
+  await call('DELETE', `/api/users/${userId}`, undefined, adminT);
+});
+
 test('a welcome link explains Microsoft SSO by whichever of email/SMS is on file', async () => {
   const noContact = await call('POST', '/api/users', { username: 'welcome-none', password: 'password1', role: 'DISPATCHER' }, adminT);
   assert.equal((await call('POST', `/api/users/${noContact.body.id}/send-welcome-link`, {}, adminT)).status, 400, 'nothing to send to');
