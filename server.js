@@ -2654,7 +2654,9 @@ route('POST', '/api/jobs/:id/broadnet-push', CONTROL, async ({ params, user }) =
 });
 
 route('POST', '/api/integrations/broadnet/webhook/:token', null, ({ params, body: b }) => {
-  if (!process.env.BROADNET_WEBHOOK_TOKEN || params.token !== process.env.BROADNET_WEBHOOK_TOKEN) throw httpError(401, 'bad BroadNet webhook token');
+  const broadnetToken = process.env.BROADNET_WEBHOOK_TOKEN;
+  const givenToken = Buffer.from(String(params.token || ''));
+  if (!broadnetToken || givenToken.length !== Buffer.byteLength(broadnetToken) || !crypto.timingSafeEqual(givenToken, Buffer.from(broadnetToken))) throw httpError(401, 'bad BroadNet webhook token');
   logInboundAlarmPayload('broadnet', 'BroadNet', b);
 
   if (b.terminal) {

@@ -41,6 +41,7 @@
  * Registrar pattern — server.js passes in what this needs.
  */
 'use strict';
+const crypto = require('crypto');
 
 const STAFF = ['FIELD_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
 const FORMS = ['AMPOULE', 'VIAL', 'TABLET', 'CAPSULE', 'ORAL_SOLUTION', 'PREFILLED_SYRINGE', 'INHALER', 'NEBULE', 'SPRAY', 'PATCH', 'SACHET', 'OTHER'];
@@ -313,7 +314,8 @@ module.exports = function registerMedicationRoutes({ route, httpError, CONTROL, 
    * different front door. Additive: the existing /administer route above
    * is completely unchanged. */
   route('POST', '/api/integrations/prf/medication/:id/administer', null, ({ params, body, req }) => {
-    if (!prfIntegrationSecret || req.headers['x-prf-integration-secret'] !== prfIntegrationSecret) throw httpError(401, 'bad integration secret');
+    const given = Buffer.from(String(req.headers['x-prf-integration-secret'] || ''));
+    if (!prfIntegrationSecret || given.length !== Buffer.byteLength(prfIntegrationSecret) || !crypto.timingSafeEqual(given, Buffer.from(prfIntegrationSecret))) throw httpError(401, 'bad integration secret');
     const email = str(body.acting_email, 120).toLowerCase();
     const user = email ? db.users.find((u) => u.email && u.email.toLowerCase() === email) : null;
     if (!user) throw httpError(400, 'acting_email does not match a CCCS account');
