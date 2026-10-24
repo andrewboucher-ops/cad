@@ -698,6 +698,9 @@ function renderJobDetail() {
           <span style="flex:1">${esc(r.callsign || r.personnel || r.mdt)}${r.acknowledged ? ' ✓' : ''}</span>
           <button class="btn danger" style="padding:0 6px;font-size:11px" data-standdown="${esc(r.personnel ? 'p:' + r.personnel : 'm:' + r.mdt)}">Stand down</button>
         </div>`).join('') : '—'}</dd>
+      ${(j.evidence_links || []).length ? `<dt>Evidence</dt><dd>${j.evidence_links.map((l) => /^https?:\/\//i.test(l.case_url || '')
+        ? `<div><a href="${esc(l.case_url)}" target="_blank" rel="noopener noreferrer">${esc(l.case_ref)}</a> <span class="dim">in DEMS</span></div>`
+        : `<div>${esc(l.case_ref)} <span class="dim">in DEMS</span></div>`).join('')}</dd>` : ''}
     </dl>
     <div id="jDetailsEdit" class="hide">
       <label for="jType">Incident type</label>

@@ -43,6 +43,8 @@ SIMULATION=off
 # Control room PCs clocking operators in at Windows sign-in
 # (POST /api/integrations/workstation/clock-in):
 # WORKSTATION_SECRET=
+# Evidence store (DEMS) linking cases to jobs (/api/integrations/dems/*):
+# DEMS_SECRET=
 # Click-to-dial relay for control room PCs off the VPN
 # (POST /api/integrations/workstation/dial). The AMI user must permit this host.
 # AMI_HOST=

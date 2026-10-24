@@ -2866,6 +2866,107 @@ route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) =>
   return { result: 'CLOCKED_IN', personnel_name: p.name, shift: publicShift(s) };
 });
 
+/* ---- DEMS integration ---------------------------------------------------
+ * The Echelon evidence store (DEMS) links its cases to CCCS incidents and
+ * matches body-worn footage to the jobs its wearer attended. Like GuardM8 it
+ * is a system, not an operator, so it authenticates with a shared secret
+ * (DEMS_SECRET). It can read job summaries, who wore which camera when, and
+ * record which DEMS cases are linked to a job. It never sees or receives
+ * footage here: CCCS shows a link into DEMS, nothing more. */
+function assertDemsSecret(req) {
+  const secret = process.env.DEMS_SECRET;
+  const given = Buffer.from(String(req.headers['x-dems-secret'] || ''));
+  if (!secret || given.length !== Buffer.byteLength(secret) || !crypto.timingSafeEqual(given, Buffer.from(secret))) {
+    throw httpError(401, 'bad DEMS secret');
+  }
+}
+function demsJob(j) {
+  const site = j.site_id ? db.sites.find((x) => x.id === j.site_id) : null;
+  return {
+    reference: j.reference, incident_type: j.incident_type, priority: j.priority, status: j.status,
+    location: j.location, site: site ? site.name : null,
+    created_at: j.created_at, dispatched_at: j.dispatched_at || null, on_scene_at: j.on_scene_at || null,
+    completed_at: j.completed_at || null, cancelled_at: j.cancelled_at || null,
+    resources: db.job_assignments.filter((a) => a.job_id === j.id).map((a) => {
+      const p = a.personnel_id ? db.personnel.find((x) => x.id === a.personnel_id) : null;
+      const cs = db.callsigns.find((c) => c.id === a.callsign_id);
+      return { callsign: cs ? cs.name : null, personnel: p ? p.name : null, employee_no: p ? p.employee_no : null };
+    }),
+    evidence_links: j.evidence_links || [],
+  };
+}
+function demsFindPerson(v) {
+  const s = String(v || '').trim();
+  if (!s) return null;
+  return db.personnel.find((p) => p.employee_no && p.employee_no.toLowerCase() === s.toLowerCase())
+    || db.personnel.find((p) => p.name.toLowerCase() === s.toLowerCase()) || null;
+}
+const demsTime = (v, name) => {
+  const t = Date.parse(v);
+  if (Number.isNaN(t)) throw httpError(400, `${name} must be an ISO date-time`);
+  return t;
+};
+route('GET', '/api/integrations/dems/jobs/:ref', null, ({ params, req }) => {
+  assertDemsSecret(req);
+  const ref = decodeURIComponent(params.ref).trim().toUpperCase();
+  const j = db.jobs.find((x) => String(x.reference).toUpperCase() === ref);
+  if (!j) throw httpError(404, 'no job with that reference');
+  return demsJob(j);
+});
+// Jobs a person was assigned to (directly, or through their call sign) whose
+// life overlaps [from, to]: the incidents a body camera on them might have caught.
+route('GET', '/api/integrations/dems/jobs', null, ({ query, req }) => {
+  assertDemsSecret(req);
+  const p = demsFindPerson(query.get('person'));
+  if (!p) return { person: null, jobs: [] };
+  const from = demsTime(query.get('from'), 'from'), to = demsTime(query.get('to'), 'to');
+  const jobs = db.jobs.filter((j) => {
+    const assigned = db.job_assignments.some((a) => a.job_id === j.id
+      && (a.personnel_id === p.id || (!a.personnel_id && p.callsign_id && a.callsign_id === p.callsign_id)));
+    if (!assigned) return false;
+    const start = Date.parse(j.created_at);
+    const end = Date.parse(j.completed_at || j.cancelled_at || '') || Date.now();
+    return start <= to && end >= from;
+  }).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  return { person: { name: p.name, employee_no: p.employee_no }, jobs: jobs.slice(0, 50).map(demsJob) };
+});
+// Who had a body camera (a DEVICE asset, matched by tag) checked out at a moment.
+route('GET', '/api/integrations/dems/wearer', null, ({ query, req }) => {
+  assertDemsSecret(req);
+  const tag = String(query.get('tag') || '').trim().toLowerCase();
+  if (!tag) throw httpError(400, 'tag required');
+  const at = demsTime(query.get('at'), 'at');
+  const a = db.assets.find((x) => x.tag && x.tag.toLowerCase() === tag);
+  if (!a) throw httpError(404, 'no asset with that tag');
+  const co = db.asset_checkouts.find((c) => c.asset_id === a.id
+    && Date.parse(c.checked_out_at) <= at && (!c.returned_at || at < Date.parse(c.returned_at)));
+  const p = co ? db.personnel.find((x) => x.id === co.personnel_id) : null;
+  return { tag: a.tag, wearer: p ? { name: p.name, employee_no: p.employee_no } : null,
+    checked_out_at: co ? co.checked_out_at : null, returned_at: co ? co.returned_at : null };
+});
+// Record (or remove) the link between a DEMS case and a job.
+route('POST', '/api/integrations/dems/links', null, ({ body, req }) => {
+  assertDemsSecret(req);
+  const ref = String(body.job_ref || '').trim().toUpperCase();
+  const j = db.jobs.find((x) => String(x.reference).toUpperCase() === ref);
+  if (!j) throw httpError(404, 'no job with that reference');
+  const caseRef = String(body.case_ref || '').trim().slice(0, 64);
+  const caseUrl = String(body.case_url || '').trim().slice(0, 500);
+  if (!caseRef) throw httpError(400, 'case_ref required');
+  if (caseUrl && !/^https?:\/\//i.test(caseUrl)) throw httpError(400, 'case_url must be http(s)');
+  const by = String(body.by || '').slice(0, 120);
+  j.evidence_links = (j.evidence_links || []).filter((l) => l.case_ref !== caseRef);
+  if (body.linked !== false) {
+    j.evidence_links.push({ case_ref: caseRef, case_url: caseUrl, linked_by: by, linked_at: new Date().toISOString() });
+  }
+  j.updated_at = new Date().toISOString();
+  broadcast('job.status_changed', publicJob(j));
+  logEvent(body.linked === false ? 'job.evidence_unlinked' : 'job.evidence_linked',
+    `JOB ${j.reference} ${body.linked === false ? 'UNLINKED FROM' : 'LINKED TO'} DEMS CASE ${caseRef}${by ? ' BY ' + by : ''}`,
+    { job_id: j.id, case_ref: caseRef });
+  return demsJob(j);
+});
+
 /* ---- Control room click-to-dial relay -----------------------------------
  * A control room PC dials through the phone system's AMI directly when it is
  * on the office network or VPN. Off it, it falls back to this relay, which
