@@ -32,6 +32,15 @@ Continuous location tracking is the most intrusive thing here, so it is kept for
 the shortest time. If you lengthen it, write down why in terms you would be
 comfortable saying to the officer being tracked.
 
+### Shared with the evidence store (DEMS)
+
+When `DEMS_SECRET` is set, DEMS can ask CCCS which jobs an officer was assigned
+to in a time window, and who had a body camera checked out at a given moment.
+It uses the answers to suggest which incident a batch of body-worn footage
+belongs to. Nothing is copied in bulk: each answer is one lookup, made when an
+operator is working on that footage in DEMS. Caller details are not shared.
+Mention this in the staff notice alongside body-worn video.
+
 ## What is not collected
 
 - **No audio is recorded.** Voice passes between devices and is not stored.
