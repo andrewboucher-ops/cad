@@ -109,13 +109,17 @@ class Doc {
   }
   /** Two-column label/value rows. */
   pairs(rows, { labelWidth = 130, size = 10 } = {}) {
+    const lead = size * 1.35;
     for (const [label, value] of rows) {
+      // Long labels wrap inside their column so they never run under the value.
+      const labelLines = this.wrap(label, labelWidth - 10, size - 1);
       const lines = this.wrap(value || '—', this.width - labelWidth, size);
-      this.room(lines.length * size * 1.35 + 2);
-      this.y -= size * 1.35;
-      this.text(label, this.margin, this.y, { size: size - 1, color: [0.35, 0.38, 0.42] });
-      lines.forEach((l, i) => this.text(l, this.margin + labelWidth, this.y - i * size * 1.35, { size }));
-      this.y -= (lines.length - 1) * size * 1.35 + 2;
+      const count = Math.max(labelLines.length, lines.length);
+      this.room(count * lead + 2);
+      this.y -= lead;
+      labelLines.forEach((l, i) => this.text(l, this.margin, this.y - i * lead, { size: size - 1, color: [0.35, 0.38, 0.42] }));
+      lines.forEach((l, i) => this.text(l, this.margin + labelWidth, this.y - i * lead, { size }));
+      this.y -= (count - 1) * lead + 2;
     }
     this.y -= 4;
     return this;
