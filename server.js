@@ -2466,6 +2466,7 @@ function createRetrospectiveJob(j, body, user) {
   if (reason.length < 3) throw httpError(400, 'a reason is required for a job entered after the event');
   if (!body.completed_at) throw httpError(400, 'cleared time required');
   if (!body.created_at) throw httpError(400, 'received time required');
+  const closeNote = String(body.closing_note || '').trim() ? closingNote(body) : null;
   const people = [];
   for (const t of body.resources || []) {
     const p = findPersonnel(t);
@@ -2494,6 +2495,8 @@ function createRetrospectiveJob(j, body, user) {
     });
   }
   db.jobs.push(j);
+  j.awaiting_close = true;
+  if (closeNote) closeJob(j, user, closeNote);
   j.resolution_report_html = jobReportHtml(j);
   const payload = publicJob(j);
   broadcast('job.created', payload);
@@ -3342,11 +3345,17 @@ function applyJobTimes(j, changes, user, reason) {
     { job_id: j.id, corrected_by: user.id, reason: reason || '', changes });
 }
 const hhmmUk = (iso) => new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+/** The job's notes plus every note added through the notes log, oldest
+ * first, each stamped with who and when — what the report shows. */
+function jobNotesText(j) {
+  const added = (j.note_entries || []).map((n) => `[${hhmmUk(n.at)} ${n.by_name}${n.closing ? ', closing note' : ''}] ${n.text}`);
+  return [j.notes, ...added].filter(Boolean).join('\n');
+}
 /** The resolution report's HTML, rebuilt from the job as it stands. */
 function jobReportHtml(j) {
   return buildResolutionReportHtml({
     reference: j.reference, kindLabel: j.incident_type, locationLabel: j.location, siteId: j.site_id,
-    description: j.description, notes: j.notes, extraRows: [['Priority', j.priority]],
+    description: j.description, notes: jobNotesText(j), extraRows: [['Priority', j.priority]],
     timeline: [
       ['Job created', j.created_at], ['Dispatched', j.dispatched_at], ['Acknowledged', j.acknowledged_at],
       ['En route', j.en_route_at], ['On scene', j.on_scene_at], ['Completed', j.completed_at],
@@ -3375,6 +3384,55 @@ route('PATCH', '/api/jobs/:id/times', CONTROL, ({ params, body, user }) => {
   return publicJob(j);
 });
 
+/* Closing a job is control's call, with a note, even when the officer has
+ * already pressed Completed: a completed job stays awaiting_close (and in
+ * control's dispatch list) until a controller writes what happened. The
+ * closing note goes into the job's notes log like any other note. Jobs
+ * completed before this existed have no awaiting_close and count as closed. */
+const CLOSING_NOTE_MIN = 3;
+function closingNote(body) {
+  const note = String(body.closing_note || body.note || '').trim().slice(0, 2000);
+  if (note.length < CLOSING_NOTE_MIN) throw httpError(400, 'a closing note is required to close the job');
+  return note;
+}
+function closeJob(j, user, note) {
+  const at = new Date().toISOString();
+  j.note_entries = j.note_entries || [];
+  j.note_entries.push({ id: crypto.randomUUID(), at, by: user.id, by_name: user.display_name, text: note, closing: true });
+  j.awaiting_close = false;
+  j.closed_at = at; j.closed_by = user.id; j.closed_by_name = user.display_name;
+  j.resolution_report_html = jobReportHtml(j);
+  j.updated_at = at;
+  logEvent('job.closed', `JOB ${j.reference} CLOSED BY ${user.display_name}`, { job_id: j.id, closed_by: user.id });
+}
+route('POST', '/api/jobs/:id/close', CONTROL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  if (j.status !== 'COMPLETED') throw httpError(409, 'only a completed job can be closed — mark it completed first');
+  if (j.closed_at) throw httpError(409, 'job is already closed');
+  closeJob(j, user, closingNote(body));
+  broadcast('job.status_changed', publicJob(j));
+  return publicJob(j);
+});
+
+/* Notes added to a job at any time, closed ones included — something
+ * remembered or found out after the officer cleared. Append-only, each one
+ * stamped with who and when, unlike the single editable notes field that
+ * control uses to brief call signs while the job is live. */
+route('POST', '/api/jobs/:id/notes', ALL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  assertJobAccess(j, user);
+  const text = String(body.text || '').trim().slice(0, 2000);
+  if (!text) throw httpError(400, 'note text required');
+  const note = { id: crypto.randomUUID(), at: new Date().toISOString(), by: user.id, by_name: user.display_name, text };
+  j.note_entries = j.note_entries || [];
+  j.note_entries.push(note);
+  if (j.status === 'COMPLETED') j.resolution_report_html = jobReportHtml(j);
+  j.updated_at = note.at;
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.note_added', `NOTE ADDED TO JOB ${j.reference} BY ${user.display_name}${['COMPLETED', 'CANCELLED'].includes(j.status) ? ' (after it closed)' : ''}`, { job_id: j.id, note_id: note.id });
+  return { __status: 201, __body: publicJob(j) };
+});
+
 route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
   // Control can set the actual stepper times directly — for a job an
@@ -3389,6 +3447,10 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
     const times = Object.fromEntries(JOB_TS_FIELDS.filter((f) => f in body).map((f) => [f, body[f]]));
     applyJobTimes(j, proposedJobTimes(j, times), user, retroReason(body));
   }
+  // Control completing a job can close it in the same step by giving the
+  // closing note; checked before anything changes so a short one fails clean.
+  const closingNow = body.closing_note !== undefined && isControlRole(user.role) && String(body.status || '').toUpperCase() === 'COMPLETED' && !j.closed_at;
+  const closeNote = closingNow ? closingNote(body) : null;
   if (body.status) {
     const s = String(body.status).toUpperCase();
     if (!JOB_STATES.includes(s)) throw httpError(400, 'invalid job status');
@@ -3401,6 +3463,7 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
       }
     }
     if (s === 'COMPLETED') {
+      if (!j.closed_at) j.awaiting_close = true;
       j.resolution_report_html = jobReportHtml(j);
       sendResolutionReportEmail({
         reference: j.reference, siteId: j.site_id, media: j.media, mediaDir: mediaDir(j.id),
@@ -3444,6 +3507,7 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
     if (!PRIORITIES.includes(pr)) throw httpError(400, 'invalid priority');
     j.priority = pr;
   }
+  if (closeNote && j.status === 'COMPLETED') closeJob(j, user, closeNote);
   j.updated_at = new Date().toISOString();
   broadcast('job.status_changed', publicJob(j));
   logEvent('job.status_changed', `JOB ${j.reference} → ${j.status}`, { job_id: j.id });
