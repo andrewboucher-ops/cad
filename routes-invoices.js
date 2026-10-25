@@ -11,6 +11,8 @@
  *                                  a shift with no clock-out is listed as
  *                                  "to check" and counts 0 until fixed
  *                   ROSTERED     — rostered length minus the unpaid break
+ *                 An Alarm Response line also bills each control-room job
+ *                 at the site in the period, arrived to cleared.
  *   FIXED_PERIOD  the amount, once per invoice
  *   ONE_OFF       the amount, on the contract's first invoice only
  * Every hourly line keeps the shifts it came from, so the invoice can be
@@ -262,6 +264,40 @@ module.exports = function registerInvoices({
     }
     return rows.sort((x, y) => x.starts_at.localeCompare(y.starts_at));
   }
+  /** An Alarm Response line is mostly billed from call-outs, not rota
+   * shifts: a job raised in the control room (by hand, after the event,
+   * or from GuardM8) at the contract's site. Each one is charged from
+   * arrived to cleared, rounded to 15 minutes in the company's favour like
+   * clocked hours. A job is counted once per contract, so two alarm
+   * response lines on the same contract don't bill the same attendance
+   * twice — `taken` carries the ids already used by an earlier line. */
+  const isAlarmResponseType = (id) => {
+    const t = id ? (db.shift_types || []).find((x) => x.id === id) : null;
+    return Boolean(t && (t.key === 'ALARM_RESPONSE' || /alarm\s*response/i.test(t.name || '')));
+  };
+  function attendancesFor(contract, from, to, taken) {
+    const t0 = dayStart(from), t1 = dayStart(to) + 86400000;
+    const stepMs = BILL_ROUND_MIN * 60000;
+    const rows = [];
+    for (const j of db.jobs || []) {
+      if (j.site_id !== contract.site_id || j.status === 'CANCELLED' || taken.has(j.id)) continue;
+      const at = Date.parse(j.on_scene_at || j.created_at);
+      if (!(at >= t0 && at < t1)) continue;
+      taken.add(j.id);
+      const names = (db.job_assignments || []).filter((a) => a.job_id === j.id)
+        .map((a) => (db.personnel.find((p) => p.id === a.personnel_id) || {}).name).filter(Boolean);
+      let hours = 0, source;
+      if (j.status !== 'COMPLETED') source = 'not finished';
+      else if (!j.on_scene_at || !j.completed_at) source = 'no arrival time';
+      else {
+        const minutes = Math.max(0, Math.round((Math.ceil(Date.parse(j.completed_at) / stepMs) - Math.floor(Date.parse(j.on_scene_at) / stepMs)) * BILL_ROUND_MIN));
+        hours = minutes / 60; source = 'attendance';
+      }
+      const starts = new Date(at).toISOString();
+      rows.push({ job_id: j.id, reference: j.reference, date: starts.slice(0, 10), starts_at: starts, ends_at: j.completed_at || starts, person: `${names.join(', ') || 'No officer'} (${j.reference})`, hours: r2(hours), source, pay_override: null });
+    }
+    return rows;
+  }
   const running = (c, from, to) => c.kind === 'CONTRACT' && ['SIGNED', 'ENDED'].includes(c.status) && c.start_date <= to && (!c.end_date || c.end_date >= from);
   const overlaps = (i, from, to) => i.status !== 'VOID' && i.period_from <= to && i.period_to >= from;
   function totals(inv) {
@@ -281,12 +317,18 @@ module.exports = function registerInvoices({
     const site = db.sites.find((s) => s.id === c.site_id);
     const siteName = site ? site.name : '—';
     const first = !db.invoices.some((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && i.status !== 'VOID');
-    const lines = [], checks = [];
+    const lines = [], checks = [], jobsTaken = new Set();
     for (const l of c.lines) {
       if (l.kind === 'HOURLY') {
         const rows = hoursFor(c, l, from, to);
+        if (isAlarmResponseType(l.shift_type_id)) {
+          rows.push(...attendancesFor(c, from, to, jobsTaken));
+          rows.sort((x, y) => x.starts_at.localeCompare(y.starts_at));
+        }
         for (const x of rows) if (x.source === 'to check') checks.push(`${x.person} on ${x.date}: no clock-out — counted as 0 hours`);
         for (const x of rows) if (x.source === 'awaiting approval') checks.push(`${x.person} on ${x.date}: clock time waiting for approval in Timeclock`);
+        for (const x of rows) if (x.source === 'no arrival time') checks.push(`${x.reference} on ${x.date}: no arrived or cleared time — counted as 0 hours, add it in the job's Times`);
+        for (const x of rows) if (x.source === 'not finished') checks.push(`${x.reference} on ${x.date}: job still open — counted as 0 hours`);
         // Hours on a pay rate day (a bank holiday, Christmas Day, or a
         // one-off an admin's added) are billed on their own line at that
         // day's enhanced rate — kept separate from the normal-rate line

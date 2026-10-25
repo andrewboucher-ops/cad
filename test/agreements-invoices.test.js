@@ -861,3 +861,37 @@ test("amending a signed contract's rate changes future invoices but leaves the s
   const after = await call('POST', '/api/invoices/generate', { from: '2026-03-01', to: '2026-03-31', contract_id: c.id }, adminT);
   assert.equal(after.body.made[0].lines[0].unit_amount, 25, 'a new invoice reads the amended, live rate');
 });
+
+test('an Alarm Response line bills the jobs attended at the site, arrived to cleared, once per contract', async () => {
+  let type = app.db.shift_types.find((t) => t.key === 'ALARM_RESPONSE');
+  if (!type) { type = { id: 9001, key: 'ALARM_RESPONSE', name: 'Alarm Response', active: true }; app.db.shift_types.push(type); }
+  const site = (await call('POST', '/api/sites', { name: 'Alarm Billing Site' }, adminT)).body;
+  await call('POST', '/api/clients', { name: 'Alarm Billing Ltd', contact_email: 'a@example.test', site_ids: [site.id] }, adminT);
+  const c = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: site.id, start_date: '2026-02-01', lines: [
+    { description: 'Response Services', kind: 'HOURLY', rate: 45, shift_type_id: type.id },
+    { description: 'Alarm Response', kind: 'HOURLY', rate: 45, shift_type_id: type.id },
+  ] }, adminT)).body;
+  await call('POST', `/api/agreements/${c.id}/mark-signed`, { name: 'Test' }, adminT);
+
+  const officer = app.db.personnel[0];
+  const done = await call('POST', '/api/jobs', { site: site.id, incident_type: 'ALARM', retrospective: true, reason: 'radio only',
+    created_at: '2026-02-10T22:00:00Z', on_scene_at: '2026-02-10T22:20:00Z', completed_at: '2026-02-10T23:05:00Z', resources: [officer.id] }, adminT);
+  assert.equal(done.status, 201, JSON.stringify(done.body));
+  const noArrival = await call('POST', '/api/jobs', { site: site.id, incident_type: 'ALARM', retrospective: true, reason: 'radio only',
+    created_at: '2026-02-12T02:00:00Z', completed_at: '2026-02-12T03:00:00Z' }, adminT);
+  assert.equal(noArrival.status, 201, JSON.stringify(noArrival.body));
+  const cancelled = await call('POST', '/api/jobs', { site: site.id, incident_type: 'ALARM' }, adminT);
+  app.db.jobs.find((j) => j.id === cancelled.body.id).status = 'CANCELLED';
+  app.db.jobs.find((j) => j.id === cancelled.body.id).created_at = '2026-02-15T10:00:00Z';
+
+  const g = await call('POST', '/api/invoices/generate', { from: '2026-02-01', to: '2026-02-31', contract_id: c.id }, adminT);
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const inv = g.body.made[0];
+  const [first, second] = inv.lines.filter((l) => l.kind === 'HOURLY');
+  assert.equal(first.quantity, 1, '22:20 to 23:05 rounds out to 22:15–23:15');
+  assert.equal(first.shifts.length, 2, 'both attendances, not the cancelled job');
+  assert.ok(first.shifts.some((x) => x.person.includes(officer.name)));
+  assert.equal(second.quantity, 0, 'the same jobs are not billed again on the second alarm response line');
+  assert.equal(second.shifts.length, 0);
+  assert.ok(inv.checks.some((x) => /no arrived or cleared time/.test(x)), JSON.stringify(inv.checks));
+});
