@@ -2828,8 +2828,9 @@ route('POST', '/api/jobs/:id/ack', ALL, ({ params, user, body }) => {
 /* ---- Resolution report ---------------------------------------------- *
  * Built the moment a job completes and kept on the job itself (so it shows
  * up in job history in the control room and the incidents log without
- * needing email to have worked), then emailed out to the site's own
- * contact and RESOLUTION_REPORT_CC via Microsoft Graph, app-only — inert
+ * needing email to have worked), then emailed when a controller closes the
+ * job to the site's own contact (or RESOLUTION_REPORT_NO_CLIENT_TO when the
+ * site has none) and RESOLUTION_REPORT_CC via Microsoft Graph, app-only — inert
  * until MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET/MS_GRAPH_SENDER are all
  * set, same gating pattern as the AURA integration above. */
 function escHtml(s) {
@@ -2899,6 +2900,10 @@ const MS_GRAPH_SENDER = process.env.MS_GRAPH_SENDER || '';
 const MAIL_REPLY_TO = (process.env.MAIL_REPLY_TO || '').trim();
 const replyTo = () => (MAIL_REPLY_TO ? { replyTo: [{ emailAddress: { address: MAIL_REPLY_TO } }] } : {});
 const RESOLUTION_REPORT_CC = process.env.RESOLUTION_REPORT_CC || '';
+// Where a report goes when the site has no client contact email (a site
+// that isn't under contract, or a job with no site at all), so there is
+// always a copy to forward on by hand.
+const RESOLUTION_REPORT_NO_CLIENT_TO = process.env.RESOLUTION_REPORT_NO_CLIENT_TO || 'info@echeloncic.com';
 const GRAPH_MAIL_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && MS_GRAPH_SENDER);
 let graphTokenCache = { token: null, exp: 0 };
 async function getGraphAppToken() {
@@ -2912,11 +2917,20 @@ async function getGraphAppToken() {
   graphTokenCache = { token: data.access_token, exp: Date.now() + data.expires_in * 1000 };
   return data.access_token;
 }
-async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: mDir, logType, logIdKey, logId }, html) {
-  if (!GRAPH_MAIL_ENABLED) { console.warn(`[cccs] resolution report for ${reference} not emailed — Graph mail not configured`); return; }
+function resolutionReportRecipients(siteId) {
   const site = siteId ? db.sites.find((s) => s.id === siteId) : null;
-  const recipients = [site && site.contact_email, RESOLUTION_REPORT_CC].filter(Boolean);
-  if (!recipients.length) { console.warn(`[cccs] resolution report for ${reference} not emailed — no recipient configured`); return; }
+  const clientTo = (site && site.contact_email) || null;
+  return { clientTo, recipients: [...new Set([clientTo || RESOLUTION_REPORT_NO_CLIENT_TO, RESOLUTION_REPORT_CC].filter(Boolean))] };
+}
+/** Sends the report; `to` overrides the usual recipients (a resend from
+ * control). Never throws — returns { ok, error } so a resend can say what
+ * happened, while the automatic send on close just logs. */
+async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: mDir, logType, logIdKey, logId, to }, html) {
+  if (!GRAPH_MAIL_ENABLED) { console.warn(`[cccs] resolution report for ${reference} not emailed — Graph mail not configured`); return { ok: false, error: 'email is not set up on this server' }; }
+  const { clientTo, recipients: usual } = resolutionReportRecipients(siteId);
+  const recipients = to && to.length ? to : usual;
+  if (!recipients.length) { console.warn(`[cccs] resolution report for ${reference} not emailed — no recipient configured`); return { ok: false, error: 'no recipient' }; }
+  const subject = `Resolution report — ${reference}${to || clientTo ? '' : ' (no client contact on file — forward to the client)'}`;
   try {
     const attachments = [{
       '@odata.type': '#microsoft.graph.fileAttachment', name: 'echelon-wordmark.png', contentId: 'echelon-wordmark', isInline: true,
@@ -2933,11 +2947,12 @@ async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: m
     const token = await getGraphAppToken();
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ message: { subject: `Resolution report — ${reference}`, body: { contentType: 'HTML', content: html }, toRecipients: recipients.map((address) => ({ emailAddress: { address } })), ...replyTo(), attachments } }),
+      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: recipients.map((address) => ({ emailAddress: { address } })), ...replyTo(), attachments } }),
     });
-    if (!res.ok) console.warn(`[cccs] resolution report email failed for ${reference}:`, res.status, await res.text());
-    else logEvent(logType, `RESOLUTION REPORT EMAILED FOR ${reference}`, { [logIdKey]: logId, to: recipients });
-  } catch (e) { console.warn(`[cccs] resolution report email failed for ${reference}:`, e.message); }
+    if (!res.ok) { console.warn(`[cccs] resolution report email failed for ${reference}:`, res.status, await res.text()); return { ok: false, error: `email service returned ${res.status}` }; }
+    logEvent(logType, `RESOLUTION REPORT EMAILED FOR ${reference}${to ? ' (resent)' : ''}`, { [logIdKey]: logId, to: recipients });
+    return { ok: true, to: recipients };
+  } catch (e) { console.warn(`[cccs] resolution report email failed for ${reference}:`, e.message); return { ok: false, error: e.message }; }
 }
 
 // Generic Graph sendMail, for anything that just needs "send this person an
@@ -3404,6 +3419,10 @@ function closeJob(j, user, note) {
   j.resolution_report_html = jobReportHtml(j);
   j.updated_at = at;
   logEvent('job.closed', `JOB ${j.reference} CLOSED BY ${user.display_name}`, { job_id: j.id, closed_by: user.id });
+  sendResolutionReportEmail({
+    reference: j.reference, siteId: j.site_id, media: j.media, mediaDir: mediaDir(j.id),
+    logType: 'job.report_emailed', logIdKey: 'job_id', logId: j.id,
+  }, j.resolution_report_html);
 }
 route('POST', '/api/jobs/:id/close', CONTROL, ({ params, body, user }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
@@ -3412,6 +3431,27 @@ route('POST', '/api/jobs/:id/close', CONTROL, ({ params, body, user }) => {
   closeJob(j, user, closingNote(body));
   broadcast('job.status_changed', publicJob(j));
   return publicJob(j);
+});
+
+/* Resend a closed job's report to wherever control chooses — a client who
+ * lost it, or a non-client site's report forwarded from info@. Rebuilt from
+ * the job as it stands, so later notes and photos are in it. */
+route('POST', '/api/jobs/:id/report/send', CONTROL, async ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  if (j.status !== 'COMPLETED') throw httpError(409, 'only a completed job has a report');
+  const to = [...new Set(String(body.to || '').split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean))];
+  if (!to.length) throw httpError(400, 'enter at least one email address');
+  const bad = to.find((x) => !EMAIL_RE.test(x));
+  if (bad) throw httpError(400, `not an email address: ${bad}`);
+  if (to.length > 10) throw httpError(400, 'at most 10 addresses');
+  j.resolution_report_html = jobReportHtml(j);
+  const r = await sendResolutionReportEmail({
+    reference: j.reference, siteId: j.site_id, media: j.media, mediaDir: mediaDir(j.id),
+    logType: 'job.report_emailed', logIdKey: 'job_id', logId: j.id, to,
+  }, j.resolution_report_html);
+  if (!r.ok) throw httpError(502, `report not sent: ${r.error}`);
+  logEvent('job.report_resent', `REPORT FOR ${j.reference} RESENT BY ${user.display_name} TO ${to.join(', ')}`, { job_id: j.id, to, by: user.id });
+  return { ok: true, to };
 });
 
 /* Notes added to a job at any time, closed ones included — something
@@ -3464,11 +3504,9 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
     }
     if (s === 'COMPLETED') {
       if (!j.closed_at) j.awaiting_close = true;
+      // Built now so it's on the job straight away, but only emailed once a
+      // controller closes the job — the closing note belongs in it.
       j.resolution_report_html = jobReportHtml(j);
-      sendResolutionReportEmail({
-        reference: j.reference, siteId: j.site_id, media: j.media, mediaDir: mediaDir(j.id),
-        logType: 'job.report_emailed', logIdKey: 'job_id', logId: j.id,
-      }, j.resolution_report_html);
       logEvent('job.report_generated', `RESOLUTION REPORT GENERATED FOR ${j.reference}`, { job_id: j.id });
     }
   }
@@ -6356,4 +6394,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, RETENTION, hashPassword, verifyPassword, sign, PORT };

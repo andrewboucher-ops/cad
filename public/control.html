@@ -220,6 +220,15 @@ const mediaTok = () => encodeURIComponent(CCCS.getSession().token);
 const JOB_TIME_FIELDS = [['created_at', 'Received'], ['dispatched_at', 'Dispatched'], ['acknowledged_at', 'Accepted'], ['en_route_at', 'En route'], ['on_scene_at', 'Arrived on scene'], ['completed_at', 'Cleared']];
 const JOB_TIME_LABEL = Object.fromEntries(JOB_TIME_FIELDS);
 let timesOpenFor = null;
+// Where a resent report goes unless control types somewhere else: the
+// site's client contact, else the office inbox to forward from.
+const reportDefaultTo = (j) => ((state.sites.find((x) => x.id === j.site_id) || {}).contact_email || 'info@echeloncic.com');
+async function resendReport(j, input, btn, status) {
+  btn.disabled = true; status.textContent = 'Sending…';
+  try { const r = await api('POST', `/api/jobs/${j.id}/report/send`, { to: input.value }); status.textContent = `Sent to ${r.to.join(', ')} ✓`; }
+  catch (e) { status.textContent = ''; showErr(e); }
+  btn.disabled = false;
+}
 /** The job's time inputs that differ from what the job has now, as ISO
  * strings (null for a time that was cleared). Compared to the minute,
  * since that's all a datetime-local input holds. */
@@ -811,6 +820,14 @@ function renderJob(body) {
       <div class="btn-row" style="margin-top:6px"><button class="btn ok" id="jCloseBtn">Close job</button></div>
     </div>` : ''}
     ${j.closed_at ? `<p class="dim" style="font-size:12px;margin:4px 0">Closed by ${esc(j.closed_by_name || '')} · ${new Date(j.closed_at).toLocaleString('en-GB')}</p>` : ''}
+    ${j.status === 'COMPLETED' ? `<div class="dsec"><div class="t">Resolution report</div>
+      <div class="btn-row"><button class="btn" id="jResendOpen">Resend report</button></div>
+      <div id="jResendBox" class="hide" style="margin-top:6px">
+        <label style="font-size:11px">Send to (separate several addresses with commas)</label>
+        <input id="jResendTo" type="text" inputmode="email" value="${esc(reportDefaultTo(j))}">
+        <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="jResendGo">Send report</button><span class="dim" id="jResendStatus" style="align-self:center;font-size:12px"></span></div>
+      </div>
+    </div>` : ''}
     <div class="dsec"><div class="t">Photos</div>
       ${(j.media || []).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${j.media.map((m) => `<a href="${m.url}?token=${mediaTok()}" target="_blank" rel="noopener" title="${esc(m.taken_by || '')} · ${m.taken_at ? new Date(m.taken_at).toLocaleString('en-GB') : ''}"><img src="${m.url}?token=${mediaTok()}" alt="" loading="lazy" style="width:64px;height:64px;object-fit:cover;border-radius:5px;border:1px solid var(--line)"></a>`).join('')}</div>` : '<p class="dim" style="margin:0">No photos.</p>'}
       <div class="btn-row" style="margin-top:6px"><label class="btn" style="margin:0;cursor:pointer">Add photos<input type="file" id="jPhotoFile" accept="image/*" multiple hidden></label><span class="dim" id="jPhotoStatus" style="align-self:center;font-size:12px"></span></div>
@@ -843,6 +860,10 @@ function renderJob(body) {
     if (note.length < 3) return showErr(new Error('Write a closing note first.'));
     try { upsert(state.jobs, await api('POST', `/api/jobs/${j.id}/close`, { note })); renderDispatch(); renderDetail({ force: true }); } catch (e) { showErr(e); }
   };
+  if (el('#jResendOpen')) {
+    el('#jResendOpen').onclick = () => { el('#jResendBox').classList.toggle('hide'); el('#jResendTo').focus(); };
+    el('#jResendGo').onclick = () => resendReport(j, el('#jResendTo'), el('#jResendGo'), el('#jResendStatus'));
+  }
   el('#jPhotoFile').onchange = (e) => uploadJobPhotos(j, [...e.target.files], el('#jPhotoStatus'));
   if (el('#jTimesOpen')) el('#jTimesOpen').onclick = () => { timesOpenFor = j.id; renderDetail({ force: true }); };
   if (el('#jTimesClose')) el('#jTimesClose').onclick = () => { timesOpenFor = null; renderDetail({ force: true }); };
