@@ -536,6 +536,46 @@ test('control can resend a completed job\'s report to an address it chooses', as
   assert.match(r.body.error, /email is not set up/);
 });
 
+test('control can fill in a closed job\'s checklist, switching it to the site\'s current checklist first', async () => {
+  const site = app.db.sites[0];
+  const savedTemplate = site.checklist;
+  site.checklist = [{ title: 'Entrance check' }, { title: 'Old step' }];
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', site: site.id }, dispT);
+  const entrance = job.body.checklist.find((x) => x.title === 'Entrance check');
+  await call('PATCH', `/api/jobs/${job.body.id}/checklist/${entrance.id}`, { status: 'COMPLETE', notes: 'Shutter down' }, dispT);
+  await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'COMPLETED', closing_note: 'Done' }, dispT);
+
+  site.checklist = [{ title: 'Entrance check' }, { title: 'Perimeter walk' }, { title: 'Photo of front door' }];
+  assert.equal((await call('POST', `/api/jobs/${job.body.id}/checklist/refresh`, {}, danT)).status, 403, 'control only');
+  const r = await call('POST', `/api/jobs/${job.body.id}/checklist/refresh`, {}, dispT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.checklist.map((x) => x.title), ['Entrance check', 'Perimeter walk', 'Photo of front door']);
+  const kept = r.body.checklist[0];
+  assert.equal(kept.status, 'COMPLETE', 'matching item keeps what was filled in');
+  assert.equal(kept.notes, 'Shutter down');
+  assert.equal(r.body.previous_checklists[0].items.length, 2, 'old checklist kept for the record');
+
+  const walk = r.body.checklist[1];
+  const done = await call('PATCH', `/api/jobs/${job.body.id}/checklist/${walk.id}`, { status: 'COMPLETE', notes: 'All fences intact' }, dispT);
+  assert.equal(done.status, 200);
+  const item = done.body.checklist.find((x) => x.id === walk.id);
+  assert.equal(item.status, 'COMPLETE');
+  assert.equal(item.updated_after_close, true);
+  assert.match(app.db.jobs.find((x) => x.id === job.body.id).resolution_report_html, /Perimeter walk/);
+  site.checklist = savedTemplate;
+});
+
+test('supervisors can edit the incident type suggestions; dispatchers can read them', async () => {
+  const before = await call('GET', '/api/settings/incident-types', undefined, dispT);
+  assert.ok(before.body.types.includes('Alarm activation'));
+  assert.equal((await call('PUT', '/api/settings/incident-types', { types: 'Medical' }, dispT)).status, 403);
+  const adminT = await login('admin', 'admin123');
+  assert.equal((await call('PUT', '/api/settings/incident-types', { types: ' \n ' }, adminT)).status, 400);
+  const r = await call('PUT', '/api/settings/incident-types', { types: 'Alarm activation\nMedical emergency\nMedical emergency\n Lost child ' }, adminT);
+  assert.deepEqual(r.body.types, ['Alarm activation', 'Medical emergency', 'Lost child']);
+  assert.deepEqual((await call('GET', '/api/settings/incident-types', undefined, dispT)).body.types, r.body.types);
+});
+
 /* ---------------- GuardM8 integration ---------------- */
 test('GuardM8 can push a job with a shared secret, and retries are idempotent', async () => {
   process.env.GUARDM8_SECRET = 'test-guardm8-secret';

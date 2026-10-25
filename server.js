@@ -1470,6 +1470,26 @@ route('PUT', '/api/settings/prf-link', ADMIN, ({ body }) => {
   return { base_url: row.settings.base_url };
 });
 
+/** Incident types offered on New job. The box stays free text — this is
+ * only the drop-down of suggestions — so editing the list never breaks a
+ * job that already has some other type. Supervisors and admins edit it. */
+const DEFAULT_INCIDENT_TYPES = ['Alarm activation', 'Intruder on site', 'Keyholding response', 'Lock and unlock', 'Fire alarm', 'Vandalism', 'Trespass', 'Welfare check'];
+route('GET', '/api/settings/incident-types', ALL, () => {
+  const row = db.ui_settings.find((x) => x.key === 'incident_types');
+  return { types: row && Array.isArray(row.settings.types) ? row.settings.types : DEFAULT_INCIDENT_TYPES };
+});
+route('PUT', '/api/settings/incident-types', ['SUPERVISOR', 'SYSTEM_ADMIN'], ({ body, user }) => {
+  const raw = Array.isArray(body.types) ? body.types : String(body.types || '').split('\n');
+  const types = [...new Set(raw.map((t) => String(t).trim().slice(0, 120)).filter(Boolean))].slice(0, 200);
+  if (!types.length) throw httpError(400, 'add at least one incident type');
+  let row = db.ui_settings.find((x) => x.key === 'incident_types');
+  if (!row) { row = { key: 'incident_types', settings: {} }; db.ui_settings.push(row); }
+  row.settings.types = types;
+  store.flushNow();
+  logEvent('settings.incident_types', `INCIDENT TYPES UPDATED BY ${user.display_name} (${types.length})`, { types });
+  return { types };
+});
+
 // Web Push — lets a phone with the console added to its home screen get
 // emergency, call and job alerts while it isn't open. See webpush.js.
 route('GET', '/api/push/vapid-public-key', ALL, () => ({ key: webpush.getPublicKeyBase64Url() }));
@@ -3597,9 +3617,39 @@ route('PATCH', '/api/jobs/:id/checklist/:itemId', ALL, ({ params, body, user }) 
     else { item.completed_at = null; item.completed_by = null; }
   }
   if (body.notes !== undefined) item.notes = String(body.notes).slice(0, 2000);
+  const closed = ['COMPLETED', 'CANCELLED'].includes(j.status);
+  // Filled in after the visit — e.g. by control from the officer's account
+  // once they're back in signal — so the stored report stays current.
+  if (closed) { item.updated_after_close = true; if (j.status === 'COMPLETED') j.resolution_report_html = jobReportHtml(j); }
   j.updated_at = new Date().toISOString();
   broadcast('job.status_changed', publicJob(j));
-  logEvent('job.checklist_updated', `${item.status === 'COMPLETE' ? 'COMPLETED' : 'UPDATED'} "${item.title}" on JOB ${j.reference}`, { job_id: j.id });
+  logEvent('job.checklist_updated', `${item.status === 'COMPLETE' ? 'COMPLETED' : 'UPDATED'} "${item.title}" on JOB ${j.reference}${closed ? ` AFTER IT CLOSED, BY ${user.display_name}` : ''}`, { job_id: j.id, by: user.id });
+  return publicJob(j);
+});
+/* Swap a job's checklist for the site's current one — the site's checklist
+ * was changed after the visit and control wants the job recorded against
+ * the new one. Items with the same title keep what was already filled in
+ * (and their photos); the old checklist is kept on the job for the record. */
+route('POST', '/api/jobs/:id/checklist/refresh', CONTROL, ({ params, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  const site = j.site_id ? db.sites.find((x) => x.id === j.site_id) : null;
+  const fresh = instantiateChecklist(site);
+  const key = (t) => String(t || '').trim().toLowerCase();
+  const old = j.checklist || [];
+  const remap = {};
+  for (const item of fresh) {
+    const prev = old.find((o) => key(o.title) === key(item.title));
+    if (!prev) continue;
+    Object.assign(item, { status: prev.status, notes: prev.notes, completed_by: prev.completed_by, completed_at: prev.completed_at });
+    remap[prev.id] = item.id;
+  }
+  for (const m of j.media || []) if (m.checklist_item_id) m.checklist_item_id = remap[m.checklist_item_id] || null;
+  j.previous_checklists = [...(j.previous_checklists || []), { replaced_at: new Date().toISOString(), replaced_by: user.display_name, items: old }];
+  j.checklist = fresh;
+  if (j.status === 'COMPLETED') j.resolution_report_html = jobReportHtml(j);
+  j.updated_at = new Date().toISOString();
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.checklist_refreshed', `CHECKLIST ON JOB ${j.reference} REPLACED WITH ${site ? `${site.name}'S` : 'THE DEFAULT'} CURRENT CHECKLIST BY ${user.display_name}`, { job_id: j.id, kept: Object.keys(remap).length });
   return publicJob(j);
 });
 
