@@ -191,6 +191,7 @@
   <!-- Current job -->
   <section class="screen" data-screen="job"><div class="narrow">
     <div class="card"><div id="jobBody"><p class="dim">No job assigned. Dispatched jobs appear here immediately.</p></div></div>
+    <div class="card hide" id="recentJobsCard" style="margin-top:12px"><label style="margin-top:0">Recent jobs — add photos afterwards</label><div id="recentJobsBody"></div></div>
   </div></section>
 
   <!-- Patrol visit -->
@@ -322,7 +323,7 @@ const isControl = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role)
 setInterval(() => (el('#clock').textContent = CCCS.hhmmss().slice(0, 5)), 1000);
 el('#clock').textContent = CCCS.hhmmss().slice(0, 5);
 
-let person = null, job = null, visit = null, pendingPhotoItemId = null, pendingPhotoKind = 'job';
+let person = null, job = null, visit = null, pendingPhotoItemId = null, pendingPhotoKind = 'job', pendingRecentJobId = null, recentJobs = [];
 
 function modal(title, html, onMount) {
   el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
@@ -864,6 +865,30 @@ function siteDocsButton(siteId) {
   return siteId ? `<button type="button" class="btn" data-sitedocs="${siteId}" style="padding:4px 10px;font-size:11px">Site documents</button>` : '';
 }
 
+/* Jobs this officer was on that closed in the last 48 hours, including
+ * ones control entered after the event — so photos taken while there was
+ * no signal can still be added from the gallery once there is. */
+const RECENT_JOB_MS = 48 * 3600e3;
+function setRecentJobs(jobs) {
+  recentJobs = jobs.filter((j) => j.status === 'COMPLETED' && person && j.resources.some((r) => r.personnel === person.name)
+    && Date.now() - Date.parse(j.completed_at || j.updated_at) < RECENT_JOB_MS)
+    .sort((a, b) => Date.parse(b.completed_at || b.updated_at) - Date.parse(a.completed_at || a.updated_at));
+  paintRecentJobs();
+}
+function paintRecentJobs() {
+  el('#recentJobsCard').classList.toggle('hide', !recentJobs.length);
+  el('#recentJobsBody').innerHTML = recentJobs.map((j) => `
+    <div style="padding:8px 0;border-top:1px solid var(--line)">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="mono" style="font-weight:700">${esc(j.reference)}</span>
+        <span class="dim" style="flex:1">${esc(j.location)} · cleared ${new Date(j.completed_at || j.updated_at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+        <button class="btn" style="padding:2px 10px;font-size:12px" data-recentphoto="${j.id}">Add photo</button>
+      </div>
+      ${(j.media || []).length ? `<div class="ci-photos">${photoThumbs(j.media)}</div>` : ''}
+    </div>`).join('');
+  CCCS.els('[data-recentphoto]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = null; pendingPhotoKind = 'recent'; pendingRecentJobId = Number(b.dataset.recentphoto); el('#photoInput').click(); }));
+}
+
 function paintJob() {
   if (!job) {
     el('#jobBody').innerHTML = '<p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>';
@@ -1179,7 +1204,8 @@ async function photoPayload(file) {
 el('#photoInput').onchange = async () => {
   const files = [...el('#photoInput').files];
   el('#photoInput').value = '';
-  const kind = pendingPhotoKind, target = kind === 'visit' ? visit : job, itemId = pendingPhotoItemId;
+  const kind = pendingPhotoKind, itemId = pendingPhotoItemId;
+  const target = kind === 'visit' ? visit : kind === 'recent' ? recentJobs.find((j) => j.id === pendingRecentJobId) : job;
   if (!files.length || !target) return;
   const path = kind === 'visit' ? `/api/site-visits/${target.id}/media` : `/api/jobs/${target.id}/media`;
   let sent = 0;
@@ -1199,8 +1225,9 @@ el('#photoInput').onchange = async () => {
       visit = await api('GET', '/api/site-visits').then((visits) => visits.find((v) => v.id === target.id) || visit);
       paintVisit();
     } else {
-      job = await api('GET', `/api/jobs`).then((jobs) => jobs.find((j) => j.id === target.id) || job);
-      paintJob();
+      const jobs = await api('GET', '/api/jobs');
+      if (kind === 'recent') setRecentJobs(jobs);
+      else { job = jobs.find((j) => j.id === target.id) || job; paintJob(); }
     }
   } catch { /* the photos are saved; the list refreshes on the next update */ }
 };
@@ -1687,6 +1714,7 @@ async function boot() {
   const jobs = await api('GET', '/api/jobs');
   job = jobs.find((j) => j.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
   paintJob();
+  setRecentJobs(jobs);
   const visits = await api('GET', '/api/site-visits');
   visit = visits.find((v) => v.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) || null;
   paintVisit();
@@ -1709,6 +1737,9 @@ bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === pe
      el('#alertHost').innerHTML = `<a href="#job" class="err" style="display:block;border:1px solid var(--priority);border-radius:10px;padding:12px;text-decoration:none">New job ${esc(j.reference)} — ${esc(j.location)} · tap to open</a>`;
    })
    .on('job.status_changed', (j) => {
+     if (person && j.resources.some((r) => r.personnel === person.name) && (j.status === 'COMPLETED' || recentJobs.some((x) => x.id === j.id))) {
+       setRecentJobs([...recentJobs.filter((x) => x.id !== j.id), j]);
+     }
      if (!job || j.id !== job.id) return;
      const stillMine = person && j.resources.some((r) => r.personnel === person.name);
      job = stillMine ? j : null;
@@ -1719,6 +1750,8 @@ bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === pe
      job = null; el('#alertHost').innerHTML = ''; paintJob();
    })
    .on('job.acknowledged', ({ job: j }) => { if (job && j.id === job.id) { job = j; paintJob(); } })
+   // A job control entered after the event lands straight in Recent jobs.
+   .on('job.created', (j) => { if (j.status === 'COMPLETED' && person && j.resources.some((r) => r.personnel === person.name)) setRecentJobs([...recentJobs, j]); })
    .on('site_visit.dispatched', (v) => {
      if (!person || !v.resources.some((r) => r.personnel === person.name)) return;
      visit = v; paintVisit();

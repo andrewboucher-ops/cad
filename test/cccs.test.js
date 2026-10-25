@@ -450,6 +450,19 @@ test('control can add photos to a closed job; photos open with the token in the 
   assert.match(after.resolution_report_html, new RegExp(media.body.id), 'report rebuilt with the new photo');
 });
 
+test('an officer can add a photo to their own job after it was entered after the event', async () => {
+  const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const dan = app.db.personnel.find((p) => p.name === 'Dan Whitfield');
+  const job = await call('POST', '/api/jobs', {
+    priority: 'GREEN', location: 'Unit 9, Retro Park', retrospective: true, reason: 'lost signal', resources: [dan.id],
+    created_at: new Date(Date.now() - 2 * 3600e3).toISOString(), completed_at: new Date(Date.now() - 3600e3).toISOString(),
+  }, dispT);
+  assert.equal(job.status, 201, JSON.stringify(job.body));
+  const media = await call('POST', `/api/jobs/${job.body.id}/media`, { mimetype: 'image/png', data: tinyPngBase64 }, danT);
+  assert.equal(media.status, 201, JSON.stringify(media.body));
+  assert.equal(media.body.taken_by, 'Dan Whitfield');
+});
+
 /* ---------------- GuardM8 integration ---------------- */
 test('GuardM8 can push a job with a shared secret, and retries are idempotent', async () => {
   process.env.GUARDM8_SECRET = 'test-guardm8-secret';
