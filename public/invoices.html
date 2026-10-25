@@ -187,8 +187,10 @@ async function view(id) {
   if (i.status === 'APPROVED') acts.push(act('void', 'Void'), act('paid', 'Mark paid'), act('xero', 'Send to Xero', 'primary'));
   if (i.status === 'APPROVED' && (!i.gocardless || !i.gocardless.payment_id)) acts.push(act('direct-debit', 'Collect via Direct Debit'));
   if (i.status === 'IN_XERO' || (i.status === 'PAID' && i.xero)) acts.push(act('sync', 'Check Xero'));
+  const hm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
+  const workedAt = (s) => s.clocked_in_at ? `${hm(s.clocked_in_at)}–${s.clocked_out_at ? hm(s.clocked_out_at) : '?'}` : (s.job_id ? '' : `rota ${hm(s.starts_at)}–${hm(s.ends_at)}`);
   const shiftTable = (l) => l.shifts && l.shifts.length ? `<details><summary class="dim" style="font-size:12px">${l.shifts.length} ${l.shifts.every((s) => s.job_id) ? 'attendance' : 'shift'}${l.shifts.length === 1 ? '' : 's'}</summary>
-    <table class="k shifts"><tbody>${l.shifts.map((s) => `<tr><td>${esc(date(s.date))}</td><td>${esc(s.person)}</td><td class="num">${s.hours} h</td><td class="dim">${esc(s.source)}</td></tr>`).join('')}</tbody></table></details>` : '';
+    <table class="k shifts"><tbody>${l.shifts.map((s) => `<tr><td>${esc(date(s.date))}</td><td>${esc(s.person)}</td><td class="dim">${esc(workedAt(s))}</td><td class="num">${s.hours} h</td><td class="dim">${esc(s.source)}</td></tr>`).join('')}</tbody></table></details>` : '';
   const multiC = i.contract_ids && i.contract_ids.length > 1;
   const siteLabel = multiC ? `${[...new Set(i.lines.map((l) => l.site_name))].join(', ')}` : i.site_name;
   modal(i.number ? `Invoice ${i.number}` : 'Draft invoice', `

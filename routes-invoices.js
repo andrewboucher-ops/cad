@@ -62,6 +62,14 @@ module.exports = function registerInvoices({
   const overrideRate = (o, baseRate) => Math.max(o.kind === 'FLAT' ? Number(o.flat_rate) : r2(baseRate * o.multiplier), baseRate);
   const findInv = (id) => { const i = db.invoices.find((x) => x.id === Number(id)); if (!i) throw httpError(404, 'invoice not found'); return i; };
   const span = (a, b) => { const f = (d, o) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-GB', o); return a === b ? f(a, { day: 'numeric', month: 'short', year: 'numeric' }) : `${f(a, { day: 'numeric', month: 'short' })} – ${f(b, { day: 'numeric', month: 'short', year: 'numeric' })}`; };
+  const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
+  /** The times a breakdown row was actually worked: clocked in to out for
+   * a shift, arrived to cleared for an attendance. */
+  const workedText = (x) => {
+    if (x.clocked_in_at && x.clocked_out_at) return `${hhmm(x.clocked_in_at)}–${hhmm(x.clocked_out_at)}${x.break_min ? ` (${x.break_min}m break)` : ''}`;
+    if (x.clocked_in_at) return x.job_id ? `arrived ${hhmm(x.clocked_in_at)}, not cleared` : `in ${hhmm(x.clocked_in_at)}, not clocked out`;
+    return x.source === 'rostered' ? '—' : x.source;
+  };
   const money = (n) => `£${Number(n || 0).toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const longDate = (d) => (d ? new Date(String(d).length === 10 ? `${d}T12:00:00Z` : d).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '—');
   const today = () => new Date().toISOString().slice(0, 10);
@@ -187,10 +195,11 @@ module.exports = function registerInvoices({
     const hourly = inv.lines.filter((l) => l.shifts && l.shifts.length);
     if (st.include_timesheet && hourly.length) {
       doc.heading(`Hours breakdown (${inv.billing_basis === 'ROSTERED' ? 'hours rostered' : 'hours worked'})`, 11);
+      if (inv.billing_basis !== 'ROSTERED') doc.para(`Hours are the time worked on the timeclock, to the quarter hour, less breaks. Response attendances are charged from arrival to clear, by the hour or part thereof.`, { size: 8.5, color: grey, gap: 4 });
       for (const l of hourly) {
         if (hourly.length > 1) doc.para(l.description, { size: 9, bold: true, gap: 2 });
-        doc.table([{ title: 'Date', width: 0.2 }, { title: 'Officer', width: 0.4 }, { title: 'Shift', width: 0.25 }, { title: 'Hours', width: 0.15, align: 'right' }],
-          l.shifts.map((x) => [longDate(x.date), x.person, `${new Date(x.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })}–${new Date(x.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })}`, String(x.hours)]), { size: 8.5 });
+        doc.table([{ title: 'Date', width: 0.17 }, { title: 'Officer', width: 0.3 }, { title: 'Rostered', width: 0.15 }, { title: 'Worked', width: 0.26 }, { title: 'Hours', width: 0.12, align: 'right' }],
+          l.shifts.map((x) => [longDate(x.date), x.person, x.job_id ? '—' : `${hhmm(x.starts_at)}–${hhmm(x.ends_at)}`, workedText(x), String(x.hours)]), { size: 8.5 });
       }
     }
     return doc.toBuffer();
@@ -261,7 +270,8 @@ module.exports = function registerInvoices({
         } else {
           source = Date.parse(s.ends_at) > Date.now() ? 'not finished' : 'to check';
         }
-        rows.push({ shift_id: s.id, assignment_id: a.id, date: s.starts_at.slice(0, 10), starts_at: s.starts_at, ends_at: s.ends_at, person: p ? p.name : '—', hours: r2(hours), source, pay_override: a.pay_override || null });
+        rows.push({ shift_id: s.id, assignment_id: a.id, date: s.starts_at.slice(0, 10), starts_at: s.starts_at, ends_at: s.ends_at, person: p ? p.name : '—', hours: r2(hours), source, pay_override: a.pay_override || null,
+          clocked_in_at: a.clocked_in_at || null, clocked_out_at: a.clocked_out_at || null, break_min: a.clocked_in_at && a.clocked_out_at ? attendance.worked(a).break_min : 0 });
       }
     }
     return rows.sort((x, y) => x.starts_at.localeCompare(y.starts_at));
@@ -292,7 +302,7 @@ module.exports = function registerInvoices({
       else if (!j.on_scene_at || !j.completed_at) source = 'no arrival time';
       else { hours = Math.max(0, (Date.parse(j.completed_at) - Date.parse(j.on_scene_at)) / 3600000); source = 'attendance'; }
       const starts = new Date(at).toISOString();
-      rows.push({ job_id: j.id, reference: j.reference, date: starts.slice(0, 10), starts_at: starts, ends_at: j.completed_at || starts, person: `${names.join(', ') || 'No officer'} (${j.reference})`, hours: r2(hours), source, pay_override: null });
+      rows.push({ job_id: j.id, reference: j.reference, clocked_in_at: j.on_scene_at || null, clocked_out_at: j.completed_at || null, break_min: 0, date: starts.slice(0, 10), starts_at: starts, ends_at: j.completed_at || starts, person: `${names.join(', ') || 'No officer'} (${j.reference})`, hours: r2(hours), source, pay_override: null });
     }
     return rows;
   }
@@ -329,6 +339,7 @@ module.exports = function registerInvoices({
           for (const x of rows) x.hours = hourOrPart(x.hours);
         }
         for (const x of rows) if (x.source === 'to check') checks.push(`${x.person} on ${x.date}: no clock-out — counted as 0 hours`);
+        for (const x of rows) if (!x.job_id && x.source === 'not finished') checks.push(`${x.person} on ${x.date}: shift not finished yet — counted as 0 hours`);
         for (const x of rows) if (x.source === 'awaiting approval') checks.push(`${x.person} on ${x.date}: clock time waiting for approval in Timeclock`);
         for (const x of rows) if (x.job_id && x.source === 'no arrival time') checks.push(`${x.reference} on ${x.date}: no arrived or cleared time — counted as 0 hours, add it in the job's Times`);
         for (const x of rows) if (x.job_id && x.source === 'not finished') checks.push(`${x.reference} on ${x.date}: job still open — counted as 0 hours`);
