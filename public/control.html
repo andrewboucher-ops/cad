@@ -211,6 +211,46 @@ const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const localDT = (iso) => (iso ? new Date(Date.parse(iso) - new Date(iso).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : '');
 const me = CCCS.getSession().user;
+// A photo URL carries the session token: an <img> can't send the
+// Authorization header.
+const mediaTok = () => encodeURIComponent(CCCS.getSession().token);
+const JOB_TIME_FIELDS = [['created_at', 'Received'], ['dispatched_at', 'Dispatched'], ['acknowledged_at', 'Accepted'], ['en_route_at', 'En route'], ['on_scene_at', 'Arrived on scene'], ['completed_at', 'Cleared']];
+const JOB_TIME_LABEL = Object.fromEntries(JOB_TIME_FIELDS);
+let timesOpenFor = null;
+/** The job's time inputs that differ from what the job has now, as ISO
+ * strings (null for a time that was cleared). Compared to the minute,
+ * since that's all a datetime-local input holds. */
+function changedJobTimes(j) {
+  const out = {};
+  for (const input of els('[data-jtime]')) {
+    const f = input.dataset.jtime;
+    if (input.value === localDT(j[f])) continue;
+    out[f] = input.value ? new Date(input.value).toISOString() : null;
+  }
+  return out;
+}
+/** Photos added from the control room — the PC's files, or ones an officer
+ * sent in some other way. Shrunk to 1600px JPEG before upload, same as the
+ * officer app. */
+async function uploadJobPhotos(j, files, status) {
+  let sent = 0;
+  for (const f of files) {
+    status.textContent = `Uploading ${sent + 1} of ${files.length}…`;
+    try {
+      let payload;
+      try { payload = { mimetype: 'image/jpeg', data: await CCCSForms.downscale(f, 1600, 0.8) }; }
+      catch { throw new Error(`can't read ${f.name} — use a JPEG or PNG`); }
+      await api('POST', `/api/jobs/${j.id}/media`, payload);
+      sent++;
+    } catch (e) { status.textContent = ''; showErr(new Error(`Photo not added: ${e.message}`)); break; }
+  }
+  if (sent) {
+    const all = await api('GET', '/api/jobs').catch(() => null);
+    const fresh = all && all.find((x) => x.id === j.id);
+    if (fresh) upsert(state.jobs, fresh);
+    renderDetail({ force: true });
+  }
+}
 
 // Mirrors server.js's complaint-list.js — duplicated here because this is
 // a plain static page with no shared-module step, same as how AVPU/
@@ -753,22 +793,40 @@ function renderJob(body) {
       <div class="btn-row" style="margin-top:4px"><button class="btn" id="jSaveNotes">Save notes</button></div>
     </div>
     <div class="dsec"><div class="t">Reports</div><div id="jReports"><p class="dim">Loading…</p></div></div>
-    ${active ? `<div class="dsec">
-      <div class="t">Complete manually</div>
-      <p class="dim" style="margin:0 0 6px;font-size:12.5px">Confirmed done by radio or in person, without the phone app or MDT — set when it happened and mark it complete.</p>
-      <div style="display:flex;gap:8px">
-        <div style="flex:1"><label style="font-size:11px">On scene</label><input type="datetime-local" id="jOnScene" value="${localDT(j.on_scene_at)}"></div>
-        <div style="flex:1"><label style="font-size:11px">Completed</label><input type="datetime-local" id="jCompletedAt" value="${localDT(j.completed_at)}"></div>
-      </div>
-      <div class="btn-row" style="margin-top:8px">
-        <button class="btn ok" id="jDone">Mark completed</button>
-        <button class="btn danger" id="jCancel">Cancel job</button>
-      </div>
-    </div>` : ''}
+    <div class="dsec"><div class="t">Photos</div>
+      ${(j.media || []).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${j.media.map((m) => `<a href="${m.url}?token=${mediaTok()}" target="_blank" rel="noopener" title="${esc(m.taken_by || '')} · ${m.taken_at ? new Date(m.taken_at).toLocaleString('en-GB') : ''}"><img src="${m.url}?token=${mediaTok()}" alt="" loading="lazy" style="width:64px;height:64px;object-fit:cover;border-radius:5px;border:1px solid var(--line)"></a>`).join('')}</div>` : '<p class="dim" style="margin:0">No photos.</p>'}
+      <div class="btn-row" style="margin-top:6px"><label class="btn" style="margin:0;cursor:pointer">Add photos<input type="file" id="jPhotoFile" accept="image/*" multiple hidden></label><span class="dim" id="jPhotoStatus" style="align-self:center;font-size:12px"></span></div>
+    </div>
+    ${j.status === 'CANCELLED' ? '' : `<div class="dsec">
+      <div class="t">${active ? 'Times — complete manually' : 'Times'}${j.retrospective ? ' <span class="dim">(entered after the event)</span>' : ''}</div>
+      ${active ? '<p class="dim" style="margin:0 0 6px;font-size:12.5px">Confirmed by radio or in person, or the officer lost signal — set when things really happened.</p>' : ''}
+      ${!active && timesOpenFor !== j.id ? `<dl class="kv">${JOB_TIME_FIELDS.map(([f, label]) => `<dt>${label}</dt><dd class="mono">${j[f] ? new Date(j[f]).toLocaleString('en-GB') : '—'}</dd>`).join('')}</dl>
+        <div class="btn-row" style="margin-top:6px"><button class="btn" id="jTimesOpen">Edit times</button></div>`
+      : `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px">${JOB_TIME_FIELDS.map(([f, label]) => `<div><label style="font-size:11px">${label}</label><input type="datetime-local" data-jtime="${f}" value="${localDT(j[f])}" max="${localDT(new Date().toISOString())}"></div>`).join('')}</div>
+        <label style="font-size:11px">Reason (kept in the audit log)</label><input id="jTimesReason" placeholder="e.g. officer lost signal, times confirmed by phone">
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn primary" id="jTimesSave">Save times</button>
+          ${active ? '<button class="btn ok" id="jDone">Mark completed</button><button class="btn danger" id="jCancel">Cancel job</button>' : '<button class="btn" id="jTimesClose">Close</button>'}
+        </div>`}
+      ${(j.time_edits || []).length ? `<details style="margin-top:6px;font-size:12px"><summary class="dim">Time changes (${j.time_edits.length})</summary>${j.time_edits.map((t) => `<div style="margin-top:4px">${new Date(t.at).toLocaleString('en-GB')} · ${esc(t.by_name || '')}${t.reason ? ` — ${esc(t.reason)}` : ''}<div class="dim">${t.changes.map((c) => `${esc(JOB_TIME_LABEL[c.field] || c.field)}: ${c.from ? new Date(c.from).toLocaleString('en-GB') : '—'} → ${c.to ? new Date(c.to).toLocaleString('en-GB') : '—'}`).join('<br>')}</div></div>`).join('')}</details>` : ''}
+    </div>`}
     <p class="err" id="detailErr"></p>`;
   paintReports(el('#jReports'), 'JOB', j.id);
   el('#jSaveNotes').onclick = () => api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }).catch(showErr);
   els('[data-contact]', body).forEach((b) => (b.onclick = () => { const p = state.personnel.find((x) => x.name === b.dataset.contact); if (p) select('p', p.id); }));
+  el('#jPhotoFile').onchange = (e) => uploadJobPhotos(j, [...e.target.files], el('#jPhotoStatus'));
+  if (el('#jTimesOpen')) el('#jTimesOpen').onclick = () => { timesOpenFor = j.id; renderDetail({ force: true }); };
+  if (el('#jTimesClose')) el('#jTimesClose').onclick = () => { timesOpenFor = null; renderDetail({ force: true }); };
+  if (el('#jTimesSave')) el('#jTimesSave').onclick = async () => {
+    try {
+      const changed = changedJobTimes(j);
+      if (!Object.keys(changed).length) throw new Error('No times changed.');
+      const reason = el('#jTimesReason').value.trim();
+      if (reason.length < 3) throw new Error('Give a reason for changing the times.');
+      upsert(state.jobs, await api('PATCH', `/api/jobs/${j.id}/times`, { ...changed, reason }));
+      timesOpenFor = null; renderDetail({ force: true });
+    } catch (e) { showErr(e); }
+  };
   if (!active) return;
   el('#jAssign').onclick = () => setMode('assign', j.id);
   if (el('#jBroadnetPush')) el('#jBroadnetPush').onclick = async (e) => {
@@ -789,13 +847,18 @@ function renderJob(body) {
       patient_name: el('#eMedName').value, patient_dob: el('#eMedDob').value, chief_complaint: el('#eMedComplaint').value,
     }).then(() => renderDetail({ force: true })).catch(showErr);
   }
-  armed(el('#jDone'), 'Confirm completed', () => {
-    const onScene = el('#jOnScene').value, completedAt = el('#jCompletedAt').value;
-    return api('PATCH', `/api/jobs/${j.id}`, {
-      status: 'COMPLETED',
-      ...(onScene ? { on_scene_at: new Date(onScene).toISOString() } : {}),
-      completed_at: completedAt ? new Date(completedAt).toISOString() : new Date().toISOString(),
-    }).catch(showErr);
+  armed(el('#jDone'), 'Confirm completed', async () => {
+    try {
+      const { created_at: receivedAt, ...stages } = changedJobTimes(j);
+      const reason = el('#jTimesReason').value.trim();
+      const anyTimes = receivedAt || Object.keys(stages).length;
+      if (anyTimes && reason.length < 3) throw new Error('Give a reason for the times you entered.');
+      if (receivedAt) await api('PATCH', `/api/jobs/${j.id}/times`, { created_at: receivedAt, reason });
+      await api('PATCH', `/api/jobs/${j.id}`, {
+        status: 'COMPLETED', ...stages, ...(reason ? { reason } : {}),
+        completed_at: stages.completed_at || j.completed_at || new Date().toISOString(),
+      });
+    } catch (e) { showErr(e); }
   });
   armed(el('#jCancel'), 'Confirm cancel', () => api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }));
   els('[data-standdown]', body).forEach((b) => armed(b, 'Confirm', () => {
@@ -1028,22 +1091,50 @@ function renderNewJob(body) {
       <label>Presenting complaint</label>
       <select id="nComplaint"><option value="">— select —</option>${CHIEF_COMPLAINTS.map((c) => `<option value="${c.code}">${esc(c.label)}</option>`).join('')}</select>
     </div>
-    <label>Dispatch now (optional)</label>
+    <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;margin-top:10px">
+      <input type="checkbox" id="nRetro"> Already happened — enter it after the event
+    </label>
+    <div id="nRetroPanel" class="hide">
+      <p class="dim" style="margin:2px 0 6px;font-size:12.5px">For a job that was dealt with but never logged, e.g. the officer lost signal. It is saved as completed and nobody is notified.</p>
+      <label>Officers who attended</label>
+      <div class="chips" id="nRetroWho">${state.personnel.filter((p) => p.employment_status === 'ACTIVE').map((p) => `<button type="button" class="chip" data-v="${p.id}">${esc(p.callsign || p.name)}</button>`).join('')}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px">
+        ${[['created_at', 'Received *'], ['dispatched_at', 'Dispatched'], ['on_scene_at', 'Arrived on scene'], ['completed_at', 'Cleared *']].map(([f, label]) => `<div><label style="font-size:11px">${label}</label><input type="datetime-local" data-ntime="${f}" max="${localDT(new Date().toISOString())}"></div>`).join('')}
+      </div>
+      <label>Reason (kept in the audit log) *</label><input id="nRetroReason" placeholder="e.g. officer lost signal on site">
+    </div>
+    <div id="nDispatchNow"><label>Dispatch now (optional)</label>
     <div class="chips" id="nRes">${state.personnel.filter((p) => liveShifts().some((s) => s.personnel_id === p.id && s.clocked_in) && isAvailable(p)).map((p) => `<button type="button" class="chip" data-v="${p.id}">${esc(p.callsign || p.name)}</button>`).join('')}
-      ${state.mdts.filter((m) => m.connected && !m.job_id).map((m) => `<button type="button" class="chip" data-v="${esc(m.mdt_code)}">${esc(m.mdt_code)}</button>`).join('') || ''}</div>
+      ${state.mdts.filter((m) => m.connected && !m.job_id).map((m) => `<button type="button" class="chip" data-v="${esc(m.mdt_code)}">${esc(m.mdt_code)}</button>`).join('') || ''}</div></div>
     <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="nGo">Create job</button><button class="btn" id="nBack">Cancel</button></div>
     <p class="err" id="detailErr"></p>`;
-  els('#nRes .chip').forEach((c) => (c.onclick = () => c.classList.toggle('on')));
+  els('#nRes .chip, #nRetroWho .chip').forEach((c) => (c.onclick = () => c.classList.toggle('on')));
+  el('#nRetro').onchange = () => {
+    const retro = el('#nRetro').checked;
+    el('#nRetroPanel').classList.toggle('hide', !retro);
+    el('#nDispatchNow').classList.toggle('hide', retro);
+    el('#nGo').textContent = retro ? 'Save completed job' : 'Create job';
+  };
   el('#nBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
   el('#nMedical').onchange = () => el('#nMedicalPanel').classList.toggle('hide', !el('#nMedical').checked);
   el('#nComplaint').onchange = () => { const pr = complaintPriority(el('#nComplaint').value); if (pr) el('#nPri').value = pr; };
   el('#nGo').onclick = async () => {
     try {
+      const retro = el('#nRetro').checked;
+      const retroFields = {};
+      if (retro) {
+        for (const input of els('[data-ntime]')) if (input.value) retroFields[input.dataset.ntime] = new Date(input.value).toISOString();
+        if (!retroFields.created_at || !retroFields.completed_at) throw new Error('Enter at least the received and cleared times.');
+        Object.assign(retroFields, { retrospective: true, reason: el('#nRetroReason').value.trim(), resources: els('#nRetroWho .chip.on').map((c) => Number(c.dataset.v)) });
+        if (retroFields.reason.length < 3) throw new Error('Give a reason for entering this job after the event.');
+      }
       const job = await api('POST', '/api/jobs', {
         incident_type: el('#nType').value, priority: el('#nPri').value, location: el('#nLoc').value, site: el('#nSite').value || undefined,
         description: el('#nDesc').value, caller: el('#nCaller').value, what3words: el('#nW3w').value.replace(/^\/+/, '').trim() || undefined,
         is_medical: el('#nMedical').checked, patient_name: el('#nPatName').value, patient_dob: el('#nPatDob').value, chief_complaint: el('#nComplaint').value,
+        ...retroFields,
       });
+      if (retro) { upsert(state.jobs, job); state.dispFilter = 'closed'; select('j', job.id, { pan: true }); return; }
       const picks = els('#nRes .chip.on').map((c) => c.dataset.v);
       if (picks.length) await api('POST', `/api/jobs/${job.id}/assign`, { resources: picks });
       upsert(state.jobs, job); select('j', job.id, { pan: true });
@@ -1332,6 +1423,10 @@ async function boot() {
     catch (e) { el('#map').innerHTML = `<p class="dim" style="position:absolute;top:50%;width:100%;text-align:center">Map unavailable (${esc(e.message)}). Everything else is live.</p>`; }
   }
   renderAll(); renderLog();
+  // control.html?job=ID — opened from the incidents log, to edit an older
+  // closed job's times or photos.
+  const linked = Number(new URLSearchParams(location.search).get('job'));
+  if (linked && state.jobs.some((x) => x.id === linked) && !state.selected) select('j', linked, { pan: true });
   // A reload landing mid-emergency must still sound.
   sound.refreshEmergencyAlarm();
 }

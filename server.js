@@ -2449,11 +2449,58 @@ route('POST', '/api/jobs', CONTROL, ({ body, user }) => {
     patient_dob: String(body.patient_dob || '').slice(0, 20),
     chief_complaint: chiefComplaint,
   };
+  if (body.retrospective) return createRetrospectiveJob(j, body, user);
   db.jobs.push(j);
   broadcast('job.created', publicJob(j));
   logEvent('job.created', `JOB ${j.reference} CREATED (${priority})`, { job_id: j.id });
   return { __status: 201, __body: publicJob(j) };
 });
+/* A job that already happened and is being written up afterwards — the
+ * officer lost signal, or it was only ever handled by radio. Created
+ * straight into COMPLETED with the real times, the officers who attended
+ * recorded as assigned and accepted, and nobody notified: there is nothing
+ * left for anyone to do on it. The resolution report is built and kept on
+ * the job like any other completed job, but not emailed out. */
+function createRetrospectiveJob(j, body, user) {
+  const reason = retroReason(body);
+  if (reason.length < 3) throw httpError(400, 'a reason is required for a job entered after the event');
+  if (!body.completed_at) throw httpError(400, 'cleared time required');
+  if (!body.created_at) throw httpError(400, 'received time required');
+  const people = [];
+  for (const t of body.resources || []) {
+    const p = findPersonnel(t);
+    if (!p) throw httpError(404, `unknown officer ${t}`);
+    if (!people.includes(p)) people.push(p);
+  }
+  // Checked against a blank job so every given time is validated, then
+  // the received time must come first since it was typed in, not stamped.
+  const blank = Object.fromEntries(JOB_EDITABLE_TIME_FIELDS.map((f) => [f, null]));
+  const times = Object.fromEntries(JOB_EDITABLE_TIME_FIELDS.filter((f) => body[f]).map((f) => [f, body[f]]));
+  const changes = proposedJobTimes(blank, times);
+  const received = changes.find((c) => c.field === 'created_at').to;
+  for (const c of changes) if (c.to && Date.parse(c.to) < Date.parse(received)) throw httpError(400, `${JOB_TIME_LABELS[c.field]} time cannot be before the received time`);
+  for (const c of changes) j[c.field] = c.to;
+  if (!j.dispatched_at && people.length) j.dispatched_at = j.created_at;
+  j.reference = `INC-${new Date(j.created_at).getFullYear()}-${j.reference.split('-')[2]}`;
+  j.status = 'COMPLETED';
+  j.retrospective = true;
+  j.retrospective_reason = reason;
+  j.entered_at = new Date().toISOString();
+  j.time_edits = [{ at: j.entered_at, by: user.id, by_name: user.display_name, reason, changes }];
+  for (const p of people) {
+    db.job_assignments.push({
+      id: nextId('job_assignments'), job_id: j.id, personnel_id: p.id, mdt_id: null, callsign_id: p.callsign_id,
+      acknowledged: true, acknowledged_at: j.acknowledged_at || j.dispatched_at || j.created_at, at: j.dispatched_at || j.created_at,
+    });
+  }
+  db.jobs.push(j);
+  j.resolution_report_html = jobReportHtml(j);
+  const payload = publicJob(j);
+  broadcast('job.created', payload);
+  logEvent('job.created', `JOB ${j.reference} ENTERED AFTER THE EVENT BY ${user.display_name} (${j.priority}, ${people.map((p) => p.name).join(', ') || 'no officer'}) — ${reason}`,
+    { job_id: j.id, retrospective: true, reason, entered_by: user.id });
+  return { __status: 201, __body: payload };
+}
 
 /* ---- External alarm-source integrations --------------------------------
  * GuardM8 (Echelon's separate guarding/alarm-receiving product) and AURA
@@ -3243,6 +3290,91 @@ route('POST', '/api/ops/weekly-client-report/send-test', ADMIN, async ({ user, b
 });
 
 const JOB_TS_FIELDS = ['dispatched_at', 'acknowledged_at', 'en_route_at', 'on_scene_at', 'completed_at'];
+// created_at doubles as "call received" — editable alongside the stage
+// times so a job typed in after the event can show when it really started.
+const JOB_EDITABLE_TIME_FIELDS = ['created_at', ...JOB_TS_FIELDS];
+const JOB_TIME_LABELS = { created_at: 'received', dispatched_at: 'dispatched', acknowledged_at: 'accepted', en_route_at: 'en route', on_scene_at: 'arrived', completed_at: 'cleared' };
+// A couple of minutes' grace for a controller's PC clock running ahead.
+const FUTURE_TIME_SLACK_MS = 2 * 60000;
+/** Parses the time fields present in `body` and checks them against what the
+ * job would look like afterwards: nothing in the future, and no stage after
+ * the job was cleared (see below). created_at is left out of the ordering check — a job
+ * keyed in late has a created_at after the officer actually arrived. Returns
+ * the changes ({ field, from, to }) without applying them. */
+function proposedJobTimes(j, body) {
+  const next = {}, changes = [];
+  for (const f of JOB_EDITABLE_TIME_FIELDS) {
+    if (!(f in body)) continue;
+    if (f === 'created_at' && !body[f]) throw httpError(400, 'received time cannot be cleared');
+    if (body[f] !== null && body[f] !== '' && !Number.isFinite(Date.parse(body[f]))) throw httpError(400, `invalid ${f}`);
+    next[f] = body[f] ? new Date(body[f]).toISOString() : null;
+  }
+  const merged = { ...Object.fromEntries(JOB_EDITABLE_TIME_FIELDS.map((f) => [f, j[f] || null])), ...next };
+  const now = Date.now();
+  for (const f of Object.keys(next)) {
+    if (next[f] && Date.parse(next[f]) > now + FUTURE_TIME_SLACK_MS) throw httpError(400, `${JOB_TIME_LABELS[f]} time cannot be in the future`);
+  }
+  // Arrival is always checked against clear; the other stages only when
+  // given in this request — a stamp from the moment control dispatched a
+  // job it is now recording as already dealt with mustn't block that.
+  if (merged.completed_at) {
+    for (const f of JOB_TS_FIELDS) {
+      if (f === 'completed_at' || (f !== 'on_scene_at' && !(f in next))) continue;
+      if (merged[f] && Date.parse(merged[f]) > Date.parse(merged.completed_at)) {
+        throw httpError(400, `${JOB_TIME_LABELS[f]} time cannot be after the cleared time`);
+      }
+    }
+  }
+  for (const [f, to] of Object.entries(next)) if ((j[f] || null) !== to) changes.push({ field: f, from: j[f] || null, to });
+  return changes;
+}
+/** Applies time changes from proposedJobTimes and records them on the job
+ * itself as well as the audit log — the audit log is capped, a job's own
+ * record of who moved its times is not. */
+function applyJobTimes(j, changes, user, reason) {
+  if (!changes.length) return;
+  for (const c of changes) j[c.field] = c.to;
+  const at = new Date().toISOString();
+  j.time_edits = j.time_edits || [];
+  j.time_edits.push({ at, by: user.id, by_name: user.display_name, reason: reason || '', changes });
+  const summary = changes.map((c) => `${JOB_TIME_LABELS[c.field]} ${c.from ? hhmmUk(c.from) : '—'} → ${c.to ? hhmmUk(c.to) : '—'}`).join(', ');
+  logEvent('job.times_corrected', `JOB ${j.reference} TIMES SET BY ${user.display_name} (not via phone/MDT): ${summary}${reason ? ` — ${reason}` : ''}`,
+    { job_id: j.id, corrected_by: user.id, reason: reason || '', changes });
+}
+const hhmmUk = (iso) => new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+/** The resolution report's HTML, rebuilt from the job as it stands. */
+function jobReportHtml(j) {
+  return buildResolutionReportHtml({
+    reference: j.reference, kindLabel: j.incident_type, locationLabel: j.location, siteId: j.site_id,
+    description: j.description, notes: j.notes, extraRows: [['Priority', j.priority]],
+    timeline: [
+      ['Job created', j.created_at], ['Dispatched', j.dispatched_at], ['Acknowledged', j.acknowledged_at],
+      ['En route', j.en_route_at], ['On scene', j.on_scene_at], ['Completed', j.completed_at],
+    ].filter(([, t]) => t),
+    checklist: j.checklist, media: j.media,
+  });
+}
+const retroReason = (body) => String(body.reason || '').trim().slice(0, 500);
+
+/* Control fixing a job's times after the fact — an officer lost signal and
+ * none of their taps reached the server, or the job was only ever handled
+ * by radio. Works on closed jobs too. A reason is required, and every
+ * change is kept on the job (time_edits) as well as in the audit log. */
+route('PATCH', '/api/jobs/:id/times', CONTROL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  const reason = retroReason(body);
+  if (reason.length < 3) throw httpError(400, 'a reason is required');
+  const changes = proposedJobTimes(j, body);
+  if (!changes.length) throw httpError(400, 'no times changed');
+  applyJobTimes(j, changes, user, reason);
+  // A completed job's stored report is rebuilt so it shows the corrected
+  // times; it is not emailed out a second time.
+  if (j.status === 'COMPLETED') j.resolution_report_html = jobReportHtml(j);
+  j.updated_at = new Date().toISOString();
+  broadcast('job.status_changed', publicJob(j));
+  return publicJob(j);
+});
+
 route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
   // Control can set the actual stepper times directly — for a job an
@@ -3254,11 +3386,8 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   // was explicitly given here.
   const settingTimes = isControlRole(user.role) && JOB_TS_FIELDS.some((f) => f in body);
   if (settingTimes) {
-    for (const f of JOB_TS_FIELDS) {
-      if (!(f in body)) continue;
-      if (body[f] !== null && !Number.isFinite(Date.parse(body[f]))) throw httpError(400, `invalid ${f}`);
-      j[f] = body[f] ? new Date(body[f]).toISOString() : null;
-    }
+    const times = Object.fromEntries(JOB_TS_FIELDS.filter((f) => f in body).map((f) => [f, body[f]]));
+    applyJobTimes(j, proposedJobTimes(j, times), user, retroReason(body));
   }
   if (body.status) {
     const s = String(body.status).toUpperCase();
@@ -3272,15 +3401,7 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
       }
     }
     if (s === 'COMPLETED') {
-      j.resolution_report_html = buildResolutionReportHtml({
-        reference: j.reference, kindLabel: j.incident_type, locationLabel: j.location, siteId: j.site_id,
-        description: j.description, notes: j.notes, extraRows: [['Priority', j.priority]],
-        timeline: [
-          ['Job created', j.created_at], ['Dispatched', j.dispatched_at], ['Acknowledged', j.acknowledged_at],
-          ['En route', j.en_route_at], ['On scene', j.on_scene_at], ['Completed', j.completed_at],
-        ].filter(([, t]) => t),
-        checklist: j.checklist, media: j.media,
-      });
+      j.resolution_report_html = jobReportHtml(j);
       sendResolutionReportEmail({
         reference: j.reference, siteId: j.site_id, media: j.media, mediaDir: mediaDir(j.id),
         logType: 'job.report_emailed', logIdKey: 'job_id', logId: j.id,
@@ -3325,9 +3446,6 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
   }
   j.updated_at = new Date().toISOString();
   broadcast('job.status_changed', publicJob(j));
-  if (settingTimes) {
-    logEvent('job.times_corrected', `JOB ${j.reference} TIMES SET BY ${user.display_name} (not via phone/MDT)`, { job_id: j.id, corrected_by: user.id });
-  }
   logEvent('job.status_changed', `JOB ${j.reference} → ${j.status}`, { job_id: j.id });
   return publicJob(j);
 });
@@ -3413,9 +3531,12 @@ route('POST', '/api/jobs/:id/media', ALL, ({ params, body, user }) => {
   };
   j.media = j.media || [];
   j.media.push(media);
+  // A photo added after the job closed (from the gallery, or by control)
+  // still belongs on its stored report.
+  if (j.status === 'COMPLETED') j.resolution_report_html = jobReportHtml(j);
   j.updated_at = new Date().toISOString();
   broadcast('job.status_changed', publicJob(j));
-  logEvent('job.media_added', `PHOTO ADDED TO JOB ${j.reference}`, { job_id: j.id });
+  logEvent('job.media_added', `PHOTO ADDED TO JOB ${j.reference} BY ${user.display_name}`, { job_id: j.id });
   return { __status: 201, __body: media };
 });
 route('GET', '/api/jobs/:id/media/:mediaId', ALL, ({ params, user }) => {
