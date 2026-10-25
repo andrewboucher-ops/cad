@@ -904,4 +904,9 @@ test('an Alarm Response line bills the jobs attended at the site by the hour or 
   assert.equal(cctv[0].amount, 36);
   assert.ok(inv.checks.some((x) => /^INC-.* no arrived or cleared time/.test(x)), JSON.stringify(inv.checks));
   assert.ok(!inv.checks.some((x) => /undefined/.test(x)), JSON.stringify(inv.checks));
+  const att = hourly[0].shifts.find((x) => x.job_id && x.hours === 2);
+  assert.equal(att.clocked_in_at, '2026-02-11T01:10:00.000Z', 'the breakdown carries the arrived time');
+  const pdf = await call('GET', `/api/invoices/${inv.id}/pdf`, undefined, adminT, true);
+  assert.equal(pdf.status, 200);
+  assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
 });
