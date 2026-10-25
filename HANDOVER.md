@@ -395,6 +395,7 @@ Console requirements requested for this redesign:
 SMS_LIVE=off                 # keep off until tested against your own phone
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
+SMS_SENDER_ID=ECHELON        # registered alphanumeric sender; empty = use the number
 TWILIO_FROM_NUMBER=          # or TWILIO_MESSAGING_SERVICE_SID
 SMS_STATUS_CALLBACK_URL=     # MUST be the PUBLIC url — Twilio signs the exact
                              # URL it called, so a proxy that rewrites host or
