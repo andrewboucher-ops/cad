@@ -2922,11 +2922,15 @@ function resolutionReportRecipients(siteId) {
   const clientTo = (site && site.contact_email) || null;
   return { clientTo, recipients: [...new Set([clientTo || RESOLUTION_REPORT_NO_CLIENT_TO, RESOLUTION_REPORT_CC].filter(Boolean))] };
 }
-async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: mDir, logType, logIdKey, logId }, html) {
-  if (!GRAPH_MAIL_ENABLED) { console.warn(`[cccs] resolution report for ${reference} not emailed — Graph mail not configured`); return; }
-  const { clientTo, recipients } = resolutionReportRecipients(siteId);
-  if (!recipients.length) { console.warn(`[cccs] resolution report for ${reference} not emailed — no recipient configured`); return; }
-  const subject = `Resolution report — ${reference}${clientTo ? '' : ' (no client contact on file — forward to the client)'}`;
+/** Sends the report; `to` overrides the usual recipients (a resend from
+ * control). Never throws — returns { ok, error } so a resend can say what
+ * happened, while the automatic send on close just logs. */
+async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: mDir, logType, logIdKey, logId, to }, html) {
+  if (!GRAPH_MAIL_ENABLED) { console.warn(`[cccs] resolution report for ${reference} not emailed — Graph mail not configured`); return { ok: false, error: 'email is not set up on this server' }; }
+  const { clientTo, recipients: usual } = resolutionReportRecipients(siteId);
+  const recipients = to && to.length ? to : usual;
+  if (!recipients.length) { console.warn(`[cccs] resolution report for ${reference} not emailed — no recipient configured`); return { ok: false, error: 'no recipient' }; }
+  const subject = `Resolution report — ${reference}${to || clientTo ? '' : ' (no client contact on file — forward to the client)'}`;
   try {
     const attachments = [{
       '@odata.type': '#microsoft.graph.fileAttachment', name: 'echelon-wordmark.png', contentId: 'echelon-wordmark', isInline: true,
@@ -2945,9 +2949,10 @@ async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: m
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: recipients.map((address) => ({ emailAddress: { address } })), ...replyTo(), attachments } }),
     });
-    if (!res.ok) console.warn(`[cccs] resolution report email failed for ${reference}:`, res.status, await res.text());
-    else logEvent(logType, `RESOLUTION REPORT EMAILED FOR ${reference}`, { [logIdKey]: logId, to: recipients });
-  } catch (e) { console.warn(`[cccs] resolution report email failed for ${reference}:`, e.message); }
+    if (!res.ok) { console.warn(`[cccs] resolution report email failed for ${reference}:`, res.status, await res.text()); return { ok: false, error: `email service returned ${res.status}` }; }
+    logEvent(logType, `RESOLUTION REPORT EMAILED FOR ${reference}${to ? ' (resent)' : ''}`, { [logIdKey]: logId, to: recipients });
+    return { ok: true, to: recipients };
+  } catch (e) { console.warn(`[cccs] resolution report email failed for ${reference}:`, e.message); return { ok: false, error: e.message }; }
 }
 
 // Generic Graph sendMail, for anything that just needs "send this person an
@@ -3426,6 +3431,27 @@ route('POST', '/api/jobs/:id/close', CONTROL, ({ params, body, user }) => {
   closeJob(j, user, closingNote(body));
   broadcast('job.status_changed', publicJob(j));
   return publicJob(j);
+});
+
+/* Resend a closed job's report to wherever control chooses — a client who
+ * lost it, or a non-client site's report forwarded from info@. Rebuilt from
+ * the job as it stands, so later notes and photos are in it. */
+route('POST', '/api/jobs/:id/report/send', CONTROL, async ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  if (j.status !== 'COMPLETED') throw httpError(409, 'only a completed job has a report');
+  const to = [...new Set(String(body.to || '').split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean))];
+  if (!to.length) throw httpError(400, 'enter at least one email address');
+  const bad = to.find((x) => !EMAIL_RE.test(x));
+  if (bad) throw httpError(400, `not an email address: ${bad}`);
+  if (to.length > 10) throw httpError(400, 'at most 10 addresses');
+  j.resolution_report_html = jobReportHtml(j);
+  const r = await sendResolutionReportEmail({
+    reference: j.reference, siteId: j.site_id, media: j.media, mediaDir: mediaDir(j.id),
+    logType: 'job.report_emailed', logIdKey: 'job_id', logId: j.id, to,
+  }, j.resolution_report_html);
+  if (!r.ok) throw httpError(502, `report not sent: ${r.error}`);
+  logEvent('job.report_resent', `REPORT FOR ${j.reference} RESENT BY ${user.display_name} TO ${to.join(', ')}`, { job_id: j.id, to, by: user.id });
+  return { ok: true, to };
 });
 
 /* Notes added to a job at any time, closed ones included — something

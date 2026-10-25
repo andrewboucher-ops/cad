@@ -171,9 +171,11 @@ el('#aType').addEventListener('change', paintActions);
 /* ---------- historical incidents: closed jobs — same data the Active Jobs
  * panel already has, just the completed/cancelled half with no time limit
  * on how far back you can search it. ---------- */
-let allJobs = [];
+let allJobs = [], siteContacts = {};
 async function loadIncidents() {
   el('#iTableWrap').innerHTML = '<p class="empty-note">Loading…</p>';
+  // Each site's client email, to prefill where a resent report goes.
+  siteContacts = await api('GET', '/api/state').then((st) => Object.fromEntries((st.sites || []).filter((x) => x.contact_email).map((x) => [x.id, x.contact_email]))).catch(() => ({}));
   const jobs = await api('GET', '/api/jobs');
   allJobs = jobs.filter((j) => ['COMPLETED', 'CANCELLED'].includes(j.status))
     .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
@@ -223,7 +225,18 @@ function incidentModal(j) {
       <dt>Closed</dt><dd class="mono">${j.awaiting_close ? '<span class="err">Awaiting a controller\'s closing note</span>' : j.closed_at ? `${new Date(j.closed_at).toLocaleString()} by ${esc(j.closed_by_name || '')}` : new Date(j.updated_at).toLocaleString()}</dd>
       <dt>Photos</dt><dd>${(j.media || []).length}</dd>
     </dl>
-    <p style="margin-top:10px"><a class="btn" href="/control.html?job=${j.id}">Open in control room</a> <span class="dim">to change its times, add photos or add notes</span></p>`);
+    ${j.status === 'COMPLETED' ? `<div style="margin-top:10px"><label style="font-size:12px">Resend the resolution report to (separate several with commas)</label>
+      <div style="display:flex;gap:6px;margin-top:4px"><input id="rsTo" type="text" inputmode="email" style="flex:1" value="${esc((siteContacts[j.site_id]) || 'info@echeloncic.com')}"><button class="btn primary" id="rsGo">Resend report</button></div>
+      <p class="dim" id="rsStatus" style="margin:4px 0 0;font-size:12px"></p></div>` : ''}
+    <p style="margin-top:10px"><a class="btn" href="/control.html?job=${j.id}">Open in control room</a> <span class="dim">to change its times, add photos or add notes</span></p>`, () => {
+    if (!el('#rsGo')) return;
+    el('#rsGo').onclick = async () => {
+      el('#rsGo').disabled = true; el('#rsStatus').textContent = 'Sending…';
+      try { const r = await api('POST', `/api/jobs/${j.id}/report/send`, { to: el('#rsTo').value }); el('#rsStatus').textContent = `Sent to ${r.to.join(', ')} ✓`; }
+      catch (e) { el('#rsStatus').textContent = `Not sent: ${e.message}`; }
+      el('#rsGo').disabled = false;
+    };
+  });
 }
 
 /* link status, for parity with the other pages even though this page does
