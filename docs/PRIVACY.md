@@ -62,6 +62,15 @@ employed and the card should not be accepted. Tell staff about this page in
 your notice to them — it is the one place their name and photo are shown
 to people outside the business.
 
+### Shared with the evidence store (DEMS)
+
+When `DEMS_SECRET` is set, DEMS can ask CCCS which jobs an officer was assigned
+to in a time window, and who had a body camera checked out at a given moment.
+It uses the answers to suggest which incident a batch of body-worn footage
+belongs to. Nothing is copied in bulk: each answer is one lookup, made when an
+operator is working on that footage in DEMS. Caller details are not shared.
+Mention this in the staff notice alongside body-worn video.
+
 ## What is not collected
 
 - **No audio is recorded.** Voice passes between devices and is not stored.
