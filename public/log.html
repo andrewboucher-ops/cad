@@ -207,7 +207,9 @@ function incidentModal(j) {
       <dt>Notes</dt><dd>${esc(j.notes || '—')}</dd>
       <dt>Created</dt><dd class="mono">${new Date(j.created_at).toLocaleString()}</dd>
       <dt>Closed</dt><dd class="mono">${new Date(j.updated_at).toLocaleString()}</dd>
-    </dl>`);
+      <dt>Photos</dt><dd>${(j.media || []).length}</dd>
+    </dl>
+    <p style="margin-top:10px"><a class="btn" href="/control.html?job=${j.id}">Open in control room</a> <span class="dim">to change its times or add photos</span></p>`);
 }
 
 /* link status, for parity with the other pages even though this page does

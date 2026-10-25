@@ -381,6 +381,75 @@ test('control can complete a job with real times, without the phone app or MDT',
   assert.ok(app.db.audit_logs.some((e) => e.type === 'job.times_corrected' && e.data && e.data.job_id === job.body.id));
 });
 
+test('control can fix a closed job\'s arrival and clear times after the fact, with a reason', async () => {
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
+  await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'COMPLETED' }, dispT);
+  const path = `/api/jobs/${job.body.id}/times`;
+  const arrived = new Date(Date.now() - 50 * 60000).toISOString();
+  const cleared = new Date(Date.now() - 10 * 60000).toISOString();
+
+  assert.equal((await call('PATCH', path, { on_scene_at: arrived, completed_at: cleared, reason: 'lost signal' }, danT)).status, 403, 'officers cannot rewrite times');
+  assert.equal((await call('PATCH', path, { on_scene_at: arrived, completed_at: cleared }, dispT)).status, 400, 'a reason is required');
+  const future = await call('PATCH', path, { on_scene_at: arrived, completed_at: new Date(Date.now() + 3600e3).toISOString(), reason: 'lost signal' }, dispT);
+  assert.equal(future.status, 400); assert.match(future.body.error, /future/);
+  const backwards = await call('PATCH', path, { on_scene_at: cleared, completed_at: arrived, reason: 'lost signal' }, dispT);
+  assert.equal(backwards.status, 400); assert.match(backwards.body.error, /after the cleared time/);
+
+  const r = await call('PATCH', path, { on_scene_at: arrived, completed_at: cleared, reason: 'Officer lost signal, times confirmed by phone' }, dispT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.on_scene_at, arrived);
+  assert.equal(r.body.completed_at, cleared);
+  assert.equal(r.body.status, 'COMPLETED', 'still completed');
+  const edit = r.body.time_edits.at(-1);
+  assert.equal(edit.reason, 'Officer lost signal, times confirmed by phone');
+  assert.ok(edit.changes.some((c) => c.field === 'completed_at' && c.to === cleared && c.from), 'records what it was before');
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'job.times_corrected' && e.data.job_id === job.body.id && e.data.reason && e.data.changes.length === 2));
+});
+
+test('control can enter a job after the event, completed with past times and nobody notified', async () => {
+  const officer = app.db.personnel.find((p) => p.name === 'Dan Officer') || app.db.personnel[0];
+  const received = new Date(Date.now() - 3 * 3600e3).toISOString();
+  const arrived = new Date(Date.now() - 2.5 * 3600e3).toISOString();
+  const cleared = new Date(Date.now() - 2 * 3600e3).toISOString();
+  const base = { priority: 'AMBER', location: 'Unit 4, Retro Park', incident_type: 'Alarm activation', retrospective: true, resources: [officer.id], created_at: received, on_scene_at: arrived, completed_at: cleared };
+
+  assert.equal((await call('POST', '/api/jobs', { ...base, reason: 'lost signal' }, danT)).status, 403, 'only control and admins');
+  assert.equal((await call('POST', '/api/jobs', base, dispT)).status, 400, 'a reason is required');
+  assert.equal((await call('POST', '/api/jobs', { ...base, on_scene_at: new Date(Date.now() - 4 * 3600e3).toISOString(), reason: 'lost signal' }, dispT)).status, 400, 'arrival before the call came in');
+  assert.equal((await call('POST', '/api/jobs', { ...base, on_scene_at: new Date(Date.now() - 1 * 3600e3).toISOString(), reason: 'lost signal' }, dispT)).status, 400, 'arrival after clear');
+  assert.equal((await call('POST', '/api/jobs', { ...base, completed_at: new Date(Date.now() + 3600e3).toISOString(), reason: 'lost signal' }, dispT)).status, 400, 'clear in the future');
+
+  const jobsBefore = app.db.jobs.length;
+  const r = await call('POST', '/api/jobs', { ...base, reason: 'Officer lost signal on site' }, dispT);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(app.db.jobs.length, jobsBefore + 1);
+  assert.equal(r.body.status, 'COMPLETED');
+  assert.equal(r.body.retrospective, true);
+  assert.equal(r.body.created_at, received);
+  assert.equal(r.body.dispatched_at, received, 'dispatched defaults to received when officers are named');
+  assert.equal(r.body.on_scene_at, arrived);
+  assert.equal(r.body.completed_at, cleared);
+  assert.ok(r.body.resources.some((x) => x.personnel === officer.name && x.acknowledged));
+  assert.ok(r.body.resolution_report_html, 'report kept on the job');
+  assert.equal(r.body.time_edits[0].reason, 'Officer lost signal on site');
+  assert.ok(app.db.audit_logs.some((e) => e.type === 'job.created' && e.data.job_id === r.body.id && e.data.retrospective));
+});
+
+test('control can add photos to a closed job; photos open with the token in the URL', async () => {
+  const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
+  await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'COMPLETED' }, dispT);
+  const media = await call('POST', `/api/jobs/${job.body.id}/media`, { mimetype: 'image/png', data: tinyPngBase64 }, dispT);
+  assert.equal(media.status, 201, JSON.stringify(media.body));
+  const img = await fetch(`${BASE}${media.body.url}?token=${encodeURIComponent(dispT)}`);
+  assert.equal(img.status, 200, 'an <img> tag can load it with ?token=');
+  assert.equal(img.headers.get('content-type'), 'image/png');
+  assert.equal((await fetch(`${BASE}${media.body.url}`)).status, 401);
+  const after = app.db.jobs.find((x) => x.id === job.body.id);
+  assert.match(after.resolution_report_html, new RegExp(media.body.id), 'report rebuilt with the new photo');
+});
+
 /* ---------------- GuardM8 integration ---------------- */
 test('GuardM8 can push a job with a shared secret, and retries are idempotent', async () => {
   process.env.GUARDM8_SECRET = 'test-guardm8-secret';

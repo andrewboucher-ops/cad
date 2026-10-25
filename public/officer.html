@@ -305,7 +305,10 @@
 </div>
 
 <div id="modalHost"></div>
-<input type="file" id="photoInput" accept="image/*" capture="environment" class="hide">
+<!-- No capture attribute: with it Android opens the camera only, and an
+     officer can't pick a photo they already took from the gallery. Without
+     it both iOS and Android offer camera or gallery. -->
+<input type="file" id="photoInput" accept="image/*" multiple class="hide">
 
 <script src="/app.js"></script>
 <script src="/nav.js"></script>
@@ -887,6 +890,7 @@ function paintJob() {
       <button class="btn" id="jKeys">Keys</button>
     </div>
     ${checklist.length ? `<label style="margin-top:10px">Checklist</label><div id="checklistHost"></div>` : ''}
+    ${(job.media || []).some((m) => !m.checklist_item_id) ? `<label style="margin-top:10px">Photos</label><div class="ci-photos">${photoThumbs(job.media.filter((m) => !m.checklist_item_id))}</div>` : ''}
     <div class="btn-row" style="margin-top:10px"><button class="btn" id="jAddPhoto">Add photo</button></div>`;
 
   if (checklist.length) {
@@ -897,7 +901,7 @@ function paintJob() {
           <div class="ci-title">${esc(item.title)}</div>
           ${item.instructions ? `<div class="ci-instr">${esc(item.instructions)}</div>` : ''}
           <textarea rows="1" placeholder="Notes" data-note="${item.id}">${esc(item.notes || '')}</textarea>
-          <div class="ci-photos">${(job.media || []).filter((m) => m.checklist_item_id === item.id).map((m) => `<img src="${m.url}" alt="">`).join('')}</div>
+          <div class="ci-photos">${photoThumbs((job.media || []).filter((m) => m.checklist_item_id === item.id))}</div>
           <div class="btn-row" style="margin-top:6px"><button class="btn" style="padding:2px 8px;font-size:11px" data-photofor="${item.id}">Photo</button></div>
         </div>
       </div>`).join('');
@@ -998,6 +1002,7 @@ function paintVisit() {
     <div id="checkpointHost"></div>
     <div class="btn-row" style="margin-top:8px"><button class="btn" id="vScan">Scan checkpoint</button></div>` : ''}
     ${checklist.length ? `<label style="margin-top:10px">Checklist</label><div id="visitChecklistHost"></div>` : ''}
+    ${(visit.media || []).some((m) => !m.checklist_item_id) ? `<label style="margin-top:10px">Photos</label><div class="ci-photos">${photoThumbs(visit.media.filter((m) => !m.checklist_item_id))}</div>` : ''}
     <div class="btn-row" style="margin-top:10px"><button class="btn" id="vAddPhoto">Add photo</button></div>`;
 
   if ((visit.waypoints || []).length) {
@@ -1024,7 +1029,7 @@ function paintVisit() {
           <div class="ci-title">${esc(item.title)}</div>
           ${item.instructions ? `<div class="ci-instr">${esc(item.instructions)}</div>` : ''}
           <textarea rows="1" placeholder="Notes" data-vnote="${item.id}">${esc(item.notes || '')}</textarea>
-          <div class="ci-photos">${(visit.media || []).filter((m) => m.checklist_item_id === item.id).map((m) => `<img src="${m.url}" alt="">`).join('')}</div>
+          <div class="ci-photos">${photoThumbs((visit.media || []).filter((m) => m.checklist_item_id === item.id))}</div>
           <div class="btn-row" style="margin-top:6px"><button class="btn" style="padding:2px 8px;font-size:11px" data-vphotofor="${item.id}">Photo</button></div>
         </div>
       </div>`).join('');
@@ -1147,29 +1152,57 @@ async function submitScan(rawCode) {
   } catch (e) { alert(e.message); }
 }
 
+/* Photo URLs need the session token in the query string: an <img> can't
+ * send the Authorization header, so without it every thumbnail 401s and
+ * an uploaded photo looks like it never arrived. */
+function photoThumbs(list) {
+  const tok = encodeURIComponent(CCCS.getSession().token);
+  return list.map((m) => `<a href="${m.url}?token=${tok}" target="_blank" rel="noopener"><img src="${m.url}?token=${tok}" alt="" loading="lazy"></a>`).join('');
+}
+/** Phone photos are 3-12MB; shrunk on the phone to a 1600px JPEG so they
+ * fit the request limit (and any proxy in front of it) and go up quickly
+ * on a weak signal. Falls back to the original file if this browser can't
+ * decode it (e.g. HEIC on some Android browsers). */
+async function photoPayload(file) {
+  try { return { mimetype: 'image/jpeg', data: await CCCSForms.downscale(file, 1600, 0.8) }; }
+  catch {
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) throw new Error(`Can't read that photo (${file.type || 'unknown type'}). Try a JPEG, or set the camera to "Most compatible".`);
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    return { mimetype: file.type, data };
+  }
+}
 el('#photoInput').onchange = async () => {
-  const file = el('#photoInput').files[0];
+  const files = [...el('#photoInput').files];
   el('#photoInput').value = '';
-  const target = pendingPhotoKind === 'visit' ? visit : job;
-  if (!file || !target) return;
-  const mimetype = file.type;
-  const data = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+  const kind = pendingPhotoKind, target = kind === 'visit' ? visit : job, itemId = pendingPhotoItemId;
+  if (!files.length || !target) return;
+  const path = kind === 'visit' ? `/api/site-visits/${target.id}/media` : `/api/jobs/${target.id}/media`;
+  let sent = 0;
+  for (const file of files) {
+    toast(files.length > 1 ? `Uploading photo ${sent + 1} of ${files.length}…` : 'Uploading photo…');
+    try {
+      await api('POST', path, { ...(await photoPayload(file)), checklist_item_id: itemId || undefined });
+      sent++;
+    } catch (e) {
+      alert(navigator.onLine === false ? 'No signal, so the photo was not sent. Add it again from the gallery once you have signal.' : `Photo not added: ${e.message}`);
+      break;
+    }
+  }
+  if (sent) toast(sent === 1 ? 'Photo added ✓' : `${sent} photos added ✓`);
   try {
-    if (pendingPhotoKind === 'visit') {
-      await api('POST', `/api/site-visits/${visit.id}/media`, { mimetype, data, checklist_item_id: pendingPhotoItemId || undefined });
-      visit = await api('GET', '/api/site-visits').then((visits) => visits.find((v) => v.id === visit.id) || visit);
+    if (kind === 'visit') {
+      visit = await api('GET', '/api/site-visits').then((visits) => visits.find((v) => v.id === target.id) || visit);
       paintVisit();
     } else {
-      await api('POST', `/api/jobs/${job.id}/media`, { mimetype, data, checklist_item_id: pendingPhotoItemId || undefined });
-      job = await api('GET', `/api/jobs`).then((jobs) => jobs.find((j) => j.id === job.id) || job);
+      job = await api('GET', `/api/jobs`).then((jobs) => jobs.find((j) => j.id === target.id) || job);
       paintJob();
     }
-  } catch (e) { alert(e.message); }
+  } catch { /* the photos are saved; the list refreshes on the next update */ }
 };
 
 function freshFix(timeoutMs = 2000) {

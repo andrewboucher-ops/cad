@@ -241,7 +241,7 @@ const CCCSForms = (() => {
       case 'severity': return `${label}<select data-ff="${f.id}"><option value="">— choose —</option>${SEVERITIES.map((o) => `<option>${esc(o)}</option>`).join('')}</select>`;
       case 'checkbox': return `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input data-ff="${f.id}" type="checkbox" style="width:20px;height:20px">${esc(f.label)}${req}</label>`;
       case 'signature': return `${label}<div data-ff-pad="${f.id}"></div><input data-ff-signer="${f.id}" placeholder="Name of person signing" style="margin-top:6px">`;
-      case 'photo': return `${label}<div style="display:flex;gap:8px;align-items:center"><button type="button" class="btn" data-ff-photobtn="${f.id}">Take / choose photo</button><span class="dim" data-ff-photostatus="${f.id}"></span></div><input type="file" accept="image/*" capture="environment" class="hide" data-ff-photo="${f.id}">`;
+      case 'photo': return `${label}<div style="display:flex;gap:8px;align-items:center"><button type="button" class="btn" data-ff-photobtn="${f.id}">Take / choose photo</button><span class="dim" data-ff-photostatus="${f.id}"></span></div><input type="file" accept="image/*" class="hide" data-ff-photo="${f.id}">`;
       default: return `${label}<input data-ff="${f.id}" autocomplete="off">`;
     }
   }
