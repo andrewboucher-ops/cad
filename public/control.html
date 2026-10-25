@@ -244,7 +244,7 @@ function changedJobTimes(j) {
 /** Photos added from the control room — the PC's files, or ones an officer
  * sent in some other way. Shrunk to 1600px JPEG before upload, same as the
  * officer app. */
-async function uploadJobPhotos(j, files, status) {
+async function uploadJobPhotos(j, files, status, checklistItemId) {
   let sent = 0;
   for (const f of files) {
     status.textContent = `Uploading ${sent + 1} of ${files.length}…`;
@@ -252,7 +252,7 @@ async function uploadJobPhotos(j, files, status) {
       let payload;
       try { payload = { mimetype: 'image/jpeg', data: await CCCSForms.downscale(f, 1600, 0.8) }; }
       catch { throw new Error(`can't read ${f.name} — use a JPEG or PNG`); }
-      await api('POST', `/api/jobs/${j.id}/media`, payload);
+      await api('POST', `/api/jobs/${j.id}/media`, { ...payload, checklist_item_id: checklistItemId || undefined });
       sent++;
     } catch (e) { status.textContent = ''; showErr(new Error(`Photo not added: ${e.message}`)); break; }
   }
@@ -311,6 +311,7 @@ const state = {
   mode: null,              // non-selection Detail modes: newJob, newVisit, assign, message, notify, callsigns, report
   modeArg: null,
   dispFilter: 'attention',
+  incident_types: ['Alarm activation'],
 };
 const CLOSED_JOB = ['COMPLETED', 'CANCELLED'];
 const CLOSED_VISIT = ['COMPLETED', 'CANCELLED', 'MISSED'];
@@ -828,6 +829,18 @@ function renderJob(body) {
         <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="jResendGo">Send report</button><span class="dim" id="jResendStatus" style="align-self:center;font-size:12px"></span></div>
       </div>
     </div>` : ''}
+    <div class="dsec"><div class="t">Checklist${active ? '' : ' — can be filled in after the visit'}</div>
+      ${(j.checklist || []).map((item) => `<div style="border-top:1px solid var(--line);padding:6px 0">
+        <label style="display:flex;gap:6px;align-items:flex-start;text-transform:none;letter-spacing:0;margin:0;font-size:13px">
+          <input type="checkbox" data-jcheck="${item.id}" ${item.status === 'COMPLETE' ? 'checked' : ''}>
+          <span style="flex:1">${esc(item.title)}${item.completed_by ? ` <span class="dim" style="font-size:11px">· ${esc(item.completed_by)}${item.completed_at ? ` ${new Date(item.completed_at).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : ''}</span>` : ''}</span>
+        </label>
+        <div style="display:flex;gap:6px;margin-top:4px"><input data-jchecknote="${item.id}" value="${esc(item.notes || '')}" placeholder="Notes" style="flex:1">
+          <label class="btn" style="margin:0;cursor:pointer;padding:2px 8px;font-size:11px">Photo<input type="file" accept="image/*" multiple hidden data-jcheckphoto="${item.id}"></label></div>
+        ${(j.media || []).some((m) => m.checklist_item_id === item.id) ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">${j.media.filter((m) => m.checklist_item_id === item.id).map((m) => `<a href="${m.url}?token=${mediaTok()}" target="_blank" rel="noopener"><img src="${m.url}?token=${mediaTok()}" alt="" loading="lazy" style="width:40px;height:40px;object-fit:cover;border-radius:4px;border:1px solid var(--line)"></a>`).join('')}</div>` : ''}
+      </div>`).join('') || '<p class="dim" style="margin:0">No checklist.</p>'}
+      <div class="btn-row" style="margin-top:6px"><button class="btn" id="jCheckRefresh" title="Replace this job's checklist with the site's checklist as it is now">Use the site's current checklist</button><span class="dim" id="jCheckStatus" style="align-self:center;font-size:12px"></span></div>
+    </div>
     <div class="dsec"><div class="t">Photos</div>
       ${(j.media || []).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${j.media.map((m) => `<a href="${m.url}?token=${mediaTok()}" target="_blank" rel="noopener" title="${esc(m.taken_by || '')} · ${m.taken_at ? new Date(m.taken_at).toLocaleString('en-GB') : ''}"><img src="${m.url}?token=${mediaTok()}" alt="" loading="lazy" style="width:64px;height:64px;object-fit:cover;border-radius:5px;border:1px solid var(--line)"></a>`).join('')}</div>` : '<p class="dim" style="margin:0">No photos.</p>'}
       <div class="btn-row" style="margin-top:6px"><label class="btn" style="margin:0;cursor:pointer">Add photos<input type="file" id="jPhotoFile" accept="image/*" multiple hidden></label><span class="dim" id="jPhotoStatus" style="align-self:center;font-size:12px"></span></div>
@@ -864,6 +877,18 @@ function renderJob(body) {
     el('#jResendOpen').onclick = () => { el('#jResendBox').classList.toggle('hide'); el('#jResendTo').focus(); };
     el('#jResendGo').onclick = () => resendReport(j, el('#jResendTo'), el('#jResendGo'), el('#jResendStatus'));
   }
+  els('[data-jcheck]', body).forEach((cb) => (cb.onchange = async () => {
+    try { upsert(state.jobs, await api('PATCH', `/api/jobs/${j.id}/checklist/${cb.dataset.jcheck}`, { status: cb.checked ? 'COMPLETE' : 'PENDING' })); renderDetail({ force: true }); }
+    catch (e) { cb.checked = !cb.checked; showErr(e); }
+  }));
+  els('[data-jchecknote]', body).forEach((input) => (input.onchange = async () => {
+    try { upsert(state.jobs, await api('PATCH', `/api/jobs/${j.id}/checklist/${input.dataset.jchecknote}`, { notes: input.value })); el('#jCheckStatus').textContent = 'Note saved ✓'; }
+    catch (e) { showErr(e); }
+  }));
+  els('[data-jcheckphoto]', body).forEach((input) => (input.onchange = (e) => uploadJobPhotos(j, [...e.target.files], el('#jCheckStatus'), input.dataset.jcheckphoto)));
+  armed(el('#jCheckRefresh'), 'Confirm: replace checklist', async () => {
+    try { upsert(state.jobs, await api('POST', `/api/jobs/${j.id}/checklist/refresh`)); renderDetail({ force: true }); } catch (e) { showErr(e); }
+  });
   el('#jPhotoFile').onchange = (e) => uploadJobPhotos(j, [...e.target.files], el('#jPhotoStatus'));
   if (el('#jTimesOpen')) el('#jTimesOpen').onclick = () => { timesOpenFor = j.id; renderDetail({ force: true }); };
   if (el('#jTimesClose')) el('#jTimesClose').onclick = () => { timesOpenFor = null; renderDetail({ force: true }); };
@@ -1124,8 +1149,12 @@ function renderReport(body) {
 function renderNewJob(body) {
   body.innerHTML = `
     <label style="margin-top:0">Incident type</label>
-    <input id="nType" list="incTypes" value="Alarm activation">
-    <datalist id="incTypes"><option>Alarm activation</option><option>Intruder on site</option><option>Keyholding response</option><option>Lock and unlock</option><option>Fire alarm</option><option>Vandalism</option><option>Trespass</option><option>Welfare check</option></datalist>
+    <input id="nType" list="incTypes" value="${esc(state.incident_types[0] || '')}">
+    <datalist id="incTypes">${state.incident_types.map((t) => `<option>${esc(t)}</option>`).join('')}</datalist>
+    ${['SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role) ? `<div style="font-size:12px;margin-top:2px"><a href="javascript:void(0)" id="nTypesEdit">Edit the incident type list</a></div>
+    <div id="nTypesBox" class="hide" style="margin-top:4px"><label style="font-size:11px">One type per line — these are the suggestions; any other type can still be typed in</label>
+      <textarea id="nTypesList" rows="8">${esc(state.incident_types.join('\n'))}</textarea>
+      <div class="btn-row" style="margin-top:4px"><button type="button" class="btn" id="nTypesSave">Save list</button></div></div>` : ''}
     <label>Priority</label>
     <select id="nPri"><option>RED</option><option selected>AMBER</option><option>GREEN</option><option>ROUTINE</option></select>
     <label>Site under contract</label>
@@ -1162,6 +1191,16 @@ function renderNewJob(body) {
     <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="nGo">Create job</button><button class="btn" id="nBack">Cancel</button></div>
     <p class="err" id="detailErr"></p>`;
   els('#nRes .chip, #nRetroWho .chip').forEach((c) => (c.onclick = () => c.classList.toggle('on')));
+  if (el('#nTypesEdit')) {
+    el('#nTypesEdit').onclick = () => el('#nTypesBox').classList.toggle('hide');
+    el('#nTypesSave').onclick = async () => {
+      try {
+        state.incident_types = (await api('PUT', '/api/settings/incident-types', { types: el('#nTypesList').value })).types;
+        el('#incTypes').innerHTML = state.incident_types.map((t) => `<option>${esc(t)}</option>`).join('');
+        el('#nTypesBox').classList.add('hide');
+      } catch (e) { showErr(e); }
+    };
+  }
   el('#nRetro').onchange = () => {
     const retro = el('#nRetro').checked;
     el('#nRetroPanel').classList.toggle('hide', !retro);
@@ -1468,6 +1507,7 @@ async function boot() {
   // Already scoped to what this login may read (canRead()) — a RESTRICTED
   // report without a grant is simply absent, same as everywhere else.
   state.reports = await api('GET', '/api/form-submissions?status=OPEN&limit=200').catch(() => []);
+  state.incident_types = await api('GET', '/api/settings/incident-types').then((r) => r.types).catch(() => state.incident_types);
   // The map loads from a CDN. If that fails the console must still show
   // emergencies, welfare alarms and the dispatch list — a map outage must
   // never blank the screen that tells control someone needs help.
