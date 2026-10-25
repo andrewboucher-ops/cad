@@ -1307,6 +1307,30 @@ function normalizeUiPrefs(p) {
 // straight through for every role's own publicUser() view.
 const publicUser = (u) => ({ id: u.id, username: u.username, role: u.role, display_name: u.display_name, personnel_id: u.personnel_id, mdt_id: u.mdt_id, client_id: u.client_id || null, branch_id: u.branch_id || null, site_ids: Array.isArray(u.site_ids) ? u.site_ids : null, email: u.email || null, ui_prefs: normalizeUiPrefs(u.ui_prefs), password_set_at: u.password_set_at || null, last_login_at: u.last_login_at || null });
 
+/** Every way of signing in goes through here, so Admin → Users' "Last
+ * login" can't miss one. Microsoft sign-in used to log the event without
+ * stamping last_login_at, which left everyone who signs in with their work
+ * account showing "Never". */
+function recordLogin(user, summary) {
+  user.last_login_at = new Date().toISOString();
+  logEvent('auth.login', summary, { user_id: user.id });
+}
+/** One-off repair for accounts that signed in before every path stamped
+ * last_login_at: take the newest auth.login row still in the audit log.
+ * Only fills a blank, so it never moves a real stamp backwards. */
+function backfillLastLogins() {
+  const latest = new Map();
+  for (const ev of db.audit_logs) {
+    const id = ev.type === 'auth.login' && ev.data && ev.data.user_id;
+    if (id && (!latest.has(id) || ev.at > latest.get(id))) latest.set(id, ev.at);
+  }
+  let filled = 0;
+  for (const u of db.users) {
+    if (!u.last_login_at && latest.has(u.id)) { u.last_login_at = latest.get(u.id); filled++; }
+  }
+  return filled;
+}
+
 route('POST', '/api/auth/login', null, ({ body }) => {
   const username = String(body.username || '').toLowerCase();
   const lockedUntil = loginLockedUntil(username);
@@ -1323,8 +1347,7 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   clearLoginFailures(username);
   const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
   const token = sign({ sub: user.id, role: user.role, exp: Date.now() + ttl });
-  user.last_login_at = new Date().toISOString();
-  logEvent('auth.login', `${user.username} signed in (${user.role})`, { user_id: user.id });
+  recordLogin(user, `${user.username} signed in (${user.role})`);
   return { token, user: publicUser(user) };
 });
 /** A "create your password" link — reuses the existing sign()/verifyToken()
@@ -1440,7 +1463,7 @@ route('GET', '/api/auth/microsoft/callback', null, async ({ query }) => {
   const token = sign({ sub: localUser.id, role: localUser.role, exp: Date.now() + TOKEN_TTL_MS });
   const oneTime = crypto.randomBytes(16).toString('hex');
   ssoExchange.set(oneTime, { token, user: publicUser(localUser), created: Date.now() });
-  logEvent('auth.login', `${localUser.username} signed in via Microsoft (${localUser.role})`, { user_id: localUser.id });
+  recordLogin(localUser, `${localUser.username} signed in via Microsoft (${localUser.role})`);
   return { __status: 302, __headers: { location: `/index.html?sso=${oneTime}` }, __body: '' };
 });
 
@@ -6323,6 +6346,8 @@ function start() {
   const restored = store.load();
   if (restored) console.log(`[cccs] state restored from ${store.file}`);
   else { seed(); store.flushNow(); }
+  const loginsFilled = backfillLastLogins();
+  if (loginsFilled) { console.log(`[cccs] last login filled in for ${loginsFilled} account(s) from the audit log`); store.flushNow(); }
   // Additive and idempotent: installs the standard forms only on a database
   // that has none, so an existing deployment gets them on first boot of this
   // version and an admin's own edits are never overwritten.
@@ -6394,4 +6419,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, RETENTION, hashPassword, verifyPassword, sign, PORT };
