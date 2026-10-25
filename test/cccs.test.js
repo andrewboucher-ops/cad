@@ -537,6 +537,75 @@ test('GuardM8 and AURA using the same external reference never collide with each
   assert.notEqual(guardm8Body.id, auraBody.id, 'different sources with the same external_ref still get separate jobs');
 });
 
+/* ---------------- DEMS integration ---------------- */
+test('DEMS needs its shared secret', async () => {
+  process.env.DEMS_SECRET = 'test-dems-secret';
+  const bad = await fetch(BASE + '/api/integrations/dems/jobs/INC-1', { headers: { 'x-dems-secret': 'wrong' } });
+  assert.equal(bad.status, 401);
+  delete process.env.DEMS_SECRET;
+  const unset = await fetch(BASE + '/api/integrations/dems/jobs/INC-1', { headers: { 'x-dems-secret': '' } });
+  assert.equal(unset.status, 401, 'no secret configured means no access');
+});
+
+test('DEMS looks up a job, finds the jobs an officer attended, and links a case', async () => {
+  process.env.DEMS_SECRET = 'test-dems-secret';
+  const dems = async (method, path, body) => {
+    const res = await fetch(BASE + path, {
+      method, headers: { 'content-type': 'application/json', 'x-dems-secret': 'test-dems-secret' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  const job = await call('POST', '/api/jobs', { priority: 'AMBER', location: 'Dock gate', incident_type: 'ASSAULT' }, dispT);
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: [String(danId)] }, dispT);
+
+  const found = await dems('GET', `/api/integrations/dems/jobs/${encodeURIComponent(job.body.reference.toLowerCase())}`);
+  assert.equal(found.status, 200);
+  assert.equal(found.body.incident_type, 'ASSAULT');
+  assert.ok(found.body.resources.some((r) => r.personnel === 'Dan Whitfield'));
+  assert.equal(found.body.caller, undefined, 'caller details are not shared');
+  assert.equal((await dems('GET', '/api/integrations/dems/jobs/INC-0000-NOPE')).status, 404);
+
+  const from = new Date(Date.now() - 3600e3).toISOString(), to = new Date().toISOString();
+  const mine = await dems('GET', `/api/integrations/dems/jobs?person=dan%20whitfield&from=${from}&to=${to}`);
+  assert.ok(mine.body.jobs.some((j) => j.reference === job.body.reference));
+  const old = await dems('GET', `/api/integrations/dems/jobs?person=Dan%20Whitfield&from=2000-01-01T00:00:00Z&to=2000-01-02T00:00:00Z`);
+  assert.equal(old.body.jobs.length, 0, 'jobs outside the window are left out');
+  const nobody = await dems('GET', `/api/integrations/dems/jobs?person=No%20One&from=${from}&to=${to}`);
+  assert.equal(nobody.body.person, null);
+
+  const linked = await dems('POST', '/api/integrations/dems/links',
+    { job_ref: job.body.reference, case_ref: 'EV-2026-0001', case_url: 'https://dems.example/cases/1', by: 'Andy' });
+  assert.equal(linked.status, 200);
+  assert.deepEqual(linked.body.evidence_links.map((l) => l.case_ref), ['EV-2026-0001']);
+  const again = await dems('POST', '/api/integrations/dems/links',
+    { job_ref: job.body.reference, case_ref: 'EV-2026-0001', case_url: 'https://dems.example/cases/1' });
+  assert.equal(again.body.evidence_links.length, 1, 'linking twice does not duplicate');
+  assert.equal((await dems('POST', '/api/integrations/dems/links',
+    { job_ref: job.body.reference, case_ref: 'EV-X', case_url: 'javascript:alert(1)' })).status, 400);
+  const shown = (await call('GET', '/api/jobs', undefined, dispT)).body.find((x) => x.id === job.body.id);
+  assert.equal(shown.evidence_links[0].case_url, 'https://dems.example/cases/1', 'control sees the link');
+  const unlinked = await dems('POST', '/api/integrations/dems/links',
+    { job_ref: job.body.reference, case_ref: 'EV-2026-0001', linked: false });
+  assert.equal(unlinked.body.evidence_links.length, 0);
+  delete process.env.DEMS_SECRET;
+});
+
+test('DEMS finds who was wearing a body camera at a given time', async () => {
+  process.env.DEMS_SECRET = 'test-dems-secret';
+  const hdr = { 'x-dems-secret': 'test-dems-secret' };
+  const cam = await call('POST', '/api/assets', { category: 'DEVICE', description: 'Body camera', tag: 'BWV-7' }, adminT);
+  const before = new Date(Date.now() - 1000).toISOString();
+  await call('POST', `/api/assets/${cam.body.id}/checkout`, { personnel_id: ellieId }, adminT);
+  const now = new Date(Date.now() + 1000).toISOString();
+  const worn = await (await fetch(BASE + `/api/integrations/dems/wearer?tag=bwv-7&at=${now}`, { headers: hdr })).json();
+  assert.equal(worn.wearer.name, 'Ellie Marsh');
+  const earlier = await (await fetch(BASE + `/api/integrations/dems/wearer?tag=BWV-7&at=${before}`, { headers: hdr })).json();
+  assert.equal(earlier.wearer, null, 'not checked out yet at that time');
+  assert.equal((await fetch(BASE + '/api/integrations/dems/wearer?tag=NOPE&at=' + now, { headers: hdr })).status, 404);
+  delete process.env.DEMS_SECRET;
+});
+
 /* ---------------- emergency ---------------- */
 test('a field user raises an emergency, control is alerted and can acknowledge and reset it', async () => {
   const officer = await wsClient(danT), control = await wsClient(dispT);

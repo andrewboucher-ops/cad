@@ -71,6 +71,7 @@ These are deliberately weak demo credentials for a POC. Replace them before the 
 | `RETAIN_JOBS_DAYS` | `730` | closed jobs |
 | `GUARDM8_SECRET` | — | shared secret for GuardM8's `POST /api/integrations/guardm8/jobs` |
 | `WORKSTATION_SECRET` | — | shared secret for control room PCs' `POST /api/integrations/workstation/clock-in` |
+| `DEMS_SECRET` | — | shared secret for the evidence store's `/api/integrations/dems/*` routes |
 | `AMI_HOST` / `AMI_PORT` / `AMI_USER` / `AMI_SECRET` | — / `5038` | phone system AMI login for the click-to-dial relay; unset disables it |
 | `AMI_CONTEXT` / `AMI_LOCAL_EXTENSIONS` | `from-internal` / — | dialplan context, and extensions (comma-separated) that ring as `Local/ext@context` instead of `PJSIP/ext` |
 | `DIAL_ALLOW` / `DIAL_MAX_PER_HOUR` | any UK number except premium rate / `200` | numbers the relay may dial (a regex), and calls per workstation per hour |
@@ -947,6 +948,23 @@ guarding/alarm-receiving product) push an alarm straight in as a dispatchable
 job, authenticated with a shared secret (`GUARDM8_SECRET`) rather than a user
 session. `external_ref` lets GuardM8 retry a send without creating a
 duplicate job.
+
+## DEMS (evidence) integration
+
+The Echelon evidence store links its cases to CCCS incidents. With `DEMS_SECRET`
+set (the same value as `DEMS_CCCS_SECRET` on the DEMS server), it can:
+
+- `GET /api/integrations/dems/jobs/:reference` look up a job: type, priority,
+  status, location, key timestamps and who attended. Caller details are not shared.
+- `GET /api/integrations/dems/jobs?person=&from=&to=` list the jobs a person
+  (by name or employee number) was assigned to, directly or through their call
+  sign, whose lifetime overlaps the window. DEMS uses this to suggest which
+  incident a batch of body-worn footage belongs to.
+- `GET /api/integrations/dems/wearer?tag=&at=` say who had a body camera (a
+  `DEVICE` asset, by tag) checked out at a moment.
+- `POST /api/integrations/dems/links` record or remove a link between a DEMS
+  case and a job. Linked cases show under **Evidence** on the job in the control
+  room, as links into DEMS. Footage never comes into CCCS.
 
 ## Control room clock-in
 

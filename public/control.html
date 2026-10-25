@@ -712,6 +712,9 @@ function renderJob(body) {
       <dt>Caller</dt><dd>${esc(j.caller || '—')}</dd>
       <dt>Detail</dt><dd>${esc(j.description || '—')}</dd>
       ${j.keyholder ? `<dt>Keyholder</dt><dd>${esc(j.keyholder)}</dd>` : ''}
+      ${(j.evidence_links || []).length ? `<dt>Evidence</dt><dd>${j.evidence_links.map((l) => /^https?:\/\//i.test(l.case_url || '')
+        ? `<div><a href="${esc(l.case_url)}" target="_blank" rel="noopener noreferrer">${esc(l.case_ref)}</a> <span class="dim">in DEMS</span></div>`
+        : `<div>${esc(l.case_ref)} <span class="dim">in DEMS</span></div>`).join('')}</dd>` : ''}
     </dl>
     <div id="jEdit" class="hide">
       <label>Incident type</label><input id="eType" value="${esc(j.incident_type)}">
