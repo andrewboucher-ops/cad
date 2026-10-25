@@ -29,6 +29,23 @@ const AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
 const FROM_NUMBER = process.env.TWILIO_FROM_NUMBER || '';
 const MESSAGING_SERVICE_SID = process.env.TWILIO_MESSAGING_SERVICE_SID || '';
 
+// Every text goes out from the alphanumeric sender ID "ECHELON", not a phone
+// number, so staff and contacts see who it is from. UK networks drop
+// unregistered alphanumeric senders, so it must be registered with Twilio
+// (UK Sender ID registration). Alphanumeric senders cannot receive replies:
+// nothing here reads inbound SMS, and every message says to contact control
+// rather than reply. Set SMS_SENDER_ID empty to send from the number or
+// Messaging Service again.
+const SENDER_ID = senderIdFrom(process.env.SMS_SENDER_ID);
+
+/** Twilio accepts 1-11 characters of A-Z, a-z, 0-9 and space, with at least
+ * one letter. Anything else falls back to the number rather than failing
+ * every send. */
+function senderIdFrom(raw) {
+  const s = raw === undefined ? 'ECHELON' : String(raw).trim();
+  return /^[A-Za-z0-9 ]{1,11}$/.test(s) && /[A-Za-z]/.test(s) ? s : '';
+}
+
 // Deliberately its own flag rather than inferring "configured therefore live".
 // Credentials present is not consent to send; an operator must opt in.
 const LIVE = process.env.SMS_LIVE === 'on';
@@ -42,7 +59,7 @@ const STATUS_CALLBACK_URL = process.env.SMS_STATUS_CALLBACK_URL || '';
 
 const API_BASE = 'https://api.twilio.com/2010-04-01';
 
-const configured = () => Boolean(ACCOUNT_SID && AUTH_TOKEN && (FROM_NUMBER || MESSAGING_SERVICE_SID));
+const configured = () => Boolean(ACCOUNT_SID && AUTH_TOKEN && (SENDER_ID || FROM_NUMBER || MESSAGING_SERVICE_SID));
 
 /** E.164 or nothing. Twilio will happily accept a local-format number and
  * interpret it against the account's own country, which is how a UK console
@@ -113,7 +130,7 @@ async function send({ to, body, label } = {}) {
 
   if (!LIVE) {
     const fakeSid = `SM${crypto.randomBytes(16).toString('hex')}`;
-    console.log(`[sms] DRY RUN (SMS_LIVE is not on) — would send to ${dest}${label ? ` (${label})` : ''}: ${text}`);
+    console.log(`[sms] DRY RUN (SMS_LIVE is not on) — would send from ${SENDER_ID || FROM_NUMBER || 'the Messaging Service'} to ${dest}${label ? ` (${label})` : ''}: ${text}`);
     return { ok: true, sid: fakeSid, status: 'dry-run', dryRun: true };
   }
 
@@ -124,9 +141,10 @@ async function send({ to, body, label } = {}) {
   const form = new URLSearchParams();
   form.set('To', dest);
   form.set('Body', text);
-  // A Messaging Service is preferable where one exists: it carries the
-  // sender pool and the opt-out handling, so replies route correctly.
-  if (MESSAGING_SERVICE_SID) form.set('MessagingServiceSid', MESSAGING_SERVICE_SID);
+  // The sender ID wins. Otherwise a Messaging Service is preferable where one
+  // exists: it carries the sender pool and the opt-out handling.
+  if (SENDER_ID) form.set('From', SENDER_ID);
+  else if (MESSAGING_SERVICE_SID) form.set('MessagingServiceSid', MESSAGING_SERVICE_SID);
   else form.set('From', FROM_NUMBER);
   if (STATUS_CALLBACK_URL) form.set('StatusCallback', STATUS_CALLBACK_URL);
 
@@ -188,5 +206,5 @@ const isTerminalStatus = (status) => ['delivered', 'undelivered', 'failed'].incl
 
 module.exports = {
   send, verifySignature, parseStatusCallback, isTerminalStatus, normalizeNumber,
-  configured, live: LIVE, STATUS_CALLBACK_URL,
+  configured, live: LIVE, STATUS_CALLBACK_URL, SENDER_ID, senderIdFrom,
 };
