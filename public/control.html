@@ -387,6 +387,7 @@ function welfareLeft(p) {
 function needsAttendance(item) {
   if (item.kind === 'job') {
     const j = item.row;
+    if (j.awaiting_close) return 'needs closing';
     if (CLOSED_JOB.includes(j.status)) return null;
     if (j.emergency_id) return 'emergency';
     if (!j.resources.length) return 'unassigned';
@@ -406,7 +407,9 @@ function needsAttendance(item) {
 function dispatchItems() {
   const dayAgo = Date.now() - 86400000;
   const all = [
-    ...state.jobs.map((row) => ({ kind: 'job', row, closed: CLOSED_JOB.includes(row.status) })),
+    // A job the officer completed stays in the open list until a controller
+    // closes it with a note.
+    ...state.jobs.map((row) => ({ kind: 'job', row, closed: CLOSED_JOB.includes(row.status) && !row.awaiting_close })),
     ...state.site_visits.map((row) => ({ kind: 'visit', row, closed: CLOSED_VISIT.includes(row.status) && row.status !== 'MISSED' })),
   ];
   const f = state.dispFilter;
@@ -795,7 +798,19 @@ function renderJob(body) {
       <textarea id="jNotes" rows="2">${esc(j.notes || '')}</textarea>
       <div class="btn-row" style="margin-top:4px"><button class="btn" id="jSaveNotes">Save notes</button></div>
     </div>
+    <div class="dsec"><div class="t">Notes log${active ? '' : ' — add notes after the job closed'}</div>
+      ${(j.note_entries || []).map((n) => `<div style="font-size:12.5px;margin-bottom:6px"><span class="dim">${new Date(n.at).toLocaleString('en-GB')} · ${esc(n.by_name || '')}${n.closing ? ' · closing note' : ''}</span><div style="white-space:pre-wrap">${esc(n.text)}</div></div>`).join('') || '<p class="dim" style="margin:0 0 6px">No notes added yet.</p>'}
+      <textarea id="jNoteNew" rows="2" placeholder="Add a note (saved with your name and the time)"></textarea>
+      <div class="btn-row" style="margin-top:4px"><button class="btn" id="jAddNote">Add note</button></div>
+    </div>
     <div class="dsec"><div class="t">Reports</div><div id="jReports"><p class="dim">Loading…</p></div></div>
+    ${j.awaiting_close ? `<div class="dsec" style="border:1px solid var(--priority, #d97706);border-radius:8px;padding:8px">
+      <div class="t">Needs closing — officer marked it completed</div>
+      <p class="dim" style="margin:0 0 6px;font-size:12.5px">A controller has to write a closing note before this job is closed.</p>
+      <textarea id="jCloseNote" rows="3" placeholder="What happened and how it was resolved"></textarea>
+      <div class="btn-row" style="margin-top:6px"><button class="btn ok" id="jCloseBtn">Close job</button></div>
+    </div>` : ''}
+    ${j.closed_at ? `<p class="dim" style="font-size:12px;margin:4px 0">Closed by ${esc(j.closed_by_name || '')} · ${new Date(j.closed_at).toLocaleString('en-GB')}</p>` : ''}
     <div class="dsec"><div class="t">Photos</div>
       ${(j.media || []).length ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${j.media.map((m) => `<a href="${m.url}?token=${mediaTok()}" target="_blank" rel="noopener" title="${esc(m.taken_by || '')} · ${m.taken_at ? new Date(m.taken_at).toLocaleString('en-GB') : ''}"><img src="${m.url}?token=${mediaTok()}" alt="" loading="lazy" style="width:64px;height:64px;object-fit:cover;border-radius:5px;border:1px solid var(--line)"></a>`).join('')}</div>` : '<p class="dim" style="margin:0">No photos.</p>'}
       <div class="btn-row" style="margin-top:6px"><label class="btn" style="margin:0;cursor:pointer">Add photos<input type="file" id="jPhotoFile" accept="image/*" multiple hidden></label><span class="dim" id="jPhotoStatus" style="align-self:center;font-size:12px"></span></div>
@@ -807,6 +822,7 @@ function renderJob(body) {
         <div class="btn-row" style="margin-top:6px"><button class="btn" id="jTimesOpen">Edit times</button></div>`
       : `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px">${JOB_TIME_FIELDS.map(([f, label]) => `<div><label style="font-size:11px">${label}</label><input type="datetime-local" data-jtime="${f}" value="${localDT(j[f])}" max="${localDT(new Date().toISOString())}"></div>`).join('')}</div>
         <label style="font-size:11px">Reason (kept in the audit log)</label><input id="jTimesReason" placeholder="e.g. officer lost signal, times confirmed by phone">
+        ${active ? '<label style="font-size:11px">Closing note (required to mark completed)</label><textarea id="jDoneNote" rows="2" placeholder="What happened and how it was resolved"></textarea>' : ''}
         <div class="btn-row" style="margin-top:8px">
           <button class="btn primary" id="jTimesSave">Save times</button>
           ${active ? '<button class="btn ok" id="jDone">Mark completed</button><button class="btn danger" id="jCancel">Cancel job</button>' : '<button class="btn" id="jTimesClose">Close</button>'}
@@ -816,7 +832,17 @@ function renderJob(body) {
     <p class="err" id="detailErr"></p>`;
   paintReports(el('#jReports'), 'JOB', j.id);
   el('#jSaveNotes').onclick = () => api('PATCH', `/api/jobs/${j.id}`, { notes: el('#jNotes').value }).catch(showErr);
+  el('#jAddNote').onclick = async () => {
+    const text = el('#jNoteNew').value.trim();
+    if (!text) return;
+    try { upsert(state.jobs, await api('POST', `/api/jobs/${j.id}/notes`, { text })); renderDetail({ force: true }); } catch (e) { showErr(e); }
+  };
   els('[data-contact]', body).forEach((b) => (b.onclick = () => { const p = state.personnel.find((x) => x.name === b.dataset.contact); if (p) select('p', p.id); }));
+  if (el('#jCloseBtn')) el('#jCloseBtn').onclick = async () => {
+    const note = el('#jCloseNote').value.trim();
+    if (note.length < 3) return showErr(new Error('Write a closing note first.'));
+    try { upsert(state.jobs, await api('POST', `/api/jobs/${j.id}/close`, { note })); renderDispatch(); renderDetail({ force: true }); } catch (e) { showErr(e); }
+  };
   el('#jPhotoFile').onchange = (e) => uploadJobPhotos(j, [...e.target.files], el('#jPhotoStatus'));
   if (el('#jTimesOpen')) el('#jTimesOpen').onclick = () => { timesOpenFor = j.id; renderDetail({ force: true }); };
   if (el('#jTimesClose')) el('#jTimesClose').onclick = () => { timesOpenFor = null; renderDetail({ force: true }); };
@@ -856,9 +882,11 @@ function renderJob(body) {
       const reason = el('#jTimesReason').value.trim();
       const anyTimes = receivedAt || Object.keys(stages).length;
       if (anyTimes && reason.length < 3) throw new Error('Give a reason for the times you entered.');
+      const closingNote = el('#jDoneNote').value.trim();
+      if (closingNote.length < 3) throw new Error('Write a closing note before marking the job completed.');
       if (receivedAt) await api('PATCH', `/api/jobs/${j.id}/times`, { created_at: receivedAt, reason });
       await api('PATCH', `/api/jobs/${j.id}`, {
-        status: 'COMPLETED', ...stages, ...(reason ? { reason } : {}),
+        status: 'COMPLETED', ...stages, ...(reason ? { reason } : {}), closing_note: closingNote,
         completed_at: stages.completed_at || j.completed_at || new Date().toISOString(),
       });
     } catch (e) { showErr(e); }
@@ -1105,6 +1133,7 @@ function renderNewJob(body) {
         ${[['created_at', 'Received *'], ['dispatched_at', 'Dispatched'], ['on_scene_at', 'Arrived on scene'], ['completed_at', 'Cleared *']].map(([f, label]) => `<div><label style="font-size:11px">${label}</label><input type="datetime-local" data-ntime="${f}" max="${localDT(new Date().toISOString())}"></div>`).join('')}
       </div>
       <label>Reason (kept in the audit log) *</label><input id="nRetroReason" placeholder="e.g. officer lost signal on site">
+      <label>Closing note (closes the job now; leave blank to close it later)</label><textarea id="nRetroClose" rows="2" placeholder="What happened and how it was resolved"></textarea>
     </div>
     <div id="nDispatchNow"><label>Dispatch now (optional)</label>
     <div class="chips" id="nRes">${state.personnel.filter((p) => liveShifts().some((s) => s.personnel_id === p.id && s.clocked_in) && isAvailable(p)).map((p) => `<button type="button" class="chip" data-v="${p.id}">${esc(p.callsign || p.name)}</button>`).join('')}
@@ -1128,7 +1157,7 @@ function renderNewJob(body) {
       if (retro) {
         for (const input of els('[data-ntime]')) if (input.value) retroFields[input.dataset.ntime] = new Date(input.value).toISOString();
         if (!retroFields.created_at || !retroFields.completed_at) throw new Error('Enter at least the received and cleared times.');
-        Object.assign(retroFields, { retrospective: true, reason: el('#nRetroReason').value.trim(), resources: els('#nRetroWho .chip.on').map((c) => Number(c.dataset.v)) });
+        Object.assign(retroFields, { retrospective: true, reason: el('#nRetroReason').value.trim(), closing_note: el('#nRetroClose').value.trim() || undefined, resources: els('#nRetroWho .chip.on').map((c) => Number(c.dataset.v)) });
         if (retroFields.reason.length < 3) throw new Error('Give a reason for entering this job after the event.');
       }
       const job = await api('POST', '/api/jobs', {

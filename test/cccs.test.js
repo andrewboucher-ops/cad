@@ -463,6 +463,55 @@ test('an officer can add a photo to their own job after it was entered after the
   assert.equal(media.body.taken_by, 'Dan Whitfield');
 });
 
+test('notes can be added to a job after it closes, by control or the officer on it, each stamped', async () => {
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
+  await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'COMPLETED', closing_note: 'All secure on arrival' }, dispT);
+  const path = `/api/jobs/${job.body.id}/notes`;
+  assert.equal((await call('POST', path, { text: '  ' }, dispT)).status, 400);
+  const byControl = await call('POST', path, { text: 'Client rang back: alarm engineer booked' }, dispT);
+  assert.equal(byControl.status, 201, JSON.stringify(byControl.body));
+  const byOfficer = await call('POST', path, { text: 'Rear fence panel was loose' }, danT);
+  assert.equal(byOfficer.status, 201, JSON.stringify(byOfficer.body));
+  const notes = byOfficer.body.note_entries;
+  assert.deepEqual(notes.map((n) => n.text), ['All secure on arrival', 'Client rang back: alarm engineer booked', 'Rear fence panel was loose']);
+  assert.equal(notes[2].by_name, 'Dan Whitfield');
+  assert.ok(notes.every((n) => n.at));
+  assert.match(app.db.jobs.find((x) => x.id === job.body.id).resolution_report_html, /Rear fence panel was loose/, 'report shows added notes');
+
+  const other = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Somewhere else' }, dispT);
+  assert.equal((await call('POST', `/api/jobs/${other.body.id}/notes`, { text: 'not mine' }, danT)).status, 403, 'only the officer on the job');
+});
+
+test('a job the officer completes stays open for control until a controller closes it with a note', async () => {
+  const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
+  await call('POST', `/api/jobs/${job.body.id}/assign`, { resources: ['P101'] }, dispT);
+  const done = await call('PATCH', `/api/jobs/${job.body.id}`, { status: 'COMPLETED' }, danT);
+  assert.equal(done.body.status, 'COMPLETED');
+  assert.equal(done.body.awaiting_close, true, 'officer completing does not close it');
+  assert.equal(done.body.closed_at, undefined);
+
+  const path = `/api/jobs/${job.body.id}/close`;
+  assert.equal((await call('POST', path, { note: 'done' }, danT)).status, 403, 'officers cannot close');
+  assert.equal((await call('POST', path, {}, dispT)).status, 400, 'a closing note is required');
+  const closed = await call('POST', path, { note: 'Officer found site secure, no further action' }, dispT);
+  assert.equal(closed.status, 200, JSON.stringify(closed.body));
+  assert.equal(closed.body.awaiting_close, false);
+  assert.ok(closed.body.closed_at);
+  assert.equal(closed.body.closed_by_name, 'Controller Hale');
+  assert.ok(closed.body.note_entries.some((n) => n.closing && n.text === 'Officer found site secure, no further action'));
+  assert.equal((await call('POST', path, { note: 'again' }, dispT)).status, 409);
+
+  const open = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
+  assert.equal((await call('POST', `/api/jobs/${open.body.id}/close`, { note: 'too early' }, dispT)).status, 409, 'must be completed first');
+  const short = await call('PATCH', `/api/jobs/${open.body.id}`, { status: 'COMPLETED', closing_note: 'x' }, dispT);
+  assert.equal(short.status, 400);
+  assert.notEqual(app.db.jobs.find((x) => x.id === open.body.id).status, 'COMPLETED', 'nothing changed on a rejected close');
+  const both = await call('PATCH', `/api/jobs/${open.body.id}`, { status: 'COMPLETED', closing_note: 'Handled by radio' }, dispT);
+  assert.equal(both.body.status, 'COMPLETED');
+  assert.equal(both.body.awaiting_close, false, 'control completing with a note closes in one step');
+});
+
 /* ---------------- GuardM8 integration ---------------- */
 test('GuardM8 can push a job with a shared secret, and retries are idempotent', async () => {
   process.env.GUARDM8_SECRET = 'test-guardm8-secret';
