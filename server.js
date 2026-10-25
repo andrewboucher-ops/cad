@@ -5619,6 +5619,10 @@ route('GET', '/api/integrations/dems/jobs', null, ({ query, req }) => {
   const p = demsFindPerson(query.get('person'));
   if (!p) return { person: null, jobs: [] };
   const from = demsTime(query.get('from'), 'from'), to = demsTime(query.get('to'), 'to');
+  // Someone's attendance history is the most personal thing DEMS can read here,
+  // so each lookup is on CCCS's own record as well as DEMS's audit trail.
+  logEvent('dems.lookup', `DEMS LOOKED UP JOBS ATTENDED BY ${p.name}`,
+    { personnel_id: p.id, from: new Date(from).toISOString(), to: new Date(to).toISOString() });
   const jobs = db.jobs.filter((j) => {
     const assigned = db.job_assignments.some((a) => a.job_id === j.id
       && (a.personnel_id === p.id || (!a.personnel_id && p.callsign_id && a.callsign_id === p.callsign_id)));
