@@ -152,8 +152,18 @@ function paintActions() {
   el('#aTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
       <thead><tr><th style="width:170px">Time</th><th style="width:200px">Type</th><th>Summary</th></tr></thead>
-      <tbody>${rows.map((e) => `<tr><td class="t-col">${new Date(e.at).toLocaleString()}</td><td class="mono dim">${esc(e.type)}</td><td>${esc(e.summary)}</td></tr>`).join('')}</tbody>
+      <tbody>${rows.map((e) => `<tr${e.data && e.data.job_id ? ` class="clickable" data-evjob="${Number(e.data.job_id)}" title="Open this job"` : ''}><td class="t-col">${new Date(e.at).toLocaleString()}</td><td class="mono dim">${esc(e.type)}</td><td>${esc(e.summary)}</td></tr>`).join('')}</tbody>
     </table>` : '<p class="empty-note">No matching events.</p>';
+  // Job events open the job: a closed one in the same popup as Historical
+  // incidents, an open one straight in the control room.
+  els('#aTableWrap [data-evjob]').forEach((row) => row.addEventListener('click', async () => {
+    const id = Number(row.dataset.evjob);
+    try {
+      const j = (await api('GET', '/api/jobs')).find((x) => x.id === id);
+      if (!j) return;
+      if (['COMPLETED', 'CANCELLED'].includes(j.status)) incidentModal(j); else location.href = `/control.html?job=${id}`;
+    } catch { /* the log stays as it is */ }
+  }));
 }
 el('#aSearch').addEventListener('input', paintActions);
 el('#aType').addEventListener('change', paintActions);
