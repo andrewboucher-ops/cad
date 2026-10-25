@@ -862,7 +862,7 @@ test("amending a signed contract's rate changes future invoices but leaves the s
   assert.equal(after.body.made[0].lines[0].unit_amount, 25, 'a new invoice reads the amended, live rate');
 });
 
-test('an Alarm Response line bills the jobs attended at the site, arrived to cleared, once per contract', async () => {
+test('an Alarm Response line bills the jobs attended at the site by the hour or part thereof, once, with like lines grouped', async () => {
   let type = app.db.shift_types.find((t) => t.key === 'ALARM_RESPONSE');
   if (!type) { type = { id: 9001, key: 'ALARM_RESPONSE', name: 'Alarm Response', active: true }; app.db.shift_types.push(type); }
   const site = (await call('POST', '/api/sites', { name: 'Alarm Billing Site' }, adminT)).body;
@@ -870,6 +870,9 @@ test('an Alarm Response line bills the jobs attended at the site, arrived to cle
   const c = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: site.id, start_date: '2026-02-01', lines: [
     { description: 'Response Services', kind: 'HOURLY', rate: 45, shift_type_id: type.id },
     { description: 'Alarm Response', kind: 'HOURLY', rate: 45, shift_type_id: type.id },
+    { description: 'CCTV Monitoring', kind: 'FIXED_PERIOD', rate: 12 },
+    { description: 'CCTV Monitoring', kind: 'FIXED_PERIOD', rate: 12 },
+    { description: 'CCTV Monitoring', kind: 'FIXED_PERIOD', rate: 12 },
   ] }, adminT)).body;
   await call('POST', `/api/agreements/${c.id}/mark-signed`, { name: 'Test' }, adminT);
 
@@ -877,6 +880,9 @@ test('an Alarm Response line bills the jobs attended at the site, arrived to cle
   const done = await call('POST', '/api/jobs', { site: site.id, incident_type: 'ALARM', retrospective: true, reason: 'radio only',
     created_at: '2026-02-10T22:00:00Z', on_scene_at: '2026-02-10T22:20:00Z', completed_at: '2026-02-10T23:05:00Z', resources: [officer.id] }, adminT);
   assert.equal(done.status, 201, JSON.stringify(done.body));
+  const long = await call('POST', '/api/jobs', { site: site.id, incident_type: 'ALARM', retrospective: true, reason: 'radio only',
+    created_at: '2026-02-11T01:00:00Z', on_scene_at: '2026-02-11T01:10:00Z', completed_at: '2026-02-11T02:20:00Z', resources: [officer.id] }, adminT);
+  assert.equal(long.status, 201, JSON.stringify(long.body));
   const noArrival = await call('POST', '/api/jobs', { site: site.id, incident_type: 'ALARM', retrospective: true, reason: 'radio only',
     created_at: '2026-02-12T02:00:00Z', completed_at: '2026-02-12T03:00:00Z' }, adminT);
   assert.equal(noArrival.status, 201, JSON.stringify(noArrival.body));
@@ -887,11 +893,15 @@ test('an Alarm Response line bills the jobs attended at the site, arrived to cle
   const g = await call('POST', '/api/invoices/generate', { from: '2026-02-01', to: '2026-02-31', contract_id: c.id }, adminT);
   assert.equal(g.status, 200, JSON.stringify(g.body));
   const inv = g.body.made[0];
-  const [first, second] = inv.lines.filter((l) => l.kind === 'HOURLY');
-  assert.equal(first.quantity, 1, '22:20 to 23:05 rounds out to 22:15–23:15');
-  assert.equal(first.shifts.length, 2, 'both attendances, not the cancelled job');
-  assert.ok(first.shifts.some((x) => x.person.includes(officer.name)));
-  assert.equal(second.quantity, 0, 'the same jobs are not billed again on the second alarm response line');
-  assert.equal(second.shifts.length, 0);
-  assert.ok(inv.checks.some((x) => /no arrived or cleared time/.test(x)), JSON.stringify(inv.checks));
+  const hourly = inv.lines.filter((l) => l.kind === 'HOURLY');
+  assert.equal(hourly.length, 1, 'the two alarm response lines are one line on the invoice');
+  assert.equal(hourly[0].quantity, 3, '45 minutes bills 1 hour, 1h10 bills 2 hours, none without an arrival time');
+  assert.equal(hourly[0].shifts.length, 3, 'each attendance once, not the cancelled job');
+  assert.ok(hourly[0].shifts.some((x) => x.person.includes(officer.name)));
+  const cctv = inv.lines.filter((l) => /CCTV/.test(l.description));
+  assert.equal(cctv.length, 1, 'repeated fixed charges are one line');
+  assert.equal(cctv[0].quantity, 3);
+  assert.equal(cctv[0].amount, 36);
+  assert.ok(inv.checks.some((x) => /^INC-.* no arrived or cleared time/.test(x)), JSON.stringify(inv.checks));
+  assert.ok(!inv.checks.some((x) => /undefined/.test(x)), JSON.stringify(inv.checks));
 });

@@ -12,7 +12,9 @@
  *                                  "to check" and counts 0 until fixed
  *                   ROSTERED     — rostered length minus the unpaid break
  *                 An Alarm Response line also bills each control-room job
- *                 at the site in the period, arrived to cleared.
+ *                 at the site in the period, arrived to cleared, by the
+ *                 hour or part thereof.
+ * Like lines are grouped into one (see groupLines).
  *   FIXED_PERIOD  the amount, once per invoice
  *   ONE_OFF       the amount, on the contract's first invoice only
  * Every hourly line keeps the shifts it came from, so the invoice can be
@@ -266,18 +268,17 @@ module.exports = function registerInvoices({
   }
   /** An Alarm Response line is mostly billed from call-outs, not rota
    * shifts: a job raised in the control room (by hand, after the event,
-   * or from GuardM8) at the contract's site. Each one is charged from
-   * arrived to cleared, rounded to 15 minutes in the company's favour like
-   * clocked hours. A job is counted once per contract, so two alarm
-   * response lines on the same contract don't bill the same attendance
-   * twice — `taken` carries the ids already used by an earlier line. */
+   * or from GuardM8) at the contract's site. Response is charged by the
+   * hour or part thereof: arrived to cleared, rounded up to whole hours,
+   * at least one. A job is counted once per invoice, so two alarm response
+   * lines (or two contracts on the same site) don't bill the same
+   * attendance twice — `taken` carries the ids already used. */
   const isAlarmResponseType = (id) => {
     const t = id ? (db.shift_types || []).find((x) => x.id === id) : null;
     return Boolean(t && (t.key === 'ALARM_RESPONSE' || /alarm\s*response/i.test(t.name || '')));
   };
   function attendancesFor(contract, from, to, taken) {
     const t0 = dayStart(from), t1 = dayStart(to) + 86400000;
-    const stepMs = BILL_ROUND_MIN * 60000;
     const rows = [];
     for (const j of db.jobs || []) {
       if (j.site_id !== contract.site_id || j.status === 'CANCELLED' || taken.has(j.id)) continue;
@@ -289,10 +290,7 @@ module.exports = function registerInvoices({
       let hours = 0, source;
       if (j.status !== 'COMPLETED') source = 'not finished';
       else if (!j.on_scene_at || !j.completed_at) source = 'no arrival time';
-      else {
-        const minutes = Math.max(0, Math.round((Math.ceil(Date.parse(j.completed_at) / stepMs) - Math.floor(Date.parse(j.on_scene_at) / stepMs)) * BILL_ROUND_MIN));
-        hours = minutes / 60; source = 'attendance';
-      }
+      else { hours = Math.max(0, (Date.parse(j.completed_at) - Date.parse(j.on_scene_at)) / 3600000); source = 'attendance'; }
       const starts = new Date(at).toISOString();
       rows.push({ job_id: j.id, reference: j.reference, date: starts.slice(0, 10), starts_at: starts, ends_at: j.completed_at || starts, person: `${names.join(', ') || 'No officer'} (${j.reference})`, hours: r2(hours), source, pay_override: null });
     }
@@ -313,22 +311,27 @@ module.exports = function registerInvoices({
    * way it always built its own lines inline. Each line carries
    * contract_id/site_id/site_name so a multi-contract invoice can group
    * and CC correctly; a single-contract invoice just ignores them. */
-  function linesForContract(c, from, to) {
+  const newTaken = () => ({ jobs: new Set(), assignments: new Set() });
+  const hourOrPart = (h) => (h > 0 ? Math.max(1, Math.ceil(h - 1e-9)) : 0);
+  function linesForContract(c, from, to, taken = newTaken()) {
     const site = db.sites.find((s) => s.id === c.site_id);
     const siteName = site ? site.name : '—';
     const first = !db.invoices.some((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && i.status !== 'VOID');
-    const lines = [], checks = [], jobsTaken = new Set();
+    const lines = [], checks = [];
     for (const l of c.lines) {
       if (l.kind === 'HOURLY') {
-        const rows = hoursFor(c, l, from, to);
+        // An hour is billed once per invoice, whichever line reaches it first.
+        const rows = hoursFor(c, l, from, to).filter((x) => !taken.assignments.has(x.assignment_id));
+        for (const x of rows) taken.assignments.add(x.assignment_id);
         if (isAlarmResponseType(l.shift_type_id)) {
-          rows.push(...attendancesFor(c, from, to, jobsTaken));
+          rows.push(...attendancesFor(c, from, to, taken.jobs));
           rows.sort((x, y) => x.starts_at.localeCompare(y.starts_at));
+          for (const x of rows) x.hours = hourOrPart(x.hours);
         }
         for (const x of rows) if (x.source === 'to check') checks.push(`${x.person} on ${x.date}: no clock-out — counted as 0 hours`);
         for (const x of rows) if (x.source === 'awaiting approval') checks.push(`${x.person} on ${x.date}: clock time waiting for approval in Timeclock`);
-        for (const x of rows) if (x.source === 'no arrival time') checks.push(`${x.reference} on ${x.date}: no arrived or cleared time — counted as 0 hours, add it in the job's Times`);
-        for (const x of rows) if (x.source === 'not finished') checks.push(`${x.reference} on ${x.date}: job still open — counted as 0 hours`);
+        for (const x of rows) if (x.job_id && x.source === 'no arrival time') checks.push(`${x.reference} on ${x.date}: no arrived or cleared time — counted as 0 hours, add it in the job's Times`);
+        for (const x of rows) if (x.job_id && x.source === 'not finished') checks.push(`${x.reference} on ${x.date}: job still open — counted as 0 hours`);
         // Hours on a pay rate day (a bank holiday, Christmas Day, or a
         // one-off an admin's added) are billed on their own line at that
         // day's enhanced rate — kept separate from the normal-rate line
@@ -356,7 +359,7 @@ module.exports = function registerInvoices({
         }
         const normalHours = r2(normalRows.reduce((n, x) => n + x.hours, 0));
         if (normalHours > 0 || (byRateDay.size === 0 && byOverride.size === 0)) {
-          lines.push({ id: crypto.randomUUID(), description: `${label} — hours, ${span(from, to)}`, kind: 'HOURLY', quantity: normalHours, unit_amount: l.rate, shifts: normalRows, contract_id: c.id, site_id: c.site_id, site_name: siteName });
+          lines.push({ id: crypto.randomUUID(), description: `${label} — hours, ${span(from, to)}`, kind: 'HOURLY', quantity: normalHours, unit_amount: l.rate, shifts: normalRows, shift_type_id: l.shift_type_id || null, contract_id: c.id, site_id: c.site_id, site_name: siteName });
         }
         for (const { rd, rows: rdRows } of byRateDay.values()) {
           const rdHours = r2(rdRows.reduce((n, x) => n + x.hours, 0));
@@ -395,10 +398,31 @@ module.exports = function registerInvoices({
     return { lines, checks };
   }
 
+  /** Like lines together, so a contract (or a client's contracts) with the
+   * same charge entered more than once reads as one line: identical
+   * fixed/one-off charges at the same site and price become one line with
+   * the count as its quantity, and normal-rate hourly lines for the same
+   * shift type, site and rate become one line with their hours added up.
+   * Rate-day and pay-override lines stay on their own. */
+  function groupLines(lines) {
+    const out = [], byKey = new Map();
+    for (const l of lines) {
+      const key = l.kind === 'HOURLY'
+        ? (l.shift_type_id && / — hours, /.test(l.description) ? `H|${l.site_id}|${l.shift_type_id}|${l.unit_amount}` : null)
+        : `${l.kind}|${l.site_id}|${l.unit_amount}|${l.description}`;
+      const into = key && byKey.get(key);
+      if (!into) { if (key) byKey.set(key, l); out.push(l); continue; }
+      into.quantity = r2(into.quantity + l.quantity);
+      if (l.shifts) into.shifts = (into.shifts || []).concat(l.shifts).sort((x, y) => x.starts_at.localeCompare(y.starts_at));
+    }
+    return out;
+  }
+
   function build(c, from, to, user) {
     const client = (db.clients || []).find((x) => x.id === c.client_id);
     const site = db.sites.find((s) => s.id === c.site_id);
-    const { lines, checks } = linesForContract(c, from, to);
+    const r = linesForContract(c, from, to);
+    const lines = groupLines(r.lines), checks = r.checks;
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
     const inv = {
       id, reference: `${c.reference}/${String(id).padStart(4, '0')}`, status: 'DRAFT', contract_id: c.id, contract_reference: c.reference, contract_ids: [c.id],
@@ -424,11 +448,13 @@ module.exports = function registerInvoices({
     const client = (db.clients || []).find((x) => x.id === first.client_id);
     const site = db.sites.find((s) => s.id === first.site_id);
     let lines = [], checks = [];
+    const taken = newTaken();
     for (const c of contracts) {
-      const r = linesForContract(c, from, to);
+      const r = linesForContract(c, from, to, taken);
       lines = lines.concat(r.lines);
       checks = checks.concat(r.checks);
     }
+    lines = groupLines(lines);
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
     const inv = {
       id, reference: `${first.reference}/${String(id).padStart(4, '0')}`, status: 'DRAFT', contract_id: first.id, contract_reference: first.reference, contract_ids: contracts.map((c) => c.id),
