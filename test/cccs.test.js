@@ -512,6 +512,16 @@ test('a job the officer completes stays open for control until a controller clos
   assert.equal(both.body.awaiting_close, false, 'control completing with a note closes in one step');
 });
 
+test('a resolution report for a site with no client contact goes to info@ to forward on', () => {
+  const noSite = app.resolutionReportRecipients(null);
+  assert.equal(noSite.clientTo, null);
+  assert.deepEqual(noSite.recipients, ['info@echeloncic.com']);
+  const site = app.db.sites.find((x) => x.contact_email) || Object.assign(app.db.sites[0], { contact_email: 'client@example.com' });
+  const withClient = app.resolutionReportRecipients(site.id);
+  assert.equal(withClient.clientTo, site.contact_email);
+  assert.deepEqual(withClient.recipients, [site.contact_email], 'info@ is only the fallback');
+});
+
 /* ---------------- GuardM8 integration ---------------- */
 test('GuardM8 can push a job with a shared secret, and retries are idempotent', async () => {
   process.env.GUARDM8_SECRET = 'test-guardm8-secret';
