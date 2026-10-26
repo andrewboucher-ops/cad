@@ -560,6 +560,7 @@ async function paintWelfareCheckcalls() {
       <div style="margin-top:6px;font-size:14px;line-height:1.7">
         Calls: ${d.enabled ? (d.reminders_on ? good(`On, every ${d.interval_min} min`) : bad('Stopped — SHIFT_REMINDERS=off also stops them')) : bad('Off (WELFARE_CHECKCALL_ENABLED is not "on")')}<br>
         Phone system: ${pbx}<br>
+        Voice: ${d.voice_configured ? (d.last_voice_error ? bad(`Set up, but the last prompt failed — ${d.last_voice_error.message}`) : good('VoiceStudio')) : bad('Not set up (TTS_API_KEY)')}<br>
         Checker: ${stale ? bad(`Not running — last ran ${when(d.last_tick_at)}`) : good(`Running, last ran ${when(d.last_tick_at)}`)}
         ${d.last_tick_error ? `<br>Last checker error: ${bad(d.last_tick_error.message)} <span class="dim">(${esc(when(d.last_tick_error.at))})</span>` : ''}
         ${d.last_call_error ? `<br>Last call error: ${bad(d.last_call_error.message)} <span class="dim">(${esc(when(d.last_call_error.at))})</span>` : ''}
