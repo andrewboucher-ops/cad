@@ -25,7 +25,9 @@ function createTts({
   speed = Number(process.env.TTS_SPEED || 1.4),
   dir = process.env.TTS_DIR || path.join(path.dirname(process.env.DATA_FILE || path.join(__dirname, 'data', 'cccs.db')), 'tts'),
   ffmpeg = process.env.TTS_FFMPEG || 'ffmpeg',
-  timeoutMs = 15000,
+  timeoutMs = 45000, // one clip took 14 s on live — leave room
+  retries = 3,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   fetchImpl = (...a) => fetch(...a),
   // (input wav path, output wav path) → Promise. Swappable for tests.
   convert = (src, out) => new Promise((resolve, reject) => {
@@ -34,6 +36,24 @@ function createTts({
   }),
 } = {}) {
   const inFlight = new Map();
+  // One request at a time: the server rate-limits (429) when several clips
+  // are asked for at once, as at start-up.
+  let queue = Promise.resolve();
+  const inTurn = (fn) => { const run = queue.then(fn, fn); queue = run.catch(() => {}); return run; };
+  async function speak(text) {
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetchImpl(url, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model, input: text, voice, speed, response_format: 'wav' }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (res.ok) return Buffer.from(await res.arrayBuffer());
+      if ((res.status !== 429 && res.status < 500) || attempt >= retries) throw new Error(`TTS server answered ${res.status}`);
+      const after = Number(res.headers.get('retry-after'));
+      await sleep(Number.isFinite(after) && after > 0 ? Math.min(after, 60) * 1000 : 2000 * 2 ** attempt);
+    }
+  }
   const keyOf = (text) => crypto.createHash('sha256').update(JSON.stringify({ text, model, voice, speed })).digest('hex').slice(0, 24);
 
   /** Path to the cached clip of `text`, or null if it hasn't been made yet. */
@@ -50,14 +70,7 @@ function createTts({
     if (inFlight.has(file)) return inFlight.get(file);
     const job = (async () => {
       fs.mkdirSync(dir, { recursive: true });
-      const res = await fetchImpl(url, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model, input: text, voice, speed, response_format: 'wav' }),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (!res.ok) throw new Error(`TTS server answered ${res.status}`);
-      const raw = Buffer.from(await res.arrayBuffer());
+      const raw = await inTurn(() => speak(text));
       const tmpIn = `${file}.${process.pid}.src.wav`, tmpOut = `${file}.${process.pid}.tmp.wav`;
       fs.writeFileSync(tmpIn, raw);
       try { await convert(tmpIn, tmpOut); fs.renameSync(tmpOut, file); }

@@ -360,7 +360,7 @@ module.exports = function registerAttendance({
     thanks: () => 'Thank you. Stay safe.',
     fail: () => 'We could not confirm your welfare. The control room has been alerted and will call you.',
   };
-  const wav = (file) => ({ __body: require('fs').readFileSync(file), __headers: { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=86400' } });
+  const wav = (file) => { health.last_voice_error = null; return { __body: require('fs').readFileSync(file), __headers: { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=86400' } }; };
   const noAudio = (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; console.warn('[attendance] welfare prompt:', e.message); return { __status: 503, __body: 'no audio', __headers: { 'content-type': 'text/plain' } }; };
   // Token-only like the routes above: the PBX fetches these mid-call.
   route('GET', '/api/welfare-checkcall/:token/intro.wav', null, async ({ params }) => {
@@ -385,11 +385,11 @@ module.exports = function registerAttendance({
   });
   function warmWelfareIntro(p) {
     if (!tts.configured() || !p) return;
-    tts.clip(WELFARE_PROMPTS.intro(p.name.split(/\s+/)[0])).catch((e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; });
+    tts.clip(WELFARE_PROMPTS.intro(p.name.split(/\s+/)[0])).then(() => { health.last_voice_error = null; }, (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; });
   }
   if (WELFARE_CHECKCALL_ENABLED && tts.configured()) {
     // Make the fixed lines now, so the first call of the day isn't waiting on them.
-    (async () => { for (const k of Object.keys(WELFARE_PROMPTS)) await tts.clip(WELFARE_PROMPTS[k]('')).catch((e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; console.warn('[attendance] could not make welfare prompt', k, '—', e.message); }); })();
+    (async () => { for (const k of Object.keys(WELFARE_PROMPTS)) await tts.clip(WELFARE_PROMPTS[k]('')).then(() => { health.last_voice_error = null; }, (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; console.warn('[attendance] could not make welfare prompt', k, '—', e.message); }); })();
     // …and the name lines for anyone already clocked in when CCCS starts.
     for (const a of db.shift_assignments || []) if (a.clocked_in_at && !a.clocked_out_at) warmWelfareIntro(db.personnel.find((x) => x.id === a.personnel_id));
   }
