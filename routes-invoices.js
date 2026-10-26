@@ -638,6 +638,25 @@ module.exports = function registerInvoices({
     const client = (db.clients || []).find((c) => c.id === inv.client_id);
     if (!client) throw httpError(400, 'the client for this invoice no longer exists');
     try {
+      // CCCS numbers its own invoices, so its number can already belong to
+      // an older invoice raised in Xero. If the client has not been sent
+      // this one yet, move it to the next number Xero has not used (and
+      // carry on numbering from there); if they have, say so instead.
+      if (inv.number && (await xero.numbersTaken([inv.number])).has(inv.number)) {
+        if ((inv.emails || []).some((e) => e.ok)) throw new Error(`Xero already has an invoice numbered ${inv.number}, and this one has been emailed to the client under that number. Void it, set Next number in Invoice settings above your last Xero invoice, and invoice again.`);
+        const st = settingsRow(), was = inv.number;
+        const candidates = [];
+        for (let n = Math.max(1, Number(st.next_number) || 1); candidates.length < 120; n++) {
+          const num = `${st.prefix}${String(n).padStart(st.digits, '0')}`;
+          if (!db.invoices.some((i) => i.number === num)) candidates.push([n, num]);
+        }
+        const taken = await xero.numbersTaken(candidates.map((c) => c[1]));
+        const free = candidates.find((c) => !taken.has(c[1]));
+        if (!free) throw new Error(`Xero already uses ${was} and the next ${candidates.length} numbers. Set Next number in Invoice settings above your last Xero invoice and try again.`);
+        inv.number = free[1]; st.next_number = free[0] + 1;
+        inv.history.push({ at: new Date().toISOString(), by: user.display_name, what: `renumbered ${was} → ${inv.number} (Xero already had ${was})` });
+        flushNow();
+      }
       const viaXero = settingsRow().send_via === 'XERO';
       const x = await xero.pushInvoice(inv, client, viaXero ? { status: 'AUTHORISED' } : {});
       inv.xero = { ...x, sent_at: new Date().toISOString(), sent_by: user.display_name };
