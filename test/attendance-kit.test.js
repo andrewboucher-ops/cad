@@ -366,3 +366,34 @@ test('control corrects clock times, with a reason, and the change is kept', asyn
   assert.equal(a.time_edits.length, 1);
   assert.equal(a.time_edits[0].from.out, null);
 });
+
+test('welfare check-call: Admin → Updates status says why someone clocked in is not being called, and is admin-only', async () => {
+  const { a } = await shiftFor(-1);
+  assert.equal((await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT)).status, 200);
+  assert.equal((await call('GET', '/api/admin/welfare-checkcall', undefined, dispT)).status, 403);
+  const dob = dan.date_of_birth; dan.date_of_birth = null;
+  app.attendance.tick();
+  const r = await call('GET', '/api/admin/welfare-checkcall', undefined, adminT);
+  dan.date_of_birth = dob;
+  assert.equal(r.status, 200);
+  assert.equal(r.body.enabled, true);
+  assert.equal(r.body.pbx.configured, false);
+  assert.ok(r.body.last_tick_at, 'the checker records that it ran');
+  const row = r.body.clocked_in.find((x) => x.assignment_id === a.id);
+  assert.equal(row.not_calling, 'no date of birth on their staff record');
+});
+
+test('welfare check-call: one broken record no longer stops the checker for everyone after it', async () => {
+  const broken = { id: 999999, shift_id: -1, personnel_id: -1 };
+  Object.defineProperty(broken, 'status', { get() { throw new Error('bad row'); } });
+  app.db.shift_assignments.unshift(broken);
+  app.db.shifts.push({ id: -1, status: 'IN_PROGRESS', starts_at: new Date().toISOString(), ends_at: new Date(Date.now() + 3600000).toISOString() });
+  try {
+    assert.doesNotThrow(() => app.attendance.tick());
+    const r = await call('GET', '/api/admin/welfare-checkcall', undefined, adminT);
+    assert.equal(r.body.last_tick_error.assignment_id, 999999);
+  } finally {
+    app.db.shift_assignments.splice(app.db.shift_assignments.indexOf(broken), 1);
+    app.db.shifts.splice(app.db.shifts.findIndex((s) => s.id === -1), 1);
+  }
+});

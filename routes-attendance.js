@@ -69,7 +69,7 @@ const WELFARE_CHECKCALL_RESULT_TIMEOUT_MS = Number(process.env.WELFARE_CHECKCALL
 const WELFARE_CHECKCALL_CONTEXT = process.env.WELFARE_CHECKCALL_CONTEXT || 'cccs-welfare-check';
 
 module.exports = function registerAttendance({
-  route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers = () => {}, sms, notifyLog, publicShift,
+  route, httpError, ALL, CONTROL, ADMIN = ['SYSTEM_ADMIN'], db, nextId, logEvent, broadcast, pushToRoles, pushToUsers = () => {}, sms, notifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl = '', flushNow = () => {},
   createEmergencyJob, forwardEmergencyToAura = () => {}, ami,
 }) {
@@ -211,6 +211,9 @@ module.exports = function registerAttendance({
   });
 
   /* ---- welfare check-call ---- */
+  // What the check-call loop last did, for Admin → Updates — so "the calls
+  // have stopped" can be answered from the browser, not journalctl.
+  const health = { last_tick_at: null, last_tick_error: null, last_call_error: null };
   /** Raises the same real alarm a welfare timer or an officer emergency
    * does — not another reminder — because by this point the call has
    * already failed to confirm the officer is OK, one way or another.
@@ -262,6 +265,7 @@ module.exports = function registerAttendance({
         // what actually confirms it was them, via date of birth.
       })
       .catch((e) => {
+        health.last_call_error = { at: new Date().toISOString(), personnel_id: a.personnel_id, message: e.message };
         if (a.welfare_checkcall_token !== token) return;
         if (a.clocked_out_at) { a.welfare_checkcall_token = null; a.welfare_checkcall_sent_at = null; flushNow(); return; }
         failWelfareCheckcall(a, s, p, site, `could not place the check call — ${e.message}`); flushNow();
@@ -348,6 +352,9 @@ module.exports = function registerAttendance({
   function tick(now = Date.now()) {
     let changed = false;
     for (const a of db.shift_assignments || []) {
+      // One bad record must not stop the loop for everyone after it — the
+      // welfare calls below run last, so they were the first to go.
+      try {
       if (!['ASSIGNED', 'CONFIRMED'].includes(a.status)) continue;
       const s = db.shifts.find((x) => x.id === a.shift_id);
       if (!s || !['PUBLISHED', 'IN_PROGRESS'].includes(s.status)) continue;
@@ -437,9 +444,52 @@ module.exports = function registerAttendance({
           changed = true;
         }
       }
+      } catch (e) {
+        health.last_tick_error = { at: new Date(now).toISOString(), assignment_id: a.id, message: e.message };
+        console.warn(`[attendance] tick failed for assignment ${a.id}:`, e.message);
+      }
     }
+    health.last_tick_at = new Date(now).toISOString();
     if (changed) flushNow();
   }
+
+  /** Admin → Updates: is the check-call loop running, can it reach the PBX,
+   * and for everyone clocked in, when is their next call or why isn't one
+   * coming. Read-only, apart from the PBX login the probe makes. */
+  route('GET', '/api/admin/welfare-checkcall', ADMIN, async () => {
+    let pbx;
+    if (!ami.configured()) pbx = { configured: false };
+    else {
+      try { pbx = { configured: true, ...(await Promise.race([ami.probe(), new Promise((_, rej) => setTimeout(() => rej(new Error('no answer from the PBX in 8 s')), 8000).unref?.())])) }; }
+      catch (e) { pbx = { configured: true, logged_in: false, error: e.message }; }
+    }
+    const now = Date.now();
+    const clocked_in = (db.shift_assignments || []).filter((a) => a.clocked_in_at && !a.clocked_out_at).map((a) => {
+      const s = db.shifts.find((x) => x.id === a.shift_id);
+      const p = db.personnel.find((x) => x.id === a.personnel_id);
+      const why = !WELFARE_CHECKCALL_ENABLED ? 'check calls are switched off'
+        : !REMINDERS_ON ? 'SHIFT_REMINDERS=off stops the check calls too'
+        : !['ASSIGNED', 'CONFIRMED'].includes(a.status) ? `assignment is ${a.status}`
+        : !s || !['PUBLISHED', 'IN_PROGRESS'].includes(s.status) ? `shift is ${s ? s.status : 'missing'}`
+        : !p ? 'no staff record'
+        : !p.contact_phone ? 'no phone number on their staff record'
+        : !p.date_of_birth ? 'no date of birth on their staff record'
+        : a.welfare_checkcall_token ? 'call in progress — waiting for the result'
+        : null;
+      return {
+        assignment_id: a.id, name: p ? p.name : nameOf(a), site: s && s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).name || null : null,
+        clocked_in_at: a.clocked_in_at, next_call_at: a.welfare_checkcall_due_at || null, call_sent_at: a.welfare_checkcall_sent_at || null,
+        overdue: Boolean(!why && a.welfare_checkcall_due_at && now - Date.parse(a.welfare_checkcall_due_at) > 120000),
+        not_calling: why,
+      };
+    });
+    const recent = (db.audit_logs || []).filter((e) => /^shift\.welfare_checkcall/.test(e.type)).slice(-20).reverse()
+      .map((e) => ({ at: e.at, type: e.type, summary: e.summary }));
+    return {
+      enabled: WELFARE_CHECKCALL_ENABLED, reminders_on: REMINDERS_ON, interval_min: WELFARE_CHECKCALL_INTERVAL_MS / 60000,
+      context: WELFARE_CHECKCALL_CONTEXT, ...health, pbx, clocked_in, recent,
+    };
+  });
   const timer = setInterval(() => { try { tick(); } catch (e) { console.warn('[attendance] tick failed:', e.message); } }, 30000);
   if (timer.unref) timer.unref();
 
