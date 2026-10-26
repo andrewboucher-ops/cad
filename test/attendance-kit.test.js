@@ -397,3 +397,29 @@ test('welfare check-call: one broken record no longer stops the checker for ever
     app.db.shifts.splice(app.db.shifts.findIndex((s) => s.id === -1), 1);
   }
 });
+
+test('welfare check-call: the PBX verify call takes the keyed DDMMYYYY as a form post and answers in plain text', async () => {
+  const { a } = await shiftFor(-1);
+  assert.equal((await call('POST', `/api/shift-assignments/${a.id}/clock-in`, { lat: 53.5, lon: -0.1 }, danT)).status, 200);
+  const form = async (token, digits) => {
+    const res = await fetch(`${BASE}/api/welfare-checkcall/${token}/verify`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `digits=${digits}` });
+    return { status: res.status, text: await res.text() };
+  };
+  assert.deepEqual(await form('not-a-real-token', '15061985'), { status: 404, text: 'NOT_FOUND' });
+
+  a.welfare_checkcall_token = 'tok-verify-ok'; a.welfare_checkcall_sent_at = new Date().toISOString();
+  assert.equal((await form('tok-verify-ok', '01011990')).text, 'RETRY');
+  assert.equal((await form('tok-verify-ok', '15061985')).text, 'CONFIRMED');
+  assert.ok(!a.welfare_checkcall_token);
+  assert.ok(Date.parse(a.welfare_checkcall_due_at) > Date.now());
+
+  const alarms = () => app.db.emergency_events.filter((e) => e.kind === 'WELFARE_CHECKCALL_FAILED' && e.personnel_id === dan.id).length;
+  const before = alarms();
+  a.welfare_checkcall_token = 'tok-verify-bad'; a.welfare_checkcall_sent_at = new Date().toISOString(); a.welfare_checkcall_tries = 0; a.welfare_checkcall_blank = 0;
+  assert.equal((await form('tok-verify-bad', '')).text, 'RETRY');
+  assert.equal((await form('tok-verify-bad', '')).text, 'RETRY');
+  assert.equal((await form('tok-verify-bad', '')).text, 'FAILED');
+  assert.equal(alarms(), before + 1);
+  assert.match(app.db.emergency_events[app.db.emergency_events.length - 1].note, /no date of birth entered/);
+  assert.equal((await form('tok-verify-bad', '15061985')).status, 404, 'resolved — the token is spent');
+});
