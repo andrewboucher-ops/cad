@@ -125,6 +125,18 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     if (!x || !x.InvoiceID) throw new Error('Xero did not return the invoice');
     return { invoice_id: x.InvoiceID, number: x.InvoiceNumber || null, status: x.Status, total: x.Total, amount_due: x.AmountDue };
   }
+  /** Which of these invoice numbers Xero already has. POST /Invoices with
+   * an existing InvoiceNumber means "update that invoice", which Xero
+   * refuses once it is approved or paid ("not of valid status for
+   * modification"), so CCCS checks before it pushes. */
+  async function numbersTaken(numbers) {
+    const taken = new Set();
+    for (let i = 0; i < numbers.length; i += 40) {
+      const r = await call('GET', `/Invoices?InvoiceNumbers=${numbers.slice(i, i + 40).map(encodeURIComponent).join(',')}&summaryOnly=true`);
+      for (const x of r.Invoices || []) if (x.Status !== 'DELETED') taken.add(x.InvoiceNumber);
+    }
+    return taken;
+  }
   /** Xero emails an approved invoice to the contact itself. */
   async function emailInvoice(xeroId) { await call('POST', `/Invoices/${encodeURIComponent(xeroId)}/Email`, {}); }
   /** Several at once (Xero takes a list of IDs), keyed by Xero invoice ID. */
@@ -145,5 +157,5 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const r = row();
     return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, settings: r.settings, redirect_uri: redirectUri };
   }
-  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, emailInvoice, invoiceStatus, invoiceStatuses, status, row };
+  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, emailInvoice, invoiceStatus, invoiceStatuses, status, row };
 };

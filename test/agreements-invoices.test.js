@@ -58,6 +58,10 @@ const fake = http.createServer((req, res) => {
       return send(200, { Invoices: [x] });
     }
     if (u.pathname === '/api.xro/2.0/Invoices' && req.method === 'GET') {
+      if (u.searchParams.has('InvoiceNumbers')) {
+        const nums = u.searchParams.get('InvoiceNumbers').split(',');
+        return send(200, { Invoices: X.invoices.filter((i) => nums.includes(i.InvoiceNumber)) });
+      }
       const ids = (u.searchParams.get('IDs') || '').split(',');
       return send(200, { Invoices: X.invoices.filter((i) => ids.includes(i.InvoiceID)) });
     }
@@ -406,8 +410,18 @@ test('a draft is checked and edited, approved, sent to Xero, and its payment rea
   await call('POST', `/api/invoices/${other.id}/approve`, {}, adminT);
   await call('PUT', '/api/xero/settings', { invoice_status: 'AUTHORISED' }, adminT);
   await call('PATCH', `/api/clients/${other.client_id}`, { billing_email: 'info@other.example, mark@other.example' }, adminT);
+  // Xero already used this number (and the next) for invoices raised there.
+  const clash = app.db.invoices.find((i) => i.id === other.id).number;
+  const ist = app.db.ui_settings.find((r) => r.key === 'invoice').settings, nextUp = ist.next_number;
+  const fmt = (n) => `${ist.prefix}${String(n).padStart(ist.digits, '0')}`;
+  X.invoices.push({ InvoiceID: 'old-1', InvoiceNumber: clash, Status: 'PAID' }, { InvoiceID: 'old-2', InvoiceNumber: fmt(nextUp), Status: 'AUTHORISED' });
   const s2 = await call('POST', `/api/invoices/${other.id}/xero`, {}, adminT);
   assert.equal(s2.status, 200, JSON.stringify(s2.body));
+  assert.equal(s2.body.number, fmt(nextUp + 1), 'moved past the numbers Xero already has');
+  assert.equal(app.db.ui_settings.find((r) => r.key === 'invoice').settings.next_number, nextUp + 2, 'numbering carries on after it');
+  assert.ok(s2.body.history.some((h) => /renumbered/.test(h.what)));
+  X.invoices.splice(X.invoices.findIndex((i) => i.InvoiceID === 'old-1'), 1);
+  X.invoices.splice(X.invoices.findIndex((i) => i.InvoiceID === 'old-2'), 1);
   assert.equal(X.invoices[1].Status, 'AUTHORISED');
   assert.equal(X.contacts.length, 2, 'Other Co is a new contact; Meridian was not created twice');
   const oc = X.contacts.find((c) => c.Name === 'Other Co');
