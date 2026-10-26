@@ -2960,10 +2960,16 @@ async function getGraphAppToken() {
   graphTokenCache = { token: data.access_token, exp: Date.now() + data.expires_in * 1000 };
   return data.access_token;
 }
+/** Splits one or more address strings ("a@x.com, b@y.com; c@z.com") into
+ * separate trimmed, de-duplicated addresses. Accepts a string or an array. */
+function splitEmailList(v) {
+  const parts = (Array.isArray(v) ? v : [v]).flatMap((x) => String(x || '').split(/[,;\s]+/));
+  return [...new Set(parts.map((x) => x.trim()).filter(Boolean))];
+}
 function resolutionReportRecipients(siteId) {
   const site = siteId ? db.sites.find((s) => s.id === siteId) : null;
   const clientTo = (site && site.contact_email) || null;
-  return { clientTo, recipients: [...new Set([clientTo || RESOLUTION_REPORT_NO_CLIENT_TO, RESOLUTION_REPORT_CC].filter(Boolean))] };
+  return { clientTo, recipients: splitEmailList([clientTo || RESOLUTION_REPORT_NO_CLIENT_TO, RESOLUTION_REPORT_CC]) };
 }
 /** Sends the report; `to` overrides the usual recipients (a resend from
  * control). Never throws — returns { ok, error } so a resend can say what
@@ -3005,7 +3011,10 @@ async function sendResolutionReportEmail({ reference, siteId, media, mediaDir: m
 // opts.attachments: [{ name, contentType, content: Buffer }] — e.g. a PDF.
 async function sendGraphEmail(to, subject, html, opts = {}) {
   if (!GRAPH_MAIL_ENABLED) return { ok: false, error: 'graph mail not configured' };
-  if (!to) return { ok: false, error: 'no recipient' };
+  // A stored email field can hold several addresses ("a@x.com, b@y.com");
+  // Graph wants each one as its own recipient or it rejects the lot.
+  const toList = splitEmailList(to);
+  if (!toList.length) return { ok: false, error: 'no recipient' };
   try {
     const token = await getGraphAppToken();
     // contentId/isInline are optional passthroughs for a cid: reference in
@@ -3019,10 +3028,10 @@ async function sendGraphEmail(to, subject, html, opts = {}) {
     // cc is an optional array of addresses (e.g. a site's accounts
     // email, alongside the client's own contact) — empty/blank entries
     // filtered out so a site with nothing set never sends a blank CC.
-    const cc = (opts.cc || []).map((a) => String(a || '').trim()).filter(Boolean);
+    const cc = splitEmailList(opts.cc).filter((a) => !toList.includes(a));
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: [{ emailAddress: { address: to } }], ...replyTo(), ...(cc.length ? { ccRecipients: cc.map((a) => ({ emailAddress: { address: a } })) } : {}), ...(attachments.length ? { attachments } : {}) } }),
+      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: toList.map((a) => ({ emailAddress: { address: a } })), ...replyTo(), ...(cc.length ? { ccRecipients: cc.map((a) => ({ emailAddress: { address: a } })) } : {}), ...(attachments.length ? { attachments } : {}) } }),
     });
     if (!res.ok) return { ok: false, error: `${res.status} ${await res.text()}` };
     return { ok: true };
@@ -6469,4 +6478,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };

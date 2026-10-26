@@ -522,6 +522,17 @@ test('a resolution report for a site with no client contact goes to info@ to for
   assert.deepEqual(withClient.recipients, [site.contact_email], 'info@ is only the fallback');
 });
 
+test('an email field holding several addresses becomes separate recipients', () => {
+  assert.deepEqual(app.splitEmailList('info@meridianpoint.co.uk, mark.graves@maltgrade.com'), ['info@meridianpoint.co.uk', 'mark.graves@maltgrade.com']);
+  assert.deepEqual(app.splitEmailList(['a@x.com; b@y.com', '', null, 'a@x.com']), ['a@x.com', 'b@y.com']);
+  assert.deepEqual(app.splitEmailList(''), []);
+  const site = app.db.sites[1] || app.db.sites[0];
+  const was = site.contact_email;
+  site.contact_email = 'one@example.com,two@example.com';
+  assert.deepEqual(app.resolutionReportRecipients(site.id).recipients, ['one@example.com', 'two@example.com']);
+  site.contact_email = was;
+});
+
 test('control can resend a completed job\'s report to an address it chooses', async () => {
   const job = await call('POST', '/api/jobs', { priority: 'GREEN', location: 'Northgate Distribution' }, dispT);
   const path = `/api/jobs/${job.body.id}/report/send`;
