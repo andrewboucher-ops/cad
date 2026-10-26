@@ -258,7 +258,7 @@
       <div id="brTableWrap"></div>
     </div>
 
-    <div id="viewUpdates" class="hide"><div id="upBody"><p class="dim">Loading…</p></div></div>
+    <div id="viewUpdates" class="hide"><div id="upBody"><p class="dim">Loading…</p></div><div id="wcBody" style="margin-top:16px"></div></div>
 
     <div id="viewRetention" class="hide">
       <p class="dim" style="margin:0 0 10px;font-size:13px">A sweep runs automatically every 6 hours and removes anything past its window below. Open jobs and patrol visits are never removed however old they are — only closed ones, once they're past the window. Change a limit with its environment variable and restart the service; there's no setting here for it.</p>
@@ -539,6 +539,40 @@ async function paintUpdates() {
     </div>
     <div class="btn-row"><button type="button" class="btn" id="upRefresh">Refresh</button></div>`;
   el('#upRefresh').onclick = paintUpdates;
+  paintWelfareCheckcalls();
+}
+/* ---------- Welfare check calls (routes-attendance.js) ---------- */
+async function paintWelfareCheckcalls() {
+  const box = el('#wcBody');
+  box.innerHTML = '<p class="dim">Checking welfare check calls and the phone system…</p>';
+  let d;
+  try { d = await api('GET', '/api/admin/welfare-checkcall'); } catch (e) { box.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const when = (iso) => (iso ? new Date(iso).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '—');
+  const bad = (t) => `<strong style="color:var(--emergency)">${esc(t)}</strong>`, good = (t) => `<strong style="color:var(--available)">${esc(t)}</strong>`;
+  const pbx = !d.pbx.configured ? bad('Not set up (AMI_HOST / AMI_USERNAME / AMI_SECRET)')
+    : d.pbx.error ? bad(`Can't log in — ${d.pbx.error}`)
+    : d.pbx.can_originate === false ? bad(`Logged in to ${d.pbx.host}, but this AMI user may not place calls (Originate)`)
+    : good(`Logged in to ${d.pbx.host}, can place calls`);
+  const stale = !d.last_tick_at || Date.now() - Date.parse(d.last_tick_at) > 120000;
+  box.innerHTML = `
+    <div style="border:1px solid var(--line);border-radius:10px;padding:12px 14px">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim)">Welfare check calls</div>
+      <div style="margin-top:6px;font-size:14px;line-height:1.7">
+        Calls: ${d.enabled ? (d.reminders_on ? good(`On, every ${d.interval_min} min`) : bad('Stopped — SHIFT_REMINDERS=off also stops them')) : bad('Off (WELFARE_CHECKCALL_ENABLED is not "on")')}<br>
+        Phone system: ${pbx}<br>
+        Checker: ${stale ? bad(`Not running — last ran ${when(d.last_tick_at)}`) : good(`Running, last ran ${when(d.last_tick_at)}`)}
+        ${d.last_tick_error ? `<br>Last checker error: ${bad(d.last_tick_error.message)} <span class="dim">(${esc(when(d.last_tick_error.at))})</span>` : ''}
+        ${d.last_call_error ? `<br>Last call error: ${bad(d.last_call_error.message)} <span class="dim">(${esc(when(d.last_call_error.at))})</span>` : ''}
+      </div>
+      <table class="log-table" style="margin-top:10px">
+        <thead><tr><th>Clocked in</th><th>Site</th><th style="width:150px">Since</th><th style="width:150px">Next call</th><th>Status</th></tr></thead>
+        <tbody>${d.clocked_in.length ? d.clocked_in.map((r) => `<tr><td>${esc(r.name)}</td><td>${esc(r.site || '—')}</td><td>${esc(when(r.clocked_in_at))}</td><td>${esc(when(r.next_call_at))}</td>
+          <td>${r.not_calling ? bad(r.not_calling) : r.overdue ? bad('Overdue — the call has not gone out') : good('OK')}</td></tr>`).join('') : '<tr><td colspan="5" class="dim">Nobody is clocked in.</td></tr>'}</tbody>
+      </table>
+      <details style="margin-top:10px"><summary class="dim" style="font-size:12.5px;cursor:pointer">Recent check calls (${d.recent.length})</summary>
+        <div style="font-size:12.5px;margin-top:6px">${d.recent.map((e) => `<div><span class="mono">${esc(when(e.at))}</span> ${esc(e.summary)}</div>`).join('') || '<span class="dim">None logged.</span>'}</div>
+      </details>
+    </div>`;
 }
 function linkedTerminal(u) {
   if (u.personnel_id) { const p = allPersonnel.find((x) => x.id === u.personnel_id); return p ? `Officer ${esc(p.name)}` : '—'; }

@@ -5588,7 +5588,7 @@ require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, f
 
 // Breaks, hours, geofenced clock-in, reminders — see routes-attendance.js.
 const attendance = require('./routes-attendance.js')({
-  route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
+  route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
   createEmergencyJob, forwardEmergencyToAura, ami,
 });
