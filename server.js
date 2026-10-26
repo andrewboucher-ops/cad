@@ -3029,9 +3029,11 @@ async function sendGraphEmail(to, subject, html, opts = {}) {
     // email, alongside the client's own contact) — empty/blank entries
     // filtered out so a site with nothing set never sends a blank CC.
     const cc = splitEmailList(opts.cc).filter((a) => !toList.includes(a));
+    // bcc: a silent copy (e.g. invoices copied to the office), same rules.
+    const bcc = splitEmailList(opts.bcc).filter((a) => !toList.includes(a) && !cc.includes(a));
     const res = await fetch(`https://graph.microsoft.com/v1.0/users/${encodeURIComponent(MS_GRAPH_SENDER)}/sendMail`, {
       method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: toList.map((a) => ({ emailAddress: { address: a } })), ...replyTo(), ...(cc.length ? { ccRecipients: cc.map((a) => ({ emailAddress: { address: a } })) } : {}), ...(attachments.length ? { attachments } : {}) } }),
+      body: JSON.stringify({ message: { subject, body: { contentType: 'HTML', content: html }, toRecipients: toList.map((a) => ({ emailAddress: { address: a } })), ...replyTo(), ...(cc.length ? { ccRecipients: cc.map((a) => ({ emailAddress: { address: a } })) } : {}), ...(bcc.length ? { bccRecipients: bcc.map((a) => ({ emailAddress: { address: a } })) } : {}), ...(attachments.length ? { attachments } : {}) } }),
     });
     if (!res.ok) return { ok: false, error: `${res.status} ${await res.text()}` };
     return { ok: true };

@@ -97,7 +97,12 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const found = await call('GET', `/Contacts?where=${where}`);
     let c = found.Contacts && found.Contacts[0];
     if (!c) {
-      const made = await call('POST', '/Contacts', { Contacts: [{ Name: client.name, EmailAddress: client.billing_email || client.contact_email || undefined }] });
+      // A CCCS email field can hold several addresses; Xero's EmailAddress
+      // takes exactly one, so the rest go in as contact people who are
+      // included in Xero's invoice emails.
+      const emails = String(client.billing_email || client.contact_email || '').split(/[\s,;]+/).filter((x) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x));
+      const people = emails.slice(1, 6).map((e) => ({ FirstName: e.split('@')[0], EmailAddress: e, IncludeInEmails: true }));
+      const made = await call('POST', '/Contacts', { Contacts: [{ Name: client.name, EmailAddress: emails[0] || undefined, ...(people.length ? { ContactPersons: people } : {}) }] });
       c = made.Contacts && made.Contacts[0];
     }
     if (!c) throw new Error('Xero did not return a contact');
