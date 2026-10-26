@@ -622,6 +622,25 @@ module.exports = function registerInvoices({
     flushNow();
     return inv;
   });
+  /** Gives an approved invoice that is not in Xero yet a different number,
+   * e.g. to carry on from the numbers already used in Xero. If the number
+   * is in this prefix's sequence, Next number moves past it. */
+  route('POST', '/api/invoices/:id/renumber', ADMIN, ({ params, body, user }) => {
+    const inv = findInv(params.id);
+    if (inv.status !== 'APPROVED') throw httpError(409, 'only an approved invoice that is not in Xero can be renumbered');
+    if (inv.xero && inv.xero.invoice_id) throw httpError(409, 'it is in Xero already');
+    const num = String(body.number || '').trim();
+    if (!/^[A-Za-z0-9/-]{1,30}$/.test(num)) throw httpError(400, 'invoice number: letters, digits, - or / only');
+    if (db.invoices.some((x) => x.id !== inv.id && x.number === num)) throw httpError(409, `${num} is already used by another invoice`);
+    const st = settingsRow(), was = inv.number;
+    const m = num.startsWith(st.prefix) && /^\d+$/.test(num.slice(st.prefix.length)) ? Number(num.slice(st.prefix.length)) : null;
+    if (m !== null && m >= st.next_number) st.next_number = m + 1;
+    inv.number = num;
+    inv.history.push({ at: new Date().toISOString(), by: user.display_name, what: `renumbered ${was} → ${num}` });
+    logEvent('invoice.renumbered', `INVOICE ${was} RENUMBERED TO ${num} BY ${user.display_name}`, { invoice_id: inv.id });
+    flushNow();
+    return inv;
+  });
   route('POST', '/api/invoices/:id/void', MONEY, ({ params, body, user }) => {
     const inv = findInv(params.id);
     if (inv.status === 'PAID') throw httpError(409, 'a paid invoice cannot be voided here — credit it in Xero');

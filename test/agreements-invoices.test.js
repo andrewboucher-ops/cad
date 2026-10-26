@@ -429,6 +429,23 @@ test('a draft is checked and edited, approved, sent to Xero, and its payment rea
   assert.deepEqual(oc.ContactPersons.map((p) => [p.EmailAddress, p.IncludeInEmails]), [['mark@other.example', true]], 'the rest are copied on Xero emails');
 });
 
+test('an admin can renumber an approved invoice that is not in Xero yet, and numbering carries on from it', async () => {
+  const d = app.db.invoices.find((i) => i.status === 'DRAFT' && i.lines.length && i.total > 0)
+    || (await call('POST', '/api/invoices/generate', { from: '2026-11-01', to: '2026-11-30', contract_id: contract.id }, adminT)).body.made[0];
+  const a = (await call('POST', `/api/invoices/${d.id}/approve`, {}, adminT)).body;
+  const ist = app.db.ui_settings.find((r) => r.key === 'invoice').settings;
+  const target = `${ist.prefix}${String(ist.next_number + 40).padStart(ist.digits, '0')}`;
+  assert.equal((await call('POST', `/api/invoices/${a.id}/renumber`, { number: target }, finT)).status, 403, 'admins only');
+  assert.equal((await call('POST', `/api/invoices/${a.id}/renumber`, { number: 'bad number!' }, adminT)).status, 400);
+  const taken = app.db.invoices.find((i) => i.number && i.id !== a.id).number;
+  assert.equal((await call('POST', `/api/invoices/${a.id}/renumber`, { number: taken }, adminT)).status, 409, 'no duplicates');
+  const r = await call('POST', `/api/invoices/${a.id}/renumber`, { number: target }, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.number, target);
+  const after = app.db.ui_settings.find((x) => x.key === 'invoice').settings;
+  assert.equal(`${after.prefix}${String(after.next_number - 1).padStart(after.digits, '0')}`, target, 'next number follows it');
+});
+
 test('the menu offers quotes & contracts to admins and invoices to admins and finance', async () => {
   const keys = async (t) => (await call('GET', '/api/ui/sections', undefined, t)).body.map((s) => s.key);
   assert.ok((await keys(adminT)).includes('contracts'));
