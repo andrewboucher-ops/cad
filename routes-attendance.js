@@ -246,6 +246,7 @@ module.exports = function registerAttendance({
     const token = crypto.randomBytes(24).toString('hex');
     a.welfare_checkcall_token = token;
     a.welfare_checkcall_sent_at = new Date().toISOString();
+    a.welfare_checkcall_tries = 0; a.welfare_checkcall_blank = 0;
     logEvent('shift.welfare_checkcall_sent', `WELFARE CHECK CALL PLACED TO ${nameOf(a)}`, { shift_id: s.id, personnel_id: a.personnel_id });
     Promise.resolve()
       .then(() => ami.originateDirect({ number: p.contact_phone, context: WELFARE_CHECKCALL_CONTEXT, exten: 's', variables: { CCCS_TOKEN: token } }))
@@ -314,6 +315,39 @@ module.exports = function registerAttendance({
     failWelfareCheckcall(a, s, p, site, reason);
     flushNow();
     return { ok: true };
+  });
+
+  /** The PBX menu's one call: it reads the 8 digits the officer keyed
+   * (DDMMYYYY) and posts them here; CCCS compares, so the date of birth
+   * never leaves CCCS and the dialplan needs no JSON. Answers in plain text
+   * for the dialplan to branch on: CONFIRMED, RETRY (wrong or nothing
+   * entered, tries left) or FAILED (alarm raised). Unknown or resolved
+   * token → 404, same as GET above. */
+  const WELFARE_CHECKCALL_TRIES = 3;
+  route('POST', '/api/welfare-checkcall/:token/verify', null, ({ params, body, query }) => {
+    const text = (t, status = 200) => ({ __status: status, __body: t, __headers: { 'content-type': 'text/plain' } });
+    const a = findPendingCheckcall(params.token); if (!a) return text('NOT_FOUND', 404);
+    const s = findShift(a.shift_id);
+    const p = db.personnel.find((x) => x.id === a.personnel_id);
+    const site = s && s.site_id ? db.sites.find((x) => x.id === s.site_id) : null;
+    if (a.clocked_out_at) { a.welfare_checkcall_token = null; a.welfare_checkcall_sent_at = null; flushNow(); return text('CONFIRMED'); }
+    const digits = String((body && body.digits) || query.get('digits') || '').replace(/\D/g, '');
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String((p && p.date_of_birth) || ''));
+    if (m && digits === `${m[3]}${m[2]}${m[1]}`) {
+      a.welfare_checkcall_token = null; a.welfare_checkcall_sent_at = null; a.welfare_checkcall_tries = 0;
+      a.welfare_checkcall_due_at = new Date(Date.now() + WELFARE_CHECKCALL_INTERVAL_MS).toISOString();
+      logEvent('shift.welfare_checkcall_confirmed', `${nameOf(a)} CONFIRMED WELFARE ON THE CHECK CALL`, { shift_id: a.shift_id, personnel_id: a.personnel_id });
+      flushNow();
+      return text('CONFIRMED');
+    }
+    a.welfare_checkcall_tries = (a.welfare_checkcall_tries || 0) + 1;
+    if (!digits) a.welfare_checkcall_blank = (a.welfare_checkcall_blank || 0) + 1;
+    if (a.welfare_checkcall_tries < WELFARE_CHECKCALL_TRIES) { flushNow(); return text('RETRY'); }
+    const blank = a.welfare_checkcall_blank === a.welfare_checkcall_tries;
+    a.welfare_checkcall_tries = 0; a.welfare_checkcall_blank = 0;
+    failWelfareCheckcall(a, s, p, site, blank ? 'no date of birth entered' : `entered date of birth did not match (${WELFARE_CHECKCALL_TRIES} tries)`);
+    flushNow();
+    return text('FAILED');
   });
 
   /* ---- reminders, alerts and auto clock-out ---- */

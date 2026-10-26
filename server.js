@@ -1129,8 +1129,9 @@ const MIME = {
   '.apk': 'application/vnd.android.package-archive', '.pdf': 'application/pdf',
 };
 
-/* Paths that accept an x-www-form-urlencoded body. Only Twilio's status
- * webhook needs one — Twilio cannot send JSON — and every other route stays
+/* Paths that accept an x-www-form-urlencoded body. Twilio's status webhook
+ * and the PBX's welfare check-call verify (Asterisk's CURL() posts a form,
+ * routes-attendance.js; token-only, no login) need one — every other route stays
  * JSON-only: a form body is what a cross-site HTML <form> can POST without a
  * CORS preflight, so accepting it everywhere would widen what another origin
  * can make a signed-in browser send. */
@@ -1165,7 +1166,7 @@ const requestHandler = async (req, res) => {
       for await (const c of req) { size += c.length; if (size > maxBody) { return send(413, { error: 'payload too large' }); } chunks.push(c); }
       const raw = Buffer.concat(chunks).toString();
       const ctype = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-      if (raw && ctype === 'application/x-www-form-urlencoded' && FORM_BODY_PATHS.has(url.pathname)) {
+      if (raw && ctype === 'application/x-www-form-urlencoded' && (FORM_BODY_PATHS.has(url.pathname) || /^\/api\/welfare-checkcall\/[^/]+\/verify$/.test(url.pathname))) {
         body = Object.fromEntries(new URLSearchParams(raw));
       } else if (raw) { try { body = JSON.parse(raw); } catch { return send(400, { error: 'invalid JSON body' }); } }
     }
