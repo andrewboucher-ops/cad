@@ -184,6 +184,7 @@ async function view(id) {
   acts.push(`<a class="btn" target="_blank" href="/api/invoices/${i.id}/pdf?token=${token()}">${draft ? 'Preview PDF' : 'PDF'}</a>`);
   if (draft) acts.push(act('void', 'Void'), act('save', 'Save changes'), act('approve', 'Approve', 'primary'));
   if (i.number && i.status !== 'VOID') acts.push(act('email', i.emails && i.emails.some((e) => e.ok) ? 'Email again' : 'Email to client'));
+  if (i.status === 'APPROVED' && isAdmin) acts.push(act('renumber', 'Change number'));
   if (i.status === 'APPROVED') acts.push(act('void', 'Void'), act('paid', 'Mark paid'), act('xero', 'Send to Xero', 'primary'));
   if (i.status === 'APPROVED' && (!i.gocardless || !i.gocardless.payment_id)) acts.push(act('direct-debit', 'Collect via Direct Debit'));
   if (i.status === 'IN_XERO' || (i.status === 'PAID' && i.xero)) acts.push(act('sync', 'Check Xero'));
@@ -232,6 +233,7 @@ async function view(id) {
         if (k === 'save') await save();
         if (k === 'approve') { await save(); if (!confirm(`Approve this invoice? It becomes ${ist.prefix}${String(ist.next_number).padStart(ist.digits, '0')} and is ${SEND_VIA[ist.send_via]}. It can't be edited after.`)) return; await api('POST', `/api/invoices/${i.id}/approve`); await new Promise((r) => setTimeout(r, 1200)); }
         if (k === 'email') { if (!confirm('Email this invoice to the client now, with the PDF attached?')) return; await api('POST', `/api/invoices/${i.id}/email`); await new Promise((r) => setTimeout(r, 1200)); }
+        if (k === 'renumber') { const number = prompt(`New number for ${i.number} (e.g. to match Xero). Later invoices carry on from it.`, i.number); if (number === null || number.trim() === i.number) return; await api('POST', `/api/invoices/${i.id}/renumber`, { number }); ist = await api('GET', '/api/invoices/settings'); }
         if (k === 'paid') { const note = prompt('Mark as paid — note (optional), e.g. "BACS 12 Oct"'); if (note === null) return; await api('POST', `/api/invoices/${i.id}/paid`, { note }); }
         if (k === 'void') { const reason = prompt('Why is it being voided? (optional)'); if (reason === null) return; await api('POST', `/api/invoices/${i.id}/void`, { reason }); }
         if (k === 'xero') { b.textContent = 'Sending…'; await api('POST', `/api/invoices/${i.id}/xero`); }
