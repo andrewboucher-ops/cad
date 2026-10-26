@@ -19,7 +19,7 @@ const { execFile } = require('child_process');
 
 function createTts({
   url = process.env.TTS_URL || 'http://192.168.7.201:3900/v1/audio/speech',
-  apiKey = process.env.TTS_API_KEY || '',
+  apiKey = (process.env.TTS_API_KEY || '').trim(), // a pasted key often brings a stray space or CR
   model = process.env.TTS_MODEL || 'tts-1',
   voice = process.env.TTS_VOICE || 'expr-voice-2-f',
   speed = Number(process.env.TTS_SPEED || 1.4),
