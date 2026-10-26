@@ -132,7 +132,7 @@ const mails = [];
 before(async () => {
   await new Promise((r) => fake.listen(XPORT, '127.0.0.1', r));
   await new Promise((r) => fakeGC.listen(GCPORT, '127.0.0.1', r));
-  app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, cc: opts.cc || [], attachments: opts.attachments || [] }); return { ok: true }; };
+  app.mailer.send = async (to, subject, html, opts = {}) => { mails.push({ to, subject, html, cc: opts.cc || [], bcc: opts.bcc || '', attachments: opts.attachments || [] }); return { ok: true }; };
   app.start();
   await new Promise((r) => setTimeout(r, 200));
   adminT = await login('admin', 'admin123'); dispT = await login('dispatcher', 'dispatch123');
@@ -405,10 +405,14 @@ test('a draft is checked and edited, approved, sent to Xero, and its payment rea
   const other = app.db.invoices.find((i) => i.contract_id !== contract.id && i.status === 'DRAFT');
   await call('POST', `/api/invoices/${other.id}/approve`, {}, adminT);
   await call('PUT', '/api/xero/settings', { invoice_status: 'AUTHORISED' }, adminT);
+  await call('PATCH', `/api/clients/${other.client_id}`, { billing_email: 'info@other.example, mark@other.example' }, adminT);
   const s2 = await call('POST', `/api/invoices/${other.id}/xero`, {}, adminT);
   assert.equal(s2.status, 200, JSON.stringify(s2.body));
   assert.equal(X.invoices[1].Status, 'AUTHORISED');
   assert.equal(X.contacts.length, 2, 'Other Co is a new contact; Meridian was not created twice');
+  const oc = X.contacts.find((c) => c.Name === 'Other Co');
+  assert.equal(oc.EmailAddress, 'info@other.example', 'Xero gets one email address on the contact');
+  assert.deepEqual(oc.ContactPersons.map((p) => [p.EmailAddress, p.IncludeInEmails]), [['mark@other.example', true]], 'the rest are copied on Xero emails');
 });
 
 test('the menu offers quotes & contracts to admins and invoices to admins and finance', async () => {
@@ -443,10 +447,12 @@ test('quotes and contracts are emailed to the client with the PDF — when sent,
 
 test('approved invoices get the next number, are emailed to the billing address with the PDF, and appear in the portal', async () => {
   await call('PATCH', `/api/clients/${client.id}`, { billing_email: 'accounts@meridian.example', billing_address: '1 High St\nLeeds' }, adminT);
-  const st = await call('PUT', '/api/invoices/settings', { prefix: 'ECH-', next_number: 120, sort_code: '12-34-56', account_number: '12345678', bank_name: 'Lloyds', vat_number: 'GB123456789' }, adminT);
+  const st = await call('PUT', '/api/invoices/settings', { prefix: 'ECH-', next_number: 120, sort_code: '12-34-56', account_number: '12345678', bank_name: 'Lloyds', vat_number: 'GB123456789', copy_to: 'office@echelon.example; boss@echelon.example' }, adminT);
   assert.equal(st.status, 200, JSON.stringify(st.body));
   assert.equal((await call('PUT', '/api/invoices/settings', { prefix: 'ECH-' }, finT)).status, 403, 'settings are for admins');
   assert.equal((await call('PUT', '/api/invoices/settings', { sort_code: '12' }, adminT)).status, 400);
+  assert.equal((await call('PUT', '/api/invoices/settings', { copy_to: 'not-an-email' }, adminT)).status, 400);
+  assert.equal(st.body.copy_to, 'office@echelon.example, boss@echelon.example');
 
   const g = (await call('POST', '/api/invoices/generate', { from: '2026-10-01', to: '2026-10-31', contract_id: contract.id }, adminT)).body;
   const inv = g.made[0];
@@ -462,6 +468,7 @@ test('approved invoices get the next number, are emailed to the billing address 
   const m = mails.slice(before).find((x) => /ECH-0120/.test(x.subject));
   assert.ok(m, 'emailed on approval');
   assert.equal(m.to, 'accounts@meridian.example', 'to the billing email');
+  assert.equal(m.bcc, 'office@echelon.example, boss@echelon.example', 'a copy goes to the office');
   assert.ok(isPdf(m.attachments[0]));
   assert.match(m.html, /12345678/);
   assert.ok(app.db.invoices.find((i) => i.id === inv.id).emails[0].ok);

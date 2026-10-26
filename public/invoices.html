@@ -254,6 +254,8 @@ if (bs) bs.onclick = () => modal('Invoice settings', `<div class="k-form">
       <option value="CCCS" ${ist.send_via === 'CCCS' ? 'selected' : ''}>CCCS — emailed with the PDF as soon as it is approved</option>
       <option value="XERO" ${ist.send_via === 'XERO' ? 'selected' : ''}>Xero — emailed by Xero when it is sent to Xero (goes in approved)</option>
       <option value="NONE" ${ist.send_via === 'NONE' ? 'selected' : ''}>Nobody — I'll send them myself</option></select></div>
+    <div class="full"><label>Send me a copy of every invoice (BCC)</label><input id="sCopy" value="${esc(ist.copy_to || '')}" placeholder="you@echeloncic.com — separate several with commas"></div>
+    <p class="dim full" style="font-size:12.5px;margin:0">Applies to invoices CCCS emails. Invoices Xero emails are copied by Xero's own settings.</p>
     <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px"><input type="checkbox" id="sTs" ${ist.include_timesheet ? 'checked' : ''} style="width:auto"> Add the hours breakdown (date, officer, hours) to the PDF</label></div>
     <div class="k-section">Bank details and company (printed on the invoice)</div>
     <div><label>Bank</label><input id="sBank" value="${esc(ist.bank_name)}"></div>
@@ -268,7 +270,7 @@ if (bs) bs.onclick = () => modal('Invoice settings', `<div class="k-form">
   root.addEventListener('input', eg); eg();
   wire(root, async () => {
     ist = await api('PUT', '/api/invoices/settings', {
-      prefix: v(root, '#sPre'), next_number: Number(v(root, '#sNext')), send_via: v(root, '#sVia'), include_timesheet: root.querySelector('#sTs').checked,
+      prefix: v(root, '#sPre'), next_number: Number(v(root, '#sNext')), send_via: v(root, '#sVia'), include_timesheet: root.querySelector('#sTs').checked, copy_to: v(root, '#sCopy'),
       bank_name: v(root, '#sBank'), account_name: v(root, '#sAccName'), sort_code: v(root, '#sSort'), account_number: v(root, '#sAcc'),
       vat_number: v(root, '#sVat'), company_number: v(root, '#sCo'), footer: v(root, '#sFoot'),
     });

@@ -79,6 +79,7 @@ module.exports = function registerInvoices({
     prefix: 'INV-', next_number: 1, digits: 4, send_via: 'CCCS', // CCCS | XERO | NONE
     bank_name: '', account_name: '', sort_code: '', account_number: '', vat_number: '', company_number: '',
     footer: 'Thank you for your business.', include_timesheet: true,
+    copy_to: '', // address(es) BCC'd on every invoice CCCS emails
   };
   function settingsRow() {
     if (!Array.isArray(db.ui_settings)) db.ui_settings = [];
@@ -223,8 +224,9 @@ module.exports = function registerInvoices({
     const pay = st.account_number ? `<p>Please pay by bank transfer to ${st.account_name || c.company_name}, sort code ${st.sort_code}, account ${st.account_number}, quoting <strong>${inv.number}</strong>.</p>` : '';
     const html = `<p>Hello,</p><p>Please find attached invoice <strong>${inv.number}</strong> for ${inv.site_name}, ${span(inv.period_from, inv.period_to)}: <strong>${money(inv.total)}</strong> including VAT, due by ${longDate(inv.due_date)}.</p>${pay}
       <p>Your invoices are also in your client portal: <a href="${publicBaseUrl}/client.html">${publicBaseUrl}/client.html</a></p><p>Kind regards,<br>${c.company_name}</p>`;
-    Promise.resolve(sendEmail(to, `Invoice ${inv.number} from ${c.company_name}`, html, { cc, attachments: [{ name: `${inv.number}.pdf`, contentType: 'application/pdf', content: invoicePdf(inv) }] }))
-      .then((r) => { log({ to, cc, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); if (r && r.ok) inv.history.push({ at: new Date().toISOString(), by, what: `emailed to ${to}${cc.length ? ` (cc ${cc.join(', ')})` : ''}` }); flushNow(); })
+    const bcc = st.copy_to || '';
+    Promise.resolve(sendEmail(to, `Invoice ${inv.number} from ${c.company_name}`, html, { cc, bcc, attachments: [{ name: `${inv.number}.pdf`, contentType: 'application/pdf', content: invoicePdf(inv) }] }))
+      .then((r) => { log({ to, cc, bcc, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); if (r && r.ok) inv.history.push({ at: new Date().toISOString(), by, what: `emailed to ${to}${cc.length ? ` (cc ${cc.join(', ')})` : ''}` }); flushNow(); })
       .catch((e) => log({ to, ok: false, error: e.message }));
   }
 
@@ -540,6 +542,12 @@ module.exports = function registerInvoices({
     if ('next_number' in body) { const v = Number(body.next_number); if (!Number.isInteger(v) || v < 1) throw httpError(400, 'next number must be a whole number'); st.next_number = v; }
     if ('send_via' in body) st.send_via = ['CCCS', 'XERO', 'NONE'].includes(body.send_via) ? body.send_via : 'CCCS';
     if ('include_timesheet' in body) st.include_timesheet = Boolean(body.include_timesheet);
+    if ('copy_to' in body) {
+      const list = [...new Set(String(body.copy_to || '').split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean))];
+      const bad = list.find((x) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(x));
+      if (bad) throw httpError(400, `copy invoices to: not an email address: ${bad}`);
+      st.copy_to = list.join(', ');
+    }
     flushNow();
     return { ...st, company: company() };
   });
