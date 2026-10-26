@@ -36,6 +36,12 @@ function createTts({
   const inFlight = new Map();
   const keyOf = (text) => crypto.createHash('sha256').update(JSON.stringify({ text, model, voice, speed })).digest('hex').slice(0, 24);
 
+  /** Path to the cached clip of `text`, or null if it hasn't been made yet. */
+  function cached(text) {
+    const file = path.join(dir, `${keyOf(text)}.wav`);
+    return fs.existsSync(file) ? file : null;
+  }
+
   /** Path to an 8 kHz WAV of `text`, made (and cached) if it isn't already. */
   async function clip(text) {
     if (!apiKey) throw new Error('TTS is not configured (TTS_API_KEY)');
@@ -62,7 +68,7 @@ function createTts({
     try { return await job; } finally { inFlight.delete(file); }
   }
 
-  return { configured: () => Boolean(apiKey), clip, dir };
+  return { configured: () => Boolean(apiKey), clip, cached, dir };
 }
 
 module.exports = { createTts };

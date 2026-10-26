@@ -36,3 +36,11 @@ test('tts: off without a key, and a server error leaves nothing half-written in 
   await assert.rejects(tts.clip('x'), /401/);
   assert.deepEqual(fs.readdirSync(dir), []);
 });
+
+test('tts: cached() says whether a clip is ready without making it', async () => {
+  const { calls, tts } = rig();
+  assert.equal(tts.cached('Hello Dan'), null);
+  assert.equal(calls.length, 0, 'asking does not call the server');
+  const f = await tts.clip('Hello Dan');
+  assert.equal(tts.cached('Hello Dan'), f);
+});
