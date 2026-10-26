@@ -71,7 +71,7 @@ const WELFARE_CHECKCALL_CONTEXT = process.env.WELFARE_CHECKCALL_CONTEXT || 'cccs
 module.exports = function registerAttendance({
   route, httpError, ALL, CONTROL, ADMIN = ['SYSTEM_ADMIN'], db, nextId, logEvent, broadcast, pushToRoles, pushToUsers = () => {}, sms, notifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl = '', flushNow = () => {},
-  createEmergencyJob, forwardEmergencyToAura = () => {}, ami,
+  createEmergencyJob, forwardEmergencyToAura = () => {}, ami, tts = require('./tts.js').createTts(),
 }) {
   /* ---- geofence ---- */
   function distanceM(a, b) {
@@ -349,6 +349,42 @@ module.exports = function registerAttendance({
     flushNow();
     return text('FAILED');
   });
+
+  /** What the PBX menu says (deploy/pbx-welfare-checkcall.conf plays these
+   * by URL), voiced by the VoiceStudio TTS server — see tts.js. Only the
+   * opening line is personal; the rest are the same for everyone, so they
+   * are made once and cached. */
+  const WELFARE_PROMPTS = {
+    intro: (first) => `Echelon control welfare check${first ? ` for ${first}` : ''}. Please enter your date of birth as eight digits: day, month, year.`,
+    retry: () => 'That didn\'t match. Please try again.',
+    thanks: () => 'Thank you. Stay safe.',
+    fail: () => 'We could not confirm your welfare. The control room has been alerted and will call you.',
+  };
+  const wav = (file) => ({ __body: require('fs').readFileSync(file), __headers: { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=86400' } });
+  const noAudio = (e) => { console.warn('[attendance] welfare prompt:', e.message); return { __status: 503, __body: 'no audio', __headers: { 'content-type': 'text/plain' } }; };
+  // Token-only like the routes above: the PBX fetches these mid-call.
+  route('GET', '/api/welfare-checkcall/:token/intro.wav', null, async ({ params }) => {
+    const a = findPendingCheckcall(params.token); if (!a) throw httpError(404, 'check call not found or already resolved');
+    const p = db.personnel.find((x) => x.id === a.personnel_id);
+    const first = p ? p.name.split(/\s+/)[0] : '';
+    try { return wav(await tts.clip(WELFARE_PROMPTS.intro(first))); }
+    catch (e) {
+      // The name line couldn't be made — the same line without the name
+      // is cached already (warmed at start-up), so the call still works.
+      try { return wav(await tts.clip(WELFARE_PROMPTS.intro(''))); } catch { return noAudio(e); }
+    }
+  });
+  // The fixed lines carry nothing personal, so no token: one URL each,
+  // which the PBX's own media cache can keep.
+  route('GET', '/api/welfare-checkcall-prompts/:name', null, async ({ params }) => {
+    const name = String(params.name).replace(/\.wav$/, '');
+    if (!['intro', 'retry', 'thanks', 'fail'].includes(name)) throw httpError(404, 'no such prompt');
+    try { return wav(await tts.clip(WELFARE_PROMPTS[name](''))); } catch (e) { return noAudio(e); }
+  });
+  if (WELFARE_CHECKCALL_ENABLED && tts.configured()) {
+    // Make the fixed lines now, so the first call of the day isn't waiting on them.
+    (async () => { for (const k of Object.keys(WELFARE_PROMPTS)) await tts.clip(WELFARE_PROMPTS[k]('')).catch((e) => console.warn('[attendance] could not make welfare prompt', k, '—', e.message)); })();
+  }
 
   /* ---- reminders, alerts and auto clock-out ---- */
   const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });

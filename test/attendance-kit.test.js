@@ -423,3 +423,9 @@ test('welfare check-call: the PBX verify call takes the keyed DDMMYYYY as a form
   assert.match(app.db.emergency_events[app.db.emergency_events.length - 1].note, /no date of birth entered/);
   assert.equal((await form('tok-verify-bad', '15061985')).status, 404, 'resolved — the token is spent');
 });
+
+test('welfare check-call: the PBX prompt URLs — unknown token or prompt 404s, and no TTS key gives a clean 503 the menu can skip past', async () => {
+  assert.equal((await call('GET', '/api/welfare-checkcall/not-a-real-token/intro.wav')).status, 404);
+  assert.equal((await call('GET', '/api/welfare-checkcall-prompts/nonsense.wav')).status, 404);
+  assert.equal((await call('GET', '/api/welfare-checkcall-prompts/thanks.wav')).status, 503);
+});
