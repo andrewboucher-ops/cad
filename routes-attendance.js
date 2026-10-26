@@ -213,7 +213,7 @@ module.exports = function registerAttendance({
   /* ---- welfare check-call ---- */
   // What the check-call loop last did, for Admin → Updates — so "the calls
   // have stopped" can be answered from the browser, not journalctl.
-  const health = { last_tick_at: null, last_tick_error: null, last_call_error: null };
+  const health = { last_tick_at: null, last_tick_error: null, last_call_error: null, last_voice_error: null };
   /** Raises the same real alarm a welfare timer or an officer emergency
    * does — not another reminder — because by this point the call has
    * already failed to confirm the officer is OK, one way or another.
@@ -361,7 +361,7 @@ module.exports = function registerAttendance({
     fail: () => 'We could not confirm your welfare. The control room has been alerted and will call you.',
   };
   const wav = (file) => ({ __body: require('fs').readFileSync(file), __headers: { 'content-type': 'audio/wav', 'cache-control': 'public, max-age=86400' } });
-  const noAudio = (e) => { console.warn('[attendance] welfare prompt:', e.message); return { __status: 503, __body: 'no audio', __headers: { 'content-type': 'text/plain' } }; };
+  const noAudio = (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; console.warn('[attendance] welfare prompt:', e.message); return { __status: 503, __body: 'no audio', __headers: { 'content-type': 'text/plain' } }; };
   // Token-only like the routes above: the PBX fetches these mid-call.
   route('GET', '/api/welfare-checkcall/:token/intro.wav', null, async ({ params }) => {
     const a = findPendingCheckcall(params.token); if (!a) throw httpError(404, 'check call not found or already resolved');
@@ -383,7 +383,7 @@ module.exports = function registerAttendance({
   });
   if (WELFARE_CHECKCALL_ENABLED && tts.configured()) {
     // Make the fixed lines now, so the first call of the day isn't waiting on them.
-    (async () => { for (const k of Object.keys(WELFARE_PROMPTS)) await tts.clip(WELFARE_PROMPTS[k]('')).catch((e) => console.warn('[attendance] could not make welfare prompt', k, '—', e.message)); })();
+    (async () => { for (const k of Object.keys(WELFARE_PROMPTS)) await tts.clip(WELFARE_PROMPTS[k]('')).catch((e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; console.warn('[attendance] could not make welfare prompt', k, '—', e.message); }); })();
   }
 
   /* ---- reminders, alerts and auto clock-out ---- */
@@ -557,7 +557,7 @@ module.exports = function registerAttendance({
       .map((e) => ({ at: e.at, type: e.type, summary: e.summary }));
     return {
       enabled: WELFARE_CHECKCALL_ENABLED, reminders_on: REMINDERS_ON, interval_min: WELFARE_CHECKCALL_INTERVAL_MS / 60000,
-      context: WELFARE_CHECKCALL_CONTEXT, ...health, pbx, clocked_in, recent,
+      context: WELFARE_CHECKCALL_CONTEXT, voice_configured: tts.configured(), ...health, pbx, clocked_in, recent,
     };
   });
   const timer = setInterval(() => { try { tick(); } catch (e) { console.warn('[attendance] tick failed:', e.message); } }, 30000);
