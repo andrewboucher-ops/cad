@@ -367,12 +367,14 @@ module.exports = function registerAttendance({
     const a = findPendingCheckcall(params.token); if (!a) throw httpError(404, 'check call not found or already resolved');
     const p = db.personnel.find((x) => x.id === a.personnel_id);
     const first = p ? p.name.split(/\s+/)[0] : '';
-    try { return wav(await tts.clip(WELFARE_PROMPTS.intro(first))); }
-    catch (e) {
-      // The name line couldn't be made — the same line without the name
-      // is cached already (warmed at start-up), so the call still works.
-      try { return wav(await tts.clip(WELFARE_PROMPTS.intro(''))); } catch { return noAudio(e); }
-    }
+    // Making a clip takes the TTS server ~15 s — too long to leave someone
+    // listening to silence. The name line is made ahead (warmWelfareIntro,
+    // when the check is scheduled); if it still isn't ready, the line
+    // without the name (made at start-up) plays instead.
+    const mine = tts.cached(WELFARE_PROMPTS.intro(first));
+    if (mine) return wav(mine);
+    warmWelfareIntro(p);
+    try { return wav(await tts.clip(WELFARE_PROMPTS.intro(''))); } catch (e) { return noAudio(e); }
   });
   // The fixed lines carry nothing personal, so no token: one URL each,
   // which the PBX's own media cache can keep.
@@ -381,9 +383,15 @@ module.exports = function registerAttendance({
     if (!['intro', 'retry', 'thanks', 'fail'].includes(name)) throw httpError(404, 'no such prompt');
     try { return wav(await tts.clip(WELFARE_PROMPTS[name](''))); } catch (e) { return noAudio(e); }
   });
+  function warmWelfareIntro(p) {
+    if (!tts.configured() || !p) return;
+    tts.clip(WELFARE_PROMPTS.intro(p.name.split(/\s+/)[0])).catch((e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; });
+  }
   if (WELFARE_CHECKCALL_ENABLED && tts.configured()) {
     // Make the fixed lines now, so the first call of the day isn't waiting on them.
     (async () => { for (const k of Object.keys(WELFARE_PROMPTS)) await tts.clip(WELFARE_PROMPTS[k]('')).catch((e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; console.warn('[attendance] could not make welfare prompt', k, '—', e.message); }); })();
+    // …and the name lines for anyone already clocked in when CCCS starts.
+    for (const a of db.shift_assignments || []) if (a.clocked_in_at && !a.clocked_out_at) warmWelfareIntro(db.personnel.find((x) => x.id === a.personnel_id));
   }
 
   /* ---- reminders, alerts and auto clock-out ---- */
@@ -500,6 +508,7 @@ module.exports = function registerAttendance({
       if (WELFARE_CHECKCALL_ENABLED && a.clocked_in_at && !a.clocked_out_at && p && p.date_of_birth && p.contact_phone) {
         if (!a.welfare_checkcall_due_at) {
           a.welfare_checkcall_due_at = new Date(Date.parse(a.clocked_in_at) + WELFARE_CHECKCALL_INTERVAL_MS).toISOString();
+          warmWelfareIntro(p);
           changed = true;
         } else if (a.welfare_checkcall_token) {
           // Waiting on the dialplan's result webhook (or the AMI-answered
