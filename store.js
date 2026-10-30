@@ -69,10 +69,10 @@ const TABLES = [
   // Payroll runs and the payslips they produce — an issued payslip is a
   // legal record, same evidentiary weight as a filed form submission.
   'payroll_runs', 'payslips',
-  // Enhanced/override pay rate days (bank holidays, Christmas, a one-off
-  // admin override) — an admin's edits to this list must survive a
-  // restart same as any other payroll setup.
-  'payroll_rate_days',
+  // Enhanced-rate days: what staff are paid (payroll_rate_days) and what
+  // clients are charged (client_rate_days) on bank holidays, Christmas or a
+  // one-off override — admins' edits must survive a restart.
+  'payroll_rate_days', 'client_rate_days',
   // Check call changes queued by control room PCs off the VPN until the
   // check call host applies them (routes-checkcalls.js). A queued stop must
   // survive a restart, or the calls carry on.

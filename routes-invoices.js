@@ -39,6 +39,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { Doc, A4 } = require('./pdf.js');
+const registerRateDays = require('./rate-days.js');
+const { rateDayRate } = registerRateDays;
 
 module.exports = function registerInvoices({
   route, httpError, ADMIN, FINANCE, CLIENT = ['CLIENT'], db, nextId, logEvent, attendance, agreements, xero, gocardless, sendEmail = null, publicBaseUrl = '', flushNow = () => {},
@@ -46,13 +48,30 @@ module.exports = function registerInvoices({
   if (!Array.isArray(db.invoices)) db.invoices = [];
   const MONEY = [...ADMIN, ...FINANCE];
   const r2 = (n) => Math.round(n * 100) / 100;
-  // Same pay-rate-day list routes-payroll.js maintains (bank holidays at
-  // time and a half, Christmas/Boxing Day/New Year's Day at double, plus
-  // anything an admin's added) — the client is charged the same enhanced
-  // rate on the same dates the staff cost more to cover, rather than that
-  // extra just being absorbed as a margin hit. One list, two consumers.
-  const rateDayFor = (dateISO) => (db.payroll_rate_days || []).find((r) => r.date === String(dateISO).slice(0, 10)) || null;
-  const rateDayRate = (rd, baseRate) => Math.max(rd.kind === 'FLAT' ? Number(rd.flat_rate) : r2(baseRate * rd.multiplier), baseRate);
+  // Client charge days — what clients are charged on bank holidays and
+  // Christmas, one list for every client (Admin → Invoices). Its own list,
+  // separate from payroll_rate_days (what staff are paid on those days,
+  // routes-payroll.js), since the two differ. Seeded to the standard
+  // contract terms: time and a half on a bank holiday (substitute days
+  // included), double time on the actual dates of Christmas Day, Boxing Day
+  // and New Year's Day, whatever day of the week they fall on.
+  const bh = (date, label) => ({ date, label, kind: 'MULTIPLIER', multiplier: 1.5 });
+  const dbl = (date, label) => ({ date, label, kind: 'MULTIPLIER', multiplier: 2 });
+  const CLIENT_DEFAULTS = [
+    dbl('2026-01-01', "New Year's Day"), bh('2026-04-03', 'Good Friday'), bh('2026-04-06', 'Easter Monday'),
+    bh('2026-05-04', 'Early May bank holiday'), bh('2026-05-25', 'Spring bank holiday'), bh('2026-08-31', 'Summer bank holiday'),
+    dbl('2026-12-25', 'Christmas Day'), dbl('2026-12-26', 'Boxing Day'), bh('2026-12-28', 'Boxing Day bank holiday (substitute)'),
+    dbl('2027-01-01', "New Year's Day"), bh('2027-03-26', 'Good Friday'), bh('2027-03-29', 'Easter Monday'),
+    bh('2027-05-03', 'Early May bank holiday'), bh('2027-05-31', 'Spring bank holiday'), bh('2027-08-30', 'Summer bank holiday'),
+    dbl('2027-12-25', 'Christmas Day'), dbl('2027-12-26', 'Boxing Day'), bh('2027-12-27', 'Christmas Day bank holiday (substitute)'), bh('2027-12-28', 'Boxing Day bank holiday (substitute)'),
+    dbl('2028-01-01', "New Year's Day"), bh('2028-01-03', "New Year's Day bank holiday (substitute)"), bh('2028-04-14', 'Good Friday'), bh('2028-04-17', 'Easter Monday'),
+    bh('2028-05-01', 'Early May bank holiday'), bh('2028-05-29', 'Spring bank holiday'), bh('2028-08-28', 'Summer bank holiday'),
+    dbl('2028-12-25', 'Christmas Day'), dbl('2028-12-26', 'Boxing Day'),
+  ];
+  const { rateDayFor } = registerRateDays({
+    route, httpError, ADMIN, db, nextId, logEvent, flushNow,
+    table: 'client_rate_days', base: '/api/invoices/rate-days', eventPrefix: 'invoice', what: 'CLIENT CHARGE DAY', defaults: CLIENT_DEFAULTS,
+  });
   // A per-person, per-shift override (shift_assignments.pay_override, set
   // in Rota) only reaches an invoice when the admin explicitly flagged it
   // bill_client — an override is otherwise an internal staffing-cost
@@ -345,7 +364,7 @@ module.exports = function registerInvoices({
         for (const x of rows) if (x.source === 'awaiting approval') checks.push(`${x.person} on ${x.date}: clock time waiting for approval in Timeclock`);
         for (const x of rows) if (x.job_id && x.source === 'no arrival time') checks.push(`${x.reference} on ${x.date}: no arrived or cleared time — counted as 0 hours, add it in the job's Times`);
         for (const x of rows) if (x.job_id && x.source === 'not finished') checks.push(`${x.reference} on ${x.date}: job still open — counted as 0 hours`);
-        // Hours on a pay rate day (a bank holiday, Christmas Day, or a
+        // Hours on a client charge day (a bank holiday, Christmas Day, or a
         // one-off an admin's added) are billed on their own line at that
         // day's enhanced rate — kept separate from the normal-rate line
         // rather than blended into one average, so the client sees exactly

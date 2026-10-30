@@ -271,10 +271,9 @@ test('invoices come from the signed contract and the hours worked at its site', 
   assert.equal(rg.body.made[0].lines[0].quantity, 7.5);
 });
 
-test('hours worked on a pay rate day (e.g. Christmas Day) are billed on their own line at the enhanced rate', async () => {
-  // Same mechanism and seeded dates as routes-payroll.js's rate days — the
-  // client is charged the same uplift the business pays staff for working
-  // that day, kept as its own line rather than blended into one average.
+test('hours worked on a client charge day (e.g. Christmas Day) are billed on their own line at the enhanced rate', async () => {
+  // From the client charge days list (not payroll's), kept as its own line
+  // rather than blended into one average.
   const id = app.seq.shifts = (app.seq.shifts || 0) + 1;
   app.db.shifts.push({ id, site_id: siteA.id, shift_type_id: app.db.shift_types[0].id, status: 'PUBLISHED',
     starts_at: '2026-12-25T08:00:00Z', ends_at: '2026-12-25T16:00:00Z', break_minutes: 0 });
@@ -293,6 +292,26 @@ test('hours worked on a pay rate day (e.g. Christmas Day) are billed on their ow
   assert.equal(xmasLine.quantity, 8);
   assert.equal(xmasLine.unit_amount, 40, 'double the contract\'s £20/hour rate');
   assert.equal(xmasLine.amount, 320);
+});
+
+test('client charge days are their own list: editing staff pay days does not change what clients are charged', async () => {
+  const charge = (await call('GET', '/api/invoices/rate-days', undefined, adminT)).body;
+  assert.equal((await call('GET', '/api/invoices/rate-days', undefined, finT)).status, 403, 'admin only');
+  const boxing = charge.find((d) => d.date === '2026-12-26');
+  assert.equal(boxing && boxing.multiplier, 2, 'Boxing Day itself is double for clients, even on a Saturday');
+  assert.equal(charge.find((d) => d.date === '2026-12-28').multiplier, 1.5, 'the substitute bank holiday is time and a half');
+  const pay = (await call('GET', '/api/payroll/rate-days', undefined, adminT)).body;
+  const payXmas = pay.find((d) => d.date === '2026-12-25');
+  await call('PATCH', `/api/payroll/rate-days/${payXmas.id}`, { multiplier: 3 }, adminT);
+  try {
+    assert.equal(app.db.client_rate_days.find((d) => d.date === '2026-12-25').multiplier, 2);
+    const add = await call('POST', '/api/invoices/rate-days', { date: '2026-11-11', label: 'Late-notice cover', kind: 'FLAT', flat_rate: 50 }, adminT);
+    assert.equal(add.status, 201, JSON.stringify(add.body));
+    assert.ok(!app.db.payroll_rate_days.some((d) => d.date === '2026-11-11'), 'not added to the staff pay list');
+    assert.equal((await call('DELETE', `/api/invoices/rate-days/${add.body.id}`, {}, adminT)).status, 200);
+  } finally {
+    await call('PATCH', `/api/payroll/rate-days/${payXmas.id}`, { multiplier: 2 }, adminT);
+  }
 });
 
 test('a per-assignment pay override only reaches the invoice when flagged bill_client, and replaces a rate day when it does', async () => {
