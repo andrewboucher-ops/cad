@@ -32,6 +32,7 @@ const fs = require('fs');
 const path = require('path');
 const { Doc, A4 } = require('./pdf.js');
 const payrollCalc = require('./payroll-calc.js');
+const registerRateDays = require('./rate-days.js');
 
 module.exports = function registerPayroll({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, attendance, flushNow = () => {},
@@ -58,23 +59,20 @@ module.exports = function registerPayroll({
    * payroll-calc.js's own TAX_YEAR_2026_27 figures, this needs a fresh
    * look for the years ahead — nothing recomputes a bank holiday's date
    * automatically, since the government doesn't set them by a fixed rule. */
-  if (db.payroll_rate_days.length === 0) {
-    const bh = (date, label) => ({ date, label, kind: 'MULTIPLIER', multiplier: 1.5 });
-    const dbl = (date, label) => ({ date, label, kind: 'MULTIPLIER', multiplier: 2 });
-    const defaults = [
-      dbl('2026-01-01', "New Year's Day"), bh('2026-04-03', 'Good Friday'), bh('2026-04-06', 'Easter Monday'),
-      bh('2026-05-04', 'Early May bank holiday'), bh('2026-05-25', 'Spring bank holiday'), bh('2026-08-31', 'Summer bank holiday'),
-      dbl('2026-12-25', 'Christmas Day'), dbl('2026-12-28', 'Boxing Day (substitute)'),
-      dbl('2027-01-01', "New Year's Day"), bh('2027-03-26', 'Good Friday'), bh('2027-03-29', 'Easter Monday'),
-      bh('2027-05-03', 'Early May bank holiday'), bh('2027-05-31', 'Spring bank holiday'), bh('2027-08-30', 'Summer bank holiday'),
-      dbl('2027-12-27', 'Christmas Day (substitute)'), dbl('2027-12-28', 'Boxing Day (substitute)'),
-    ];
-    for (const d of defaults) {
-      db.payroll_rate_days.push({ id: nextId('payroll_rate_days'), flat_rate: null, created_by: 'system', created_at: new Date().toISOString(), ...d });
-    }
-  }
-  const findRateDay = (id) => { const r = db.payroll_rate_days.find((x) => x.id === Number(id)); if (!r) throw httpError(404, 'rate day not found'); return r; };
-  const rateDayFor = (dateISO) => db.payroll_rate_days.find((r) => r.date === String(dateISO).slice(0, 10)) || null;
+  const bh = (date, label) => ({ date, label, kind: 'MULTIPLIER', multiplier: 1.5 });
+  const dbl = (date, label) => ({ date, label, kind: 'MULTIPLIER', multiplier: 2 });
+  const PAYROLL_DEFAULTS = [
+    dbl('2026-01-01', "New Year's Day"), bh('2026-04-03', 'Good Friday'), bh('2026-04-06', 'Easter Monday'),
+    bh('2026-05-04', 'Early May bank holiday'), bh('2026-05-25', 'Spring bank holiday'), bh('2026-08-31', 'Summer bank holiday'),
+    dbl('2026-12-25', 'Christmas Day'), dbl('2026-12-28', 'Boxing Day (substitute)'),
+    dbl('2027-01-01', "New Year's Day"), bh('2027-03-26', 'Good Friday'), bh('2027-03-29', 'Easter Monday'),
+    bh('2027-05-03', 'Early May bank holiday'), bh('2027-05-31', 'Spring bank holiday'), bh('2027-08-30', 'Summer bank holiday'),
+    dbl('2027-12-27', 'Christmas Day (substitute)'), dbl('2027-12-28', 'Boxing Day (substitute)'),
+  ];
+  const { findRateDay, rateDayFor } = registerRateDays({
+    route, httpError, ADMIN, db, nextId, logEvent, flushNow,
+    table: 'payroll_rate_days', base: '/api/payroll/rate-days', eventPrefix: 'payroll', what: 'PAY RATE DAY', defaults: PAYROLL_DEFAULTS,
+  });
   /** What a rate day actually pays per hour for this person, and the extra
    * over their plain hourly_rate — never less than their normal rate, in
    * case a flat override is mistakenly set below it. */
@@ -344,61 +342,6 @@ module.exports = function registerPayroll({
   /* ---------------------------------------------------------------- *
    * Routes
    * ---------------------------------------------------------------- */
-  const publicRateDay = (r) => ({ ...r });
-  route('GET', '/api/payroll/rate-days', ADMIN, () => db.payroll_rate_days.slice().sort((a, b) => a.date < b.date ? -1 : 1).map(publicRateDay));
-  /** Admin adds a one-off — a late-notice shift paid at a flat override
-   * rate, an extra bank holiday for a specific year, whatever's needed —
-   * on top of the seeded defaults. Applies to anyone working that date,
-   * not a named person. */
-  route('POST', '/api/payroll/rate-days', ADMIN, ({ body, user }) => {
-    const date = String(body.date || '').slice(0, 10);
-    if (!date || isNaN(Date.parse(date))) throw httpError(400, 'a valid date is required');
-    if (rateDayFor(date)) throw httpError(409, 'a rate day already exists for that date — edit or delete it instead');
-    const label = String(body.label || '').trim().slice(0, 120);
-    if (!label) throw httpError(400, 'a label is required, e.g. "Late-notice cover"');
-    const kind = body.kind === 'FLAT' ? 'FLAT' : 'MULTIPLIER';
-    let multiplier = null, flat_rate = null;
-    if (kind === 'MULTIPLIER') {
-      multiplier = Number(body.multiplier);
-      if (!Number.isFinite(multiplier) || multiplier <= 1) throw httpError(400, 'multiplier must be a number greater than 1');
-    } else {
-      flat_rate = round2(Number(body.flat_rate));
-      if (!Number.isFinite(flat_rate) || flat_rate <= 0) throw httpError(400, 'flat_rate must be a positive number');
-    }
-    const r = { id: nextId('payroll_rate_days'), date, label, kind, multiplier, flat_rate, created_by: user.display_name, created_at: new Date().toISOString() };
-    db.payroll_rate_days.push(r);
-    logEvent('payroll.rate_day_added', `${user.username} ADDED PAY RATE DAY ${date} (${label}, ${kind === 'FLAT' ? `flat £${flat_rate}/h` : `×${multiplier}`})`, { rate_day_id: r.id });
-    flushNow();
-    return { __status: 201, __body: publicRateDay(r) };
-  });
-  route('PATCH', '/api/payroll/rate-days/:id', ADMIN, ({ params, body, user }) => {
-    const r = findRateDay(params.id);
-    if ('label' in body) { const label = String(body.label || '').trim().slice(0, 120); if (!label) throw httpError(400, 'label required'); r.label = label; }
-    if ('kind' in body) r.kind = body.kind === 'FLAT' ? 'FLAT' : 'MULTIPLIER';
-    if ('multiplier' in body) {
-      const m = body.multiplier === null ? null : Number(body.multiplier);
-      if (m !== null && (!Number.isFinite(m) || m <= 1)) throw httpError(400, 'multiplier must be a number greater than 1');
-      r.multiplier = m;
-    }
-    if ('flat_rate' in body) {
-      const f = body.flat_rate === null ? null : round2(Number(body.flat_rate));
-      if (f !== null && (!Number.isFinite(f) || f <= 0)) throw httpError(400, 'flat_rate must be a positive number');
-      r.flat_rate = f;
-    }
-    if (r.kind === 'MULTIPLIER' && !Number.isFinite(r.multiplier)) throw httpError(400, 'a multiplier rate day needs a multiplier');
-    if (r.kind === 'FLAT' && !Number.isFinite(r.flat_rate)) throw httpError(400, 'a flat-rate day needs a flat_rate');
-    logEvent('payroll.rate_day_edited', `${user.username} EDITED PAY RATE DAY ${r.date} (${r.label})`, { rate_day_id: r.id });
-    flushNow();
-    return publicRateDay(r);
-  });
-  route('DELETE', '/api/payroll/rate-days/:id', ADMIN, ({ params, user }) => {
-    const r = findRateDay(params.id);
-    db.payroll_rate_days = db.payroll_rate_days.filter((x) => x.id !== r.id);
-    logEvent('payroll.rate_day_deleted', `${user.username} REMOVED PAY RATE DAY ${r.date} (${r.label})`, { rate_day_id: r.id });
-    flushNow();
-    return { ok: true };
-  });
-
   route('POST', '/api/payroll/runs', ADMIN, ({ body, user }) => {
     const period_start = String(body.period_start || '').slice(0, 10);
     const period_end = String(body.period_end || '').slice(0, 10);
