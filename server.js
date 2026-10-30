@@ -264,7 +264,9 @@ function logEvent(type, summary, data = {}) {
   const ev = { id: nextId('audit_logs'), type, summary, data, at: new Date().toISOString() };
   db.audit_logs.push(ev);
   if (db.audit_logs.length > 5000) db.audit_logs.shift();
-  broadcast('event.logged', ev);
+  // Control only: the log carries failed-login usernames, sickness leave,
+  // applicant names and raw alarm payloads — not for every officer's phone.
+  broadcast('event.logged', ev, { controlOnly: true });
   return ev;
 }
 
@@ -809,10 +811,19 @@ function cleanPayroll(raw, existing) {
  * just GET /api/personnel — passes `user`, and only then does a control
  * role or the person themself see their own emergency contact or bank
  * details; colleagues never do. */
+/** Passed as publicPersonnel's `user` by broadcasts that only reach control
+ * and the person themselves: the operational staff record (location,
+ * welfare, compliance) without the bank/DOB/payroll tier. */
+const STAFF_RECORD_VIEW = Symbol('staff-record-view');
 function publicPersonnel(p, user) {
   const cs = db.callsigns.find((c) => c.id === p.callsign_id);
   const veh = db.vehicles.find((v) => v.id === p.vehicle_id);
   const canSeeSensitive = user && (isControlRole(user.role) || user.personnel_id === p.id);
+  // A colleague's live position and HR record (DBS, right-to-work, notes,
+  // leave, training) are control's business and the person's own, not every
+  // officer's: UK GDPR data minimisation. Name, call sign, phone and SIA
+  // licence stay visible — colleagues need those to work together.
+  const canSeeStaffRecord = user === STAFF_RECORD_VIEW || canSeeSensitive;
   // Stricter than canSeeSensitive above, deliberately — not even the person
   // themselves sees their own live tax code/NI category/pension/rate here.
   // admin.html is already hard-gated to SYSTEM_ADMIN and nothing else
@@ -829,23 +840,26 @@ function publicPersonnel(p, user) {
     callsign: cs ? cs.name : null, callsign_id: p.callsign_id,
     vehicle: veh ? veh.registration : null, vehicle_id: p.vehicle_id,
     has_login: Boolean(p.user_id), supervisor_id: p.supervisor_id || null,
-    welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
-    welfare_note: p.welfare_note || null,
     sia_licence_no: p.sia_licence_no || null, sia_licence_expiry: p.sia_licence_expiry || null,
     sia_licences: siaLicencesOf(p),
     has_photo: Boolean(p.id_photo), photo_updated_at: p.id_photo ? p.id_photo.uploaded_at : null, id_card_issued_at: p.id_card_issued_at || null,
-    dbs_certificate_no: p.dbs_certificate_no || null, dbs_certificate_type: p.dbs_certificate_type || null,
-    dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
-    rtw_check_type: p.rtw_check_type || null, rtw_reference: p.rtw_reference || null,
-    rtw_expiry: p.rtw_expiry || null, rtw_last_checked_at: p.rtw_last_checked_at || null,
-    compliance: personnelCompliance(p),
-    notes: p.notes || '', branch_id: p.branch_id || null,
-    lat: p.lat ?? null, lon: p.lon ?? null, location_at: p.location_at || null,
-    training: trainingStatusForPerson(p.id),
+    branch_id: p.branch_id || null,
     employment_type: p.employment_type || 'EMPLOYED',
-    annual_leave_allowance_days: p.annual_leave_allowance_days ?? null,
-    leave_balance: leaveBalanceForPerson(p),
-    start_date: p.start_date || null,
+    ...(canSeeStaffRecord ? {
+      welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
+      welfare_note: p.welfare_note || null,
+      dbs_certificate_no: p.dbs_certificate_no || null, dbs_certificate_type: p.dbs_certificate_type || null,
+      dbs_update_service_id: p.dbs_update_service_id || null, dbs_last_checked_at: p.dbs_last_checked_at || null,
+      rtw_check_type: p.rtw_check_type || null, rtw_reference: p.rtw_reference || null,
+      rtw_expiry: p.rtw_expiry || null, rtw_last_checked_at: p.rtw_last_checked_at || null,
+      compliance: personnelCompliance(p),
+      notes: p.notes || '',
+      lat: p.lat ?? null, lon: p.lon ?? null, location_at: p.location_at || null,
+      training: trainingStatusForPerson(p.id),
+      annual_leave_allowance_days: p.annual_leave_allowance_days ?? null,
+      leave_balance: leaveBalanceForPerson(p),
+      start_date: p.start_date || null,
+    } : {}),
     // Same audience as emergency_contact/bank_details above: onboarding
     // status is an HR-chasing concern, not something a colleague needs to
     // see about another officer, even as a boolean checklist with no detail.
@@ -4041,7 +4055,7 @@ route('POST', '/api/messages/:id/read', ALL, ({ params, user }) => {
 });
 
 // Events / audit
-route('GET', '/api/events', ALL, ({ query }) => {
+route('GET', '/api/events', CONTROL, ({ query }) => {
   let ev = db.audit_logs.slice();
   const type = query.get('type'); const q = query.get('q'); const since = query.get('since');
   if (type) ev = ev.filter((e) => e.type.startsWith(type));
@@ -4056,12 +4070,12 @@ route('GET', '/api/state', ALL, ({ user }) => ({
   // internal role would be a safety/oversight regression, not a feature.
   mdts: db.mdts.map(publicMdt),
   jobs: db.jobs.filter((j) => siteVisibleTo(j.site_id, user)).map(publicJob),
-  personnel: db.personnel.filter((p) => visibleToUser(p, user)).map(publicPersonnel),
+  personnel: db.personnel.filter((p) => visibleToUser(p, user)).map((p) => publicPersonnel(p, isControlRole(user.role) ? STAFF_RECORD_VIEW : user)),
   sites: db.sites.filter((s) => siteVisibleTo(s.id, user)),
   site_visits: db.site_visits.filter((v) => siteVisibleTo(v.site_id, user)).map(publicSiteVisit),
   broadnet_terminals: db.broadnet_terminals.map(publicBroadnetTerminal),
   emergencies: db.emergency_events.filter((e) => e.state !== 'RESOLVED'),
-  events: db.audit_logs.slice(-80), server_time: new Date().toISOString(),
+  events: isControlRole(user.role) ? db.audit_logs.slice(-80) : [], server_time: new Date().toISOString(),
 }));
 /* ------------------------------------------------------------------ *
  * Data retention
@@ -4205,7 +4219,7 @@ route('POST', '/api/personnel/:id/location', ['FIELD_USER'], ({ params, body, us
   p.lat = lat; p.lon = lon; p.location_at = new Date().toISOString();
   db.locations.push({ id: nextId('locations'), mdt_id: null, personnel_id: p.id, lat, lon, speed: null, heading: null, at: p.location_at });
   checkAutoProgressForPerson(p.id, lat, lon);
-  broadcast('personnel.location', publicPersonnel(p), { controlOnly: true });
+  broadcast('personnel.location', publicPersonnel(p, STAFF_RECORD_VIEW), { controlOnly: true });
   return { ok: true };
 });
 
@@ -4294,8 +4308,8 @@ function startWelfare(person, intervalS, note, user) {
   person.welfare_due_at = new Date(Date.now() + person.welfare_interval_s * 1000).toISOString();
   person.welfare_warned = false;
   person.welfare_note = note || null;
-  const payload = { personnel: publicPersonnel(person), note: person.welfare_note };
-  broadcast('welfare.started', payload);
+  const payload = { personnel: publicPersonnel(person, STAFF_RECORD_VIEW), note: person.welfare_note };
+  broadcast('welfare.started', payload, { personnelIds: [person.id] });
   logEvent('welfare.started', `${callsignOf(person)} WELFARE TIMER ${person.welfare_interval_s}s${note ? ' — ' + note : ''} (started by ${user.display_name})`, { personnel_id: person.id, started_by: user.id });
   return person;
 }
@@ -4311,14 +4325,14 @@ function checkInWelfare(person, user) {
       broadcast('emergency.resolved', ev);
     }
   }
-  broadcast('welfare.checked_in', publicPersonnel(person));
+  broadcast('welfare.checked_in', publicPersonnel(person, STAFF_RECORD_VIEW), { personnelIds: [person.id] });
   logEvent('welfare.checked_in', `${callsignOf(person)} CHECKED IN (by ${user.display_name})`, { personnel_id: person.id, checked_in_by: user.id });
   return person;
 }
 
 function stopWelfare(person, reason = 'cancelled', user) {
   person.welfare_interval_s = null; person.welfare_due_at = null; person.welfare_warned = false; person.welfare_note = null;
-  broadcast('welfare.stopped', publicPersonnel(person));
+  broadcast('welfare.stopped', publicPersonnel(person, STAFF_RECORD_VIEW), { personnelIds: [person.id] });
   logEvent('welfare.stopped', `${callsignOf(person)} WELFARE TIMER ${reason.toUpperCase()} (by ${user.display_name})`, { personnel_id: person.id, stopped_by: user.id });
   return person;
 }
@@ -4345,7 +4359,7 @@ function welfareTick() {
       store.flushNow();
     } else if (!person.welfare_warned && due - now <= WELFARE_WARN_S * 1000) {
       person.welfare_warned = true;
-      broadcast('welfare.due_soon', { personnel: publicPersonnel(person), seconds_left: Math.round((due - now) / 1000) }, { personnelIds: [person.id] });
+      broadcast('welfare.due_soon', { personnel: publicPersonnel(person, STAFF_RECORD_VIEW), seconds_left: Math.round((due - now) / 1000) }, { personnelIds: [person.id] });
     }
   }
 }
