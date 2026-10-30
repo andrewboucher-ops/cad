@@ -65,6 +65,11 @@ module.exports = function registerInventoryRoutes({
   prfIntegrationSecret = '',
 }) {
   for (const t of ['stock_locations', 'stock_subcategories', 'asset_events', 'stocktakes', 'stock_movements', 'assets', 'asset_checkouts']) if (!Array.isArray(db[t])) db[t] = [];
+  const secretOk = (given) => {
+    if (!prfIntegrationSecret || typeof given !== 'string') return false;
+    const a = Buffer.from(given), b = Buffer.from(prfIntegrationSecret);
+    return a.length === b.length && require('crypto').timingSafeEqual(a, b);
+  };
 
   /** The main store always exists; ledger rows with no location are its. */
   function mainStore() {
@@ -437,7 +442,7 @@ module.exports = function registerInventoryRoutes({
    * ledger shape as a logged-in STAFF request). Additive: /issue, /adjust
    * and the new /use route above are all unchanged. */
   route('POST', '/api/integrations/prf/stock/:id/use', null, ({ params, body, req }) => {
-    if (!prfIntegrationSecret || req.headers['x-prf-integration-secret'] !== prfIntegrationSecret) throw httpError(401, 'bad integration secret');
+    if (!secretOk(req.headers['x-prf-integration-secret'])) throw httpError(401, 'bad integration secret');
     const email = String(body.acting_email || '').trim().toLowerCase();
     const user = email ? db.users.find((u) => u.email && u.email.toLowerCase() === email) : null;
     if (!user) throw httpError(400, 'acting_email does not match a CCCS account');
@@ -453,7 +458,7 @@ module.exports = function registerInventoryRoutes({
    * collect a witness). Shared-secret gated like the write routes above;
    * nothing here is a CCCS session concern since it is simply a read. */
   route('GET', '/api/integrations/prf/catalogue', null, ({ req }) => {
-    if (!prfIntegrationSecret || req.headers['x-prf-integration-secret'] !== prfIntegrationSecret) throw httpError(401, 'bad integration secret');
+    if (!secretOk(req.headers['x-prf-integration-secret'])) throw httpError(401, 'bad integration secret');
     return {
       medicines: db.medicines.filter((m) => m.active !== false).map((m) => ({ id: m.id, name: m.name, strength: m.strength, form: m.form, unit: m.unit, controlled: Boolean(m.controlled) })),
       stock_items: db.assets.filter((a) => a.is_stock_tracked && a.status !== 'RETIRED').map((a) => ({ id: a.id, description: a.description, size: a.size || null, unit: a.unit || null, category: a.category || null })),
