@@ -52,6 +52,16 @@
   .coverage-badge.adhoc { color: #b45309; background: rgba(242,169,60,.18); }
   .add-hint { font-size: 10.5px; color: var(--ink-dim); opacity: 0; transition: opacity .1s; }
   .rota-cell:hover .add-hint { opacity: 1; }
+  /* Booked leave — its own colour (purple) so it can't be mistaken for a
+     shift; a still-pending request is the same colour, dashed and faded. */
+  .leave-chip {
+    font-size: 10.5px; padding: 3px 6px; border-radius: 5px; line-height: 1.3;
+    background: rgba(168,85,247,.16); border-left: 3px solid #a855f7; color: var(--ink);
+  }
+  .leave-chip strong { color: #a855f7; }
+  .leave-chip.pending { background: rgba(168,85,247,.07); border-left-style: dashed; opacity: .8; }
+  .leave-legend { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-dim); }
+  .leave-legend i { width: 10px; height: 10px; border-radius: 2px; background: #a855f7; display: inline-block; }
   .visit-chip {
     font-size: 10.5px; padding: 3px 6px; border-radius: 5px; background: var(--panel-3);
     border-left: 3px dotted var(--ink-dim); line-height: 1.3; opacity: .85; cursor: default;
@@ -130,6 +140,7 @@
       <div class="seg" id="viewSeg"><button data-v="staff" class="on">By staff</button><button data-v="site">By site</button><button data-v="list">List by day</button></div>
       <select id="groupBy" class="hide"><option value="staff">Group by staff</option><option value="site">Group by site</option><option value="list">List by day</option></select>
       <input id="rotaSearch" type="search" placeholder="Search name, site, postcode, time…">
+      <span class="leave-legend" title="Approved leave. A faded, dashed one is requested but not yet approved."><i></i> Holiday / leave</span>
       <span class="spacer"></span>
       <button class="btn" id="btnPublishDrafts">Publish drafts</button>
       <button class="btn" id="btnDuplicateWeek">Duplicate week forward</button>
@@ -203,7 +214,7 @@ function startOfWeek(d) {
   return x;
 }
 let weekStart = startOfWeek(new Date());
-let allPersonnel = [], allSites = [], allShifts = [], allShiftTypes = [], allVehicles = [], allAssets = [], allSiteVisits = [];
+let allPersonnel = [], allSites = [], allShifts = [], allShiftTypes = [], allVehicles = [], allAssets = [], allSiteVisits = [], allLeave = [];
 /** A shift chip shows one person's own involvement — their assignment
  * carries the clock/attendance state now, the shift itself only carries
  * DRAFT/PUBLISHED/IN_PROGRESS/COMPLETED/CANCELLED. */
@@ -233,7 +244,7 @@ async function load() {
   const from = new Date(days[0]); from.setHours(0, 0, 0, 0);
   const to = new Date(days[6]); to.setHours(23, 59, 59, 999);
   el('#weekRange').textContent = `${days[0].toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${days[6].toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
-  [allPersonnel, allSites, allShifts, allShiftTypes, allVehicles, allAssets, allSiteVisits] = await Promise.all([
+  [allPersonnel, allSites, allShifts, allShiftTypes, allVehicles, allAssets, allSiteVisits, allLeave] = await Promise.all([
     api('GET', '/api/personnel'), api('GET', '/api/sites'),
     api('GET', `/api/shifts?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`),
     api('GET', '/api/shift-types'), api('GET', '/api/vehicles'), api('GET', '/api/assets'),
@@ -242,6 +253,10 @@ async function load() {
     // patrol schedules. Read-only here: scheduling a patrol is still done
     // from Patrol schedules, this is purely "don't double-book" visibility.
     api('GET', '/api/site-visits').catch(() => []),
+    // Approved (and still-pending) leave, drawn on the rota so a booked
+    // holiday is visible before anyone gets rostered over it. A role that
+    // can't list leave just sees no leave chips rather than a broken page.
+    api('GET', '/api/leave-requests').catch(() => []),
   ]);
   paintGrid();
 }
@@ -285,6 +300,33 @@ function visitOverlapsAny(v, shiftsThatDay) {
   const vEnd = vStart + (v.duration_expected_min || 30) * 60000;
   return shiftsThatDay.some((s) => s.status !== 'CANCELLED' && Date.parse(s.starts_at) < vEnd && vStart < Date.parse(s.ends_at));
 }
+/** Leave covering this day for this person — APPROVED is booked, PENDING
+ * is shown faded so a dispatcher knows a request is waiting. Rejected and
+ * cancelled requests never show. start_date/end_date are whole local days. */
+const LEAVE_CHIP_LABEL = { ANNUAL: 'Holiday', SICK: 'Sick leave', UNPAID: 'Unpaid leave', OTHER: 'Leave' };
+function leaveForPersonOnDay(personId, d) {
+  const day = fmtDate(d);
+  return allLeave.filter((r) => r.personnel_id === personId && ['APPROVED', 'PENDING'].includes(r.status) && r.start_date <= day && day <= r.end_date);
+}
+function leaveChipHtml(r, withName) {
+  const label = LEAVE_CHIP_LABEL[r.type] || 'Leave';
+  return `<div class="leave-chip${r.status === 'PENDING' ? ' pending' : ''}" data-leave="${r.id}" title="${esc(label)} ${esc(r.start_date)}${r.end_date !== r.start_date ? ' to ' + esc(r.end_date) : ''}${r.status === 'PENDING' ? ' (requested, not yet approved)' : ''}">
+    <strong>${esc(label)}</strong>${r.status === 'PENDING' ? ' · requested' : ''}${withName ? ` · ${esc(r.personnel_name || '')}` : ''}
+  </div>`;
+}
+function leavePopup(r) {
+  const label = LEAVE_CHIP_LABEL[r.type] || 'Leave';
+  modal(label, `
+    <p><strong>${esc(r.personnel_name || '')}</strong></p>
+    <p>${esc(r.start_date)}${r.end_date !== r.start_date ? ` → ${esc(r.end_date)}` : ''} · ${r.days} day${r.days === 1 ? '' : 's'}</p>
+    <p class="dim">${r.status === 'APPROVED' ? `Approved${r.reviewed_by ? ' by ' + esc(r.reviewed_by) : ''}` : 'Requested — not yet approved. Approve or reject it from Admin → Leave.'}</p>
+    ${r.note ? `<p class="dim" style="font-size:12px">${esc(r.note)}</p>` : ''}
+  `, () => {
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = '<span></span><button class="btn" id="lvpClose">Close</button>';
+    el('#lvpClose').onclick = closeModal;
+  });
+}
 function visitChipHtml(v, overlap) {
   const start = new Date(v.scheduled_for);
   const who = v.resources.map((r) => r.personnel).filter(Boolean).join(', ');
@@ -323,6 +365,8 @@ function paintList() {
   for (const d of days) {
     const list = shifts.filter((s) => sameDay(new Date(s.starts_at), d)).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
     html += `<h3 class="${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()]} ${d.getDate()} ${d.toLocaleDateString('en-GB', { month: 'short' })} <span style="text-transform:none;letter-spacing:0;font-weight:400">· ${list.length} shift${list.length === 1 ? '' : 's'}</span></h3>`;
+    const dayLeave = allLeave.filter((r) => ['APPROVED', 'PENDING'].includes(r.status) && r.start_date <= fmtDate(d) && fmtDate(d) <= r.end_date);
+    if (dayLeave.length) html += `<div style="display:flex;flex-wrap:wrap;gap:4px;margin:0 0 6px">${dayLeave.map((r) => leaveChipHtml(r, true)).join('')}</div>`;
     html += list.length ? `<table><tbody>${list.map((s) => {
       const active = s.assignments.filter((a) => a.status !== 'REMOVED');
       const cover = s.coverage_gap > 0 ? `<span class="coverage-badge gap">${s.assigned_count}/${s.required_headcount} — needs ${s.coverage_gap}</span>` : s.over_staffed ? `<span class="coverage-badge over">${s.assigned_count}/${s.required_headcount}</span>` : `<span class="dim">${s.assigned_count}/${s.required_headcount}</span>`;
@@ -350,6 +394,7 @@ function paintGridByStaff() {
     for (const d of days) {
       const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.assignments.some((a) => a.personnel_id === p.id));
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
+        ${leaveForPersonOnDay(p.id, d).map((r) => leaveChipHtml(r, false)).join('')}
         ${dayShifts.map((s) => {
           const a = s.assignments.find((x) => x.personnel_id === p.id);
           // Kept deliberately minimal — time and where, nothing else. Every
@@ -433,6 +478,10 @@ function finishGridPaint(shifts, days, defaultsForCell) {
   els('.shift-chip').forEach((chip) => chip.addEventListener('click', (e) => {
     e.stopPropagation();
     shiftModal(allShifts.find((s) => s.id === Number(chip.dataset.shift)));
+  }));
+  els('.leave-chip').forEach((chip) => chip.addEventListener('click', (e) => {
+    e.stopPropagation();
+    leavePopup(allLeave.find((r) => r.id === Number(chip.dataset.leave)));
   }));
   els('.visit-chip').forEach((chip) => chip.addEventListener('click', (e) => {
     e.stopPropagation();
