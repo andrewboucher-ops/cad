@@ -64,3 +64,33 @@ test('tts: one request at a time, and a 429 is waited out and retried', async ()
   const gaveUp = createTts({ apiKey: 'k', dir, fetchImpl: async () => new Response('no', { status: 429 }), convert: async () => {}, sleep: async () => {} });
   await assert.rejects(gaveUp.clip('four'), /429/);
 });
+
+test('tts: a 24 kHz WAV becomes 8 kHz mono 16-bit PCM for the PBX, with no ffmpeg', () => {
+  const { toPbxWav } = require('../tts.js');
+  const wavOf = ({ rate, channels, bits, format = 1, samples }) => {
+    const bytes = bits / 8, data = Buffer.alloc(samples.length * channels * bytes);
+    samples.forEach((v, i) => { for (let c = 0; c < channels; c++) {
+      const o = (i * channels + c) * bytes;
+      if (format === 3) data.writeFloatLE(v, o); else data.writeInt16LE(Math.round(v * 32767), o);
+    } });
+    const h = Buffer.alloc(44);
+    h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVE', 8); h.write('fmt ', 12); h.writeUInt32LE(16, 16);
+    h.writeUInt16LE(format, 20); h.writeUInt16LE(channels, 22); h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * channels * bytes, 28);
+    h.writeUInt16LE(channels * bytes, 32); h.writeUInt16LE(bits, 34); h.write('data', 36); h.writeUInt32LE(data.length, 40);
+    return Buffer.concat([h, data]);
+  };
+  const tone = Array.from({ length: 24000 }, (_, i) => 0.5 * Math.sin(2 * Math.PI * 440 * i / 24000)); // 1 s of 440 Hz
+  for (const src of [wavOf({ rate: 24000, channels: 1, bits: 16, samples: tone }), wavOf({ rate: 24000, channels: 2, bits: 32, format: 3, samples: tone })]) {
+    const out = toPbxWav(src);
+    assert.equal(out.toString('ascii', 0, 4), 'RIFF');
+    assert.equal(out.readUInt16LE(20), 1, 'PCM');
+    assert.equal(out.readUInt16LE(22), 1, 'mono');
+    assert.equal(out.readUInt32LE(24), 8000);
+    assert.equal(out.readUInt16LE(34), 16);
+    const n = out.readUInt32LE(40) / 2;
+    assert.equal(n, 8000, 'still one second long');
+    let peak = 0; for (let i = 100; i < n - 100; i++) peak = Math.max(peak, Math.abs(out.readInt16LE(44 + i * 2)) / 32767);
+    assert.ok(peak > 0.45 && peak < 0.55, `the tone survives at the same level (peak ${peak})`);
+  }
+  assert.throws(() => toPbxWav(Buffer.from('not audio')), /not send a WAV/);
+});

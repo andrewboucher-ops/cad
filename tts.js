@@ -3,7 +3,9 @@
  * server (OpenAI-style POST /v1/audio/speech, on the LAN).
  *
  * The server returns 24 kHz WAV; the PBX wants 8 kHz mono 16-bit PCM, so
- * every clip goes through ffmpeg once. Clips are cached on disk under a hash
+ * every clip is resampled once, here in JS (toPbxWav below). It used to go
+ * through ffmpeg, which install.sh never installed — without it every clip
+ * fails and the officer hears only the PBX's beep. Clips are cached on disk under a hash
  * of their text and voice settings — the API is only called when the
  * wording (or, for a personal line, the name) changes. The cache sits next
  * to the database so a deploy doesn't wipe it.
@@ -15,7 +17,61 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+
+/** Reads a WAV (PCM 8/16/24/32-bit or float, any rate, any channels) and
+ * returns it as 8 kHz mono 16-bit PCM WAV — what Asterisk plays as .wav. */
+function toPbxWav(buf, outRate = 8000) {
+  if (buf.length < 12 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') throw new Error('TTS server did not send a WAV');
+  let fmt = null, data = null;
+  for (let o = 12; o + 8 <= buf.length;) {
+    const id = buf.toString('ascii', o, o + 4);
+    let size = buf.readUInt32LE(o + 4);
+    if (id === 'data' && (size === 0 || size === 0xffffffff || o + 8 + size > buf.length)) size = buf.length - o - 8; // streamed WAVs leave the size unset
+    if (id === 'fmt ') {
+      let format = buf.readUInt16LE(o + 8);
+      if (format === 0xfffe && size >= 26) format = buf.readUInt16LE(o + 32); // WAVE_FORMAT_EXTENSIBLE: the real format is the sub-format GUID's first two bytes
+      fmt = { format, channels: buf.readUInt16LE(o + 10), rate: buf.readUInt32LE(o + 12), bits: buf.readUInt16LE(o + 22) };
+    } else if (id === 'data') { data = buf.subarray(o + 8, o + 8 + size); break; }
+    o += 8 + size + (size & 1);
+  }
+  if (!fmt || !data) throw new Error('TTS WAV has no audio');
+  const { format, channels, rate, bits } = fmt;
+  const bytes = bits / 8, frame = bytes * channels;
+  if (!channels || !rate || ![1, 3].includes(format) || (format === 3 ? bits !== 32 && bits !== 64 : ![8, 16, 24, 32].includes(bits))) throw new Error(`TTS WAV format not supported (format ${format}, ${bits}-bit)`);
+  const read = format === 3
+    ? (o) => (bits === 32 ? data.readFloatLE(o) : data.readDoubleLE(o))
+    : bits === 8 ? (o) => (data[o] - 128) / 128
+      : bits === 16 ? (o) => data.readInt16LE(o) / 32768
+        : bits === 24 ? (o) => data.readIntLE(o, 3) / 8388608
+          : (o) => data.readInt32LE(o) / 2147483648;
+  const n = Math.floor(data.length / frame);
+  const mono = new Float32Array(n);
+  for (let i = 0; i < n; i++) { let v = 0; for (let c = 0; c < channels; c++) v += read(i * frame + c * bytes); mono[i] = v / channels; }
+  // Windowed-sinc low-pass + resample, cut off just under the new Nyquist.
+  const ratio = rate / outRate, cutoff = Math.min(1, 1 / ratio) * 0.95, half = 16;
+  const reach = Math.ceil(half * Math.max(1, ratio));
+  const outN = Math.floor(n / ratio);
+  const pcm = Buffer.alloc(outN * 2);
+  for (let j = 0; j < outN; j++) {
+    const t = j * ratio, centre = Math.floor(t);
+    let acc = 0, norm = 0;
+    for (let k = centre - reach + 1; k <= centre + reach; k++) {
+      if (k < 0 || k >= n) continue;
+      const x = (k - t) * cutoff;
+      if (Math.abs(x) >= half) continue;
+      const w = (x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x)) * (0.5 + 0.5 * Math.cos(Math.PI * x / half));
+      acc += mono[k] * w; norm += w;
+    }
+    const v = norm ? acc / norm : 0;
+    pcm.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v * 32767))), j * 2);
+  }
+  const head = Buffer.alloc(44);
+  head.write('RIFF', 0, 'ascii'); head.writeUInt32LE(36 + pcm.length, 4); head.write('WAVE', 8, 'ascii');
+  head.write('fmt ', 12, 'ascii'); head.writeUInt32LE(16, 16); head.writeUInt16LE(1, 20); head.writeUInt16LE(1, 22);
+  head.writeUInt32LE(outRate, 24); head.writeUInt32LE(outRate * 2, 28); head.writeUInt16LE(2, 32); head.writeUInt16LE(16, 34);
+  head.write('data', 36, 'ascii'); head.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([head, pcm]);
+}
 
 function createTts({
   url = process.env.TTS_URL || 'http://192.168.7.201:3900/v1/audio/speech',
@@ -24,16 +80,12 @@ function createTts({
   voice = process.env.TTS_VOICE || 'expr-voice-2-f',
   speed = Number(process.env.TTS_SPEED || 1.4),
   dir = process.env.TTS_DIR || path.join(path.dirname(process.env.DATA_FILE || path.join(__dirname, 'data', 'cccs.db')), 'tts'),
-  ffmpeg = process.env.TTS_FFMPEG || 'ffmpeg',
   timeoutMs = 45000, // one clip took 14 s on live — leave room
   retries = 3,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   fetchImpl = (...a) => fetch(...a),
   // (input wav path, output wav path) → Promise. Swappable for tests.
-  convert = (src, out) => new Promise((resolve, reject) => {
-    execFile(ffmpeg, ['-y', '-loglevel', 'error', '-i', src, '-ar', '8000', '-ac', '1', '-acodec', 'pcm_s16le', out], { timeout: 30000 },
-      (err, _o, stderr) => (err ? reject(new Error(`ffmpeg: ${String(stderr || err.message).trim().slice(0, 200)}`)) : resolve()));
-  }),
+  convert = async (src, out) => fs.writeFileSync(out, toPbxWav(fs.readFileSync(src))),
 } = {}) {
   const inFlight = new Map();
   // One request at a time: the server rate-limits (429) when several clips
@@ -84,4 +136,4 @@ function createTts({
   return { configured: () => Boolean(apiKey), clip, cached, dir };
 }
 
-module.exports = { createTts };
+module.exports = { createTts, toPbxWav };

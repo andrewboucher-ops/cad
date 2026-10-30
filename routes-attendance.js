@@ -374,15 +374,18 @@ module.exports = function registerAttendance({
     const mine = tts.cached(WELFARE_PROMPTS.intro(first));
     if (mine) return wav(mine);
     warmWelfareIntro(p);
-    try { return wav(await tts.clip(WELFARE_PROMPTS.intro(''))); } catch (e) { return noAudio(e); }
+    // Don't hold the PBX for minutes if the TTS server is slow: answer
+    // 503 and let the dialplan play its built-in fallback instead.
+    try { return wav(await soon(tts.clip(WELFARE_PROMPTS.intro('')))); } catch (e) { return noAudio(e); }
   });
   // The fixed lines carry nothing personal, so no token: one URL each,
   // which the PBX's own media cache can keep.
   route('GET', '/api/welfare-checkcall-prompts/:name', null, async ({ params }) => {
     const name = String(params.name).replace(/\.wav$/, '');
     if (!['intro', 'retry', 'thanks', 'fail'].includes(name)) throw httpError(404, 'no such prompt');
-    try { return wav(await tts.clip(WELFARE_PROMPTS[name](''))); } catch (e) { return noAudio(e); }
+    try { return wav(await soon(tts.clip(WELFARE_PROMPTS[name]('')))); } catch (e) { return noAudio(e); }
   });
+  const soon = (job, ms = 8000) => { job.catch(() => {}); return Promise.race([job, new Promise((_, reject) => setTimeout(() => reject(new Error('TTS server too slow for a live call')), ms).unref?.())]); };
   function warmWelfareIntro(p) {
     if (!tts.configured() || !p) return;
     tts.clip(WELFARE_PROMPTS.intro(p.name.split(/\s+/)[0])).then(() => { health.last_voice_error = null; }, (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; });
