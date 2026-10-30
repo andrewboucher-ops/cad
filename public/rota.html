@@ -311,6 +311,17 @@ function leaveForPersonOnDay(personId, d) {
 /** Asks before putting someone on a shift that falls on their booked or
  * requested leave. A warning, not a hard block: control sometimes does
  * need to call someone in, but it should never happen by accident. */
+/** An expired SIA licence or right to work blocks rostering and clock-in;
+ * an admin can still go ahead by giving a reason, which the server logs. */
+async function withLicenceOverride(call) {
+  try { return await call({}); }
+  catch (e) {
+    if (e.code !== 'LICENCE_EXPIRED' || me.role !== 'SYSTEM_ADMIN') throw e;
+    const reason = prompt(`${e.message}\n\nReason for going ahead anyway (for example, a shift that needs no licence):`);
+    if (!reason || !reason.trim()) throw e;
+    return call({ compliance_override_reason: reason.trim() });
+  }
+}
 function confirmLeaveClash(personId, startsIso, endsIso) {
   const first = fmtDate(new Date(startsIso));
   const last = fmtDate(new Date(Date.parse(endsIso) - 1));
@@ -784,7 +795,7 @@ function shiftModal(s, defaults) {
       } catch (e) { el('#shError').textContent = e.message; }
     }));
     els('[data-clockin]').forEach((b) => (b.onclick = async () => {
-      try { await api('POST', `/api/shift-assignments/${b.dataset.clockin}/clock-in`, {}); await reopen(); }
+      try { await withLicenceOverride((o) => api('POST', `/api/shift-assignments/${b.dataset.clockin}/clock-in`, o)); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     }));
     els('[data-clockout]').forEach((b) => (b.onclick = async () => {
@@ -825,7 +836,7 @@ function shiftModal(s, defaults) {
     }));
     if (el('#shAddPerson')) el('#shAddPerson').onclick = async () => {
       if (!confirmLeaveClash(Number(el('#shAddPersonnel').value), s.starts_at, s.ends_at)) return;
-      try { await api('POST', `/api/shifts/${s.id}/assignments`, { personnel: Number(el('#shAddPersonnel').value) }); await reopen(); }
+      try { await withLicenceOverride((o) => api('POST', `/api/shifts/${s.id}/assignments`, { personnel: Number(el('#shAddPersonnel').value), ...o })); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
     if (el('#shApplications')) {
@@ -846,7 +857,7 @@ function shiftModal(s, defaults) {
         els('#shApplications [data-approve]').forEach((b) => (b.onclick = async () => {
           const app = open.find((a) => a.id === Number(b.dataset.approve));
           if (app && !confirmLeaveClash(app.personnel_id, s.starts_at, s.ends_at)) return;
-          try { await api('PATCH', `/api/shift-applications/${b.dataset.approve}`, { status: 'APPROVED' }); await reopen(); }
+          try { await withLicenceOverride((o) => api('PATCH', `/api/shift-applications/${b.dataset.approve}`, { status: 'APPROVED', ...o })); await reopen(); }
           catch (e) { el('#shError').textContent = e.message; }
         }));
         els('#shApplications [data-reject]').forEach((b) => (b.onclick = async () => {
@@ -909,7 +920,7 @@ function shiftModal(s, defaults) {
           body.personnel = Number(el('#shPersonnel').value);
           if (!confirmLeaveClash(body.personnel, body.starts_at, body.ends_at)) return;
           if (el('#shDraft') && el('#shDraft').checked) body.status = 'DRAFT';
-          await api('POST', '/api/shifts', body);
+          await withLicenceOverride((o) => api('POST', '/api/shifts', { ...body, ...o }));
         }
         closeModal(); await load();
       } catch (e) { el('#shError').textContent = e.message; }
@@ -947,6 +958,7 @@ if (isAdmin) {
     if (!source.length) { alert('No shifts in the current view to duplicate.'); return; }
     if (!confirm(`Duplicate ${source.length} shift${source.length === 1 ? '' : 's'} ${weeks} week${weeks === 1 ? '' : 's'} forward, as drafts?`)) return;
     const shiftMs = weeks * 7 * 86400000;
+    const skipped = [];
     for (const s of source) {
       const created = await api('POST', '/api/shifts', {
         site_id: s.site_id, shift_type_id: s.shift_type_id,
@@ -957,10 +969,14 @@ if (isAdmin) {
         detail: s.detail, notes: s.notes, status: 'DRAFT',
       });
       for (const a of s.assignments.filter((x) => ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
-        await api('POST', `/api/shifts/${created.id}/assignments`, { personnel: a.personnel_id, role_on_shift: a.role_on_shift, is_duty_supervisor: a.is_duty_supervisor });
+        // Someone whose licence has since expired is left off the copy, not
+        // overridden in bulk — each override needs its own reason.
+        try { await api('POST', `/api/shifts/${created.id}/assignments`, { personnel: a.personnel_id, role_on_shift: a.role_on_shift, is_duty_supervisor: a.is_duty_supervisor }); }
+        catch (e) { if (e.code !== 'LICENCE_EXPIRED') throw e; skipped.push(e.message); }
       }
     }
     await load();
+    if (skipped.length) alert(`Left off the copied shifts:\n\n${[...new Set(skipped)].join('\n')}`);
   };
 }
 
