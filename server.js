@@ -6003,6 +6003,32 @@ route('GET', '/api/integrations/dems/wearer', null, ({ query, req }) => {
   return { tag: a.tag, wearer: p ? { name: p.name, employee_no: p.employee_no } : null,
     checked_out_at: co ? co.checked_out_at : null, returned_at: co ? co.returned_at : null };
 });
+// Whether someone holds an in-date SIA CCTV (Public Space Surveillance) licence.
+// DEMS asks before showing footage. Matched on a sign-in email (a CCCS user's,
+// or the staff file's contact email), then employee number or exact name. The
+// licence number is not sent: DEMS only needs yes or no, the expiry and whether
+// it was checked against the SIA register.
+const SIA_CCTV_TYPE = 'CCTV (Public Space Surveillance)';
+route('GET', '/api/integrations/dems/licence', null, ({ query, req }) => {
+  assertDemsSecret(req);
+  const email = String(query.get('email') || '').trim().toLowerCase();
+  let p = null;
+  if (email) {
+    const u = db.users.find((x) => x.email && x.email.toLowerCase() === email && x.personnel_id);
+    p = (u && db.personnel.find((x) => x.id === u.personnel_id))
+      || db.personnel.find((x) => x.contact_email && x.contact_email.toLowerCase() === email) || null;
+  }
+  if (!p) p = demsFindPerson(query.get('person'));
+  if (!p) return { person: null, cctv: null };
+  const today = new Date().toISOString().slice(0, 10);
+  const cctv = siaLicencesOf(p)
+    .filter((l) => l.licence_type === SIA_CCTV_TYPE && l.expiry && String(l.expiry).slice(0, 10) >= today)
+    .sort((a, b) => String(b.expiry).localeCompare(String(a.expiry)))[0];
+  return {
+    person: { name: p.name, employee_no: p.employee_no },
+    cctv: cctv ? { expiry: String(cctv.expiry).slice(0, 10), verified: !!cctv.verified_at } : null,
+  };
+});
 // Record (or remove) the link between a DEMS case and a job.
 route('POST', '/api/integrations/dems/links', null, ({ body, req }) => {
   assertDemsSecret(req);
