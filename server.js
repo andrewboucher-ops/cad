@@ -31,6 +31,14 @@ const MS_CLIENT_ID = process.env.MS_CLIENT_ID || '';
 const MS_CLIENT_SECRET = process.env.MS_CLIENT_SECRET || '';
 const MS_REDIRECT_URI = process.env.MS_REDIRECT_URI || '';
 const MS_ENABLED = Boolean(MS_TENANT_ID && MS_CLIENT_ID && MS_CLIENT_SECRET && MS_REDIRECT_URI);
+// Roles whose accounts must sign in with Microsoft (and so get Entra MFA)
+// rather than a password. Only bites when Microsoft sign-in is configured and
+// the account has an email to match on. BREAK_GLASS_USERS keeps password
+// sign-in for named accounts in case Microsoft is unreachable.
+const SSO_REQUIRED_ROLES = process.env.SSO_REQUIRED_ROLES === 'off' ? []
+  : String(process.env.SSO_REQUIRED_ROLES || 'SYSTEM_ADMIN,DISPATCHER,SUPERVISOR,FINANCE').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+const BREAK_GLASS_USERS = String(process.env.BREAK_GLASS_USERS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+const mustUseMicrosoft = (u) => MS_ENABLED && Boolean(u.email) && SSO_REQUIRED_ROLES.includes(u.role) && !BREAK_GLASS_USERS.includes(u.username);
 // Shared secret the separate PRF system's backend sends on its
 // /api/integrations/prf/... calls (medication administered, stock used,
 // its read-only catalogue) — that system never holds a CCCS session, so
@@ -1425,6 +1433,12 @@ route('POST', '/api/auth/login', null, ({ body }) => {
     throw httpError(401, 'invalid credentials');
   }
   clearLoginFailures(username);
+  if (mustUseMicrosoft(user)) {
+    logEvent('auth.password_refused', `PASSWORD SIGN-IN REFUSED FOR ${user.username} — ${user.role} MUST USE MICROSOFT`, { user_id: user.id });
+    const e = httpError(403, 'This account signs in with Microsoft. Use "Sign in with Microsoft".');
+    e.code = 'SSO_REQUIRED';
+    throw e;
+  }
   const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
   const token = sign({ sub: user.id, role: user.role, iat: Date.now(), exp: Date.now() + ttl });
   recordLogin(user, `${user.username} signed in (${user.role})`);

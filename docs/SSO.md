@@ -80,6 +80,28 @@ New accounts can also be given an email at creation time (`POST /api/users`),
 or via `seed.json` — see the `email` field documented in
 `seed.example.json`.
 
+## 7. Microsoft-only sign-in for admin and control roles
+
+Once SSO is enabled, accounts with the roles below **and an email set** can no
+longer sign in with a password: the login form tells them to use "Sign in
+with Microsoft", so every sign-in goes through Entra ID and its MFA.
+
+```
+# default when unset; "off" turns the rule off
+SSO_REQUIRED_ROLES=SYSTEM_ADMIN,DISPATCHER,SUPERVISOR,FINANCE
+# accounts that keep password sign-in, for when Microsoft is unreachable
+BREAK_GLASS_USERS=breakglass
+```
+
+Keep at least one break-glass admin with a long random password stored
+offline, and no email set or listed in `BREAK_GLASS_USERS`. Each refused
+password sign-in is written to the audit log as `auth.password_refused`.
+Field officers, MDTs and clients are unaffected.
+
+Turn on MFA for these people in Entra ID (Security defaults, or a
+Conditional Access policy requiring MFA for the CCCS app); this rule only
+makes sure the Microsoft route is the one used.
+
 ## Notes
 
 - If a Microsoft sign-in has no matching CCCS account, the user is bounced
