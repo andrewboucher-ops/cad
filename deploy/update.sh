@@ -31,7 +31,9 @@ SERVICE="${SERVICE:-cccs}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/cccs}"
 # Unlike deploy/backup.sh's own scheduled backups, nothing was pruning
 # these predeploy ones — every deploy added a pair and never removed one.
-KEEP_DAYS="${KEEP_DAYS:-30}"
+# Kept by count, not age: with auto-deploy there can be several deploys a
+# day, and 30 days of them (~300 MB each) filled the 20 GB disk.
+KEEP_DEPLOYS="${KEEP_DEPLOYS:-5}"
 DRY_RUN="${DRY_RUN:-}"
 # MIGRATE=1: convert radio-era accounts (RADIO_USER) as part of this deploy.
 # Never implied — review the dry run it prints first.
@@ -123,7 +125,15 @@ if [ -f "$DATA_FILE" ]; then
 fi
 APP_BACKUP="$BACKUP_DIR/app-predeploy-$STAMP.tar.gz"
 run tar -czf "$APP_BACKUP" -C "$(dirname "$APP_DIR")" "$(basename "$APP_DIR")"
-run find "$BACKUP_DIR" -maxdepth 1 \( -name 'cccs-predeploy-*.db' -o -name 'app-predeploy-*.tar.gz' \) -mtime "+$KEEP_DAYS" -delete
+prune_predeploy() {
+  # Names sort by their timestamp, so the newest are last.
+  local f pattern
+  for pattern in 'cccs-predeploy-*.db' 'app-predeploy-*.tar.gz'; do
+    find "$BACKUP_DIR" -maxdepth 1 -name "$pattern" -printf '%f\n' | sort | head -n "-$KEEP_DEPLOYS" |
+      while read -r f; do rm -f "$BACKUP_DIR/$f"; done
+  done
+}
+run prune_predeploy
 echo "   code     → $APP_BACKUP"
 
 rollback() {
