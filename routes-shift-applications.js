@@ -22,6 +22,7 @@ const OPEN_APPLICATION_STATUSES = ['APPLIED', 'SHORTLISTED'];
 module.exports = function registerShiftApplicationRoutes({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,
   findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent, buildShiftIndex,
+  assertDeployable = () => {},
 }) {
   for (const t of ['shift_applications']) if (!Array.isArray(db[t])) db[t] = [];
 
@@ -117,6 +118,8 @@ module.exports = function registerShiftApplicationRoutes({
         const s = findShift(a.shift_id);
         if (assignedPersonnelIds(s.id).length >= s.required_headcount) throw httpError(409, 'this shift is already fully staffed');
         if (assignedPersonnelIds(s.id).includes(a.personnel_id)) throw httpError(409, 'already assigned to this shift');
+        const applicant = db.personnel.find((x) => x.id === a.personnel_id);
+        if (applicant) assertDeployable(applicant, body, user, 'ROSTERING');
         db.shift_assignments.push({
           id: nextId('shift_assignments'), shift_id: s.id, personnel_id: a.personnel_id, role_on_shift: '',
           is_duty_supervisor: false, status: 'ASSIGNED', confirmed_at: null, attendance: null, clocked_in_at: null, clocked_out_at: null,

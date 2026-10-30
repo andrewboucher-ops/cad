@@ -32,7 +32,7 @@ const KIND = {
 
 module.exports = function registerTimeclock({
   route, httpError, CONTROL, db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift,
-  isControlRole, siteVisibleTo = () => true, flushNow = () => {},
+  isControlRole, siteVisibleTo = () => true, flushNow = () => {}, assertDeployable = () => {},
 }) {
   const crypto = require('crypto');
   const minutes = (ms) => Math.round(ms / 60000);
@@ -87,6 +87,7 @@ module.exports = function registerTimeclock({
     const person = db.personnel.find((p) => p.id === pid);
     if (!person) throw httpError(400, isControlRole(user.role) ? 'choose who to clock in' : 'this login is not linked to a member of staff');
     if (openFor(pid)) throw httpError(409, `${person.name} is already clocked in`);
+    assertDeployable(person, body, user, 'AD HOC CLOCK-IN');
     const site = db.sites.find((x) => x.id === Number(body.site_id));
     if (!site || !siteVisibleTo(site.id, user)) throw httpError(400, 'choose the site you are working at');
     const reason = String(body.reason || '').trim().slice(0, 300);
