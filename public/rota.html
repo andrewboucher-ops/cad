@@ -308,6 +308,22 @@ function leaveForPersonOnDay(personId, d) {
   const day = fmtDate(d);
   return allLeave.filter((r) => r.personnel_id === personId && ['APPROVED', 'PENDING'].includes(r.status) && r.start_date <= day && day <= r.end_date);
 }
+/** Asks before putting someone on a shift that falls on their booked or
+ * requested leave. A warning, not a hard block: control sometimes does
+ * need to call someone in, but it should never happen by accident. */
+function confirmLeaveClash(personId, startsIso, endsIso) {
+  const first = fmtDate(new Date(startsIso));
+  const last = fmtDate(new Date(Date.parse(endsIso) - 1));
+  const clash = allLeave.find((r) => r.personnel_id === personId && ['APPROVED', 'PENDING'].includes(r.status) && r.start_date <= last && first <= r.end_date);
+  if (!clash) return true;
+  const label = (LEAVE_CHIP_LABEL[clash.type] || 'Leave').toLowerCase();
+  const p = allPersonnel.find((x) => x.id === personId);
+  const name = (p && p.name) || clash.personnel_name || 'This person';
+  const dates = `${clash.start_date}${clash.end_date !== clash.start_date ? ' to ' + clash.end_date : ''}`;
+  return confirm(clash.status === 'APPROVED'
+    ? `${name} has booked ${label} (${dates}). Roster them on this shift anyway?`
+    : `${name} has requested ${label} (${dates}), not yet approved. Roster them on this shift anyway?`);
+}
 function leaveChipHtml(r, withName) {
   const label = LEAVE_CHIP_LABEL[r.type] || 'Leave';
   return `<div class="leave-chip${r.status === 'PENDING' ? ' pending' : ''}" data-leave="${r.id}" title="${esc(label)} ${esc(r.start_date)}${r.end_date !== r.start_date ? ' to ' + esc(r.end_date) : ''}${r.status === 'PENDING' ? ' (requested, not yet approved)' : ''}">
@@ -808,6 +824,7 @@ function shiftModal(s, defaults) {
       catch (e) { el('#shError').textContent = e.message; }
     }));
     if (el('#shAddPerson')) el('#shAddPerson').onclick = async () => {
+      if (!confirmLeaveClash(Number(el('#shAddPersonnel').value), s.starts_at, s.ends_at)) return;
       try { await api('POST', `/api/shifts/${s.id}/assignments`, { personnel: Number(el('#shAddPersonnel').value) }); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
@@ -827,6 +844,8 @@ function shiftModal(s, defaults) {
           catch (e) { el('#shError').textContent = e.message; }
         }));
         els('#shApplications [data-approve]').forEach((b) => (b.onclick = async () => {
+          const app = open.find((a) => a.id === Number(b.dataset.approve));
+          if (app && !confirmLeaveClash(app.personnel_id, s.starts_at, s.ends_at)) return;
           try { await api('PATCH', `/api/shift-applications/${b.dataset.approve}`, { status: 'APPROVED' }); await reopen(); }
           catch (e) { el('#shError').textContent = e.message; }
         }));
@@ -888,6 +907,7 @@ function shiftModal(s, defaults) {
           }
         } else {
           body.personnel = Number(el('#shPersonnel').value);
+          if (!confirmLeaveClash(body.personnel, body.starts_at, body.ends_at)) return;
           if (el('#shDraft') && el('#shDraft').checked) body.status = 'DRAFT';
           await api('POST', '/api/shifts', body);
         }
