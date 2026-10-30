@@ -621,6 +621,37 @@ function siaLicencesOf(p) {
   if (Array.isArray(p.sia_licences)) return p.sia_licences;
   return p.sia_licence_no ? [{ id: 1, licence_type: 'Door Supervision', licence_no: p.sia_licence_no, expiry: p.sia_licence_expiry || null }] : [];
 }
+/** Why this person can't be put to work right now, or null. Blocks only on
+ * an expiry that has actually passed: an SIA licence on file with none still
+ * in date (someone holding an expired DS and a valid SG is fine), or a
+ * time-limited right to work that has run out. Nothing on file never blocks —
+ * medics and office staff need no SIA licence. */
+function deploymentBlock(p, now = Date.now()) {
+  const dated = siaLicencesOf(p).filter((l) => l.expiry);
+  if (dated.length && dated.every((l) => Date.parse(l.expiry) < now)) {
+    const last = dated.map((l) => l.expiry).sort().pop();
+    return `${p.name}'s SIA licence expired on ${String(last).slice(0, 10)}`;
+  }
+  if (p.rtw_expiry && Date.parse(p.rtw_expiry) < now) return `${p.name}'s right to work expired on ${String(p.rtw_expiry).slice(0, 10)}`;
+  return null;
+}
+/** Supplying an unlicensed operative is an offence (Private Security Industry
+ * Act 2001), so rostering or clocking in someone with an expired licence or
+ * right to work is refused. An admin can override with a written reason —
+ * for a shift that needs no licence — and the override is logged. */
+function assertDeployable(p, body, user, what) {
+  const block = deploymentBlock(p);
+  if (!block) return;
+  const reason = String((body && body.compliance_override_reason) || '').trim().slice(0, 300);
+  if (user && user.role === 'SYSTEM_ADMIN' && reason) {
+    logEvent('compliance.override', `${block.toUpperCase()} — ${what} ALLOWED BY ${user.username}: ${reason}`, { personnel_id: p.id, by: user.id, reason });
+    return;
+  }
+  logEvent('compliance.blocked', `${block.toUpperCase()} — ${what} REFUSED`, { personnel_id: p.id, by: user ? user.id : null });
+  const e = httpError(409, `${block}. ${user && user.role === 'SYSTEM_ADMIN' ? 'Give a reason to override.' : 'An admin must update the record or override.'}`);
+  e.code = 'LICENCE_EXPIRED';
+  throw e;
+}
 function personnelCompliance(p) {
   const now = Date.now();
   // Worst case across every licence held: one expired licence matters more
@@ -5128,6 +5159,7 @@ route('POST', '/api/shifts', ADMIN, ({ body, user }) => {
   if (body.personnel) {
     const p = findPersonnel(body.personnel);
     if (!p) throw httpError(400, 'personnel not found');
+    assertDeployable(p, body, user, 'ROSTERING');
     firstAssignment = {
       id: nextId('shift_assignments'), shift_id: s.id, personnel_id: p.id, role_on_shift: body.role_on_shift || '',
       is_duty_supervisor: body.is_duty_supervisor === true, status: 'ASSIGNED', confirmed_at: null,
@@ -5362,6 +5394,7 @@ route('POST', '/api/shifts/:id/assignments', ADMIN, ({ params, body, user }) => 
   if (db.shift_assignments.some((a) => a.shift_id === s.id && a.personnel_id === p.id && a.status !== 'REMOVED')) {
     throw httpError(409, `${p.name} is already on this shift`);
   }
+  assertDeployable(p, body, user, 'ROSTERING');
   const a = {
     id: nextId('shift_assignments'), shift_id: s.id, personnel_id: p.id, role_on_shift: body.role_on_shift || '',
     is_duty_supervisor: body.is_duty_supervisor === true, status: 'ASSIGNED', confirmed_at: null,
@@ -5450,6 +5483,8 @@ route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user 
   const s = findShift(a.shift_id);
   if (a.clocked_in_at) return publicShift(s);
   if (a.status === 'REMOVED') throw httpError(409, 'no longer on this shift');
+  const who = db.personnel.find((x) => x.id === a.personnel_id);
+  if (who) assertDeployable(who, body, user, 'CLOCK-IN');
   // Outside the rostered time needs a reason (routes-timeclock.js), and
   // the on-site check (routes-attendance.js) — each throws if not met.
   const pending = timeclock.check(a, s, body || {}, user, 'IN');
@@ -5667,7 +5702,7 @@ const staffId = require('./routes-staff-id.js')({
 
 // Clocking in/out off-rota, reasons and approvals — see routes-timeclock.js.
 const timeclock = require('./routes-timeclock.js')({
-  route, httpError, CONTROL, db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift, isControlRole, siteVisibleTo,
+  route, httpError, CONTROL, db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift, isControlRole, siteVisibleTo, assertDeployable,
   flushNow: () => store.flushNow(),
 });
 
@@ -5769,7 +5804,7 @@ require('./routes-reports.js')({ route, httpError, ADMIN, db });
 // Shift applications — see routes-shift-applications.js for the design.
 const shiftApplications = require('./routes-shift-applications.js')({
   route, httpError, ALL, CONTROL, db, nextId, logEvent, broadcast,
-  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent, buildShiftIndex,
+  findShift, assignedPersonnelIds, publicShift, siteVisibleTo, isControlRole, notifyShiftEvent, buildShiftIndex, assertDeployable,
 });
 
 // Vehicle/asset allocation and the stock ledger — see routes-fleet-stock.js.
@@ -5895,6 +5930,7 @@ route('POST', '/api/integrations/workstation/clock-in', null, ({ body, req }) =>
   // clocked_in_at is the person's own time, from the assignment: the shift
   // itself no longer carries one, and the PC shows it to the operator.
   if (a.clocked_in_at) return { result: 'ALREADY_CLOCKED_IN', personnel_name: p.name, clocked_in_at: a.clocked_in_at, shift: publicShift(s) };
+  assertDeployable(p, null, null, `CLOCK-IN AT ${workstation || 'A WORKSTATION'}`);
 
   a.clocked_in_at = new Date().toISOString(); a.updated_at = a.clocked_in_at;
   if (s.status === 'PUBLISHED') s.status = 'IN_PROGRESS';
@@ -6016,6 +6052,32 @@ route('GET', '/api/integrations/dems/wearer', null, ({ query, req }) => {
   const p = co ? db.personnel.find((x) => x.id === co.personnel_id) : null;
   return { tag: a.tag, wearer: p ? { name: p.name, employee_no: p.employee_no } : null,
     checked_out_at: co ? co.checked_out_at : null, returned_at: co ? co.returned_at : null };
+});
+// Whether someone holds an in-date SIA CCTV (Public Space Surveillance) licence.
+// DEMS asks before showing footage. Matched on a sign-in email (a CCCS user's,
+// or the staff file's contact email), then employee number or exact name. The
+// licence number is not sent: DEMS only needs yes or no, the expiry and whether
+// it was checked against the SIA register.
+const SIA_CCTV_TYPE = 'CCTV (Public Space Surveillance)';
+route('GET', '/api/integrations/dems/licence', null, ({ query, req }) => {
+  assertDemsSecret(req);
+  const email = String(query.get('email') || '').trim().toLowerCase();
+  let p = null;
+  if (email) {
+    const u = db.users.find((x) => x.email && x.email.toLowerCase() === email && x.personnel_id);
+    p = (u && db.personnel.find((x) => x.id === u.personnel_id))
+      || db.personnel.find((x) => x.contact_email && x.contact_email.toLowerCase() === email) || null;
+  }
+  if (!p) p = demsFindPerson(query.get('person'));
+  if (!p) return { person: null, cctv: null };
+  const today = new Date().toISOString().slice(0, 10);
+  const cctv = siaLicencesOf(p)
+    .filter((l) => l.licence_type === SIA_CCTV_TYPE && l.expiry && String(l.expiry).slice(0, 10) >= today)
+    .sort((a, b) => String(b.expiry).localeCompare(String(a.expiry)))[0];
+  return {
+    person: { name: p.name, employee_no: p.employee_no },
+    cctv: cctv ? { expiry: String(cctv.expiry).slice(0, 10), verified: !!cctv.verified_at } : null,
+  };
 });
 // Record (or remove) the link between a DEMS case and a job.
 route('POST', '/api/integrations/dems/links', null, ({ body, req }) => {
