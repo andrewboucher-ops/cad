@@ -1098,6 +1098,27 @@ function idempotencyPut(key, status, body) {
   if (idempotency.size > 5000) idempotency.delete(idempotency.keys().next().value);
 }
 
+/** Behind a reverse proxy every request arrives from the proxy's address, so
+ * keying the limit on the socket would put the whole control room in one
+ * shared bucket. The forwarded address is trusted only from loopback or an
+ * address in TRUSTED_PROXIES; from anywhere else it is just a header the
+ * sender wrote. */
+const TRUSTED_PROXIES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1',
+  ...String(process.env.TRUSTED_PROXIES || '').split(',').map((x) => x.trim()).filter(Boolean)]);
+function clientIp(req) {
+  const remote = String(req.socket.remoteAddress || '');
+  if (!TRUSTED_PROXIES.has(remote) && !TRUSTED_PROXIES.has(remote.replace(/^::ffff:/, ''))) return remote || 'unknown';
+  const real = String(req.headers['x-real-ip'] || '').trim();
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+  return real || fwd[fwd.length - 1] || remote || 'unknown';
+}
+/** Constant-time check of a shared integration secret from a request header. */
+function secretMatches(given, secret) {
+  if (!secret || typeof given !== 'string') return false;
+  const a = Buffer.from(given), b = Buffer.from(secret);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 const rate = new Map();
 function rateLimit(ip) {
   const now = Date.now();
@@ -1134,7 +1155,11 @@ function authFrom(req, url) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : url.searchParams.get('token');
   const payload = verifyToken(token);
   if (!payload) return null;
-  return db.users.find((u) => u.id === payload.sub) || null;
+  const user = db.users.find((u) => u.id === payload.sub) || null;
+  // A password change or reset signs out every session issued before it.
+  // Tokens from before iat was stamped carry none and simply run to expiry.
+  if (user && payload.iat && user.password_set_at && payload.iat < user.password_set_at) return null;
+  return user;
 }
 
 const MIME = {
@@ -1156,8 +1181,17 @@ const FORM_BODY_PATHS = new Set(['/api/sms/status']);
 // trip), so the dispatcher must not buffer or parse it first.
 const RAW_BODY_PATHS = new Set(['/api/integrations/checkcall-host/release', '/api/webhooks/gocardless']);
 
+/* Set here as well as at the edge, so a deployment that isn't behind the
+ * bundled Caddyfile still gets them. same-origin keeps ?token= and ?sso=
+ * links out of the Referer sent to Google Fonts and the CDNs. */
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'same-origin',
+};
 const requestHandler = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
   const send = (status, body, headers = {}) => {
     const payload = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body);
     res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers });
@@ -1165,7 +1199,7 @@ const requestHandler = async (req, res) => {
   };
 
   if (url.pathname.startsWith('/api/')) {
-    const ip = req.socket.remoteAddress || 'unknown';
+    const ip = clientIp(req);
     if (!rateLimit(ip)) return send(429, { error: 'rate limit exceeded' });
     let body = {};
     if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method) && !RAW_BODY_PATHS.has(url.pathname)) {
@@ -1361,7 +1395,7 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   }
   clearLoginFailures(username);
   const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
-  const token = sign({ sub: user.id, role: user.role, exp: Date.now() + ttl });
+  const token = sign({ sub: user.id, role: user.role, iat: Date.now(), exp: Date.now() + ttl });
   recordLogin(user, `${user.username} signed in (${user.role})`);
   return { token, user: publicUser(user) };
 });
@@ -1475,7 +1509,7 @@ route('GET', '/api/auth/microsoft/callback', null, async ({ query }) => {
     return { __status: 302, __headers: { location: `/index.html?sso_error=${msg}` }, __body: '' };
   }
 
-  const token = sign({ sub: localUser.id, role: localUser.role, exp: Date.now() + TOKEN_TTL_MS });
+  const token = sign({ sub: localUser.id, role: localUser.role, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
   const oneTime = crypto.randomBytes(16).toString('hex');
   ssoExchange.set(oneTime, { token, user: publicUser(localUser), created: Date.now() });
   recordLogin(localUser, `${localUser.username} signed in via Microsoft (${localUser.role})`);
@@ -2618,7 +2652,7 @@ function logInboundAlarmPayload(source, label, reqBody) {
 }
 function checkAlarmSecret(secretHeader, secretEnv, label, req) {
   const secret = process.env[secretEnv];
-  if (!secret || req.headers[secretHeader] !== secret) throw httpError(401, `bad ${label} secret`);
+  if (!secretMatches(req.headers[secretHeader], secret)) throw httpError(401, `bad ${label} secret`);
 }
 
 route('POST', '/api/integrations/guardm8/jobs', null, ({ body: b, req }) => {
@@ -3630,7 +3664,7 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
  * — this system never holds a CCCS session. GET, not POST: it changes
  * nothing on the CCCS side. */
 route('GET', '/api/integrations/prf/jobs/:reference', null, ({ params, req }) => {
-  if (!PRF_INTEGRATION_SECRET || req.headers['x-prf-integration-secret'] !== PRF_INTEGRATION_SECRET) throw httpError(401, 'bad integration secret');
+  if (!secretMatches(req.headers['x-prf-integration-secret'], PRF_INTEGRATION_SECRET)) throw httpError(401, 'bad integration secret');
   const ref = String(params.reference || '').trim().toUpperCase();
   const j = db.jobs.find((x) => x.reference.toUpperCase() === ref || String(x.id) === ref);
   if (!j) throw httpError(404, 'job not found');
@@ -6096,7 +6130,7 @@ function normalizeEmail(raw, { forId } = {}) {
 }
 
 route('GET', '/api/users', ADMIN, () => db.users.map(publicUser));
-route('POST', '/api/users', ADMIN, ({ body }) => {
+route('POST', '/api/users', ADMIN, ({ body, user }) => {
   const username = String(body.username || '').toLowerCase().trim();
   if (!username || !body.password) throw httpError(400, 'username and password required');
   if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
@@ -6110,12 +6144,13 @@ route('POST', '/api/users', ADMIN, ({ body }) => {
   const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: personnelId, mdt_id: body.mdt_id || null, client_id: clientId, branch_id: normalizedBranchId(body.branch_id), site_ids: normalizedSiteIds(body.site_ids), email, created_at: new Date().toISOString() };
   db.users.push(u);
   if (personnelId) { const p = db.personnel.find((x) => x.id === personnelId); if (p) p.user_id = u.id; }
-  logEvent('user.created', `USER ${username} CREATED (${u.role})`);
+  logEvent('user.created', `USER ${username} CREATED (${u.role}) BY ${user.username}`, { user_id: u.id, by: user.id });
   return { __status: 201, __body: { id: u.id, username: u.username, role: u.role } };
 });
-route('PATCH', '/api/users/:id', ADMIN, ({ params, body }) => {
+route('PATCH', '/api/users/:id', ADMIN, ({ params, body, user }) => {
   const u = db.users.find((x) => x.id === Number(params.id));
   if (!u) throw httpError(404, 'user not found');
+  const roleBefore = u.role;
   if ('email' in body) u.email = normalizeEmail(body.email, { forId: u.id });
   if ('display_name' in body) u.display_name = String(body.display_name || '').trim() || u.username;
   if ('role' in body) {
@@ -6145,8 +6180,11 @@ route('PATCH', '/api/users/:id', ADMIN, ({ params, body }) => {
   if ('password' in body && body.password) {
     if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
     u.password_hash = hashPassword(String(body.password));
+    u.password_set_at = Date.now();
   }
-  logEvent('user.updated', `USER ${u.username} UPDATED`, { user_id: u.id });
+  // Who changed an account, and any change of role, is what an access review asks.
+  const what = [u.role !== roleBefore ? `ROLE ${roleBefore} → ${u.role}` : '', body.password ? 'PASSWORD RESET' : ''].filter(Boolean).join(', ');
+  logEvent('user.updated', `USER ${u.username} UPDATED BY ${user.username}${what ? ` (${what})` : ''}`, { user_id: u.id, by: user.id, role_before: roleBefore, role: u.role });
   return publicUser(u);
 });
 route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
@@ -6155,7 +6193,7 @@ route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
   if (u.id === user.id) throw httpError(400, 'cannot delete the account you are signed in as');
   if (u.personnel_id) { const p = db.personnel.find((x) => x.id === u.personnel_id); if (p && p.user_id === u.id) p.user_id = null; }
   db.users = db.users.filter((x) => x.id !== u.id);
-  logEvent('user.deleted', `USER ${u.username} DELETED`, { user_id: u.id });
+  logEvent('user.deleted', `USER ${u.username} DELETED BY ${user.username}`, { user_id: u.id, by: user.id });
   return { ok: true };
 });
 /** Staff sign in with Microsoft 365, not a password — there's nothing to
