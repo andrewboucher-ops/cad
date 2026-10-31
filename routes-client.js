@@ -44,6 +44,8 @@ const { contentDisposition } = require('./disposition.js');
 // independent-upload behaviour unchanged.
 const DOC_TYPES = ['CONTRACT', 'SITE_DOCUMENT', 'ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP', 'INDUCTION'];
 const VERSIONED_DOC_TYPES = ['ASSIGNMENT_INSTRUCTIONS', 'SITE_MAP', 'INDUCTION'];
+// The ones an officer must confirm they have read (BS 7499).
+const ACK_DOC_TYPES = ['ASSIGNMENT_INSTRUCTIONS', 'INDUCTION'];
 // What a client sees in their portal: their contract, and the two
 // operational documents they need on site day to day — their assignment
 // instructions and the site plan. Not SITE_DOCUMENT (internal paperwork
@@ -442,7 +444,46 @@ module.exports = function registerClientRoutes({
       if (query.get('type')) rows = rows.filter((d) => d.type === query.get('type'));
       if (query.get('current') === '1') rows = rows.filter((d) => d.is_current !== false);
     }
-    return rows.map(publicDocument);
+    return rows.map((d) => ({
+      ...publicDocument(d),
+      needs_acknowledgement: ACK_DOC_TYPES.includes(d.type),
+      acknowledged_by_me: Boolean(user.personnel_id && (d.acknowledgements || []).some((a) => a.personnel_id === user.personnel_id)),
+      ...(isControlRole(user.role) ? { acknowledgements: d.acknowledgements || [] } : {}),
+    }));
+  });
+
+  /* BS 7499: an officer must have read and understood the assignment
+   * instructions (and induction) for a site before working there. Each
+   * version is a separate document, so a new version needs reading again. */
+  route('POST', '/api/documents/:id/acknowledge', ALL, ({ params, user }) => {
+    const d = db.documents.find((x) => x.id === Number(params.id));
+    if (!d || !ACK_DOC_TYPES.includes(d.type) || d.is_current === false) throw httpError(404, 'document not found');
+    if (!user.personnel_id) throw httpError(400, 'this account is not linked to a staff record');
+    assertPassdownAccess(d.site_id, user);
+    if (!Array.isArray(d.acknowledgements)) d.acknowledgements = [];
+    if (!d.acknowledgements.some((a) => a.personnel_id === user.personnel_id)) {
+      const person = db.personnel.find((x) => x.id === user.personnel_id);
+      d.acknowledgements.push({ personnel_id: user.personnel_id, name: person ? person.name : user.display_name, at: new Date().toISOString() });
+      logEvent('site.document_acknowledged', `${(person ? person.name : user.display_name).toUpperCase()} CONFIRMED READING "${d.title || d.type}" v${d.version || 1}`, { site_id: d.site_id, document_id: d.id, personnel_id: user.personnel_id });
+    }
+    return { ok: true, acknowledged_at: d.acknowledgements.find((a) => a.personnel_id === user.personnel_id).at };
+  });
+
+  /** Who has worked or is rostered at a site in the last/next 30 days and
+   * hasn't confirmed its current instructions — the gap an audit asks about. */
+  route('GET', '/api/sites/:id/acknowledgements', CONTROL, ({ params, user }) => {
+    const site = db.sites.find((s) => s.id === Number(params.id));
+    if (!site) throw httpError(404, 'site not found');
+    assertPassdownAccess(site.id, user);
+    const from = Date.now() - 30 * 86400000, to = Date.now() + 30 * 86400000;
+    const shiftIds = new Set(db.shifts.filter((s) => s.site_id === site.id && Date.parse(s.ends_at) >= from && Date.parse(s.starts_at) <= to).map((s) => s.id));
+    const staff = [...new Set(db.shift_assignments.filter((a) => shiftIds.has(a.shift_id) && a.status !== 'REMOVED').map((a) => a.personnel_id))];
+    return db.documents.filter((d) => d.site_id === site.id && ACK_DOC_TYPES.includes(d.type) && d.is_current !== false).map((d) => ({
+      document: publicDocument(d),
+      acknowledged: d.acknowledgements || [],
+      outstanding: staff.filter((pid) => !(d.acknowledgements || []).some((a) => a.personnel_id === pid))
+        .map((pid) => { const p = db.personnel.find((x) => x.id === pid); return { personnel_id: pid, name: p ? p.name : `#${pid}` }; }),
+    }));
   });
   route('GET', '/api/documents/:id/file', ALL, ({ params, user }) => {
     const d = db.documents.find((x) => x.id === Number(params.id));

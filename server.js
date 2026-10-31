@@ -47,6 +47,7 @@ const mustUseMicrosoft = (u) => MS_ENABLED && Boolean(u.email) && SSO_REQUIRED_R
 // workstation integration's own secret.
 const PRF_INTEGRATION_SECRET = process.env.PRF_INTEGRATION_SECRET || '';
 const { CHIEF_COMPLAINTS, CHIEF_COMPLAINT_CODES, complaintLabel } = require('./complaint-list.js');
+const { screeningStatus } = require('./routes-screening.js');
 const { verifyMicrosoftIdToken } = require('./msauth.js');
 const webpush = require('./webpush.js');
 const sms = require('./sms.js');
@@ -119,6 +120,7 @@ const db = {
   checkcall_commands: [],
   broadnet_terminals: [],
   safes: [], safe_checkouts: [], key_wallets: [], keys: [], key_events: [],
+  complaints: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -721,6 +723,7 @@ function onboardingStatusForPerson(p) {
     ['emergency_contact', 'Emergency contact recorded', Boolean(p.emergency_contact && (p.emergency_contact.name || p.emergency_contact.phone))],
     ...(p.employment_type === 'SUBCONTRACTOR' ? [] : [['bank_details', 'Bank details recorded', Boolean(p.bank_details && (p.bank_details.account_number || p.bank_details.sort_code))]]),
     ['login_account', 'System login created', Boolean(p.user_id)],
+    ['bs7858_screening', 'BS 7858 screening signed off', screeningStatus(p, { hasIdDocument: (p.files || []).some((f) => f.kind === 'ID') }).status === 'COMPLETE'],
     ...(db.assets.length ? [['kit_issued', 'Uniform / equipment issued', db.asset_checkouts.some((c) => c.personnel_id === p.id)]] : []),
   ];
   const items = checks.map(([key, label, done]) => ({ key, label, done }));
@@ -4378,6 +4381,7 @@ function retentionSweep() {
     passdown_logs: pruneOlderThan('passdown_logs', RETENTION.passdown, 'created_at'),
     dial_log: pruneOlderThan('dial_log', RETENTION.dial_log, 'attempted_at'),
     ...gdpr.sweep(),
+    ...complaints.sweep(),
   };
 
   // Jobs are only removed once they are finished — an open job is
@@ -5896,6 +5900,9 @@ require('./routes-cylinders.js')({ route, httpError, CONTROL, ADMIN, db, nextId,
 require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow(), prfIntegrationSecret: PRF_INTEGRATION_SECRET });
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
+// BS 7858 screening record and sign-off; the SIA ACS complaints log.
+require('./routes-screening.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });
+const complaints = require('./routes-complaints.js')({ route, httpError, CONTROL, db, nextId, logEvent, siteVisibleTo, flushNow: () => store.flushNow() });
 // Retention for people records and subject access exports.
 const gdpr = require('./routes-gdpr.js')({ route, httpError, ADMIN, db, logEvent, UPLOADS_DIR, store, flushNow: () => store.flushNow() });
 require('./routes-rentals.js')({ route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, UPLOADS_DIR, publicAsset, flushNow: () => store.flushNow() });

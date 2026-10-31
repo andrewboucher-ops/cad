@@ -107,6 +107,16 @@ test('each item flips independently as the underlying fact changes, and complete
     assert.equal(itemsByKey(await current()).kit_issued, true);
   }
 
+  // BS 7858 screening (routes-screening.js): a verified 5-year history, credit check and self-declaration, signed off.
+  const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const sc = await call('PUT', `/api/personnel/${pid}/screening`, {
+    history: [{ from: day(2000), activity: 'EMPLOYMENT', organisation: 'Previous Ltd', verified_at: day(1), verify_method: 'REFERENCE_WRITTEN' }],
+    credit_check: { done_on: day(1), result: 'CLEAR' }, self_declaration: { signed_on: day(1) },
+  }, adminT);
+  assert.equal(sc.status, 200, JSON.stringify(sc.body));
+  assert.equal((await call('POST', `/api/personnel/${pid}/screening/sign-off`, {}, adminT)).status, 200);
+  assert.equal(itemsByKey(await current()).bs7858_screening, true);
+
   const done = await current();
   assert.equal(done.onboarding.complete, true, 'every applicable item done — complete without needing the override');
   assert.equal(done.onboarding.overridden, false);

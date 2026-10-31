@@ -67,8 +67,10 @@ test('marking someone TERMINATED starts the leaver clock; after it runs out the 
   rec.terminated_at = longAgo(2600);
   const fileDir = path.join(UPLOADS, 'personnel', String(p.id));
   fs.mkdirSync(fileDir, { recursive: true }); fs.writeFileSync(path.join(fileDir, 'screening.pdf'), 'x');
+  app.db.documents.push({ id: 860001, site_id: 1, type: 'ASSIGNMENT_INSTRUCTIONS', acknowledgements: [{ personnel_id: p.id, name: 'Leaver Person', at: longAgo(3000) }] });
   const removed = app.retentionSweep();
   assert.strictEqual(removed.leavers_anonymised, 1);
+  assert.match(app.db.documents.find((d) => d.id === 860001).acknowledgements[0].name, /^Former employee/);
   assert.match(rec.name, /^Former employee/);
   assert.strictEqual(rec.date_of_birth, null);
   assert.strictEqual(rec.bank_details, null);

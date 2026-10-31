@@ -86,6 +86,8 @@ const TABLES = [
   // codes, who has which safe/wallet, and the key register. Losing this
   // on restart loses who has what keys right now, not just history.
   'safes', 'safe_checkouts', 'key_wallets', 'keys', 'key_events',
+  // SIA ACS complaints log (routes-complaints.js): never deleted by hand.
+  'complaints',
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */
