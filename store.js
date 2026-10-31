@@ -105,7 +105,8 @@ function createStore(db, seq, opts = {}) {
 
   if (!enabled) {
     if (!DatabaseSync) console.warn('[store] node:sqlite unavailable — running in memory only, state is lost on restart');
-    return { load: () => false, flushNow: () => {}, close: () => {}, enabled: false, file: null, getMeta: () => null, setMeta: () => {} };
+    return { load: () => false, flushNow: () => {}, close: () => {}, enabled: false, file: null, getMeta: () => null, setMeta: () => {},
+      appendAudit: () => {}, queryAudit: null, pruneAudit: () => 0 };
   }
 
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -126,6 +127,17 @@ function createStore(db, seq, opts = {}) {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    -- The audit trail, one row per event, written as it happens. The
+    -- audit_logs collection is only the recent window the UI keeps in
+    -- memory; this table is the record, kept for RETAIN_AUDIT_DAYS.
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id      INTEGER PRIMARY KEY,
+      type    TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      data    TEXT NOT NULL,
+      at      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS audit_events_at ON audit_events(at);
   `);
 
   const put = sql.prepare('INSERT INTO collections(name,payload,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at');
@@ -134,6 +146,29 @@ function createStore(db, seq, opts = {}) {
   const allCounters = sql.prepare('SELECT name, value FROM counters');
   const putMeta = sql.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
   const getMetaStmt = sql.prepare('SELECT value FROM meta WHERE key = ?');
+  const putAudit = sql.prepare('INSERT OR IGNORE INTO audit_events(id,type,summary,data,at) VALUES(?,?,?,?,?)');
+  const pruneAuditStmt = sql.prepare('DELETE FROM audit_events WHERE at < ?');
+
+  /** Written straight away rather than on the flush timer: an audit row is
+   * the thing that must not be lost in a crash. */
+  let loaded = false;
+  function appendAudit(ev) {
+    // Before load() the id counter isn't restored yet, so an id could collide.
+    if (!loaded) return;
+    putAudit.run(ev.id, ev.type, ev.summary, JSON.stringify(ev.data || {}), ev.at);
+  }
+  /** Search the whole trail, newest last, the same shape logEvent() makes. */
+  function queryAudit({ type, q, since, until, limit = 200 } = {}) {
+    const where = []; const args = [];
+    if (type) { where.push("type LIKE ? ESCAPE '\\'"); args.push(type.replace(/[%_\\]/g, (c) => '\\' + c) + '%'); }
+    if (q) { where.push("summary LIKE ? ESCAPE '\\'"); args.push('%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%'); }
+    if (since) { where.push('at >= ?'); args.push(since); }
+    if (until) { where.push('at <= ?'); args.push(until); }
+    const n = Math.max(1, Math.min(Number(limit) || 200, 5000));
+    const rows = sql.prepare(`SELECT id, type, summary, data, at FROM audit_events ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ${n}`).all(...args);
+    return rows.reverse().map((r) => ({ id: r.id, type: r.type, summary: r.summary, data: JSON.parse(r.data), at: r.at }));
+  }
+  function pruneAudit(cutoffIso) { return Number(pruneAuditStmt.run(cutoffIso).changes || 0); }
 
   const lastWritten = new Map();
   let timer = null;
@@ -182,6 +217,13 @@ function createStore(db, seq, opts = {}) {
       }
     }
     for (const row of allCounters.all()) seq[row.name] = row.value;
+    loaded = true;
+    // One-off: carry the recent window held before audit_events existed
+    // into it, so the trail doesn't start empty on the first upgrade.
+    if (Array.isArray(db.audit_logs) && db.audit_logs.length && !getMetaStmt.get('audit_events_backfilled')) {
+      for (const ev of db.audit_logs) if (ev && ev.id != null && ev.at) appendAudit(ev);
+      putMeta.run('audit_events_backfilled', new Date().toISOString());
+    }
 
     if (restored) {
       // Devices cannot still be connected across a restart, whatever the file says.
@@ -219,7 +261,7 @@ function createStore(db, seq, opts = {}) {
   process.once('SIGINT', () => { close(); process.exit(0); });
   process.once('SIGTERM', () => { close(); process.exit(0); });
 
-  return { load, flushNow, close, enabled: true, file, getMeta, setMeta };
+  return { load, flushNow, close, enabled: true, file, getMeta, setMeta, appendAudit, queryAudit, pruneAudit };
 }
 
 module.exports = { createStore, TABLES, CAPS };
