@@ -2472,6 +2472,9 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
   if ('email_opt_out' in body) p.email_opt_out = body.email_opt_out === true;
   if ('employment_status' in body) {
     if (!['ACTIVE', 'LEAVE', 'TERMINATED'].includes(body.employment_status)) throw httpError(400, 'invalid employment_status');
+    // The leaver retention clock (routes-gdpr.js) runs from this date.
+    if (body.employment_status === 'TERMINATED' && p.employment_status !== 'TERMINATED') p.terminated_at = new Date().toISOString();
+    if (body.employment_status !== 'TERMINATED') p.terminated_at = null;
     p.employment_status = body.employment_status;
   }
   if ('start_date' in body) {
@@ -4374,6 +4377,7 @@ function retentionSweep() {
     messages: pruneOlderThan('messages', RETENTION.messages, 'sent_at'),
     passdown_logs: pruneOlderThan('passdown_logs', RETENTION.passdown, 'created_at'),
     dial_log: pruneOlderThan('dial_log', RETENTION.dial_log, 'attempted_at'),
+    ...gdpr.sweep(),
   };
 
   // Jobs are only removed once they are finished — an open job is
@@ -5892,6 +5896,8 @@ require('./routes-cylinders.js')({ route, httpError, CONTROL, ADMIN, db, nextId,
 require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow(), prfIntegrationSecret: PRF_INTEGRATION_SECRET });
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
+// Retention for people records and subject access exports.
+const gdpr = require('./routes-gdpr.js')({ route, httpError, ADMIN, db, logEvent, UPLOADS_DIR, store, flushNow: () => store.flushNow() });
 require('./routes-rentals.js')({ route, httpError, CONTROL, ADMIN, CLIENT, db, nextId, logEvent, UPLOADS_DIR, publicAsset, flushNow: () => store.flushNow() });
 
 // Key management / chain-of-custody — see routes-keys.js.

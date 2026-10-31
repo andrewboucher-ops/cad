@@ -69,6 +69,12 @@ These are deliberately weak demo credentials for a POC. Replace them before the 
 | `RETAIN_AUDIT_DAYS` | `365` | audit trail |
 | `RETAIN_MESSAGES_DAYS` | `180` | message metadata |
 | `RETAIN_JOBS_DAYS` | `730` | closed jobs |
+| `RETAIN_APPLICANTS_DAYS` | `183` | rejected/withdrawn applicants and their files, from the decision |
+| `RETAIN_LEAVERS_DAYS` | `2555` | leaver's personal details (BS 7858: employment + 7 years), then anonymised |
+| `RETAIN_TIMESHEETS_DAYS` | `2190` | shifts and clock-in/out |
+| `RETAIN_FORMS_DAYS` | `2190` | form submissions (incident reports, checks) and photos |
+| `RETAIN_CLIENT_REQUESTS_DAYS` | `730` | closed client portal requests |
+| `RETAIN_EMERGENCIES_DAYS` | `730` | resolved emergency activations and call-me requests |
 | `GUARDM8_SECRET` | — | shared secret for GuardM8's `POST /api/integrations/guardm8/jobs` |
 | `WORKSTATION_SECRET` | — | shared secret for control room PCs' `POST /api/integrations/workstation/clock-in` |
 | `DEMS_SECRET` | — | shared secret for the evidence store's `/api/integrations/dems/*` routes |

@@ -40,6 +40,14 @@ taken then, not tracked continuously — exactly as before.
 Retention is enforced in code, not by policy alone: a sweep runs every six hours
 and deletes anything past its window. `GET /api/retention` shows the current
 policy and record counts; `RETAIN_LOCATIONS_DAYS` and friends change it.
+People records have their own schedule in `routes-gdpr.js` (see the README's
+settings table): unsuccessful applicants after 6 months, leavers anonymised 7
+years after leaving, timesheets and form submissions after 6 years.
+
+**Subject access requests.** Admin → Personnel → (person) → *Subject access
+export* downloads everything CCCS holds about that person as one JSON file,
+with secrets left out and the request itself logged. Reply within one month.
+Check it for other people's details before sending.
 
 Continuous location tracking is the most intrusive thing here, so it is kept for
 the shortest time. If you lengthen it, write down why in terms you would be
