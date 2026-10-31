@@ -28,9 +28,10 @@ const CCCS = (() => {
    * the server reads an HttpOnly cookie instead. This keeps that cookie on
    * the session this page holds (it follows the last sign-in on this
    * browser, as the localStorage mirror above already does). */
+  let cookieReady = Promise.resolve();
   function syncSessionCookie() {
     if (!session || !session.token || typeof fetch !== 'function' || !document.documentElement) return; // not in the offline-outbox test harness
-    try { fetch('/api/auth/session-cookie', { method: 'POST', headers: { authorization: `Bearer ${session.token}` } }).catch(() => {}); } catch {}
+    try { cookieReady = fetch('/api/auth/session-cookie', { method: 'POST', headers: { authorization: `Bearer ${session.token}` } }).then(() => {}, () => {}); } catch {}
   }
   function getSession() { return session; }
 
@@ -246,15 +247,23 @@ const CCCS = (() => {
     const handlers = new Map();
     const binaryHandlers = [];
     let ws = null, retry = 0, closed = false;
+    // The live link signs in with the HttpOnly cookie, which proxies leave
+    // out of their logs. If the cookie turns out to be someone else's (a
+    // different sign-in in another tab), it falls back to sending this tab's
+    // token as a subprotocol: still never in the address.
+    let viaProtocol = false;
     const queue = [];
 
-    function connect() {
+    function connect() { cookieReady.then(open); }
+    function open() {
+      if (closed) return;
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      // The token goes as a subprotocol, not in the address, so it never lands in a log.
-      ws = new WebSocket(`${proto}://${location.host}/ws`, ['cccs', session.token]);
+      ws = viaProtocol ? new WebSocket(`${proto}://${location.host}/ws`, ['cccs', session.token]) : new WebSocket(`${proto}://${location.host}/ws`);
       ws.binaryType = 'arraybuffer';
-      ws.onopen = () => { retry = 0; onStatus && onStatus(true); while (queue.length) ws.send(queue.shift()); };
+      let opened = false;
+      ws.onopen = () => { opened = true; retry = 0; onStatus && onStatus(true); while (queue.length) ws.send(queue.shift()); };
       ws.onclose = () => {
+        if (!opened) viaProtocol = true; // refused: no cookie yet (or a blocked one)
         onStatus && onStatus(false);
         if (closed) return;
         retry = Math.min(retry + 1, 6);
@@ -268,6 +277,9 @@ const CCCS = (() => {
         // binaryType/this check existed.
         if (e.data instanceof ArrayBuffer) { binaryHandlers.forEach((fn) => fn(e.data)); return; }
         let msg; try { msg = JSON.parse(e.data); } catch { return; }
+        if (msg.type === 'hello' && !viaProtocol && msg.payload && msg.payload.user && session && session.user && msg.payload.user.id !== session.user.id) {
+          viaProtocol = true; try { ws.close(); } catch {} return;
+        }
         (handlers.get(msg.type) || []).forEach((fn) => fn(msg.payload, msg));
         (handlers.get('*') || []).forEach((fn) => fn(msg.payload, msg));
       };
