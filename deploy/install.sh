@@ -81,24 +81,7 @@ sed "s|__DOMAIN__|$DOMAIN|g" deploy/Caddyfile > /etc/caddy/Caddyfile
 systemctl reload caddy || systemctl restart caddy
 
 echo "==> Installing nightly backup"
-install -m 755 deploy/backup.sh /usr/local/bin/cccs-backup
-cat > /etc/systemd/system/cccs-backup.service <<UNIT
-[Unit]
-Description=CCCS database backup
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/cccs-backup
-UNIT
-cat > /etc/systemd/system/cccs-backup.timer <<UNIT
-[Unit]
-Description=Nightly CCCS backup
-[Timer]
-OnCalendar=*-*-* 02:30:00
-Persistent=true
-[Install]
-WantedBy=timers.target
-UNIT
-systemctl daemon-reload && systemctl enable --now cccs-backup.timer
+bash deploy/install-backup.sh
 
 cat <<DONE
 

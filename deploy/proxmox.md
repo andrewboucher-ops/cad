@@ -102,20 +102,35 @@ plain HTTP.
 
 ## 4. Backups off the box
 
-`deploy/install.sh` schedules a nightly dump to `/var/backups/cccs`. That is on
-the same disk as the database, which means it survives a mistake but not a disk
-failure. Add one of these:
+Every night at 02:30 `cccs-backup` (deploy/backup.sh, installed and kept up to
+date by deploy/install-backup.sh, which install.sh and update.sh both run)
+writes one archive to `/var/backups/cccs`: a consistent copy of the database
+**and** the uploads folder (CVs, SIA scans, ID photos, personnel files, site
+documents, signed agreements, report photos). It is encrypted with
+`/etc/cccs/backup.key`, checked by opening it, and the newest 14 are kept
+(`BACKUP_KEEP`).
 
-**Proxmox host pulls it:**
+Two things only you can do:
+
+1. **Save the key somewhere other than this server** (a password manager).
+   `cat /etc/cccs/backup.key` inside the container shows it. Without it no
+   archive can be opened.
+2. **Copy the archives off this server.** Either set
+   `BACKUP_RCLONE_REMOTE=onedrive:cccs-backups` in `/etc/cccs/cccs.env` after
+   `apt install rclone && rclone config`, or have the Proxmox host pull them:
 ```bash
 # on the host, in cron
-rsync -a root@192.168.1.140:/var/backups/cccs/ /mnt/backups/cccs/
+rsync -a root@192.168.7.54:/var/backups/cccs/ /mnt/backups/cccs/
 ```
 
-**Or push to object storage** — uncomment the `rclone` line at the bottom of
-`deploy/backup.sh` and configure a remote. A few pounds a month.
+Restore (service stopped):
+```bash
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:/etc/cccs/backup.key \
+  -in /var/backups/cccs/cccs-YYYYmmdd-HHMMSS.tar.gz.enc | tar -xzf - -C /var/lib/cccs
+```
 
-Then restore one. An untested backup is a hope, not a backup.
+Then restore one for real, onto a spare container. An untested backup is a
+hope, not a backup.
 
 ## 5. Snapshots are not backups either
 
