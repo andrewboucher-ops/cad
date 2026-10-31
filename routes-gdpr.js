@@ -128,6 +128,8 @@ module.exports = function registerGdpr({ route, httpError, ADMIN, db, logEvent, 
     rmDir(path.join(UPLOADS_DIR, 'personnel', String(p.id)));
     p.files = [];
     db.locations = db.locations.filter((l) => l.personnel_id !== p.id);
+    // Their name copied onto "read and understood" sign-offs goes too.
+    for (const d of db.documents) for (const a of d.acknowledgements || []) if (a.personnel_id === p.id) a.name = label;
     p.name = label;
     p.anonymised_at = new Date().toISOString();
     logEvent('retention.leaver_anonymised', `LEAVER RECORD #${p.id} ANONYMISED AFTER THE RETENTION PERIOD`, { personnel_id: p.id });
