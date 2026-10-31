@@ -20,6 +20,13 @@ review it, particularly the legitimate interest assessment.
 | A single location fix on a filed report (incident, use of force, etc.), if the device offers one | Kept with the report | Proof of where a report was filed from — evidential, not tracking; same category as the single fix already taken when raising an emergency, not continuous |
 | ID photo | While employed (delete it on leaving) | Their ID card, and so whoever scans the card can see it is the same person |
 | Clock-in/out reasons (outside the rostered time, or with no shift) and who approved them | With the shift record | Paying and billing the right hours |
+| Shifts and clock-in/out times | 6 years | Pay records (HMRC), client billing disputes |
+| BS 7858 screening record: 5-year history, who verified each part and how, credit check, self-declaration, sign-off | Employment + 7 years, then the record is anonymised | BS 7858 vetting; SIA ACS |
+| Welfare check call PIN (optional, set by the officer) | Until they clear it; stored only as a hash | Confirming it is really them on the two-hourly welfare call |
+| "Read and understood" sign-offs of assignment instructions | With the document | BS 7499: officers briefed before working a site |
+| Complaints naming them | 6 years after closing | SIA ACS complaints handling |
+| Incident and other form reports they filed | 6 years | Personal injury and contract claims |
+| Applications from people not hired, with CV and licence scans | 6 months after the decision | Defending a recruitment decision |
 
 This is the materially different privacy position the paragraph below used
 to warn about before it was built: continuous personal location tracking
@@ -107,7 +114,9 @@ read: https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/employ
 
 ## Handling requests
 
-**Access** — export their location history, status changes and job assignments.
+**Access** — Admin → Personnel → (person) → *Subject access export* downloads
+everything held about them as one file (UK GDPR Article 15; reply within a
+month). Remove other people's details before sending where needed.
 
 **Erasure** — `POST /api/personnel/:id/erase-location-history` (admin only)
 removes a person's movement history while leaving the operational job record
