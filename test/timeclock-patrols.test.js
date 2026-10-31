@@ -107,13 +107,14 @@ test('with no shift booked, an officer clocks in ad hoc with a site and a reason
   assert.equal(shift.ends_at, a.clocked_out_at);
   assert.equal(shift.status, 'COMPLETED');
 
-  const today = new Date().toISOString().slice(0, 10);
-  let sheet = (await call('GET', `/api/timeclock/timesheet?from=${today}&to=${today}&personnel_id=${dan.id}`, undefined, adminT)).body;
+  // From the day the shift started: run just after midnight, two hours ago is yesterday.
+  const today = new Date().toISOString().slice(0, 10), started = a.clocked_in_at.slice(0, 10);
+  let sheet = (await call('GET', `/api/timeclock/timesheet?from=${started}&to=${today}&personnel_id=${dan.id}`, undefined, adminT)).body;
   const row = sheet.find((x) => x.assignment_id === a.id);
   assert.ok(Math.abs(row.worked_min - 120) <= 1);
   await call('POST', `/api/timeclock/exceptions/${a.id}/${a.exceptions[0].id}`, { decision: 'REJECT', note: 'not authorised' }, dispT);
   assert.equal(a.time_rejected, true, 'rejected: no hours count');
-  sheet = (await call('GET', `/api/timeclock/timesheet?from=${today}&to=${today}`, undefined, adminT)).body;
+  sheet = (await call('GET', `/api/timeclock/timesheet?from=${started}&to=${today}`, undefined, adminT)).body;
   assert.equal(sheet.find((x) => x.assignment_id === a.id).rejected, true);
 
   // Control clocks someone in with no shift: approved straight away.
