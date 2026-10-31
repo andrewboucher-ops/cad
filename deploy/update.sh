@@ -194,6 +194,11 @@ if [ -z "$DRY_RUN" ]; then
   chown "$APP_USER:$APP_USER" "$APP_DIR/VERSION.json"
 fi
 
+# Keep the nightly backup in step with this code (and install it where it
+# never was): database and uploads, encrypted. Never fails a deploy.
+if [ -n "$DRY_RUN" ]; then echo "   (dry run) bash deploy/install-backup.sh"
+else bash "$SRC_DIR/deploy/install-backup.sh" || echo "   WARNING: could not install the nightly backup — run deploy/install-backup.sh by hand" >&2; fi
+
 say "5/6  Restarting $SERVICE"
 run systemctl restart "$SERVICE"
 
