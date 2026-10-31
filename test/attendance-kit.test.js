@@ -229,7 +229,7 @@ test('welfare check-call: the dialplan GET/result pair — confirmed clears it a
   const got = await call('GET', '/api/welfare-checkcall/tok-confirmed');
   assert.equal(got.status, 200, JSON.stringify(got.body));
   assert.equal(got.body.first_name, 'Dan');
-  assert.equal(got.body.date_of_birth, dan.date_of_birth);
+  assert.equal(got.body.date_of_birth, undefined, 'the answer is never handed out: /verify compares it');
 
   const okRes = await call('POST', '/api/welfare-checkcall/tok-confirmed/result', { outcome: 'CONFIRMED' });
   assert.equal(okRes.status, 200);

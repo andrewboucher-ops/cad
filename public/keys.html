@@ -239,7 +239,7 @@ function renderKeys() {
       <td class="mono">${esc(k.tag_id)}</td><td>${esc(k.description)}</td><td>${esc(k.wallet_tag || '—')}</td><td>${pill(k.status)}</td>
       <td class="acts">
         ${k.status === 'IN_WALLET' ? `<button class="btn" data-retire="${k.id}">Retire</button>` : ''}
-        ${k.status === 'DISPOSED' ? `<a class="btn" href="/api/keys/${k.id}/certificate?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">Certificate</a>` : ''}
+        ${k.status === 'DISPOSED' ? `<a class="btn" href="/api/keys/${k.id}/certificate" target="_blank">Certificate</a>` : ''}
       </td></tr>`).join('') || `<tr><td colspan="5" class="dim">No keys registered yet.</td></tr>`}</tbody></table>`;
   els('[data-retire]').forEach((b) => (b.onclick = () => retireKeyModal(Number(b.dataset.retire))));
 }

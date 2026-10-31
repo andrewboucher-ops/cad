@@ -72,6 +72,7 @@ module.exports = function registerAttendance({
   route, httpError, ALL, CONTROL, ADMIN = ['SYSTEM_ADMIN'], db, nextId, logEvent, broadcast, pushToRoles, pushToUsers = () => {}, sms, notifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl = '', flushNow = () => {},
   createEmergencyJob, forwardEmergencyToAura = () => {}, ami, tts = require('./tts.js').createTts(),
+  hashPassword = null, verifyPassword = null,
 }) {
   /* ---- geofence ---- */
   function distanceM(a, b) {
@@ -282,11 +283,13 @@ module.exports = function registerAttendance({
   // retries the dialplan allows) is done. Both 404 alike on an unknown or
   // already-resolved token, deliberately not distinguishing "wrong token"
   // from "already handled" to anyone probing it.
+  // The answer itself (date of birth or PIN) is never handed out: the
+  // dialplan posts what was keyed to /verify below and CCCS compares.
   route('GET', '/api/welfare-checkcall/:token', null, ({ params }) => {
     const a = findPendingCheckcall(params.token); if (!a) throw httpError(404, 'check call not found or already resolved');
     const p = db.personnel.find((x) => x.id === a.personnel_id);
-    if (!p || !p.date_of_birth) throw httpError(404, 'check call not found or already resolved');
-    return { first_name: p.name.split(/\s+/)[0], date_of_birth: p.date_of_birth };
+    if (!p || !(p.date_of_birth || p.welfare_pin_hash)) throw httpError(404, 'check call not found or already resolved');
+    return { first_name: p.name.split(/\s+/)[0], uses_pin: Boolean(p.welfare_pin_hash) };
   });
   route('POST', '/api/welfare-checkcall/:token/result', null, ({ params, body }) => {
     const a = findPendingCheckcall(params.token); if (!a) throw httpError(404, 'check call not found or already resolved');
@@ -309,8 +312,8 @@ module.exports = function registerAttendance({
       flushNow();
       return { ok: true };
     }
-    const reason = outcome === 'MISMATCH' ? 'entered date of birth did not match'
-      : outcome === 'NO_ENTRY' ? 'no date of birth entered'
+    const reason = outcome === 'MISMATCH' ? 'entered answer did not match'
+      : outcome === 'NO_ENTRY' ? 'nothing entered'
       : `unexpected check call result (${outcome || 'none given'})`;
     failWelfareCheckcall(a, s, p, site, reason);
     flushNow();
@@ -324,6 +327,46 @@ module.exports = function registerAttendance({
    * entered, tries left) or FAILED (alarm raised). Unknown or resolved
    * token → 404, same as GET above. */
   const WELFARE_CHECKCALL_TRIES = 3;
+  /** A date of birth is on the officer's licence, CV and social media, so an
+   * officer can set a welfare PIN instead (officer page → "Welfare check
+   * PIN"); once set, only the PIN confirms, never the date of birth. */
+  function welfareAnswerMatches(p, digits) {
+    if (!p || !digits) return false;
+    if (p.welfare_pin_hash && verifyPassword) return verifyPassword(digits, p.welfare_pin_hash);
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(p.date_of_birth || ''));
+    return Boolean(m) && digits === `${m[3]}${m[2]}${m[1]}`;
+  }
+  const PIN_RE = /^\d{4,8}$/;
+  const TRIVIAL_PINS = new Set(['0000', '1111', '1234', '4321', '12345', '123456', '654321', '111111', '000000', '12345678']);
+  route('GET', '/api/me/welfare-pin', ALL, ({ user }) => {
+    const p = user.personnel_id ? db.personnel.find((x) => x.id === user.personnel_id) : null;
+    if (!p) throw httpError(400, 'this account is not linked to a staff record');
+    return { pin_set: Boolean(p.welfare_pin_hash), pin_set_at: p.welfare_pin_set_at || null };
+  });
+  route('PUT', '/api/me/welfare-pin', ALL, ({ body, user }) => {
+    const p = user.personnel_id ? db.personnel.find((x) => x.id === user.personnel_id) : null;
+    if (!p) throw httpError(400, 'this account is not linked to a staff record');
+    if (!hashPassword) throw httpError(503, 'welfare PINs are not available');
+    const pin = String((body && body.pin) || '');
+    if (!PIN_RE.test(pin)) throw httpError(400, 'the PIN must be 4 to 8 digits');
+    if (TRIVIAL_PINS.has(pin) || /^(\d)\1+$/.test(pin)) throw httpError(400, 'that PIN is too easy to guess — choose another');
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(p.date_of_birth || ''));
+    if (m && [`${m[3]}${m[2]}${m[1]}`, `${m[3]}${m[2]}${m[1].slice(2)}`, `${m[3]}${m[2]}`, m[1]].includes(pin)) throw httpError(400, 'the PIN must not be your date of birth');
+    p.welfare_pin_hash = hashPassword(pin);
+    p.welfare_pin_set_at = new Date().toISOString();
+    logEvent('personnel.welfare_pin_set', `${p.name.toUpperCase()} SET A WELFARE CHECK PIN`, { personnel_id: p.id });
+    warmWelfareIntro(p);
+    return { pin_set: true, pin_set_at: p.welfare_pin_set_at };
+  });
+  // The officer, or control for an officer who has forgotten theirs.
+  route('DELETE', '/api/personnel/:id/welfare-pin', ALL, ({ params, user }) => {
+    const p = db.personnel.find((x) => x.id === Number(params.id));
+    if (!p) throw httpError(404, 'personnel not found');
+    if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not your record');
+    p.welfare_pin_hash = null; p.welfare_pin_set_at = null;
+    logEvent('personnel.welfare_pin_cleared', `WELFARE CHECK PIN CLEARED FOR ${p.name.toUpperCase()} BY ${user.username}`, { personnel_id: p.id, by: user.id });
+    return { pin_set: false };
+  });
   route('POST', '/api/welfare-checkcall/:token/verify', null, ({ params, body, query }) => {
     const text = (t, status = 200) => ({ __status: status, __body: t, __headers: { 'content-type': 'text/plain' } });
     const a = findPendingCheckcall(params.token); if (!a) return text('NOT_FOUND', 404);
@@ -332,8 +375,7 @@ module.exports = function registerAttendance({
     const site = s && s.site_id ? db.sites.find((x) => x.id === s.site_id) : null;
     if (a.clocked_out_at) { a.welfare_checkcall_token = null; a.welfare_checkcall_sent_at = null; flushNow(); return text('CONFIRMED'); }
     const digits = String((body && body.digits) || query.get('digits') || '').replace(/\D/g, '');
-    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String((p && p.date_of_birth) || ''));
-    if (m && digits === `${m[3]}${m[2]}${m[1]}`) {
+    if (welfareAnswerMatches(p, digits)) {
       a.welfare_checkcall_token = null; a.welfare_checkcall_sent_at = null; a.welfare_checkcall_tries = 0;
       a.welfare_checkcall_due_at = new Date(Date.now() + WELFARE_CHECKCALL_INTERVAL_MS).toISOString();
       logEvent('shift.welfare_checkcall_confirmed', `${nameOf(a)} CONFIRMED WELFARE ON THE CHECK CALL`, { shift_id: a.shift_id, personnel_id: a.personnel_id });
@@ -345,7 +387,8 @@ module.exports = function registerAttendance({
     if (a.welfare_checkcall_tries < WELFARE_CHECKCALL_TRIES) { flushNow(); return text('RETRY'); }
     const blank = a.welfare_checkcall_blank === a.welfare_checkcall_tries;
     a.welfare_checkcall_tries = 0; a.welfare_checkcall_blank = 0;
-    failWelfareCheckcall(a, s, p, site, blank ? 'no date of birth entered' : `entered date of birth did not match (${WELFARE_CHECKCALL_TRIES} tries)`);
+    const what = p && p.welfare_pin_hash ? 'PIN' : 'date of birth';
+    failWelfareCheckcall(a, s, p, site, blank ? `no ${what} entered` : `entered ${what} did not match (${WELFARE_CHECKCALL_TRIES} tries)`);
     flushNow();
     return text('FAILED');
   });
@@ -355,7 +398,9 @@ module.exports = function registerAttendance({
    * opening line is personal; the rest are the same for everyone, so they
    * are made once and cached. */
   const WELFARE_PROMPTS = {
-    intro: (first) => `Echelon control welfare check${first ? ` for ${first}` : ''}. Please enter your date of birth as eight digits: day, month, year.`,
+    intro: (first, pin) => pin
+      ? `Echelon control welfare check${first ? ` for ${first}` : ''}. Please enter your welfare PIN, then press hash.`
+      : `Echelon control welfare check${first ? ` for ${first}` : ''}. Please enter your date of birth as eight digits: day, month, year.`,
     retry: () => 'That didn\'t match. Please try again.',
     thanks: () => 'Thank you. Stay safe.',
     fail: () => 'We could not confirm your welfare. The control room has been alerted and will call you.',
@@ -367,16 +412,17 @@ module.exports = function registerAttendance({
     const a = findPendingCheckcall(params.token); if (!a) throw httpError(404, 'check call not found or already resolved');
     const p = db.personnel.find((x) => x.id === a.personnel_id);
     const first = p ? p.name.split(/\s+/)[0] : '';
+    const pin = Boolean(p && p.welfare_pin_hash);
     // Making a clip takes the TTS server ~15 s — too long to leave someone
     // listening to silence. The name line is made ahead (warmWelfareIntro,
     // when the check is scheduled); if it still isn't ready, the line
     // without the name (made at start-up) plays instead.
-    const mine = tts.cached(WELFARE_PROMPTS.intro(first));
+    const mine = tts.cached(WELFARE_PROMPTS.intro(first, pin));
     if (mine) return wav(mine);
     warmWelfareIntro(p);
     // Don't hold the PBX for minutes if the TTS server is slow: answer
     // 503 and let the dialplan play its built-in fallback instead.
-    try { return wav(await soon(tts.clip(WELFARE_PROMPTS.intro('')))); } catch (e) { return noAudio(e); }
+    try { return wav(await soon(tts.clip(WELFARE_PROMPTS.intro('', pin)))); } catch (e) { return noAudio(e); }
   });
   // The fixed lines carry nothing personal, so no token: one URL each,
   // which the PBX's own media cache can keep.
@@ -388,11 +434,11 @@ module.exports = function registerAttendance({
   const soon = (job, ms = 8000) => { job.catch(() => {}); return Promise.race([job, new Promise((_, reject) => setTimeout(() => reject(new Error('TTS server too slow for a live call')), ms).unref?.())]); };
   function warmWelfareIntro(p) {
     if (!tts.configured() || !p) return;
-    tts.clip(WELFARE_PROMPTS.intro(p.name.split(/\s+/)[0])).then(() => { health.last_voice_error = null; }, (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; });
+    tts.clip(WELFARE_PROMPTS.intro(p.name.split(/\s+/)[0], Boolean(p.welfare_pin_hash))).then(() => { health.last_voice_error = null; }, (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; });
   }
   if (WELFARE_CHECKCALL_ENABLED && tts.configured()) {
     // Make the fixed lines now, so the first call of the day isn't waiting on them.
-    (async () => { for (const k of Object.keys(WELFARE_PROMPTS)) await tts.clip(WELFARE_PROMPTS[k]('')).then(() => { health.last_voice_error = null; }, (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; console.warn('[attendance] could not make welfare prompt', k, '—', e.message); }); })();
+    (async () => { for (const [k, fn] of [...Object.entries(WELFARE_PROMPTS), ['intro (PIN)', (f) => WELFARE_PROMPTS.intro(f, true)]]) await tts.clip(fn('')).then(() => { health.last_voice_error = null; }, (e) => { health.last_voice_error = { at: new Date().toISOString(), message: e.message }; console.warn('[attendance] could not make welfare prompt', k, '—', e.message); }); })();
     // …and the name lines for anyone already clocked in when CCCS starts.
     for (const a of db.shift_assignments || []) if (a.clocked_in_at && !a.clocked_out_at) warmWelfareIntro(db.personnel.find((x) => x.id === a.personnel_id));
   }

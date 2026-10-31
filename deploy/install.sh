@@ -38,6 +38,8 @@ AUTH_SECRET=$(openssl rand -hex 32)
 PORT=4000
 DATA_FILE=$DATA_DIR/cccs.db
 SIMULATION=off
+# Never load the demo accounts (published passwords) on a real installation.
+DEMO_DATA=off
 # GuardM8 alarm-receiving integration (POST /api/integrations/guardm8/jobs):
 # GUARDM8_SECRET=
 # Control room PCs clocking operators in at Windows sign-in

@@ -358,6 +358,12 @@ function seed() {
     console.log(`[cccs] seeding from ${seedFile}`);
     return seedFromFile(seedFile);
   }
+  // The demo data signs in with published passwords (admin/admin123 …), so a
+  // real installation must never fall back to it: install.sh writes
+  // DEMO_DATA=off, and update.sh adds it to an existing cccs.env.
+  if (String(process.env.DEMO_DATA || '').toLowerCase() === 'off') {
+    throw new Error(`no seed file at ${seedFile} and DEMO_DATA=off — refusing to load demo accounts. Copy seed.example.json to seed.json and set real passwords.`);
+  }
   console.warn('[cccs] no seed.json found — loading demo data. Copy seed.example.json to seed.json for your own call signs.');
   const mkUser = (username, password, role, extra = {}) => {
     const u = { id: nextId('users'), username, password_hash: hashPassword(password), role, display_name: extra.display_name || username, personnel_id: null, mdt_id: null, created_at: new Date().toISOString(), ...extra };
@@ -529,7 +535,9 @@ function broadcast(type, payload, opts = {}) {
       }
       continue;
     }
-    let deliver = !targeted;
+    // FINANCE works invoices and payroll, not the live floor: untargeted
+    // operational traffic (jobs, positions, radio) isn't theirs to see.
+    let deliver = !targeted && c.user.role !== 'FINANCE';
     if (targeted) {
       if (opts.mdtIds && c.mdtId && opts.mdtIds.includes(c.mdtId)) deliver = true;
       if (opts.personnelIds && c.user.personnel_id && opts.personnelIds.includes(c.user.personnel_id)) deliver = true;
@@ -542,6 +550,11 @@ function broadcast(type, payload, opts = {}) {
   if (type === 'shift.created' || type === 'shift.updated' || type === 'shift.deleted') queueRotaCalendarSync(payload && payload.id);
 }
 const isControlRole = (role) => ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(role);
+/** Ends a user's open live connections (deleted, role changed, password
+ * reset), so a screen left open can't keep receiving what they no longer may. */
+function closeUserSockets(userId) {
+  for (const c of sockets) if (c.user && c.user.id === userId) c.close();
+}
 
 /* Multi-branch — a staff-visibility split, not a tenancy wall. DISPATCHER
  * and SYSTEM_ADMIN always see everything, every branch, no exceptions:
@@ -1161,6 +1174,32 @@ function secretMatches(given, secret) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+/* INTEGRATION_ALLOWED_IPS (optional): the addresses alarm receivers, the
+ * PBX, the PRF, the evidence store and the check call host call from, e.g.
+ * "192.168.7.0/24,203.0.113.10". Set, every machine-to-machine route below
+ * also has to come from one of them, so a leaked integration secret alone
+ * isn't enough. Control room PC routes (/api/integrations/workstation/*)
+ * are left out on purpose: those PCs call in from anywhere when off the VPN. */
+const INTEGRATION_PATH_RE = /^\/api\/(integrations\/(guardm8|aura|broadnet|prf|dems|checkcall-host)\/|welfare-checkcall(-prompts)?\/)/;
+const INTEGRATION_ALLOWED = String(process.env.INTEGRATION_ALLOWED_IPS || '').split(',').map((x) => x.trim()).filter(Boolean);
+function ipv4ToInt(ip) {
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(ip);
+  return m && m.slice(1).every((x) => Number(x) < 256) ? ((+m[1] << 24) | (+m[2] << 16) | (+m[3] << 8) | +m[4]) >>> 0 : null;
+}
+function addressMatches(ip, rule) {
+  const addr = ip.replace(/^::ffff:/, '');
+  if (!rule.includes('/')) return addr === rule.replace(/^::ffff:/, '');
+  const [base, bitsRaw] = rule.split('/');
+  const a = ipv4ToInt(addr), b = ipv4ToInt(base), bits = Number(bitsRaw);
+  if (a === null || b === null || !(bits >= 0 && bits <= 32)) return false;
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+  return (a & mask) === (b & mask);
+}
+function integrationAddressAllowed(pathname, ip) {
+  if (!INTEGRATION_ALLOWED.length || !INTEGRATION_PATH_RE.test(pathname)) return true;
+  return INTEGRATION_ALLOWED.some((rule) => addressMatches(String(ip), rule));
+}
+
 const rate = new Map();
 function rateLimit(ip) {
   const now = Date.now();
@@ -1177,24 +1216,101 @@ function rateLimit(ip) {
  * actually exists (see the login route) — so this can't be grown
  * unbounded by throwing junk usernames at it, and checking it for a
  * username that doesn't exist is just a harmless Map miss. */
+//
+// Two counters: one per username AND address, which locks quickly (5) so a
+// guesser at one address is stopped without locking the real user out from
+// theirs; and one per username alone with a much higher bar (30), which
+// still stops a guessing run spread over many addresses.
 const failedLogins = new Map();
 const LOGIN_LOCKOUT_THRESHOLD = 5;
+const LOGIN_ACCOUNT_LOCKOUT_THRESHOLD = 30;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
-function loginLockedUntil(username) {
-  const rec = failedLogins.get(username);
-  return rec && rec.lockedUntil > Date.now() ? rec.lockedUntil : null;
+const lockKeys = (username, ip) => [[`${username}|${ip}`, LOGIN_LOCKOUT_THRESHOLD], [username, LOGIN_ACCOUNT_LOCKOUT_THRESHOLD]];
+function loginLockedUntil(username, ip) {
+  let until = null;
+  for (const [key] of lockKeys(username, ip)) {
+    const rec = failedLogins.get(key);
+    if (rec && rec.lockedUntil > Date.now()) until = Math.max(until || 0, rec.lockedUntil);
+  }
+  return until;
 }
-function recordLoginFailure(username) {
-  const rec = failedLogins.get(username) || { count: 0, lockedUntil: 0 };
-  rec.count++;
-  if (rec.count >= LOGIN_LOCKOUT_THRESHOLD) { rec.lockedUntil = Date.now() + LOGIN_LOCKOUT_MS; rec.count = 0; }
-  failedLogins.set(username, rec);
+function recordLoginFailure(username, ip) {
+  for (const [key, threshold] of lockKeys(username, ip)) {
+    const rec = failedLogins.get(key) || { count: 0, lockedUntil: 0, first: Date.now() };
+    if (Date.now() - rec.first > LOGIN_LOCKOUT_MS) { rec.count = 0; rec.first = Date.now(); }
+    rec.count++;
+    if (rec.count >= threshold) { rec.lockedUntil = Date.now() + LOGIN_LOCKOUT_MS; rec.count = 0; rec.first = Date.now(); }
+    failedLogins.set(key, rec);
+  }
 }
-function clearLoginFailures(username) { failedLogins.delete(username); }
+function clearLoginFailures(username, ip) { failedLogins.delete(`${username}|${ip}`); }
+setInterval(() => {
+  for (const [k, rec] of failedLogins) if (rec.lockedUntil < Date.now() && Date.now() - rec.first > LOGIN_LOCKOUT_MS) failedLogins.delete(k);
+}, 10 * 60 * 1000).unref?.();
 
-function authFrom(req, url) {
+/* Common and breached passwords (NCSC: block the obvious ones rather than
+ * force complexity rules). Short on purpose: these are the ones guessing
+ * tools try first. */
+const COMMON_PASSWORDS = new Set(['password', 'password1', 'password12', 'password123', 'passw0rd', 'p@ssw0rd', 'p@ssword', '12345678', '123456789', '1234567890', '11111111', '00000000', '87654321', 'qwertyui', 'qwerty123', 'qwertyuiop', 'abc12345', 'abcd1234', 'iloveyou', 'letmein1', 'welcome1', 'welcome123', 'admin123', 'administrator', 'changeme', 'changeme1', 'security', 'security1', 'football', 'baseball', 'sunshine', 'princess', 'trustno1', 'superman', 'whatever', 'starwars', 'liverpool', 'chelsea1', 'arsenal1', 'monkey12', 'dragon12', 'master12', 'computer', 'internet', 'samsung1', 'google12', 'zaq12wsx', '1q2w3e4r', '1qaz2wsx', 'asdfghjk', 'echelon1', 'echelon123', 'cccs1234', 'control1', 'dispatch123', 'super123', 'field123', 'mdt12345']);
+/** Why a new password isn't acceptable, or null if it is. */
+function passwordProblem(password, username) {
+  const pw = String(password || '');
+  if (pw.length < 8) return 'password must be at least 8 characters';
+  if (pw.length > 200) return 'password is too long';
+  const lower = pw.toLowerCase();
+  if (COMMON_PASSWORDS.has(lower) || /^(.)\1+$/.test(pw)) return 'that password is too common — choose another';
+  if (username && lower.includes(String(username).toLowerCase()) && String(username).length >= 3) return 'password must not contain the username';
+  return null;
+}
+function assertPassword(password, username) {
+  const problem = passwordProblem(password, username);
+  if (problem) throw httpError(400, problem);
+}
+
+/* The session also travels as an HttpOnly cookie, so a link to a PDF, photo
+ * or download needs no ?token= in its address (addresses end up in browser
+ * history, proxy logs and the Caddy log). JavaScript can't read it, and
+ * SameSite=Strict keeps other sites from using it. Only GET requests and the
+ * WebSocket accept it: every change still needs the Bearer header, so the
+ * cookie alone can't make a change on anyone's behalf. */
+const SESSION_COOKIE = 'cccs_session';
+function readCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return null;
+}
+function requestIsHttps(req) {
+  return Boolean(req.socket && req.socket.encrypted) || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+function sessionCookie(req, token) {
+  const p = verifyToken(token);
+  const maxAge = p ? Math.max(0, Math.floor((p.exp - Date.now()) / 1000)) : 0;
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${requestIsHttps(req) ? '; Secure' : ''}`;
+}
+const clearSessionCookie = (req) => `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${requestIsHttps(req) ? '; Secure' : ''}`;
+/** A WebSocket from a browser always says which page opened it: refuse one
+ * opened by a page on another site, which would otherwise ride the cookie. */
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // not a browser (PC client, tests)
+  try { return new URL(origin).host === String(req.headers.host || ''); } catch { return false; }
+}
+/** The token offered as a WebSocket subprotocol: ['cccs', <token>]. Browsers
+ * can't set headers on a WebSocket, and this keeps the token out of the URL. */
+function wsProtocolToken(req) {
+  const offered = String(req.headers['sec-websocket-protocol'] || '').split(',').map((x) => x.trim()).filter(Boolean);
+  return offered.includes('cccs') ? offered.find((x) => x !== 'cccs') || null : null;
+}
+
+function authFrom(req, url, { upgrade = false } = {}) {
   const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : url.searchParams.get('token');
+  let token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token && upgrade) token = wsProtocolToken(req);
+  if (!token && (upgrade ? sameOrigin(req) : req.method === 'GET' || req.method === 'HEAD')) token = readCookie(req, SESSION_COOKIE);
+  // Still accepted from older PC builds and pages cached before the cookie.
+  if (!token) token = url.searchParams.get('token');
   const payload = verifyToken(token);
   if (!payload) return null;
   const user = db.users.find((u) => u.id === payload.sub) || null;
@@ -1225,12 +1341,33 @@ const RAW_BODY_PATHS = new Set(['/api/integrations/checkcall-host/release', '/ap
 
 /* Set here as well as at the edge, so a deployment that isn't behind the
  * bundled Caddyfile still gets them. same-origin keeps ?token= and ?sso=
- * links out of the Referer sent to Google Fonts and the CDNs. */
+ * links out of the Referer sent to Google Fonts. */
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'referrer-policy': 'same-origin',
 };
+/* Pages only (a PDF or photo opened in a tab keeps the browser's own
+ * viewer). Scripts come only from CCCS itself — the map and QR libraries are
+ * served from /vendor rather than a CDN — so an injected <script src> from
+ * anywhere else won't run. 'unsafe-inline' stays because the pages use
+ * inline scripts and onclick handlers throughout. */
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' data: https://fonts.gstatic.com",
+  "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://server.arcgisonline.com",
+  "media-src 'self' blob: data:",
+  "connect-src 'self' ws: wss: https://api.postcodes.io https://router.project-osrm.org",
+  "worker-src 'self'",
+  "manifest-src 'self'",
+  "frame-src 'none'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
 const requestHandler = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
@@ -1243,6 +1380,10 @@ const requestHandler = async (req, res) => {
   if (url.pathname.startsWith('/api/')) {
     const ip = clientIp(req);
     if (!rateLimit(ip)) return send(429, { error: 'rate limit exceeded' });
+    if (!integrationAddressAllowed(url.pathname, ip)) {
+      logEvent('integration.address_refused', `INTEGRATION CALL REFUSED FROM ${ip} (${url.pathname.replace(/\/[0-9a-f]{16,}(?=\/|$)/gi, '/…')})`);
+      return send(403, { error: 'not allowed from this address' });
+    }
     let body = {};
     if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method) && !RAW_BODY_PATHS.has(url.pathname)) {
       const chunks = [];
@@ -1307,7 +1448,8 @@ const requestHandler = async (req, res) => {
   if (!file.startsWith(path.join(__dirname, 'public'))) return send(403, { error: 'forbidden' });
   fs.readFile(file, (err, data) => {
     if (err) return send(404, 'Not found', { 'content-type': 'text/plain' });
-    send(200, data, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' });
+    const ext = path.extname(file);
+    send(200, data, { 'content-type': MIME[ext] || 'application/octet-stream', ...(ext === '.html' ? { 'content-security-policy': CONTENT_SECURITY_POLICY } : {}) });
   });
 };
 
@@ -1337,13 +1479,18 @@ try {
 function handleUpgrade(req, socket) {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname !== '/ws') return socket.destroy();
-  const user = authFrom(req, url);
+  if (!sameOrigin(req)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    return socket.destroy();
+  }
+  const user = authFrom(req, url, { upgrade: true });
   const key = req.headers['sec-websocket-key'];
   if (!user || !key) {
     socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
     return socket.destroy();
   }
-  socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${wsAccept(key)}`, '\r\n'].join('\r\n'));
+  const protoHeader = wsProtocolToken(req) ? ['Sec-WebSocket-Protocol: cccs'] : [];
+  socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${wsAccept(key)}`, ...protoHeader, '\r\n'].join('\r\n'));
   socket.setNoDelay(true);
   const conn = new Conn(socket, user);
   conn.send('hello', { user: { id: user.id, username: user.username, role: user.role, display_name: user.display_name, personnel_id: user.personnel_id, mdt_id: user.mdt_id, client_id: user.client_id || null, branch_id: user.branch_id || null, ui_prefs: normalizeUiPrefs(user.ui_prefs) } });
@@ -1422,20 +1569,21 @@ function backfillLastLogins() {
   return filled;
 }
 
-route('POST', '/api/auth/login', null, ({ body }) => {
+route('POST', '/api/auth/login', null, ({ body, req }) => {
   const username = String(body.username || '').toLowerCase();
-  const lockedUntil = loginLockedUntil(username);
+  const ip = clientIp(req);
+  const lockedUntil = loginLockedUntil(username, ip);
   if (lockedUntil) {
     logEvent('auth.locked', `Login blocked for ${username} — too many recent failures`);
     throw httpError(429, `too many failed attempts — try again in ${Math.ceil((lockedUntil - Date.now()) / 1000)}s`);
   }
   const user = db.users.find((u) => u.username === username);
   if (!user || !verifyPassword(String(body.password || ''), user.password_hash)) {
-    if (user) recordLoginFailure(username);
+    if (user) recordLoginFailure(username, ip);
     logEvent('auth.failed', `Failed login for ${body.username}`);
     throw httpError(401, 'invalid credentials');
   }
-  clearLoginFailures(username);
+  clearLoginFailures(username, ip);
   if (mustUseMicrosoft(user)) {
     logEvent('auth.password_refused', `PASSWORD SIGN-IN REFUSED FOR ${user.username} — ${user.role} MUST USE MICROSOFT`, { user_id: user.id });
     const e = httpError(403, 'This account signs in with Microsoft. Use "Sign in with Microsoft".');
@@ -1445,8 +1593,17 @@ route('POST', '/api/auth/login', null, ({ body }) => {
   const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
   const token = sign({ sub: user.id, role: user.role, iat: Date.now(), exp: Date.now() + ttl });
   recordLogin(user, `${user.username} signed in (${user.role})`);
-  return { token, user: publicUser(user) };
+  return { __body: { token, user: publicUser(user) }, __headers: { 'set-cookie': sessionCookie(req, token) } };
 });
+/** Sets the cookie for a session the page already holds (pages signed in
+ * before the cookie existed, and every page load, so the cookie follows
+ * whoever this browser last signed in as). Bearer header only. */
+route('POST', '/api/auth/session-cookie', [], ({ req }) => {
+  const header = req.headers.authorization || '';
+  if (!header.startsWith('Bearer ')) throw httpError(400, 'send the session as a Bearer header');
+  return { __body: { ok: true }, __headers: { 'set-cookie': sessionCookie(req, header.slice(7)) } };
+});
+route('POST', '/api/auth/logout', null, ({ req }) => ({ __body: { ok: true }, __headers: { 'set-cookie': clearSessionCookie(req) } }));
 /** A "create your password" link — reuses the existing sign()/verifyToken()
  * HMAC mechanism (already used for session tokens) rather than inventing a
  * second token scheme: stateless, self-expiring, and never a valid session
@@ -1463,9 +1620,10 @@ route('POST', '/api/auth/set-password', null, ({ body }) => {
   const u = db.users.find((x) => x.id === payload.user_id);
   if (!u) throw httpError(404, 'account not found');
   if (u.password_set_at && payload.iat < u.password_set_at) throw httpError(400, 'this link has already been used — ask for a new one');
-  if (!body.password || String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
+  assertPassword(body.password, u.username);
   u.password_hash = hashPassword(String(body.password));
   u.password_set_at = Date.now();
+  closeUserSockets(u.id);
   logEvent('auth.password_set_via_link', `${u.username} SET THEIR PASSWORD VIA EMAIL LINK`, { user_id: u.id });
   return { ok: true };
 });
@@ -1564,12 +1722,12 @@ route('GET', '/api/auth/microsoft/callback', null, async ({ query }) => {
   return { __status: 302, __headers: { location: `/index.html?sso=${oneTime}` }, __body: '' };
 });
 
-route('GET', '/api/auth/microsoft/session', null, ({ query }) => {
+route('GET', '/api/auth/microsoft/session', null, ({ query, req }) => {
   const code = query.get('code');
   const entry = code && ssoExchange.get(code);
   if (!entry) throw httpError(400, 'that sign-in code is invalid or already used');
   ssoExchange.delete(code);
-  return { token: entry.token, user: entry.user };
+  return { __body: { token: entry.token, user: entry.user }, __headers: { 'set-cookie': sessionCookie(req, entry.token) } };
 });
 route('GET', '/api/me', ALL, ({ user }) => publicUser(user));
 
@@ -5696,7 +5854,7 @@ require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, f
 const attendance = require('./routes-attendance.js')({
   route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers, sms, notifyLog: writeNotifyLog, publicShift,
   findAssignment, findShift, assertAssignmentAccess, isControlRole, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
-  createEmergencyJob, forwardEmergencyToAura, ami,
+  createEmergencyJob, forwardEmergencyToAura, ami, hashPassword, verifyPassword,
 });
 
 
@@ -6200,7 +6358,8 @@ route('GET', '/api/config', ALL, () => ({
   foot_tracking: process.env.FOOT_TRACKING === 'on',
 }));
 
-route('GET', '/api/openapi.json', null, () => require('./openapi.json'));
+// The full map of every endpoint is a gift to anyone probing: admins only.
+route('GET', '/api/openapi.json', ADMIN, () => require('./openapi.json'));
 
 // Admin: users
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -6217,7 +6376,7 @@ route('GET', '/api/users', ADMIN, () => db.users.map(publicUser));
 route('POST', '/api/users', ADMIN, ({ body, user }) => {
   const username = String(body.username || '').toLowerCase().trim();
   if (!username || !body.password) throw httpError(400, 'username and password required');
-  if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
+  assertPassword(body.password, username);
   if (!ROLES.includes(body.role)) throw httpError(400, 'invalid role');
   if (db.users.some((u) => u.username === username)) throw httpError(409, 'username taken');
   const email = normalizeEmail(body.email) ?? null;
@@ -6262,10 +6421,12 @@ route('PATCH', '/api/users/:id', ADMIN, ({ params, body, user }) => {
   if ('branch_id' in body) u.branch_id = normalizedBranchId(body.branch_id);
   if ('site_ids' in body) u.site_ids = normalizedSiteIds(body.site_ids);
   if ('password' in body && body.password) {
-    if (String(body.password).length < 8) throw httpError(400, 'password must be at least 8 characters');
+    assertPassword(body.password, u.username);
     u.password_hash = hashPassword(String(body.password));
     u.password_set_at = Date.now();
   }
+  // A new role or password takes effect on open screens now, not at their next reconnect.
+  if (u.role !== roleBefore || body.password) closeUserSockets(u.id);
   // Who changed an account, and any change of role, is what an access review asks.
   const what = [u.role !== roleBefore ? `ROLE ${roleBefore} → ${u.role}` : '', body.password ? 'PASSWORD RESET' : ''].filter(Boolean).join(', ');
   logEvent('user.updated', `USER ${u.username} UPDATED BY ${user.username}${what ? ` (${what})` : ''}`, { user_id: u.id, by: user.id, role_before: roleBefore, role: u.role });
@@ -6277,6 +6438,7 @@ route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
   if (u.id === user.id) throw httpError(400, 'cannot delete the account you are signed in as');
   if (u.personnel_id) { const p = db.personnel.find((x) => x.id === u.personnel_id); if (p && p.user_id === u.id) p.user_id = null; }
   db.users = db.users.filter((x) => x.id !== u.id);
+  closeUserSockets(u.id);
   logEvent('user.deleted', `USER ${u.username} DELETED BY ${user.username}`, { user_id: u.id, by: user.id });
   return { ok: true };
 });
@@ -6617,4 +6779,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };

@@ -863,7 +863,7 @@ function personnelForm(p) {
       <input id="npnEmpNo" autocomplete="off" value="${isNew ? '' : esc(p.employee_no || '')}" placeholder="next: …">
       ${!isNew ? `<label>ID photo — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">head and shoulders, plain background; it goes on their ID card and the card's check page</span></label>
       <div style="display:flex;gap:12px;align-items:center">
-        ${p.has_photo ? `<img id="pnPhotoImg" src="/api/personnel/${p.id}/photo?token=${encodeURIComponent(CCCS.getSession().token)}&v=${encodeURIComponent(p.photo_updated_at || '')}" alt="" style="width:72px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">` : '<div style="width:72px;height:90px;border-radius:8px;border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--ink-dim);text-align:center">No photo</div>'}
+        ${p.has_photo ? `<img id="pnPhotoImg" src="/api/personnel/${p.id}/photo?v=${encodeURIComponent(p.photo_updated_at || '')}" alt="" style="width:72px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">` : '<div style="width:72px;height:90px;border-radius:8px;border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--ink-dim);text-align:center">No photo</div>'}
         <div style="display:flex;flex-direction:column;gap:6px">
           <label class="btn" style="padding:5px 12px;font-size:12px;text-transform:none;letter-spacing:0;margin:0;cursor:pointer">${p.has_photo ? 'Change photo' : 'Add photo'}<input type="file" id="pnPhotoFile" accept="image/*" capture="user" hidden></label>
           ${p.has_photo ? '<button type="button" class="btn" id="pnPhotoDel" style="padding:5px 12px;font-size:12px">Remove</button>' : ''}
@@ -1008,7 +1008,6 @@ function personnelForm(p) {
 /** Documents kept against this person, and — if they came through
  * Applicants — their whole application as they gave it. Admin only. */
 async function personnelFileModal(p) {
-  const tok = encodeURIComponent(CCCS.getSession().token);
   let rec;
   try { rec = await api('GET', `/api/personnel/${p.id}/record`); } catch (e) { alert(e.message); return; }
   const app = rec.application;
@@ -1017,7 +1016,7 @@ async function personnelFileModal(p) {
     <form class="stack" onsubmit="return false">
       <label>Documents</label>
       ${rec.files.length ? `<table class="log-table"><tbody>${rec.files.map((f) => `<tr>
-        <td>${f.mimetype.startsWith('image/') ? `<a href="${f.url}?token=${tok}" target="_blank"><img src="${f.url}?token=${tok}" alt="" style="height:54px;border-radius:4px;border:1px solid var(--line)"></a>` : `<a href="${f.url}?token=${tok}" target="_blank" class="btn" style="padding:3px 9px;font-size:12px">PDF</a>`}</td>
+        <td>${f.mimetype.startsWith('image/') ? `<a href="${f.url}" target="_blank"><img src="${f.url}" alt="" style="height:54px;border-radius:4px;border:1px solid var(--line)"></a>` : `<a href="${f.url}" target="_blank" class="btn" style="padding:3px 9px;font-size:12px">PDF</a>`}</td>
         <td><strong>${esc(f.label)}</strong><div class="dim" style="font-size:11.5px">${esc(rec.kinds[f.kind] || f.kind)} · ${esc(f.source || '')} · ${esc(new Date(f.added_at).toLocaleDateString('en-GB'))}</div></td>
         <td style="text-align:right"><button type="button" class="btn danger" data-pf-del="${f.id}" style="padding:3px 9px;font-size:11px">Remove</button></td></tr>`).join('')}</tbody></table>` : '<p class="dim" style="margin:0">No documents yet.</p>'}
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
@@ -1748,7 +1747,7 @@ function siteModal(s) {
     el('#sAddTask').onclick = () => editor.add();
     if (s) {
       const DOC_TYPE_LABEL = { CONTRACT: 'Contract', SITE_DOCUMENT: 'Site document' };
-      const docUrl = (id) => `/api/documents/${id}/file?token=${encodeURIComponent(CCCS.getSession().token)}`;
+      const docUrl = (id) => `/api/documents/${id}/file`;
       const paintDocs = (docs) => {
         const rows = docs.filter((d) => d.type === 'CONTRACT' || d.type === 'SITE_DOCUMENT');
         el('#sDocsList').innerHTML = rows.length
@@ -2205,7 +2204,7 @@ function beatModal(b) {
         const win = window.open('', '_blank');
         if (!win) { alert('Your browser blocked the print window — allow pop-ups for this site and try again.'); return; }
         win.document.write(`<!doctype html><html><head><title>Checkpoint codes — ${esc(b.name)}</title>
-          <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
+          <script src="/vendor/qrcode.min.js"><\/script>
           <style>body{font-family:sans-serif;padding:24px} .cp{display:inline-block;text-align:center;margin:0 18px 28px 0;page-break-inside:avoid}
           .cp .code{font-family:monospace;font-size:10px;color:#555;margin-top:6px;word-break:break-all;max-width:180px}
           .cp .title{font-weight:700;margin-top:8px}</style></head><body>
@@ -2780,7 +2779,7 @@ function applicantForm(a) {
       </div>
       <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px;font-weight:400"><input type="checkbox" id="napNotify" checked style="width:16px;height:16px"> Email ${esc(a.email || 'the applicant')} if the stage or interview time changes</label>
       <label>CV</label>
-      <div id="apCvWrap" class="dim">${a.cv ? `<a href="/api/applicants/${a.id}/cv?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(a.cv.filename)}</a>` : 'No CV uploaded yet.'}</div>
+      <div id="apCvWrap" class="dim">${a.cv ? `<a href="/api/applicants/${a.id}/cv" target="_blank">${esc(a.cv.filename)}</a>` : 'No CV uploaded yet.'}</div>
       <div style="display:flex;gap:8px">
         <input type="file" id="apCvFile" accept="application/pdf,image/png,image/jpeg" style="flex:1">
         <button type="button" class="btn" id="apCvUpload">Upload</button>
@@ -2798,13 +2797,13 @@ function applicantForm(a) {
  * field list snapshotted at the time — so they still read correctly after
  * the form is redesigned in Admin → Forms. */
 function applicationAnswersHtml(a) {
-  const app = a.application, tok = encodeURIComponent(CCCS.getSession().token);
+  const app = a.application;
   const val = (f) => {
     const v = app.values[f.id];
     if (v === null || v === undefined || v === '') return '<span class="dim">—</span>';
     if (f.type === 'checkbox') return v ? 'Yes' : 'No';
     if (f.type === 'datetime') return esc(new Date(v).toLocaleString('en-GB'));
-    if (f.type === 'signature' && v.file_id) return `<img src="/api/applicants/${a.id}/application-files/${esc(v.file_id)}?token=${tok}" alt="signature" style="height:70px;background:#fff;border-radius:6px;border:1px solid var(--line)"><div class="dim" style="font-size:11px">${esc(v.signer_name || '')}</div>`;
+    if (f.type === 'signature' && v.file_id) return `<img src="/api/applicants/${a.id}/application-files/${esc(v.file_id)}" alt="signature" style="height:70px;background:#fff;border-radius:6px;border:1px solid var(--line)"><div class="dim" style="font-size:11px">${esc(v.signer_name || '')}</div>`;
     return `<span style="white-space:pre-wrap">${esc(v)}</span>`;
   };
   return `
@@ -2818,17 +2817,16 @@ function applicationAnswersHtml(a) {
  * have sent — everything about an application besides its form answers. */
 const EMAIL_LABEL = { SCREENING: 'Being reviewed', INTERVIEW: 'Interview invitation', INTERVIEW_MOVED: 'Interview moved', OFFER: 'Offer', REJECTED: 'Unsuccessful', WITHDRAWN: 'Withdrawn', APPLIED: 'Back to applied', HIRED: 'Welcome / hired', INFO_REQUEST: 'Request for more information' };
 function applicantExtrasHtml(a) {
-  const tok = encodeURIComponent(CCCS.getSession().token);
   const when = (iso) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const sia = a.sia ? (a.sia.none ? '<p class="dim" style="margin:0">Applicant said they don\'t hold an SIA licence yet.</p>'
-    : `<div style="display:flex;gap:10px;flex-wrap:wrap">${['front', 'back'].filter((s) => a.sia[s]).map((s) => `<a href="/api/applicants/${a.id}/sia/${s}?token=${tok}" target="_blank" style="text-align:center;font-size:12px">${a.sia[s].mimetype === 'application/pdf' ? `<span class="btn">SIA ${s} (PDF)</span>` : `<img src="/api/applicants/${a.id}/sia/${s}?token=${tok}" alt="SIA licence ${s}" style="height:110px;border-radius:6px;border:1px solid var(--line);display:block">`}${s}</a>`).join('')}</div>`) : '<p class="dim" style="margin:0">None on file.</p>';
+    : `<div style="display:flex;gap:10px;flex-wrap:wrap">${['front', 'back'].filter((s) => a.sia[s]).map((s) => `<a href="/api/applicants/${a.id}/sia/${s}" target="_blank" style="text-align:center;font-size:12px">${a.sia[s].mimetype === 'application/pdf' ? `<span class="btn">SIA ${s} (PDF)</span>` : `<img src="/api/applicants/${a.id}/sia/${s}" alt="SIA licence ${s}" style="height:110px;border-radius:6px;border:1px solid var(--line);display:block">`}${s}</a>`).join('')}</div>`) : '<p class="dim" style="margin:0">None on file.</p>';
   const reqs = (a.info_requests || []).slice().reverse().map((r) => `
     <div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:13px">
       <div style="display:flex;gap:8px;align-items:center"><strong style="flex:1">Asked ${esc(when(r.created_at))} by ${esc(r.created_by)}</strong>
         <span class="role-pill ${r.status === 'COMPLETED' ? 'control' : ''}">${r.status === 'OPEN' && Date.parse(r.expires_at) < Date.now() ? 'EXPIRED' : esc(r.status)}</span>
         ${r.status === 'OPEN' ? `<button type="button" class="btn" data-cancel-req="${r.id}" style="padding:2px 8px;font-size:11px">Cancel</button>` : ''}</div>
       ${r.status === 'COMPLETED' ? `<div class="dim" style="font-size:12px;margin:2px 0 4px">Answered ${esc(when(r.submitted_at))}</div>
-        ${r.answers.map((x) => `<div style="margin-top:4px"><span class="dim">${esc(x.label)}:</span> ${x.type === 'TEXT' ? `<span style="white-space:pre-wrap">${esc(x.text || '—')}</span>` : x.file ? `<a target="_blank" href="/api/applicants/${a.id}/info-files/${r.id}/${esc(x.item_id)}?token=${tok}">${esc(x.file.filename)}</a>` : '—'}</div>`).join('')}`
+        ${r.answers.map((x) => `<div style="margin-top:4px"><span class="dim">${esc(x.label)}:</span> ${x.type === 'TEXT' ? `<span style="white-space:pre-wrap">${esc(x.text || '—')}</span>` : x.file ? `<a target="_blank" href="/api/applicants/${a.id}/info-files/${r.id}/${esc(x.item_id)}">${esc(x.file.filename)}</a>` : '—'}</div>`).join('')}`
         : `<ul style="margin:4px 0 0 18px;padding:0">${r.items.map((i) => `<li>${esc(i.label)} <span class="dim">(${i.type === 'FILE' ? 'upload' : 'written'}${i.required ? '' : ', optional'})</span></li>`).join('')}</ul>`}
     </div>`).join('');
   const emails = (a.emails || []).slice().reverse().map((e) => `<div><span class="t">${esc(when(e.at))}</span>${esc(EMAIL_LABEL[e.kind] || e.kind)} — ${e.ok ? 'sent' : e.ok === null ? 'sending…' : `<span style="color:var(--emergency)">not sent (${esc(e.error || 'failed')})</span>`}</div>`).join('');
@@ -3239,7 +3237,6 @@ async function payrollRunModal(runId, justSkipped) {
   let run;
   try { run = await api('GET', `/api/payroll/runs/${runId}`); } catch (e) { alert(e.message); return; }
   const draft = run.status === 'DRAFT';
-  const t = encodeURIComponent(CCCS.getSession().token);
   const blockerText = (ps) => {
     const bits = [];
     if (ps.unresolved_hours.length) bits.push(`${ps.unresolved_hours.length} shift(s) with no clock-out`);
@@ -3263,7 +3260,7 @@ async function payrollRunModal(runId, justSkipped) {
             <td class="dim">${gbpPr(ps.ni_employee)}</td>
             <td class="dim">${gbpPr(ps.pension_employee)}</td>
             <td><strong>${gbpPr(ps.net_pay)}</strong></td>
-            <td>${draft ? `<button class="btn" data-adjust="${ps.id}" style="padding:3px 8px;font-size:11px">Adjust</button>` : `<a class="btn" target="_blank" href="/api/payslips/${ps.id}/pdf?token=${t}" style="padding:3px 8px;font-size:11px">PDF</a>`}</td>
+            <td>${draft ? `<button class="btn" data-adjust="${ps.id}" style="padding:3px 8px;font-size:11px">Adjust</button>` : `<a class="btn" target="_blank" href="/api/payslips/${ps.id}/pdf" style="padding:3px 8px;font-size:11px">PDF</a>`}</td>
           </tr>${ps.other_lines.length ? `<tr><td colspan="8" class="dim" style="font-size:11.5px">${ps.other_lines.map((l) => `${esc(l.description)}: ${gbpPr(l.amount)}`).join(' · ')}</td></tr>` : ''}`;
         }).join('')}</tbody>
       </table>

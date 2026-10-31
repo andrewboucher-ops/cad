@@ -138,6 +138,15 @@ hope, not a backup.
 takes a second. It is not a substitute for the database dump, because a snapshot
 of a live SQLite file can capture a half-written transaction.
 
+## 6. Security settings in cccs.env
+
+All optional except the first. Edit `/etc/cccs/cccs.env`, then `systemctl restart cccs`.
+
+- `DEMO_DATA=off`: never load the demo accounts (they have published passwords) if the database is ever empty. New installs get it; add it by hand to an older cccs.env.
+- `TRUSTED_PROXIES=192.168.7.x`: the address of the reverse proxy, if it isn't on this container. Without it every request looks like it comes from the proxy, so login lockout and rate limits can't tell people apart.
+- `INTEGRATION_ALLOWED_IPS=192.168.7.0/24,203.0.113.10`: addresses that alarm receivers (GuardM8, Aura, Broadnet), the PBX welfare calls, the PRF, the evidence store and the check call host may call from. Leave unset until you know every sender's address: anything else gets a 403 and an `integration.address_refused` line in the audit log. Control room PC routes are never limited by it.
+- `SSO_REQUIRED_ROLES`, `BREAK_GLASS_USERS`: see docs/SSO.md §7.
+
 ## What self-hosting means here
 
 Two honest trade-offs against a VPS:

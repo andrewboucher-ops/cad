@@ -60,7 +60,6 @@
 const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['SYSTEM_ADMIN'])) throw new Error('auth');
 const { modal, close, foot, wire, v, numOrNull, money, date, when, words, options } = KIT;
-const token = () => encodeURIComponent(CCCS.getSession().token);
 const STATUS = { ON_HIRE: ['On hire', 'info'], PART_RETURNED: ['Part returned', 'warn'], RETURNED: ['Returned', 'ok'] };
 const CONDITIONS = ['NEW', 'GOOD', 'FAIR', 'POOR', 'DAMAGED', 'LOST'];
 let rentals = [], filter = 'open';
@@ -96,9 +95,9 @@ function paint() {
         <td style="white-space:nowrap">${r.expected_return_at ? esc(date(r.expected_return_at)) : '<span class="dim">on request</span>'}${r.overdue ? ' <span class="pill bad">Overdue</span>' : ''}</td>
         <td><span class="pill ${sc}">${sl}</span></td>
         <td><div class="acts">
-          <a class="btn" target="_blank" href="${r.agreement_url}?token=${token()}">Agreement</a>
+          <a class="btn" target="_blank" href="${r.agreement_url}">Agreement</a>
           ${r.status !== 'RETURNED' ? `<button class="btn primary" data-ret="${r.id}">Return</button>` : ''}
-          ${r.return_notes.map((n) => `<a class="btn" target="_blank" href="${n.url}?token=${token()}">Return note ${n.n}</a>`).join('')}
+          ${r.return_notes.map((n) => `<a class="btn" target="_blank" href="${n.url}">Return note ${n.n}</a>`).join('')}
         </div></td></tr>`;
     }).join('')}</tbody></table></div>` : `<p class="dim">${rentals.length ? 'No rentals match.' : 'No rentals yet. Press <strong>New rental</strong> to hire equipment out.'}</p>`;
   els('[data-ret]').forEach((b) => (b.onclick = () => returnModal(rentals.find((r) => r.id === Number(b.dataset.ret)))));
@@ -119,7 +118,7 @@ function returnModal(r) {
     const res = await api('POST', `/api/rentals/${r.id}/return`, { asset_ids: ids, conditions, note: v(root, '#rnNote') });
     close(); await load();
     const n = res.return_notes[res.return_notes.length - 1];
-    if (n && confirm('Booked back in. Open the return note to print?')) window.open(`${n.url}?token=${token()}`, '_blank');
+    if (n && confirm('Booked back in. Open the return note to print?')) window.open(`${n.url}`, '_blank');
   }));
 }
 
@@ -259,7 +258,7 @@ function paintWizard() {
         <h2 style="margin:6px 0">Agreement ${esc(r.reference)} created</h2>
         <p class="dim">${r.items.length} item${r.items.length === 1 ? '' : 's'} on hire to ${esc(r.hirer_name)}. A copy is in the Rentals list and in the client's portal.</p>
         <div class="btn-row" style="justify-content:center;margin-top:14px">
-          <a class="btn primary" target="_blank" href="${r.agreement_url}?token=${token()}" style="padding:11px 18px">Open agreement to print</a>
+          <a class="btn primary" target="_blank" href="${r.agreement_url}" style="padding:11px 18px">Open agreement to print</a>
           <button class="btn" id="wAgain" style="padding:11px 18px">Another rental</button>
         </div></div>`;
     el('#wAgain').onclick = () => { closeWizard(); el('#bNew').click(); };

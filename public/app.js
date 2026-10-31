@@ -13,13 +13,25 @@ const CCCS = (() => {
   // auth check fails before it ever renders anything, i.e. a blank window.
   function setSession(s) {
     session = s; sessionStorage.setItem(KEY, JSON.stringify(s)); try { localStorage.setItem(KEY + '.mirror', JSON.stringify(s)); } catch {} applyTheme(s && s.user && s.user.ui_prefs);
+    syncSessionCookie();
     // The right person being signed in is itself a trigger: a secure item
     // left queued because it belonged to someone else may now be sendable,
     // independent of the 'online' event, which may have already fired
     // while the wrong person was still signed in on this device.
     flushSecureOutbox();
   }
-  function clearSession() { session = null; sessionStorage.removeItem(KEY); try { localStorage.removeItem(KEY + '.mirror'); } catch {} }
+  function clearSession() {
+    session = null; sessionStorage.removeItem(KEY); try { localStorage.removeItem(KEY + '.mirror'); } catch {}
+    if (typeof fetch === 'function' && document.documentElement) try { fetch('/api/auth/logout', { method: 'POST', keepalive: true }).catch(() => {}); } catch {}
+  }
+  /** Links to PDFs, photos and downloads carry no token in their address:
+   * the server reads an HttpOnly cookie instead. This keeps that cookie on
+   * the session this page holds (it follows the last sign-in on this
+   * browser, as the localStorage mirror above already does). */
+  function syncSessionCookie() {
+    if (!session || !session.token || typeof fetch !== 'function' || !document.documentElement) return; // not in the offline-outbox test harness
+    try { fetch('/api/auth/session-cookie', { method: 'POST', headers: { authorization: `Bearer ${session.token}` } }).catch(() => {}); } catch {}
+  }
   function getSession() { return session; }
 
   /** Stamps the operator's theme choice onto <html> as data-* attributes,
@@ -43,7 +55,7 @@ const CCCS = (() => {
     set('data-priority-ramp', p.priority_ramp);
     set('data-motion', p.reduce_motion ? 'reduce' : null);
   }
-  if (session) applyTheme(session.user && session.user.ui_prefs);
+  if (session) { applyTheme(session.user && session.user.ui_prefs); syncSessionCookie(); }
 
   async function api(method, path, body, opts = {}) {
     const res = await fetch(path, {
@@ -238,7 +250,8 @@ const CCCS = (() => {
 
     function connect() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(session.token)}`);
+      // The token goes as a subprotocol, not in the address, so it never lands in a log.
+      ws = new WebSocket(`${proto}://${location.host}/ws`, ['cccs', session.token]);
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => { retry = 0; onStatus && onStatus(true); while (queue.length) ws.send(queue.shift()); };
       ws.onclose = () => {
