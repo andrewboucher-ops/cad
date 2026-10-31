@@ -271,7 +271,10 @@ const findPersonnel = (v) =>
 function logEvent(type, summary, data = {}) {
   const ev = { id: nextId('audit_logs'), type, summary, data, at: new Date().toISOString() };
   db.audit_logs.push(ev);
+  // Memory keeps the recent window the live screens use; the full trail is
+  // written to its own table straight away (store.js audit_events).
   if (db.audit_logs.length > 5000) db.audit_logs.shift();
+  try { store.appendAudit(ev); } catch (e) { console.error('[cccs] audit write failed:', e.message); }
   // Control only: the log carries failed-login usernames, sickness leave,
   // applicant names and raw alarm payloads — not for every officer's phone.
   broadcast('event.logged', ev, { controlOnly: true });
@@ -4135,6 +4138,10 @@ route('POST', '/api/messages/:id/read', ALL, ({ params, user }) => {
 
 // Events / audit
 route('GET', '/api/events', CONTROL, ({ query }) => {
+  // With persistence on, search the whole trail rather than the in-memory window.
+  if (store.queryAudit) {
+    return store.queryAudit({ type: query.get('type'), q: query.get('q'), since: query.get('since'), until: query.get('until'), limit: query.get('limit') || 200 });
+  }
   let ev = db.audit_logs.slice();
   const type = query.get('type'); const q = query.get('q'); const since = query.get('since');
   if (type) ev = ev.filter((e) => e.type.startsWith(type));
@@ -4205,6 +4212,7 @@ function retentionSweep() {
   const removed = {
     locations: pruneOlderThan('locations', RETENTION.locations, 'at'),
     audit_logs: pruneOlderThan('audit_logs', RETENTION.audit, 'at'),
+    audit_events: RETENTION.audit > 0 ? store.pruneAudit(new Date(Date.now() - RETENTION.audit * 86400000).toISOString()) : 0,
     messages: pruneOlderThan('messages', RETENTION.messages, 'sent_at'),
     passdown_logs: pruneOlderThan('passdown_logs', RETENTION.passdown, 'created_at'),
     dial_log: pruneOlderThan('dial_log', RETENTION.dial_log, 'attempted_at'),
