@@ -158,8 +158,15 @@ function createStore(db, seq, opts = {}) {
     putAudit.run(ev.id, ev.type, ev.summary, JSON.stringify(ev.data || {}), ev.at);
   }
   /** Search the whole trail, newest last, the same shape logEvent() makes. */
-  function queryAudit({ type, q, since, until, limit = 200 } = {}) {
+  function queryAudit({ type, q, since, until, personnelId, userId, limit = 200 } = {}) {
     const where = []; const args = [];
+    // Subject access: every row about one person, by the ids logEvent() stamps.
+    if (personnelId || userId) {
+      const who = [];
+      if (personnelId) { who.push("json_extract(data, '$.personnel_id') = ?"); args.push(Number(personnelId)); }
+      if (userId) { who.push("json_extract(data, '$.user_id') = ?"); args.push(Number(userId)); }
+      where.push(`(${who.join(' OR ')})`);
+    }
     if (type) { where.push("type LIKE ? ESCAPE '\\'"); args.push(type.replace(/[%_\\]/g, (c) => '\\' + c) + '%'); }
     if (q) { where.push("summary LIKE ? ESCAPE '\\'"); args.push('%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%'); }
     if (since) { where.push('at >= ?'); args.push(since); }

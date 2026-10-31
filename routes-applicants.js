@@ -160,7 +160,9 @@ module.exports = function registerApplicantRoutes({
     if (!a) throw httpError(404, 'applicant not found');
     if (a.status === 'HIRED') throw httpError(409, 'cannot delete a hired applicant — the personnel record it became still references this history');
     db.applicants = db.applicants.filter((x) => x.id !== a.id);
-    logEvent('applicant.deleted', `APPLICANT ${a.name} DELETED`);
+    // Their CV, licence scans and answers go too, or "deleted" isn't true.
+    try { fs.rmSync(cvDir(a.id), { recursive: true, force: true }); } catch {}
+    logEvent('applicant.deleted', `APPLICANT #${a.id} DELETED`);
     return { ok: true };
   });
 

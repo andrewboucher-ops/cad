@@ -1063,13 +1063,23 @@ function personnelModal(p) {
       <div class="foot-split">
         <span>${p ? '<button class="btn danger" id="pnDelete">Delete personnel</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
-          ${p ? '<button class="btn" id="pnFile">Personnel file</button><a class="btn" id="pnIdCard" href="/id-card.html?id=' + p.id + '">ID card</a>' : ''}
+          ${p ? '<button class="btn" id="pnFile">Personnel file</button><a class="btn" id="pnIdCard" href="/id-card.html?id=' + p.id + '">ID card</a><button class="btn" id="pnSar" title="Everything CCCS holds about this person, for a subject access request">Subject access export</button>' : ''}
           <button class="btn" id="pnCancel">Cancel</button>
           <button class="btn primary" id="pnSave">${p ? 'Save changes' : 'Create personnel'}</button>
         </span>
       </div>`;
     el('#pnCancel').onclick = closeModal;
     if (el('#pnFile')) el('#pnFile').onclick = () => personnelFileModal(p);
+    // UK GDPR Article 15: reply within a month. Downloads one JSON file.
+    if (el('#pnSar')) el('#pnSar').onclick = async () => {
+      try {
+        const res = await fetch(`/api/personnel/${p.id}/subject-access-export`, { headers: { authorization: `Bearer ${CCCS.getSession().token}` } });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `export failed (${res.status})`);
+        const name = (/filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '') || [])[1] || `subject-access-${p.id}.json`;
+        const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(await res.blob()), download: name });
+        document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      } catch (e) { alert(e.message); }
+    };
     if (el('#npnIcalGen')) {
       const showLink = (url) => { el('#npnIcalUrl').value = url; el('#npnIcalActions').classList.remove('hide'); };
       el('#npnIcalGen').onclick = async () => {
