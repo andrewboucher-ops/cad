@@ -738,7 +738,7 @@ async function loadSiteInfo(s) {
     const docs = await api('GET', `/api/sites/${s.site_id}/documents`);
     const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map', INDUCTION: 'Induction' };
     const docLinks = docs.length
-      ? docs.map((d) => `<div><a href="/api/documents/${d.id}/file?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</a></div>`).join('')
+      ? docs.map((d) => `<div><a href="/api/documents/${d.id}/file" target="_blank">${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</a></div>`).join('')
       : '<div class="dim">No maps, instructions or inductions on file for this site yet.</div>';
     el('#shSiteInfo').innerHTML = `<div>${esc(site && site.address || '')}</div>${docLinks}`;
   } catch (e) { if (el('#shSiteInfo')) el('#shSiteInfo').textContent = 'Failed to load site information.'; }

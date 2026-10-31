@@ -255,7 +255,7 @@ const DOC_LABEL = { CONTRACT: 'Contract', SITE_DOCUMENT: 'Site document', ASSIGN
 async function paintDocs() {
   const docs = await api('GET', withAs(`/api/client/documents?site_id=${currentSiteId}`));
   el('#docsBody').innerHTML = docs.length
-    ? docs.map((d) => `<div class="list-row doc-row"><span class="t">${esc(DOC_LABEL[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</span><a href="${withAs(`/api/client/documents/${d.id}/file?token=${encodeURIComponent(getSession().token)}`)}" target="_blank" style="flex:1">${esc(d.filename)}</a><span class="dim" style="font-size:11px">${esc(fmtDate(d.uploaded_at))}</span></div>`).join('')
+    ? docs.map((d) => `<div class="list-row doc-row"><span class="t">${esc(DOC_LABEL[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</span><a href="${withAs(`/api/client/documents/${d.id}/file`)}" target="_blank" style="flex:1">${esc(d.filename)}</a><span class="dim" style="font-size:11px">${esc(fmtDate(d.uploaded_at))}</span></div>`).join('')
     : '<p class="empty-note">No documents on file for this site yet.</p>';
 }
 
@@ -281,7 +281,6 @@ el('#reqSend').onclick = async () => {
  * client sees everything they have signed for in one place. */
 async function paintRentals() {
   const rows = await api('GET', withAs('/api/client/rentals')).catch(() => []);
-  const t = encodeURIComponent(getSession().token);
   const label = { ON_HIRE: 'On hire', PART_RETURNED: 'Part returned', RETURNED: 'Returned' };
   el('#rentalsBody').innerHTML = rows.length ? rows.map((r) => `
     <div style="border-bottom:1px solid var(--line-soft);padding:10px 0">
@@ -291,7 +290,7 @@ async function paintRentals() {
         <span class="pill ${r.status === 'RETURNED' ? 'completed' : 'open'}">${esc(label[r.status] || r.status)}</span>
       </div>
       <ul style="margin:6px 0 4px 18px;padding:0;font-size:13px">${r.items.map((i) => `<li>${esc(i.tag ? i.tag + ' — ' : '')}${esc(i.description)}${i.serial_no ? ` <span class="dim">(SN ${esc(i.serial_no)})</span>` : ''} — ${i.returned_at ? `<span style="color:var(--available)">returned ${esc(fmtDate(i.returned_at))}</span>` : '<strong>on hire</strong>'}</li>`).join('')}</ul>
-      <div style="font-size:12.5px"><a target="_blank" href="${withAs(`/api/client/rentals/${r.id}/agreement?token=${t}`)}">Rental agreement (PDF)</a>${r.return_notes.map((n) => ` · <a target="_blank" href="${withAs(`/api/client/rentals/${r.id}/returns/${n.n}?token=${t}`)}">Return note ${n.n}</a>`).join('')}</div>
+      <div style="font-size:12.5px"><a target="_blank" href="${withAs(`/api/client/rentals/${r.id}/agreement`)}">Rental agreement (PDF)</a>${r.return_notes.map((n) => ` · <a target="_blank" href="${withAs(`/api/client/rentals/${r.id}/returns/${n.n}`)}">Return note ${n.n}</a>`).join('')}</div>
     </div>`).join('') : '<p class="empty-note">Nothing on hire.</p>';
 }
 
@@ -304,7 +303,6 @@ const gbp = (n) => `£${Number(n || 0).toLocaleString('en-GB', { minimumFraction
 let agreements = [];
 async function paintAgreements() {
   agreements = await api('GET', withAs('/api/client/agreements')).catch(() => []);
-  const t = encodeURIComponent(getSession().token);
   el('#agreementsBody').innerHTML = agreements.length ? agreements.map((a) => {
     const [sl, sc] = AG_STATUS[a.status] || [a.status, 'open'];
     const quote = a.kind === 'QUOTE', waiting = a.status === 'SENT';
@@ -315,7 +313,7 @@ async function paintAgreements() {
         <span class="pill ${sc}">${esc(sl)}</span>
       </div>
       <div style="font-size:12.5px;margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <a target="_blank" href="${withAs(`/api/client/agreements/${a.id}/pdf?token=${t}`)}">${quote ? 'Quotation' : 'Contract'} (PDF)</a>
+        <a target="_blank" href="${withAs(`/api/client/agreements/${a.id}/pdf`)}">${quote ? 'Quotation' : 'Contract'} (PDF)</a>
         ${waiting && !isAdminView ? (quote ? `<button class="btn primary" data-ag-accept="${a.id}">Accept</button><button class="btn" data-ag-decline="${a.id}">Decline</button>` : `<button class="btn primary" data-ag-sign="${a.id}">Read &amp; sign</button>`) : ''}
         ${waiting && isAdminView ? `<span class="dim">waiting for the client to ${quote ? 'accept or decline' : 'sign'} it from their own login</span>` : ''}
       </div></div>`;
@@ -382,14 +380,13 @@ async function paintDirectDebit() {
 }
 async function paintInvoices() {
   const rows = await api('GET', withAs('/api/client/invoices')).catch(() => []);
-  const t = encodeURIComponent(getSession().token);
   el('#invoicesBody').innerHTML = rows.length ? rows.map((i) => `
     <div class="list-row">
       <span class="t mono">${esc(i.number)}</span>
       <span style="flex:1">${esc(i.site_name)} <span class="dim" style="font-size:12px">· ${esc(fmtDate(i.period_from))} – ${esc(fmtDate(i.period_to))} · due ${esc(fmtDate(i.due_date))}</span></span>
       <strong style="font-variant-numeric:tabular-nums">${gbp(i.total)}</strong>
       <span class="pill ${i.paid ? 'completed' : i.overdue ? 'closed' : 'open'}">${i.paid ? 'Paid' : i.overdue ? 'Overdue' : 'Due'}</span>
-      <a target="_blank" href="${withAs(`${i.pdf_url}?token=${t}`)}" style="font-size:12.5px">PDF</a>
+      <a target="_blank" href="${withAs(`${i.pdf_url}`)}" style="font-size:12.5px">PDF</a>
     </div>`).join('') : '<p class="empty-note">No invoices yet.</p>';
 }
 function agModal(title, html, onMount) {
@@ -422,9 +419,8 @@ function agDecline(a) {
   });
 }
 function agSign(a) {
-  const t = encodeURIComponent(getSession().token);
   agModal(`Sign contract ${a.reference}`, `${agLines(a)}
-    <p style="font-size:13px">Please <a target="_blank" href="${withAs(`/api/client/agreements/${a.id}/pdf?token=${t}`)}">read the full contract and its terms (PDF)</a> before signing.</p>
+    <p style="font-size:13px">Please <a target="_blank" href="${withAs(`/api/client/agreements/${a.id}/pdf`)}">read the full contract and its terms (PDF)</a> before signing.</p>
     <div style="max-height:220px;overflow-y:auto;white-space:pre-wrap;font-size:12px;border:1px solid var(--line);border-radius:8px;padding:8px 10px">${esc(a.terms_snapshot || '')}</div>
     <label style="display:flex;gap:10px;align-items:center;margin:10px 0;font-size:14px;text-transform:none;letter-spacing:0;font-weight:500;color:var(--ink)"><input type="checkbox" id="agAgree" style="width:20px;height:20px"> I have read the contract and agree to it on behalf of ${esc(client ? client.name : 'the client')}</label>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><label style="display:block;font-size:12px">Full name</label><input id="agName" style="width:100%" value="${esc(me.display_name && me.display_name !== me.username ? me.display_name : '')}"></div>

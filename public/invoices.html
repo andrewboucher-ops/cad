@@ -57,7 +57,6 @@ if (!isAdmin) els('.admin-only').forEach((x) => x.remove());
 const STATUS = { DRAFT: ['Draft — check it', 'warn'], APPROVED: ['Approved', 'info'], IN_XERO: ['In Xero', 'ok'], PAID: ['Paid', 'ok'], VOID: ['Void', 'off'] };
 const params = new URLSearchParams(location.search);
 let invoices = [], xs = null, filter = 'open', ist = null;
-const token = () => encodeURIComponent(CCCS.getSession().token);
 const SEND_VIA = { CCCS: 'emailed to the client with the PDF straight away', XERO: 'emailed to the client by Xero when you send it to Xero', NONE: 'not emailed automatically' };
 
 if (params.get('xero')) {
@@ -182,7 +181,7 @@ async function view(id) {
   const draft = i.status === 'DRAFT';
   const act = (k, label, cls = '') => `<button class="btn ${cls}" data-a="${k}">${label}</button>`;
   const acts = [];
-  acts.push(`<a class="btn" target="_blank" href="/api/invoices/${i.id}/pdf?token=${token()}">${draft ? 'Preview PDF' : 'PDF'}</a>`);
+  acts.push(`<a class="btn" target="_blank" href="/api/invoices/${i.id}/pdf">${draft ? 'Preview PDF' : 'PDF'}</a>`);
   if (draft) acts.push(act('void', 'Void'), act('save', 'Save changes'), act('approve', 'Approve', 'primary'));
   if (i.number && i.status !== 'VOID') acts.push(act('email', i.emails && i.emails.some((e) => e.ok) ? 'Email again' : 'Email to client'));
   if (i.status === 'APPROVED' && isAdmin) acts.push(act('renumber', 'Change number'));

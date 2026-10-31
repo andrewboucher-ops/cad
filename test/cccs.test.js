@@ -138,7 +138,7 @@ test('rejects bad credentials and unauthenticated API calls', async () => {
 
 test('role permissions are enforced', async () => {
   assert.equal((await call('POST', '/api/mdts', { mdt_code: 'MDT-999' }, danT)).status, 403);
-  assert.equal((await call('POST', '/api/users', { username: 'x', password: 'password1', role: 'DISPATCHER' }, dispT)).status, 403);
+  assert.equal((await call('POST', '/api/users', { username: 'x', password: 'welcome-pass-9', role: 'DISPATCHER' }, dispT)).status, 403);
 });
 
 test('a "set your password" link signs in with the new password, rejects a bad/expired token, and cannot be reused', async () => {
@@ -179,12 +179,12 @@ test('5 failed logins lock an account out for a time, without affecting other ac
 });
 
 test('a welcome link explains Microsoft SSO by whichever of email/SMS is on file', async () => {
-  const noContact = await call('POST', '/api/users', { username: 'welcome-none', password: 'password1', role: 'DISPATCHER' }, adminT);
+  const noContact = await call('POST', '/api/users', { username: 'welcome-none', password: 'welcome-pass-9', role: 'DISPATCHER' }, adminT);
   assert.equal((await call('POST', `/api/users/${noContact.body.id}/send-welcome-link`, {}, adminT)).status, 400, 'nothing to send to');
   assert.equal((await call('POST', `/api/users/${noContact.body.id}/send-welcome-link`, {}, dispT)).status, 403, 'admin only');
 
   const before = mails.length;
-  const emailOnly = await call('POST', '/api/users', { username: 'welcome-email', password: 'password1', role: 'DISPATCHER', email: 'welcome-email@example.test' }, adminT);
+  const emailOnly = await call('POST', '/api/users', { username: 'welcome-email', password: 'welcome-pass-9', role: 'DISPATCHER', email: 'welcome-email@example.test' }, adminT);
   const r1 = await call('POST', `/api/users/${emailOnly.body.id}/send-welcome-link`, {}, adminT);
   assert.equal(r1.status, 200, JSON.stringify(r1.body));
   assert.equal(r1.body.email, true);

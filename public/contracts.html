@@ -48,7 +48,6 @@
 const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['SYSTEM_ADMIN'])) throw new Error('auth');
 const { modal, close, foot, wire, v, money, date, when, options } = KIT;
-const token = () => encodeURIComponent(CCCS.getSession().token);
 const STATUS = {
   DRAFT: ['Draft', 'off'], SENT: ['Waiting for client', 'warn'], ACCEPTED: ['Accepted', 'ok'], DECLINED: ['Declined', 'bad'],
   EXPIRED: ['Expired', 'off'], WITHDRAWN: ['Withdrawn', 'off'], SIGNED: ['Signed — live', 'ok'], ENDED: ['Ended', 'off'],
@@ -208,7 +207,7 @@ function view(a) {
   if (['SENT', 'ACCEPTED', 'SIGNED'].includes(a.status)) acts.push(act('email', 'Email again'));
   if (a.kind === 'QUOTE' && a.status === 'ACCEPTED' && !rows.some((x) => x.from_quote_id === a.id && x.status !== 'WITHDRAWN')) acts.push(act('convert', 'Make contract from this quote', 'primary'));
   if (a.status === 'SIGNED') acts.push(act('end', 'End contract'), `<a class="btn primary" href="/invoices.html?contract_id=${a.id}">Invoices</a>`);
-  if (a.pdf_url && a.status !== 'DRAFT') acts.push(`<a class="btn" target="_blank" href="${a.pdf_url}?token=${token()}">PDF</a>`);
+  if (a.pdf_url && a.status !== 'DRAFT') acts.push(`<a class="btn" target="_blank" href="${a.pdf_url}">PDF</a>`);
   const made = rows.find((x) => x.from_quote_id === a.id);
   modal(`${a.kind === 'QUOTE' ? 'Quote' : 'Contract'} ${a.reference}`, `
     <p style="margin-top:0"><span class="pill ${sc}">${sl}</span> <strong>${esc(a.title)}</strong></p>

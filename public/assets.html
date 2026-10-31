@@ -315,7 +315,7 @@ el('#bLabels').onclick = () => {
     body{font-family:Arial,sans-serif;margin:10mm} .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6mm}
     .lab{border:1px dashed #999;padding:4mm;display:flex;gap:4mm;align-items:center;break-inside:avoid}
     .t{font-weight:700;font-size:16px} .d{font-size:11px;color:#333} @media print{.lab{border-color:#ccc}}</style>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script></head><body>
+    <script src="/vendor/qrcode.min.js"><\/script></head><body>
     <div class="grid">${rows.map((a) => `<div class="lab"><div id="qr-${a.id}"></div><div><div class="t">${esc(a.tag)}</div><div class="d">${esc(a.description)}</div><div class="d">Property of Echelon</div></div></div>`).join('')}</div>
     <script>window.onload=function(){${rows.map((a) => `new QRCode(document.getElementById('qr-${a.id}'),{text:${JSON.stringify(a.tag)},width:70,height:70});`).join('')}setTimeout(function(){window.print()},400)}<\/script></body></html>`);
   w.document.close();

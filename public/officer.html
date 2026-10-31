@@ -222,6 +222,18 @@
       </div>
       <p class="err" id="wErr"></p>
     </div>
+    <div class="card">
+      <h3>Welfare check PIN</h3>
+      <p class="dim" style="margin-top:0">On the two-hourly welfare phone call you confirm you're OK by keying your date of birth. Set a PIN of 4 to 8 digits and key that (then #) instead: your date of birth is easy for anyone to find out.</p>
+      <div id="pinState" class="dim" style="margin-bottom:8px"></div>
+      <label for="pinNew">New PIN</label>
+      <input id="pinNew" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="new-password">
+      <div class="btn-row" style="margin-top:12px">
+        <button class="btn ok" id="pinSave">Save PIN</button>
+        <button class="btn" id="pinClear">Use date of birth instead</button>
+      </div>
+      <p class="err" id="pinErr"></p>
+    </div>
   </div></section>
 
   <!-- Messages -->
@@ -619,6 +631,26 @@ function paintWelfare() {
   }
 }
 setInterval(paintWelfare, 1000);
+async function paintWelfarePin() {
+  const me = (CCCS.getSession() || {}).user || {};
+  if (!me.personnel_id) { el('#pinState').textContent = 'Your login is not linked to a staff record.'; return; }
+  try {
+    const r = await api('GET', '/api/me/welfare-pin');
+    el('#pinState').textContent = r.pin_set ? `PIN set ${new Date(r.pin_set_at).toLocaleDateString('en-GB')}. Key it, then #, on the welfare call.` : 'No PIN set: the welfare call asks for your date of birth.';
+    el('#pinClear').classList.toggle('hide', !r.pin_set);
+  } catch (e) { el('#pinState').textContent = e.message; }
+}
+el('#pinSave').onclick = async () => {
+  el('#pinErr').textContent = '';
+  try { await api('PUT', '/api/me/welfare-pin', { pin: el('#pinNew').value.trim() }); el('#pinNew').value = ''; toast('Welfare PIN saved'); paintWelfarePin(); }
+  catch (e) { el('#pinErr').textContent = e.message; }
+};
+el('#pinClear').onclick = async () => {
+  el('#pinErr').textContent = '';
+  try { await api('DELETE', `/api/personnel/${CCCS.getSession().user.personnel_id}/welfare-pin`); toast('Welfare call will ask for your date of birth'); paintWelfarePin(); }
+  catch (e) { el('#pinErr').textContent = e.message; }
+};
+paintWelfarePin();
 el('#welfareStrip').addEventListener('click', (e) => { if (e.target.id !== 'welfareCheckIn') go('welfare'); });
 el('#welfareCheckIn').onclick = async (e) => {
   e.stopPropagation();
@@ -859,7 +891,7 @@ async function openSiteDocsModal(siteId) {
       const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map', INDUCTION: 'Induction' };
       el('#modalHost .content').innerHTML = docs.length
         ? docs.map((d) => `<div class="field"><span>${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</span>
-            <div><a href="/api/documents/${d.id}/file?token=${encodeURIComponent(CCCS.getSession().token)}" target="_blank">${esc(d.filename)}</a></div></div>`).join('')
+            <div><a href="/api/documents/${d.id}/file" target="_blank">${esc(d.filename)}</a></div></div>`).join('')
         : '<p class="dim">Nothing on file for this site yet.</p>';
     } catch (e) { el('#modalHost .content').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   });
@@ -1141,7 +1173,7 @@ async function scanViaCamera() {
     // (iPhone) jsQR, loaded on first use.
     const detector = 'BarcodeDetector' in window ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
     const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const ready = detector || window.jsQR ? Promise.resolve() : new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js'; sc.onload = ok; sc.onerror = () => bad(new Error('could not load the QR reader — enter the code by hand')); document.head.appendChild(sc); });
+    const ready = detector || window.jsQR ? Promise.resolve() : new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = '/vendor/jsQR.js'; sc.onload = ok; sc.onerror = () => bad(new Error('could not load the QR reader — enter the code by hand')); document.head.appendChild(sc); });
     let done = false;
     const read = async () => {
       if (detector) { const codes = await detector.detect(video); return codes.length ? codes[0].rawValue : null; }
@@ -1202,8 +1234,7 @@ async function submitScan(rawCode) {
  * send the Authorization header, so without it every thumbnail 401s and
  * an uploaded photo looks like it never arrived. */
 function photoThumbs(list) {
-  const tok = encodeURIComponent(CCCS.getSession().token);
-  return list.map((m) => `<a href="${m.url}?token=${tok}" target="_blank" rel="noopener"><img src="${m.url}?token=${tok}" alt="" loading="lazy"></a>`).join('');
+  return list.map((m) => `<a href="${m.url}" target="_blank" rel="noopener"><img src="${m.url}" alt="" loading="lazy"></a>`).join('');
 }
 /** Phone photos are 3-12MB; shrunk on the phone to a 1600px JPEG so they
  * fit the request limit (and any proxy in front of it) and go up quickly
@@ -1459,14 +1490,13 @@ async function refreshPayslips() {
   if (!person) return;
   try {
     const mine = await api('GET', `/api/payslips?personnel_id=${person.id}`);
-    const tok = encodeURIComponent(CCCS.getSession().token);
-    el('#payslipsList').innerHTML = mine.length ? mine.map((ps) => `
+      el('#payslipsList').innerHTML = mine.length ? mine.map((ps) => `
       <div class="field" style="display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line-soft);padding-bottom:8px;margin-bottom:8px">
         <div style="flex:1">
           <div>${esc(ps.period_start)} → ${esc(ps.period_end)}</div>
           <div class="dim" style="font-size:12px">Pay date ${esc(ps.pay_date)} · net £${ps.net_pay.toFixed(2)}</div>
         </div>
-        <a class="btn" target="_blank" href="/api/payslips/${ps.id}/pdf?token=${tok}" style="padding:6px 12px;font-size:12px">PDF</a>
+        <a class="btn" target="_blank" href="/api/payslips/${ps.id}/pdf" style="padding:6px 12px;font-size:12px">PDF</a>
       </div>`).join('') : '<p class="dim">No payslips issued yet.</p>';
   } catch (e) { el('#payslipsList').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }

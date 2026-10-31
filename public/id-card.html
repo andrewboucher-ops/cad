@@ -58,7 +58,6 @@
 const { api, el, esc } = CCCS;
 if (!CCCS.requireAuth(['SYSTEM_ADMIN'])) throw new Error('auth');
 const id = Number(new URLSearchParams(location.search).get('id'));
-const token = () => encodeURIComponent(CCCS.getSession().token);
 async function paint() {
   let card, people, company = {};
   try { [card, people] = await Promise.all([api('GET', `/api/personnel/${id}/id-card`), api('GET', '/api/personnel')]); }
@@ -69,7 +68,7 @@ async function paint() {
   el('#cards').innerHTML = `
     <div class="idc front">
       <div class="logo"><img src="/assets/echelon-wordmark-navy.jpg" alt=""><span>Staff ID</span></div>
-      ${p.has_photo ? `<img class="ph" src="/api/personnel/${id}/photo?token=${token()}&v=${encodeURIComponent(p.photo_updated_at || '')}" alt="">` : '<div class="ph">No photo — add one on their record</div>'}
+      ${p.has_photo ? `<img class="ph" src="/api/personnel/${id}/photo?v=${encodeURIComponent(p.photo_updated_at || '')}" alt="">` : '<div class="ph">No photo — add one on their record</div>'}
       <div><div class="nm">${esc(card.name)}</div><div class="rl">${esc(card.rank || '')}</div>
         <div class="no">Staff no.<br><b>${esc(card.employee_no || '—')}</b></div>${lic ? `<div class="sia">SIA: ${esc(lic)}</div>` : ''}</div>
     </div>
