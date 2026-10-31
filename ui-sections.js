@@ -67,6 +67,7 @@ const SECTIONS = [
   // Keys: creation stays ADMIN-gated at the API, but CONTROL (not just
   // SYSTEM_ADMIN) needs this page — they're the ones running tag-check
   // audits and transferring wallets between safes day to day.
+  { key: 'complaints', label: 'Complaints', group: 'Reports', icon: 'reports', desktop: '/complaints.html', mobile: '/complaints.html', allowed: CONTROL, default: CONTROL },
   { key: 'keys', label: 'Keys', group: 'Stock & assets', icon: 'asset', desktop: '/keys.html', mobile: '/keys.html', allowed: CONTROL, default: CONTROL },
   // Finance
   { key: 'contracts', label: 'Quotes & contracts', group: 'Finance', icon: 'contract', desktop: '/contracts.html', mobile: '/contracts.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },

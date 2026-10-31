@@ -889,10 +889,17 @@ async function openSiteDocsModal(siteId) {
     try {
       const docs = await api('GET', `/api/sites/${siteId}/documents`);
       const label = { ASSIGNMENT_INSTRUCTIONS: 'Assignment instructions', SITE_MAP: 'Site map', INDUCTION: 'Induction' };
+      // BS 7499: confirm you have read the instructions before working the site.
       el('#modalHost .content').innerHTML = docs.length
-        ? docs.map((d) => `<div class="field"><span>${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}</span>
-            <div><a href="/api/documents/${d.id}/file" target="_blank">${esc(d.filename)}</a></div></div>`).join('')
+        ? docs.map((d) => `<div class="field"><span>${esc(label[d.type] || d.type)}${d.title ? ' — ' + esc(d.title) : ''}${d.version > 1 ? ` (v${d.version})` : ''}</span>
+            <div><a href="/api/documents/${d.id}/file" target="_blank">${esc(d.filename)}</a>
+            ${d.needs_acknowledgement ? (d.acknowledged_by_me ? ' <span class="dim">· read and understood ✓</span>'
+              : ` <button type="button" class="btn ok" data-ack="${d.id}" style="padding:4px 10px;font-size:11px">I have read and understood this</button>`) : ''}</div></div>`).join('')
         : '<p class="dim">Nothing on file for this site yet.</p>';
+      els('#modalHost [data-ack]').forEach((b) => (b.onclick = async () => {
+        try { await api('POST', `/api/documents/${b.dataset.ack}/acknowledge`, {}); b.outerHTML = '<span class="dim">· read and understood ✓</span>'; }
+        catch (e) { alert(e.message); }
+      }));
     } catch (e) { el('#modalHost .content').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   });
 }

@@ -73,7 +73,13 @@ const KIT = (() => {
   const numOrNull = (s) => (s === '' ? null : Number(s));
 
   function csv(filename, header, rows) {
-    const cell = (x) => { const t = x == null ? '' : String(x); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+    // A cell starting = + - @ is run as a formula by Excel (CSV injection):
+    // text like that gets a leading apostrophe; plain numbers are left alone.
+    const cell = (x) => {
+      let t = x == null ? '' : String(x);
+      if (/^[=+\-@\t\r]/.test(t) && !/^-?\d+(\.\d+)?$/.test(t)) t = `'${t}`;
+      return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+    };
     const text = [header, ...rows].map((r) => r.map(cell).join(',')).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));

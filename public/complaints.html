@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — complaints</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+</head>
+<body>
+<div class="k-top">
+  <h1>Complaints</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn primary" id="bNew">Record a complaint</button>
+</div>
+<div class="k-body">
+  <p class="dim" style="margin-top:0">Every complaint is recorded here when it comes in, then acknowledged, investigated and closed with a root cause, the action taken and the outcome told to the complainant (SIA ACS). Nothing here can be deleted.</p>
+  <div class="bar" id="views">
+    <button class="chip on" data-f="">All</button>
+    <button class="chip" data-f="OPEN">Open</button>
+    <button class="chip" data-f="INVESTIGATING">Investigating</button>
+    <button class="chip" data-f="RESOLVED">Resolved</button>
+    <button class="chip" data-f="CLOSED">Closed</button>
+    <button class="btn" id="bCsv" style="margin-left:auto">Export CSV</button>
+  </div>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const { modal, close, foot, wire, v, date, when, words, options, csv } = KIT;
+
+let data = { complaints: [] }, clients = [], sites = [], people = [], filter = '';
+const PILL = { OPEN: 'warn', INVESTIGATING: 'info', RESOLVED: 'ok', CLOSED: 'off' };
+const toInput = (iso) => (iso ? new Date(iso).toISOString().slice(0, 10) : '');
+
+async function load() {
+  try {
+    [data, clients, sites, people] = await Promise.all([
+      api('GET', '/api/complaints'),
+      clients.length ? clients : api('GET', '/api/clients').catch(() => []),
+      sites.length ? sites : api('GET', '/api/sites').catch(() => []),
+      people.length ? people : api('GET', '/api/personnel').catch(() => []),
+    ]);
+  } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  paint();
+}
+function paint() {
+  const rows = data.complaints.filter((c) => !filter || c.status === filter);
+  el('#main').innerHTML = rows.length ? `<table class="log-table"><thead><tr><th>Ref</th><th>Received</th><th>Category</th><th>Site / client</th><th>Summary</th><th>Status</th></tr></thead><tbody>
+    ${rows.map((c) => `<tr data-id="${c.id}" style="cursor:pointer">
+      <td><strong>${esc(c.reference)}</strong></td>
+      <td>${esc(date(c.received_at))}${c.ack_overdue ? ' <span class="pill bad">not acknowledged</span>' : ''}</td>
+      <td>${esc(words(c.category))} <span class="dim">· ${esc(words(c.severity))}</span></td>
+      <td>${esc(c.site_name || c.client_name || '—')}</td>
+      <td>${esc(c.summary.slice(0, 90))}${c.summary.length > 90 ? '…' : ''}</td>
+      <td><span class="pill ${PILL[c.status]}">${esc(words(c.status))}</span>${c.resolve_overdue ? ` <span class="pill bad">over ${data.resolve_days} days</span>` : ''}</td>
+    </tr>`).join('')}</tbody></table>` : '<p class="dim">No complaints.</p>';
+  els('#main [data-id]').forEach((tr) => (tr.onclick = () => editor(data.complaints.find((c) => c.id === Number(tr.dataset.id)))));
+}
+els('#views [data-f]').forEach((b) => (b.onclick = () => { els('#views [data-f]').forEach((x) => x.classList.toggle('on', x === b)); filter = b.dataset.f; paint(); }));
+
+function form(c = {}) {
+  return `<div class="k-form">
+    <div><label>Received</label><input type="date" data-received value="${esc(toInput(c.received_at) || toInput(new Date().toISOString()))}"></div>
+    <div><label>How</label><select data-source>${options(data.sources.map((s) => [s, words(s)]), c.source || 'PHONE')}</select></div>
+    <div><label>Category</label><select data-category>${options(data.categories.map((s) => [s, words(s)]), c.category || 'OTHER')}</select></div>
+    <div><label>Severity</label><select data-severity>${options(data.severities.map((s) => [s, words(s)]), c.severity || 'MEDIUM')}</select></div>
+    <div><label>Complainant</label><input data-cname value="${esc(c.complainant_name || '')}"></div>
+    <div><label>Their phone or email</label><input data-ccontact value="${esc(c.complainant_contact || '')}"></div>
+    <div><label>Client</label><select data-client>${options(clients.map((x) => [x.id, x.name]), c.client_id, '—')}</select></div>
+    <div><label>Site</label><select data-site>${options(sites.map((x) => [x.id, x.name]), c.site_id, '—')}</select></div>
+    <div class="full"><label>Staff involved</label><select data-people multiple size="4">${people.map((p) => `<option value="${p.id}" ${(c.personnel_ids || []).includes(p.id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+    <div class="full"><label>What the complaint is about</label><textarea data-summary rows="3">${esc(c.summary || '')}</textarea></div>
+  </div>`;
+}
+const formBody = (root) => ({
+  received_at: v(root, '[data-received]') || undefined, source: v(root, '[data-source]'), category: v(root, '[data-category]'), severity: v(root, '[data-severity]'),
+  complainant_name: v(root, '[data-cname]'), complainant_contact: v(root, '[data-ccontact]'),
+  client_id: v(root, '[data-client]') || null, site_id: v(root, '[data-site]') || null,
+  personnel_ids: [...root.querySelector('[data-people]').selectedOptions].map((o) => Number(o.value)), summary: v(root, '[data-summary]'),
+});
+
+el('#bNew').onclick = () => modal('Record a complaint', `${form()}${foot('Record')}`, (root) => wire(root, async () => {
+  const c = await api('POST', '/api/complaints', formBody(root));
+  close(); await load(); editor(data.complaints.find((x) => x.id === c.id));
+}), { wide: true });
+
+function editor(c) {
+  modal(`${c.reference} — ${words(c.status)}`, `${form(c)}
+    <div class="k-form">
+      <div class="k-section">Handling</div>
+      <div><label>Investigating officer</label><input data-assigned value="${esc(c.assigned_to || '')}"></div>
+      <div><label>Acknowledged to complainant</label><input type="date" data-ack value="${esc(toInput(c.acknowledged_at))}"></div>
+      <div class="full"><label>Root cause</label><textarea data-root rows="2">${esc(c.root_cause || '')}</textarea></div>
+      <div class="full"><label>Corrective action (put this right)</label><textarea data-corrective rows="2">${esc(c.corrective_action || '')}</textarea></div>
+      <div class="full"><label>Preventive action (stop it happening again)</label><textarea data-preventive rows="2">${esc(c.preventive_action || '')}</textarea></div>
+      <div class="full"><label>Outcome</label><textarea data-outcome rows="2">${esc(c.outcome || '')}</textarea></div>
+      <div><label>Outcome told to complainant</label><input type="date" data-told value="${esc(toInput(c.outcome_communicated_at))}"></div>
+      <div><label>Status</label><select data-status>${options(data.statuses.map((s) => [s, words(s)]), c.status)}</select></div>
+      <div class="k-section">Investigation notes</div>
+      <div class="full"><ul class="tl">${c.notes.map((n) => `<li><span class="when">${esc(when(n.at))} · ${esc(n.by)}</span><div style="white-space:pre-wrap">${esc(n.body)}</div></li>`).join('') || '<li class="dim">None yet.</li>'}</ul></div>
+      <div class="full" style="display:flex;gap:6px"><input data-note placeholder="Add a note" style="flex:1"><button type="button" class="btn" data-addnote>Add</button></div>
+      <div class="full dim" style="font-size:12px">Recorded ${esc(when(c.recorded_at))} by ${esc(c.recorded_by)}${c.closed_at ? ` · closed ${esc(when(c.closed_at))} by ${esc(c.closed_by)}` : ''}</div>
+    </div>${foot('Save')}`, (root) => {
+    root.querySelector('[data-addnote]').onclick = async () => {
+      const body = v(root, '[data-note]'); if (!body) return;
+      try { await api('POST', `/api/complaints/${c.id}/notes`, { body }); await load(); editor(data.complaints.find((x) => x.id === c.id)); }
+      catch (e) { root.querySelector('[data-k-err]').textContent = e.message; }
+    };
+    wire(root, async () => {
+      await api('PATCH', `/api/complaints/${c.id}`, {
+        ...formBody(root), assigned_to: v(root, '[data-assigned]'), acknowledged_at: v(root, '[data-ack]') || null,
+        root_cause: v(root, '[data-root]'), corrective_action: v(root, '[data-corrective]'), preventive_action: v(root, '[data-preventive]'),
+        outcome: v(root, '[data-outcome]'), outcome_communicated_at: v(root, '[data-told]') || null, status: v(root, '[data-status]'),
+      });
+      close(); load();
+    });
+  }, { wide: true });
+}
+
+el('#bCsv').onclick = () => csv(`complaints-${new Date().toISOString().slice(0, 10)}.csv`,
+  ['Reference', 'Received', 'Source', 'Category', 'Severity', 'Client', 'Site', 'Summary', 'Acknowledged', 'Root cause', 'Corrective action', 'Preventive action', 'Outcome', 'Outcome told', 'Status', 'Closed'],
+  data.complaints.map((c) => [c.reference, toInput(c.received_at), c.source, c.category, c.severity, c.client_name || '', c.site_name || '', c.summary, toInput(c.acknowledged_at), c.root_cause, c.corrective_action, c.preventive_action, c.outcome, toInput(c.outcome_communicated_at), c.status, toInput(c.closed_at)]));
+
+load();
+</script>
+</body>
+</html>

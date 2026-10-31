@@ -1056,6 +1056,72 @@ async function personnelFileModal(p) {
     };
   });
 }
+/** BS 7858 screening record (routes-screening.js): the 5-year history with
+ * each period verified, credit check, self-declaration, conditional start
+ * and sign-off. Saving clears a sign-off, so a signed file is the one checked. */
+async function screeningModal(p) {
+  let r;
+  try { r = await api('GET', `/api/personnel/${p.id}/screening`); } catch (e) { alert(e.message); return; }
+  const sc = r.screening || {};
+  let history = (sc.history || []).map((h) => ({ ...h }));
+  const opt = (list, sel) => list.map((x) => `<option value="${x}" ${x === sel ? 'selected' : ''}>${esc(x.replace(/_/g, ' ').toLowerCase())}</option>`).join('');
+  const st = r.status;
+  const STATUS_TEXT = { COMPLETE: 'Signed off', READY_TO_SIGN: 'Ready to sign off', CONDITIONAL: `Conditional until ${st.conditional_until}`, OVERDUE: `Conditional period ended ${st.conditional_until} — finish screening now`, INCOMPLETE: 'Incomplete' };
+  const rowHtml = (h, i) => `<tr data-row="${i}">
+    <td><input type="date" data-k="from" value="${esc(h.from || '')}"></td>
+    <td><input type="date" data-k="to" value="${esc(h.to || '')}" title="Leave blank if this is now"></td>
+    <td><select data-k="activity">${opt(r.activities, h.activity)}</select></td>
+    <td><input data-k="organisation" value="${esc(h.organisation || '')}" placeholder="Employer, school…"></td>
+    <td><input data-k="contact" value="${esc(h.contact || '')}" placeholder="Referee / contact"></td>
+    <td><input type="date" data-k="verified_at" value="${esc(h.verified_at || '')}" title="Date verified"></td>
+    <td><select data-k="verify_method"><option value="">—</option>${opt(r.verify_methods, h.verify_method)}</select></td>
+    <td><button type="button" class="btn danger" data-delrow="${i}" style="padding:3px 8px;font-size:11px">×</button></td></tr>`;
+  modal(`BS 7858 screening — ${p.name}`, `
+    <form class="stack" onsubmit="return false">
+      <div style="font-size:13px"><strong>${esc(STATUS_TEXT[st.status] || st.status)}</strong>${st.signed_off ? ` by ${esc(st.signed_off.by)} on ${esc(new Date(st.signed_off.at).toLocaleDateString('en-GB'))}` : ''}</div>
+      <ul style="margin:4px 0 0;padding-left:18px;font-size:12.5px">${st.checks.map((c) => `<li>${c.done ? '✓' : '✗'} ${esc(c.label)}</li>`).join('')}</ul>
+      ${st.gaps.length ? `<p class="err" style="margin:4px 0">Gaps over ${r.gap_days} days to account for: ${st.gaps.map((g) => `${esc(g.from)} to ${esc(g.to)} (${g.days} days)`).join('; ')}</p>` : ''}
+      <label>${r.years}-year history (work, education, unemployment, time abroad…)</label>
+      <div style="overflow-x:auto"><table class="log-table" id="scHist"><thead><tr><th>From</th><th>To</th><th>Activity</th><th>Organisation</th><th>Contact</th><th>Verified on</th><th>How</th><th></th></tr></thead><tbody>${history.map(rowHtml).join('')}</tbody></table></div>
+      <button type="button" class="btn" id="scAdd" style="align-self:flex-start">Add a period</button>
+      <label>Financial (credit) check</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap"><input type="date" id="scCreditOn" value="${esc((sc.credit_check || {}).done_on || '')}" style="width:auto">
+        <input id="scCreditProvider" placeholder="Provider" value="${esc((sc.credit_check || {}).provider || '')}" style="flex:1;min-width:120px">
+        <select id="scCreditResult" style="width:auto"><option value="">Result…</option>${['CLEAR', 'ADVERSE_EXPLAINED', 'ADVERSE'].map((x) => `<option value="${x}" ${x === (sc.credit_check || {}).result ? 'selected' : ''}>${x.replace(/_/g, ' ').toLowerCase()}</option>`).join('')}</select></div>
+      <label>Self-declaration of criminal convictions and CCJs — signed on</label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input type="date" id="scDeclOn" value="${esc((sc.self_declaration || {}).signed_on || '')}" style="width:auto">
+        <label style="margin:0;font-weight:400;text-transform:none;letter-spacing:0"><input type="checkbox" id="scDeclDisclosed" ${(sc.self_declaration || {}).disclosed ? 'checked' : ''}> something was disclosed</label></div>
+      <label>Conditional start (working before screening is finished — ${r.conditional_weeks} weeks to complete)</label>
+      <input type="date" id="scCond" value="${esc(sc.conditional_start || '')}" style="width:auto">
+      <label>Notes</label><textarea id="scNotes" rows="2">${esc(sc.notes || '')}</textarea>
+      <p class="err" id="scErr" style="min-height:16px;margin:0"></p>
+    </form>`, () => {
+    const collect = () => { history = els('#scHist [data-row]').map((tr) => { const h = { ...history[Number(tr.dataset.row)] }; tr.querySelectorAll('[data-k]').forEach((x) => { h[x.dataset.k] = x.value || null; }); return h; }); };
+    const repaint = () => { el('#scHist tbody').innerHTML = history.map(rowHtml).join(''); wireRows(); };
+    const wireRows = () => els('#scHist [data-delrow]').forEach((b) => (b.onclick = () => { collect(); history.splice(Number(b.dataset.delrow), 1); repaint(); }));
+    wireRows();
+    el('#scAdd').onclick = () => { collect(); history.push({ activity: 'EMPLOYMENT' }); repaint(); };
+    const foot = document.querySelector('#modalHost .foot');
+    foot.innerHTML = `<div class="foot-split"><button class="btn" id="scBack">Back</button><span class="btn-row" style="margin:0">
+      <button class="btn" id="scSave">Save</button>${st.ready && st.status !== 'COMPLETE' ? '<button class="btn primary" id="scSign">Sign off screening</button>' : ''}</span></div>`;
+    el('#scBack').onclick = () => personnelModal(allPersonnel.find((x) => x.id === p.id) || p);
+    el('#scSave').onclick = async () => {
+      collect();
+      try {
+        await api('PUT', `/api/personnel/${p.id}/screening`, {
+          history, credit_check: { done_on: el('#scCreditOn').value || null, provider: el('#scCreditProvider').value, result: el('#scCreditResult').value || null },
+          self_declaration: { signed_on: el('#scDeclOn').value || null, disclosed: el('#scDeclDisclosed').checked },
+          conditional_start: el('#scCond').value || null, notes: el('#scNotes').value,
+        });
+        screeningModal(p);
+      } catch (e) { el('#scErr').textContent = e.message; }
+    };
+    if (el('#scSign')) el('#scSign').onclick = async () => {
+      if (!confirm('Sign off this screening as checked and complete? Your name and the time are recorded.')) return;
+      try { await api('POST', `/api/personnel/${p.id}/screening/sign-off`, {}); screeningModal(p); } catch (e) { el('#scErr').textContent = e.message; }
+    };
+  });
+}
 function personnelModal(p) {
   modal(p ? `Edit — ${p.name}` : 'New personnel', personnelForm(p), () => {
     const foot = document.querySelector('#modalHost .foot');
@@ -1063,13 +1129,14 @@ function personnelModal(p) {
       <div class="foot-split">
         <span>${p ? '<button class="btn danger" id="pnDelete">Delete personnel</button>' : ''}</span>
         <span class="btn-row" style="margin:0">
-          ${p ? '<button class="btn" id="pnFile">Personnel file</button><a class="btn" id="pnIdCard" href="/id-card.html?id=' + p.id + '">ID card</a><button class="btn" id="pnSar" title="Everything CCCS holds about this person, for a subject access request">Subject access export</button>' : ''}
+          ${p ? '<button class="btn" id="pnFile">Personnel file</button><a class="btn" id="pnIdCard" href="/id-card.html?id=' + p.id + '">ID card</a><button class="btn" id="pnSar" title="Everything CCCS holds about this person, for a subject access request">Subject access export</button><button class="btn" id="pnScreening">BS 7858 screening</button>' : ''}
           <button class="btn" id="pnCancel">Cancel</button>
           <button class="btn primary" id="pnSave">${p ? 'Save changes' : 'Create personnel'}</button>
         </span>
       </div>`;
     el('#pnCancel').onclick = closeModal;
     if (el('#pnFile')) el('#pnFile').onclick = () => personnelFileModal(p);
+    if (el('#pnScreening')) el('#pnScreening').onclick = () => screeningModal(p);
     // UK GDPR Article 15: reply within a month. Downloads one JSON file.
     if (el('#pnSar')) el('#pnSar').onclick = async () => {
       try {
@@ -1791,8 +1858,12 @@ function siteModal(s) {
             <span class="dim" style="font-size:11px">${esc(new Date(d.uploaded_at).toLocaleDateString('en-GB'))} · ${esc(d.uploaded_by)}</span>
             <button type="button" class="btn danger" data-deldoc="${d.id}" style="padding:3px 8px;font-size:11px">Delete</button>
           </div>`;
+          const acks = current.acknowledgements || [];
+          const ackLine = current.needs_acknowledgement ? `<div class="dim" style="font-size:11.5px;margin:0 0 4px">${acks.length
+            ? `Read and understood by ${acks.length}: ${acks.map((a) => `${esc(a.name)} (${esc(new Date(a.at).toLocaleDateString('en-GB'))})`).join(', ')}`
+            : 'Nobody has confirmed reading this version yet.'}</div>` : '';
           return `<div style="border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:6px">
-            ${row(current, true)}
+            ${row(current, true)}${ackLine}
             ${older.length ? `<details style="margin-left:8px"><summary class="dim" style="font-size:11px;cursor:pointer">${older.length} earlier version${older.length === 1 ? '' : 's'}</summary>${older.map((d) => row(d, false)).join('')}</details>` : ''}
           </div>`;
         }).join('');
