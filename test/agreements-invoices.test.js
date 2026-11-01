@@ -58,6 +58,13 @@ const fake = http.createServer((req, res) => {
       return send(200, { Invoices: [x] });
     }
     if (u.pathname === '/api.xro/2.0/Invoices' && req.method === 'GET') {
+      const where = u.searchParams.get('where') || '';
+      const sw = where.match(/InvoiceNumber\.StartsWith\("(.*)"\)/);
+      if (where) {
+        const list = X.invoices.filter((i) => !sw || String(i.InvoiceNumber).startsWith(sw[1]));
+        if (u.searchParams.get('order') === 'InvoiceNumber DESC') list.sort((a, b) => (a.InvoiceNumber < b.InvoiceNumber ? 1 : -1));
+        return send(200, { Invoices: list.slice(0, 100) });
+      }
       if (u.searchParams.has('InvoiceNumbers')) {
         const nums = u.searchParams.get('InvoiceNumbers').split(',');
         return send(200, { Invoices: X.invoices.filter((i) => nums.includes(i.InvoiceNumber)) });
@@ -550,6 +557,21 @@ test('approved invoices get the next number, are emailed to the billing address 
   assert.equal(x.Status, 'AUTHORISED');
   assert.equal(x.InvoiceNumber, 'ECH-0121');
   assert.deepEqual(X.emailed, [x.InvoiceID]);
+});
+
+test('approving carries on after the highest number already in Xero, skipping any Xero has used', async () => {
+  // Invoices raised straight in Xero for clients who are not on CCCS.
+  X.invoices.push({ InvoiceID: 'xo-1', InvoiceNumber: 'ECH-0130', Status: 'AUTHORISED' }, { InvoiceID: 'xo-2', InvoiceNumber: 'ECH-0132', Status: 'PAID' }, { InvoiceID: 'xo-3', InvoiceNumber: 'ECH-0199', Status: 'DELETED' });
+  await call('PUT', '/api/invoices/settings', { send_via: 'CCCS' }, adminT);
+  const d = (await call('POST', '/api/invoices/generate', { from: '2027-02-01', to: '2027-02-28', contract_id: contract.id }, adminT)).body.made[0];
+  const r = await call('POST', `/api/invoices/${d.id}/approve`, {}, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.number, 'ECH-0133', 'after ECH-0132 in Xero; a deleted Xero invoice does not count');
+  assert.match(r.body.history.map((h) => h.what).join(' '), /carrying on after ECH-0132/);
+  assert.equal(app.db.ui_settings.find((x) => x.key === 'invoice').settings.next_number, 134);
+  assert.equal((await call('POST', `/api/invoices/${d.id}/approve`, {}, adminT)).status, 409, 'approved once only');
+  X.invoices = X.invoices.filter((i) => !/^xo-/.test(i.InvoiceID));
+  await call('PUT', '/api/invoices/settings', { send_via: 'XERO' }, adminT);
 });
 
 test('a payment recorded in Xero shows here without anyone pressing anything', async () => {

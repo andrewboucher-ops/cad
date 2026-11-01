@@ -27,6 +27,8 @@
  * with the PDF attached (unless the settings say Xero sends it, or nobody
  * does) and appears in their portal → SEND TO XERO (same number there) →
  * the Xero status is read back (PAID…), or it is marked paid by hand.
+ * If Xero is connected, approving first asks Xero for the numbers it
+ * already has, so invoices raised straight in Xero never clash.
  * VOID at any point before paid.
  *
  * Who: admins and the FINANCE role. Xero connect/disconnect: admins.
@@ -624,16 +626,47 @@ module.exports = function registerInvoices({
     inv.history.push({ at: new Date().toISOString(), by: user.display_name, what: 'edited' });
     return inv;
   });
-  route('POST', '/api/invoices/:id/approve', MONEY, ({ params, user }) => {
+  /** Before a number is given out, asks Xero which numbers it already has,
+   * because invoices raised straight in Xero (for clients not on CCCS) use
+   * the same series. Returns candidate numbers Xero has not used, starting
+   * after Xero's highest, or a note if Xero could not be asked. */
+  async function xeroCandidates() {
+    if (!xero.connected()) return { free: null, note: null };
+    const st = settingsRow();
+    const fmt = (n) => `${st.prefix}${String(n).padStart(st.digits, '0')}`;
+    try {
+      let start = Math.max(1, Number(st.next_number) || 1), after = null;
+      try {
+        const hi = await xero.highestNumber(st.prefix);
+        if (hi >= start) { start = hi + 1; after = fmt(hi); }
+      } catch { /* the number-by-number check below still keeps clear of Xero */ }
+      const candidates = [];
+      for (let n = start; candidates.length < 40; n++) if (!db.invoices.some((i) => i.number === fmt(n))) candidates.push([n, fmt(n)]);
+      const taken = await xero.numbersTaken(candidates.map((c) => c[1]));
+      return { free: candidates.filter((c) => !taken.has(c[1])), after, note: null };
+    } catch (e) {
+      return { free: null, note: `could not check Xero for the next number (${e.message}), so CCCS used its own` };
+    }
+  }
+  route('POST', '/api/invoices/:id/approve', MONEY, async ({ params, user }) => {
+    const check = (inv) => {
+      if (inv.status !== 'DRAFT') throw httpError(409, 'only a draft can be approved');
+      if (!inv.lines.length || inv.total <= 0) throw httpError(400, 'there is nothing to invoice');
+    };
+    check(findInv(params.id));
+    const x = await xeroCandidates();
     const inv = findInv(params.id);
-    if (inv.status !== 'DRAFT') throw httpError(409, 'only a draft can be approved');
-    if (!inv.lines.length || inv.total <= 0) throw httpError(400, 'there is nothing to invoice');
+    check(inv); // again: it may have been approved while Xero was asked
+    const st = settingsRow();
+    const pick = x.free && x.free.find((c) => !db.invoices.some((i) => i.number === c[1]));
+    if (x.free && !pick) throw httpError(409, 'Xero already uses the next 40 invoice numbers. Set Next number in Invoice settings above your last Xero invoice and approve again.');
     inv.status = 'APPROVED'; inv.approved_by = user.display_name; inv.approved_at = new Date().toISOString();
     // Issued today: the due date moves with it, keeping the same terms.
     const terms = Math.round((Date.parse(inv.due_date) - Date.parse(inv.issue_date)) / 86400000);
     inv.issue_date = today(); inv.due_date = new Date(Date.parse(inv.issue_date) + terms * 86400000).toISOString().slice(0, 10);
-    inv.number = takeNumber();
-    inv.history.push({ at: inv.approved_at, by: user.display_name, what: `approved as ${inv.number}` });
+    if (pick) { inv.number = pick[1]; st.next_number = pick[0] + 1; } else inv.number = takeNumber();
+    inv.history.push({ at: inv.approved_at, by: user.display_name, what: `approved as ${inv.number}${x.after ? ` (carrying on after ${x.after}, the last number in Xero)` : ''}` });
+    if (x.note) inv.history.push({ at: inv.approved_at, by: 'CCCS', what: x.note });
     logEvent('invoice.approved', `INVOICE ${inv.number} APPROVED (£${inv.total.toFixed(2)})`, { invoice_id: inv.id });
     if (settingsRow().send_via === 'CCCS') emailInvoice(inv, user.display_name);
     flushNow();

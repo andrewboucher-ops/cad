@@ -231,7 +231,7 @@ async function view(id) {
         const k = b.dataset.a;
         if (k === 'close') return close();
         if (k === 'save') await save();
-        if (k === 'approve') { await save(); if (!confirm(`Approve this invoice? It becomes ${ist.prefix}${String(ist.next_number).padStart(ist.digits, '0')} and is ${SEND_VIA[ist.send_via]}. It can't be edited after.`)) return; await api('POST', `/api/invoices/${i.id}/approve`); await new Promise((r) => setTimeout(r, 1200)); }
+        if (k === 'approve') { await save(); if (!confirm(`Approve this invoice? It becomes ${xs && xs.connected ? `the next number Xero hasn't used (${ist.prefix}${String(ist.next_number).padStart(ist.digits, '0')} or later)` : `${ist.prefix}${String(ist.next_number).padStart(ist.digits, '0')}`} and is ${SEND_VIA[ist.send_via]}. It can't be edited after.`)) return; await api('POST', `/api/invoices/${i.id}/approve`); await new Promise((r) => setTimeout(r, 1200)); }
         if (k === 'email') { if (!confirm('Email this invoice to the client now, with the PDF attached?')) return; await api('POST', `/api/invoices/${i.id}/email`); await new Promise((r) => setTimeout(r, 1200)); }
         if (k === 'renumber') { const number = prompt(`New number for ${i.number} (e.g. to match Xero). Later invoices carry on from it.`, i.number); if (number === null || number.trim() === i.number) return; await api('POST', `/api/invoices/${i.id}/renumber`, { number }); ist = await api('GET', '/api/invoices/settings'); }
         if (k === 'paid') { const note = prompt('Mark as paid — note (optional), e.g. "BACS 12 Oct"'); if (note === null) return; await api('POST', `/api/invoices/${i.id}/paid`, { note }); }
