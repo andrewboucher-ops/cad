@@ -31,7 +31,7 @@ const KIND = {
 };
 
 module.exports = function registerTimeclock({
-  route, httpError, CONTROL, db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift,
+  route, httpError, CONTROL, ADMIN = ['SYSTEM_ADMIN'], db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift,
   isControlRole, siteVisibleTo = () => true, flushNow = () => {}, assertDeployable = () => {},
 }) {
   const crypto = require('crypto');
@@ -202,6 +202,95 @@ module.exports = function registerTimeclock({
   });
   /** Officer's own: the sites they can clock in at with no shift. */
   route('GET', '/api/timeclock/sites', ['FIELD_USER', ...CONTROL], ({ user }) => db.sites.filter((s) => s.active !== false && siteVisibleTo(s.id, user)).map((s) => ({ id: s.id, name: s.name })));
+
+  /* ---- an ad-hoc shift that should have been the rostered one ----
+   * Someone clocks in "ad hoc" when they were actually on the rota (user
+   * error). The ad-hoc shift has the AD_HOC type, so no contract line bills
+   * it. This moves the clock record — times, breaks, the on-site location
+   * check and its presence state — onto their rostered assignment at the
+   * same site, then deletes the ad-hoc shift. GET shows what would happen;
+   * POST does it. Admin only, like deleting a shift. */
+  const KEEP_ON_TARGET = new Set(['id', 'shift_id', 'personnel_id', 'role_on_shift', 'is_duty_supervisor', 'status', 'confirmed_at', 'created_by', 'created_at',
+    'pay_override', 'exceptions', 'time_edits', 'time_rejected', 'updated_at']);
+  function adHocSource(id, user) {
+    const a = findAssignment(id);
+    const s = findShift(a.shift_id);
+    if (!s.ad_hoc) throw httpError(409, 'this is already a rostered shift');
+    if (!a.clocked_in_at) throw httpError(409, 'nothing clocked on this ad-hoc shift');
+    if (s.site_id && !siteVisibleTo(s.site_id, user)) throw httpError(404, 'not found');
+    return { a, s };
+  }
+  function rotaMatches(a, s) {
+    const inAt = Date.parse(a.clocked_in_at), outAt = a.clocked_out_at ? Date.parse(a.clocked_out_at) : Date.now();
+    const lo = inAt - 4 * 3600000, hi = outAt + 4 * 3600000;
+    return db.shifts.filter((t) => !t.ad_hoc && t.id !== s.id && t.site_id === s.site_id && t.status !== 'CANCELLED'
+      && Date.parse(t.starts_at) < hi && Date.parse(t.ends_at) > lo)
+      .map((t) => {
+        const mine = db.shift_assignments.find((x) => x.shift_id === t.id && x.personnel_id === a.personnel_id && x.status !== 'REMOVED');
+        const filled = db.shift_assignments.filter((x) => x.shift_id === t.id && x.status !== 'REMOVED').length;
+        const type = db.shift_types.find((x) => x.id === t.shift_type_id);
+        const blocked = mine && mine.clocked_in_at ? `${nameOf(a.personnel_id)} already has clock times on this shift` : null;
+        return {
+          shift_id: t.id, starts_at: t.starts_at, ends_at: t.ends_at, status: t.status, shift_type: type ? type.name : null,
+          assigned: Boolean(mine), assignment_id: mine ? mine.id : null, filled, required_headcount: t.required_headcount || 1,
+          others: db.shift_assignments.filter((x) => x.shift_id === t.id && x.status !== 'REMOVED' && x.personnel_id !== a.personnel_id).map((x) => nameOf(x.personnel_id)),
+          blocked, warning: t.status === 'DRAFT' ? 'this shift is still a draft, so it won\'t be invoiced until it is published' : null,
+          distance_min: Math.round(Math.abs(Date.parse(t.starts_at) - inAt) / 60000),
+        };
+      })
+      .sort((x, y) => (y.assigned - x.assigned) || (x.distance_min - y.distance_min));
+  }
+  route('GET', '/api/timeclock/adhoc/:id/rota-matches', ADMIN, ({ params, user }) => {
+    const { a, s } = adHocSource(params.id, user);
+    const site = s.site_id ? db.sites.find((x) => x.id === s.site_id) : null;
+    const w = attendance.worked(a);
+    return {
+      assignment_id: a.id, shift_id: s.id, name: nameOf(a.personnel_id), site_name: site ? site.name : null,
+      clocked_in_at: a.clocked_in_at, clocked_out_at: a.clocked_out_at || null, worked_min: w.worked_min, break_min: w.break_min,
+      location_checked: Boolean(a.clock_in_location), location: a.clock_in_location || null, clock_in_override: a.clock_in_override || null,
+      matches: rotaMatches(a, s),
+    };
+  });
+  route('POST', '/api/timeclock/adhoc/:id/move-to-rota', ADMIN, ({ params, body, user }) => {
+    const { a, s } = adHocSource(params.id, user);
+    const m = rotaMatches(a, s).find((x) => x.shift_id === Number(body && body.shift_id));
+    if (!m) throw httpError(400, 'choose a rostered shift at the same site and time');
+    if (m.blocked) throw httpError(409, m.blocked);
+    const t = findShift(m.shift_id);
+    const nowIso = new Date().toISOString();
+    let ta = m.assignment_id ? db.shift_assignments.find((x) => x.id === m.assignment_id) : null;
+    if (!ta) {
+      ta = {
+        id: nextId('shift_assignments'), shift_id: t.id, personnel_id: a.personnel_id, role_on_shift: '', is_duty_supervisor: false,
+        status: 'CONFIRMED', confirmed_at: nowIso, attendance: null, clocked_in_at: null, clocked_out_at: null, created_by: user.id, created_at: nowIso, updated_at: nowIso,
+      };
+      db.shift_assignments.push(ta);
+    }
+    const from = { in: ta.clocked_in_at || null, out: ta.clocked_out_at || null };
+    for (const [k, v] of Object.entries(a)) if (!KEEP_ON_TARGET.has(k)) ta[k] = v;
+    // "No shift booked" no longer applies, and nor does a rejection of it.
+    const carried = (a.exceptions || []).filter((x) => x.kind !== 'UNSCHEDULED');
+    if (carried.length) ta.exceptions = [...(ta.exceptions || []), ...carried];
+    ta.time_rejected = false;
+    const reason = String((body && body.reason) || '').trim().slice(0, 300);
+    ta.time_edits = [...(ta.time_edits || []), ...(a.time_edits || []), {
+      at: nowIso, by: user.display_name, reason: `Moved from ad-hoc shift #${s.id}${reason ? ` — ${reason}` : ''}`, from, to: { in: ta.clocked_in_at, out: ta.clocked_out_at || null },
+    }];
+    if (['ASSIGNED'].includes(ta.status)) { ta.status = 'CONFIRMED'; ta.confirmed_at = ta.confirmed_at || nowIso; }
+    ta.updated_at = nowIso;
+    if (t.status === 'PUBLISHED') t.status = ta.clocked_out_at && Date.parse(t.ends_at) <= Date.now() ? 'COMPLETED' : 'IN_PROGRESS';
+    t.revision = (t.revision || 0) + 1;
+
+    db.shift_assignments = db.shift_assignments.filter((x) => x.id !== a.id);
+    const left = db.shift_assignments.some((x) => x.shift_id === s.id);
+    if (!left) db.shifts = db.shifts.filter((x) => x.id !== s.id);
+    broadcast(left ? 'shift.updated' : 'shift.deleted', left ? publicShift(s) : { id: s.id }, { personnelIds: [a.personnel_id] });
+    broadcast('shift.updated', publicShift(t), { personnelIds: [a.personnel_id] });
+    logEvent('timeclock.adhoc_moved', `${user.display_name} MOVED ${nameOf(a.personnel_id)}'S AD-HOC CLOCK TIMES (SHIFT ${s.id}) ONTO ROSTERED SHIFT ${t.id}${reason ? ` — ${reason.toUpperCase()}` : ''}`,
+      { shift_id: t.id, personnel_id: a.personnel_id });
+    flushNow();
+    return { moved_to: { shift_id: t.id, assignment_id: ta.id }, deleted_shift_id: left ? null : s.id, clocked_in_at: ta.clocked_in_at, clocked_out_at: ta.clocked_out_at || null };
+  });
 
   return { check, record, clockInAdHoc, KIND };
 };
