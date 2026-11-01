@@ -1360,7 +1360,7 @@ const CONTENT_SECURITY_POLICY = [
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' data: https://fonts.gstatic.com",
-  "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://server.arcgisonline.com",
+  "img-src 'self' data: blob: https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://server.arcgisonline.com",
   "media-src 'self' blob: data:",
   "connect-src 'self' ws: wss: https://api.postcodes.io https://router.project-osrm.org",
   "worker-src 'self'",
