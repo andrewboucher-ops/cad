@@ -137,6 +137,23 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     }
     return taken;
   }
+  /** The highest number Xero already has in this prefix's series (0 if
+   * none), so CCCS can carry on after invoices raised straight in Xero.
+   * Xero sorts InvoiceNumber as text, so the top page is read and the
+   * largest number taken from it (copes with a mix of widths). */
+  async function highestNumber(prefix) {
+    const p = String(prefix || '');
+    const where = `Type=="ACCREC"${p ? ` AND InvoiceNumber.StartsWith("${p.replace(/"/g, '')}")` : ''}`;
+    const r = await call('GET', `/Invoices?where=${encodeURIComponent(where)}&order=${encodeURIComponent('InvoiceNumber DESC')}&summaryOnly=true&page=1`);
+    let max = 0;
+    for (const x of r.Invoices || []) {
+      const n = String(x.InvoiceNumber || '');
+      if (x.Status === 'DELETED' || !n.startsWith(p)) continue;
+      const d = n.slice(p.length);
+      if (/^\d{1,9}$/.test(d)) max = Math.max(max, Number(d));
+    }
+    return max;
+  }
   /** Xero emails an approved invoice to the contact itself. */
   async function emailInvoice(xeroId) { await call('POST', `/Invoices/${encodeURIComponent(xeroId)}/Email`, {}); }
   /** Several at once (Xero takes a list of IDs), keyed by Xero invoice ID. */
@@ -157,5 +174,5 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const r = row();
     return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, settings: r.settings, redirect_uri: redirectUri };
   }
-  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, emailInvoice, invoiceStatus, invoiceStatuses, status, row };
+  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, status, row };
 };
