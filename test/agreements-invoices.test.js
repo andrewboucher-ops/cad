@@ -665,6 +665,20 @@ test('invoicing on the CLOCKED basis rounds the clocked span to the nearest 15 m
   // from — is untouched: the exact, unrounded span.
   const a = app.db.shift_assignments.find((x) => x.shift_id === app.db.shifts.find((s) => s.site_id === site.id).id);
   assert.equal(app.attendance.worked(a).worked_min, 526, 'payroll still sees the real 8h46m, not the bill-rounded figure');
+
+  // The total is rounded, not each end: a minute early in and a 22:45
+  // finish (4h16m) bills 4.5h, not 4.75h; 4h25m also bills 4.5h; an exact
+  // 4h bills 4h.
+  const site2 = (await call('POST', '/api/sites', { name: 'Rounding Test Site 2' }, adminT)).body;
+  await call('POST', '/api/clients', { name: 'Rounding Test Client 2', site_ids: [site2.id] }, adminT);
+  const c2 = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: site2.id, lines: [{ description: 'Static guarding', kind: 'HOURLY', rate: 20, est_quantity: 160 }], start_date: '2026-08-01' }, adminT)).body;
+  await call('POST', `/api/agreements/${c2.id}/mark-signed`, { name: 'Test' }, adminT);
+  addShift(site2.id, '21', 17, 4, { clocked_in_at: '2026-08-21T17:29:00Z', clocked_out_at: '2026-08-21T21:45:20Z' });
+  addShift(site2.id, '22', 17, 4, { clocked_in_at: '2026-08-22T17:30:10Z', clocked_out_at: '2026-08-22T21:55:00Z' });
+  addShift(site2.id, '23', 17, 4, { clocked_in_at: '2026-08-23T17:30:00Z', clocked_out_at: '2026-08-23T21:30:00Z' });
+  const g2 = await call('POST', '/api/invoices/generate', { from: '2026-08-01', to: '2026-08-31', contract_id: c2.id }, adminT);
+  const rows = g2.body.made[0].lines.find((l) => l.kind === 'HOURLY').shifts.map((r) => r.hours).sort();
+  assert.deepEqual(rows, [4, 4.5, 4.5]);
 });
 
 /* ---------------- GoCardless Direct Debit ---------------- */

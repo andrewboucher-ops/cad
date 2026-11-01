@@ -215,7 +215,7 @@ module.exports = function registerInvoices({
     const hourly = inv.lines.filter((l) => l.shifts && l.shifts.length);
     if (st.include_timesheet && hourly.length) {
       doc.heading(`Hours breakdown (${inv.billing_basis === 'ROSTERED' ? 'hours rostered' : 'hours worked'})`, 11);
-      if (inv.billing_basis !== 'ROSTERED') doc.para(`Hours are the time worked on the timeclock, to the quarter hour, less breaks. Response attendances are charged from arrival to clear, by the hour or part thereof.`, { size: 8.5, color: grey, gap: 4 });
+      if (inv.billing_basis !== 'ROSTERED') doc.para(`Hours are the time worked on the timeclock less breaks, rounded up to the next quarter hour. Response attendances are charged from arrival to clear, by the hour or part thereof.`, { size: 8.5, color: grey, gap: 4 });
       for (const l of hourly) {
         if (hourly.length > 1) doc.para(l.description, { size: 9, bold: true, gap: 2 });
         doc.table([{ title: 'Date', width: 0.17 }, { title: 'Officer', width: 0.3 }, { title: 'Rostered', width: 0.15 }, { title: 'Worked', width: 0.26 }, { title: 'Hours', width: 0.12, align: 'right' }],
@@ -251,22 +251,20 @@ module.exports = function registerInvoices({
 
   const dayStart = (d) => new Date(`${d}T00:00:00.000Z`).getTime();
 
-  /** Billing on the CLOCKED basis rounds the clocked span to the nearest
-   * 15 minutes IN THE COMPANY'S FAVOUR before converting to hours — the
-   * mirror image of routes-payroll.js's workedHoursForPay(), and
-   * deliberately the opposite direction: clock-in rounds DOWN to the
-   * previous boundary, clock-out rounds UP to the next one, so a client
-   * is never billed for fewer minutes than were actually worked. Nothing
-   * here touches attendance.worked() itself, which payroll also reads
-   * from — rounding a bill up must never also round a wage up. */
+  /** Billing on the CLOCKED basis: the time worked (clock-in to clock-out,
+   * less breaks, in whole minutes) rounded UP to the next quarter hour, so
+   * a client is never billed for fewer minutes than were worked, and never
+   * for more than 14 extra. It used to round the clock-in down and the
+   * clock-out up separately, which could add up to 29 minutes and let a
+   * 1-minute-early start bill a whole extra quarter (4h16m billed 4.75h).
+   * Nothing here touches attendance.worked() itself, which payroll also
+   * reads from — rounding a bill up must never also round a wage up. */
   const BILL_ROUND_MIN = 15;
   function workedHoursForInvoice(a) {
-    const stepMs = BILL_ROUND_MIN * 60000;
-    const roundedIn = Math.floor(Date.parse(a.clocked_in_at) / stepMs) * stepMs;
-    const roundedOut = Math.ceil(Date.parse(a.clocked_out_at) / stepMs) * stepMs;
-    const { break_min } = attendance.worked(a);
-    const minutes = Math.max(0, Math.round((roundedOut - roundedIn) / 60000) - break_min);
-    return minutes / 60;
+    const end = Date.parse(a.clocked_out_at);
+    const brkMs = (a.breaks || []).reduce((n, b) => n + Math.max(0, (b.end ? Date.parse(b.end) : end) - Date.parse(b.start)), 0);
+    const mins = Math.max(0, Math.floor((end - Date.parse(a.clocked_in_at) - brkMs) / 60000));
+    return (Math.ceil(mins / BILL_ROUND_MIN) * BILL_ROUND_MIN) / 60;
   }
 
   /** Hours for one HOURLY line in [from, to]: per shift, per person. */
