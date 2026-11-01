@@ -345,8 +345,13 @@ const CCCS = (() => {
     map.createPane('street').style.zIndex = 200;
     map.createPane('satellite').style.zIndex = 200;
 
-    const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      pane: 'street', maxZoom: 19, subdomains: 'abc',
+    /* OSM refuses tiles ("Access blocked") when the request carries no
+     * Referer, and our pages send none cross-origin (Referrer-Policy is
+     * same-origin / no-referrer). The tiles alone send just the site origin,
+     * never the path or any ?token=. OSM also asks for the single host, not
+     * the old a/b/c subdomains. */
+    const streetLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      pane: 'street', maxZoom: 19, referrerPolicy: 'strict-origin',
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     });
     const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
