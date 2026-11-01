@@ -215,3 +215,50 @@ test('someone rostered for a past shift who never clocked in at all shows up on 
   sheet = (await call('GET', `/api/timeclock/timesheet?from=${from}&to=${to}&personnel_id=${dan.id}`, undefined, adminT)).body;
   assert.ok(!sheet.some((x) => x.assignment_id === b.id), 'NO_SHOW is excluded');
 });
+
+test('an ad-hoc clock-in made by mistake moves onto the rostered shift, keeping times and location, and the ad-hoc shift goes', async () => {
+  clockOutAll();
+  const { s: rota, a: rotaA } = await shiftFor(-10 * 60, 8); // rostered 10h ago, ended 2h ago
+  const r = await call('POST', '/api/timeclock/clock-in', { site_id: site.id, reason: 'pressed the wrong button' }, danT);
+  assert.equal(r.status, 201);
+  const adhoc = app.db.shift_assignments.find((x) => x.shift_id === r.body.id);
+  adhoc.clocked_in_at = new Date(Date.parse(rota.starts_at) + 3 * 60000).toISOString();
+  adhoc.clock_in_location = { distance_m: 42, accuracy: 12, at: adhoc.clocked_in_at };
+  adhoc.last_inside_at = adhoc.clocked_in_at;
+  adhoc.breaks = [{ start: new Date(Date.parse(rota.starts_at) + 3 * 3600e3).toISOString(), end: new Date(Date.parse(rota.starts_at) + 3.5 * 3600e3).toISOString() }];
+  assert.equal((await call('POST', `/api/shift-assignments/${adhoc.id}/clock-out`, {}, danT)).status, 200);
+  adhoc.clocked_out_at = new Date(Date.parse(rota.ends_at) - 2 * 60000).toISOString();
+
+  const url = `/api/timeclock/adhoc/${adhoc.id}/rota-matches`;
+  assert.equal((await call('GET', url, undefined, dispT)).status, 403, 'admin only, like deleting a shift');
+  const prev = (await call('GET', url, undefined, adminT)).body;
+  assert.equal(prev.location.distance_m, 42);
+  const m = prev.matches[0];
+  assert.equal(m.shift_id, rota.id);
+  assert.equal(m.assigned, true);
+  assert.ok(app.db.shifts.some((x) => x.id === r.body.id), 'looking changes nothing');
+
+  assert.equal((await call('POST', `/api/timeclock/adhoc/${adhoc.id}/move-to-rota`, { shift_id: 999999 }, adminT)).status, 400);
+  const mv = await call('POST', `/api/timeclock/adhoc/${adhoc.id}/move-to-rota`, { shift_id: rota.id, reason: 'clocked in ad hoc by mistake' }, adminT);
+  assert.equal(mv.status, 200, JSON.stringify(mv.body));
+  assert.equal(mv.body.deleted_shift_id, r.body.id);
+  assert.ok(!app.db.shifts.some((x) => x.id === r.body.id), 'ad-hoc shift deleted');
+  assert.ok(!app.db.shift_assignments.some((x) => x.id === adhoc.id), 'ad-hoc assignment deleted');
+  assert.equal(rotaA.clocked_in_at, adhoc.clocked_in_at);
+  assert.equal(rotaA.clocked_out_at, adhoc.clocked_out_at);
+  assert.equal(rotaA.clock_in_location.distance_m, 42, 'location check kept');
+  assert.equal(rotaA.breaks.length, 1);
+  assert.equal(rotaA.attendance, 'ATTENDED');
+  assert.ok(!(rotaA.exceptions || []).some((x) => x.kind === 'UNSCHEDULED'), '"no shift booked" no longer applies');
+  assert.match(rotaA.time_edits.at(-1).reason, /Moved from ad-hoc shift/);
+  assert.equal(rota.status, 'COMPLETED');
+
+  // Already has times: can't be overwritten.
+  const r2 = await call('POST', '/api/timeclock/clock-in', { personnel_id: dan.id, site_id: site.id, reason: 'again' }, dispT);
+  const adhoc2 = app.db.shift_assignments.find((x) => x.shift_id === r2.body.id);
+  adhoc2.clocked_in_at = new Date(Date.parse(rota.starts_at) + 60000).toISOString();
+  const p2 = (await call('GET', `/api/timeclock/adhoc/${adhoc2.id}/rota-matches`, undefined, adminT)).body;
+  assert.ok(p2.matches.find((x) => x.shift_id === rota.id).blocked);
+  assert.equal((await call('POST', `/api/timeclock/adhoc/${adhoc2.id}/move-to-rota`, { shift_id: rota.id }, adminT)).status, 409);
+  clockOutAll();
+});

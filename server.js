@@ -5876,7 +5876,7 @@ const staffId = require('./routes-staff-id.js')({
 
 // Clocking in/out off-rota, reasons and approvals — see routes-timeclock.js.
 const timeclock = require('./routes-timeclock.js')({
-  route, httpError, CONTROL, db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift, isControlRole, siteVisibleTo, assertDeployable,
+  route, httpError, CONTROL, ADMIN, db, nextId, logEvent, broadcast, attendance, publicShift, findAssignment, findShift, isControlRole, siteVisibleTo, assertDeployable,
   flushNow: () => store.flushNow(),
 });
 
