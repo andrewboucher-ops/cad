@@ -1112,9 +1112,11 @@ test('a weekly repeat keeps the same UK local clock time across the daylight-sav
   }, adminT);
   const rootId = created.body.id;
   await call('PUT', `/api/shifts/${rootId}/recurrence`, { every_days: 7 }, adminT);
-  // Instances before the repeat was switched on are never invented, so pin
-  // set_at to the root's week — otherwise this fails once 1 Nov 2026 is past.
-  app.db.shifts.find((x) => x.id === rootId).recurrence.set_at = '2026-10-18T00:00:00.000Z';
+  // Repeats never fill in instances from before the setting was made, and
+  // set_at is the real clock — so once the real date passed 2026-11-01
+  // 17:30 this test stopped generating the very instance it checks. Pin the
+  // setting to before the root shift so the test doesn't depend on today.
+  app.db.shifts.find((x) => x.id === rootId).recurrence.set_at = '2026-10-01T00:00:00.000Z';
   app.shiftRecurrenceTick(Date.parse('2026-11-05T00:00:00Z')); // well past the change, forces generation if the first tick missed it
 
   const londonTime = (iso) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour12: false, hour: '2-digit', minute: '2-digit' }).format(new Date(iso));
