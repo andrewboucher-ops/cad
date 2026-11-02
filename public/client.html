@@ -59,6 +59,37 @@
   .range-row label { display: block; font-size: 11px; color: var(--ink-dim); margin-bottom: 4px; }
   .doc-row a { color: var(--accent); text-decoration: none; }
   .doc-row a:hover { text-decoration: underline; }
+  /* The wordmark PNG is white, made for the dark themes; on a light theme
+     it vanished into the page, so darken it there. Same two selectors as
+     console.css's light mode (OS light unless dark is stamped, or light
+     stamped explicitly). */
+  @media (prefers-color-scheme: light) { :root:not([data-mode="dark"]) .topbar img.brand-wordmark { filter: brightness(0); opacity: .85; } }
+  :root[data-mode="light"] .topbar img.brand-wordmark { filter: brightness(0); opacity: .85; }
+  /* Jump links to each section; sticks to the top so any section is one tap away. */
+  .jump { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; overflow-x: auto; padding: 8px 0; margin: -6px 0 12px; background: var(--bg); scrollbar-width: none; }
+  .jump::-webkit-scrollbar { display: none; }
+  .jump a { flex: none; font-size: 12px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-dim); text-decoration: none; background: var(--panel); }
+  .jump a:hover { color: var(--ink); border-color: var(--accent); }
+  .section-card { scroll-margin-top: 52px; }
+  /* Incident & site reports: one collapsed card per report. */
+  .inc-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .inc-tools input { flex: 1 1 200px; min-width: 0; }
+  .inc-tools select { flex: 0 1 180px; }
+  .inc-tools .dim { font-size: 12px; margin-left: auto; }
+  .inc-card { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; background: var(--panel-2); }
+  .inc-card > summary { list-style: none; cursor: pointer; padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; align-items: start; }
+  .inc-card > summary::-webkit-details-marker { display: none; }
+  .inc-card > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+  .inc-title { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .inc-chev { color: var(--ink-dim); font-size: 12px; transition: transform .15s var(--ease); justify-self: end; }
+  .inc-card[open] .inc-chev { transform: rotate(90deg); }
+  .inc-meta { grid-column: 1 / -1; font-size: 11.5px; color: var(--ink-dim); font-family: var(--mono); }
+  .inc-summary { grid-column: 1 / -1; font-size: 12.5px; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .inc-card[open] .inc-summary { display: none; }
+  .inc-full { margin: 0; padding: 4px 12px 12px; border-top: 1px solid var(--line-soft); font-size: 12.5px; display: grid; grid-template-columns: 160px 1fr; gap: 6px 12px; }
+  .inc-full dt { color: var(--ink-dim); padding-top: 6px; }
+  .inc-full dd { margin: 0; padding-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  @media (max-width: 560px) { .inc-full { grid-template-columns: 1fr; gap: 0 } .inc-full dd { padding-top: 1px; padding-bottom: 4px; } }
 </style>
 </head>
 <body>
@@ -94,17 +125,9 @@
     <span id="siteAddress" class="dim"></span>
   </div>
 
-  <div class="section-card">
-    <header><span class="h-icon" style="background:rgba(249,115,22,.15);color:var(--priority)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" stroke-linecap="round"/></svg></span>Open jobs &amp; patrol visits</header>
-    <div class="body" id="activityBody"><p class="empty-note">Loading…</p></div>
-  </div>
+  <nav class="jump" aria-label="Jump to section"><a href="#sec-summary">Service report</a><a href="#sec-open">Open jobs</a><a href="#sec-incidents">Incident reports</a><a href="#sec-rota">Rota</a><a href="#sec-request">Requests</a><a href="#sec-docs">Documents</a><a href="#sec-invoices">Invoices</a><a href="#sec-quotes">Quotes &amp; contracts</a><a href="#sec-hire">Equipment on hire</a></nav>
 
-  <div class="section-card">
-    <header><span class="h-icon" style="background:rgba(239,68,68,.15);color:var(--emergency)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 8v5M12 16h.01" stroke-linecap="round"/></svg></span>Incident &amp; site reports</header>
-    <div class="body" id="incidentsBody"><p class="empty-note">Loading…</p></div>
-  </div>
-
-  <div class="section-card">
+  <div class="section-card" id="sec-summary">
     <header><span class="h-icon" style="background:color-mix(in srgb, var(--accent) 18%, transparent);color:var(--accent)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Service report</header>
     <div class="body">
       <div class="range-row">
@@ -116,7 +139,17 @@
     </div>
   </div>
 
-  <div class="section-card">
+  <div class="section-card" id="sec-open">
+    <header><span class="h-icon" style="background:rgba(249,115,22,.15);color:var(--priority)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" stroke-linecap="round"/></svg></span>Open jobs &amp; patrol visits</header>
+    <div class="body" id="activityBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card" id="sec-incidents">
+    <header><span class="h-icon" style="background:rgba(239,68,68,.15);color:var(--emergency)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 8v5M12 16h.01" stroke-linecap="round"/></svg></span>Incident &amp; site reports</header>
+    <div class="body" id="incidentsBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card" id="sec-rota">
     <header><span class="h-icon" style="background:rgba(59,130,246,.15);color:var(--on-task)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 3v3M16 3v3" stroke-linecap="round"/></svg></span>Rota &amp; patrols</header>
     <div class="body">
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px" id="spRange">
@@ -126,30 +159,7 @@
     </div>
   </div>
 
-  <div class="section-card">
-    <header><span class="h-icon" style="background:rgba(34,197,94,.15);color:var(--available)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l4 4v14H6z" stroke-linejoin="round"/><path d="M15 3v4h4M9 12h6M9 16h3" stroke-linecap="round"/><path d="M13 18c1-1.5 2-1.5 2.5 0s1.5 1 2.5-.5" stroke-linecap="round"/></svg></span>Quotes &amp; contracts</header>
-    <div class="body" id="agreementsBody"><p class="empty-note">Loading…</p></div>
-  </div>
-
-  <div class="section-card">
-    <header><span class="h-icon" style="background:rgba(234,179,8,.15);color:var(--busy)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h12v18l-2-1.5L14 21l-2-1.5L10 21l-2-1.5L6 21z" stroke-linejoin="round"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Invoices</header>
-    <div class="body">
-      <div id="ddBody" style="margin-bottom:10px"></div>
-      <div id="invoicesBody"><p class="empty-note">Loading…</p></div>
-    </div>
-  </div>
-
-  <div class="section-card">
-    <header><span class="h-icon" style="background:rgba(100,116,139,.18);color:var(--offline)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4" stroke-linecap="round"/><path d="M15 17l1.5 1.5L19 15" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Equipment on hire</header>
-    <div class="body" id="rentalsBody"><p class="empty-note">Loading…</p></div>
-  </div>
-
-  <div class="section-card">
-    <header><span class="h-icon" style="background:color-mix(in srgb, var(--accent-dim) 20%, transparent);color:var(--accent-dim)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Documents</header>
-    <div class="body" id="docsBody"><p class="empty-note">Loading…</p></div>
-  </div>
-
-  <div class="section-card">
+  <div class="section-card" id="sec-request">
     <header><span class="h-icon" style="background:rgba(244,63,94,.15);color:#f43f5e"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H9l-5 4z" stroke-linejoin="round"/></svg></span>Raise a request</header>
     <div class="body">
       <div class="stack" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
@@ -161,6 +171,29 @@
       <p class="dim hide" id="reqAdminNote" style="font-size:13px;margin:0 0 12px">The client raises requests here from their own login (Admin → Clients → Send password link). Their requests are listed below.</p>
       <div id="reqList"><p class="empty-note">Loading…</p></div>
     </div>
+  </div>
+
+  <div class="section-card" id="sec-docs">
+    <header><span class="h-icon" style="background:color-mix(in srgb, var(--accent-dim) 20%, transparent);color:var(--accent-dim)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Documents</header>
+    <div class="body" id="docsBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card" id="sec-invoices">
+    <header><span class="h-icon" style="background:rgba(234,179,8,.15);color:var(--busy)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h12v18l-2-1.5L14 21l-2-1.5L10 21l-2-1.5L6 21z" stroke-linejoin="round"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/></svg></span>Invoices</header>
+    <div class="body">
+      <div id="ddBody" style="margin-bottom:10px"></div>
+      <div id="invoicesBody"><p class="empty-note">Loading…</p></div>
+    </div>
+  </div>
+
+  <div class="section-card" id="sec-quotes">
+    <header><span class="h-icon" style="background:rgba(34,197,94,.15);color:var(--available)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l4 4v14H6z" stroke-linejoin="round"/><path d="M15 3v4h4M9 12h6M9 16h3" stroke-linecap="round"/><path d="M13 18c1-1.5 2-1.5 2.5 0s1.5 1 2.5-.5" stroke-linecap="round"/></svg></span>Quotes &amp; contracts</header>
+    <div class="body" id="agreementsBody"><p class="empty-note">Loading…</p></div>
+  </div>
+
+  <div class="section-card" id="sec-hire">
+    <header><span class="h-icon" style="background:rgba(100,116,139,.18);color:var(--offline)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4" stroke-linecap="round"/><path d="M15 17l1.5 1.5L19 15" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Equipment on hire</header>
+    <div class="body" id="rentalsBody"><p class="empty-note">Loading…</p></div>
   </div>
 </div>
 
@@ -217,17 +250,67 @@ function fmtVal(f, v) {
   if (f.type === 'severity') return `<span class="pill ${v === 'CRITICAL' || v === 'HIGH' ? 'missed' : v === 'MEDIUM' ? 'open' : ''}">${esc(v)}</span>`;
   return esc(String(v));
 }
+/* The overview line on a collapsed report card. Forms differ, so pick
+ * by field type rather than by id: the first select is usually the
+ * incident type, the first severity field the severity, the first
+ * datetime the time it happened, and the first textarea the narrative. */
+function firstOf(r, type) {
+  const f = r.fields.find((x) => x.type === type && r.values[x.id] !== null && r.values[x.id] !== undefined && r.values[x.id] !== '');
+  return f ? r.values[f.id] : null;
+}
+function incidentCard(r) {
+  const kind = firstOf(r, 'select');
+  const sev = firstOf(r, 'severity');
+  const when = firstOf(r, 'datetime') || r.occurred_at;
+  const narrative = firstOf(r, 'textarea');
+  const summary = narrative ? String(narrative).replace(/\s+/g, ' ').trim() : '';
+  const sevPill = sev ? fmtVal({ type: 'severity' }, sev) : '';
+  return `
+    <details class="inc-card">
+      <summary>
+        <span class="inc-title">${esc(kind ? `${kind}` : r.definition_name)}${kind ? ` <span class="dim" style="font-weight:400;font-size:12px">${esc(r.definition_name)}</span>` : ''} ${sevPill}</span>
+        <span class="inc-chev" aria-hidden="true">&#9654;</span>
+        <span class="inc-meta">${esc(fmtDateTime(when))} · ${esc(r.reference)}${r.subject_label ? ` · ${esc(r.subject_label)}` : ''}</span>
+        ${summary ? `<span class="inc-summary">${esc(summary.length > 220 ? summary.slice(0, 220) + '…' : summary)}</span>` : ''}
+      </summary>
+      ${r.fields.length ? `<dl class="inc-full">${r.fields.map((f) => `<dt>${esc(f.label)}</dt><dd>${fmtVal(f, r.values[f.id])}</dd>`).join('')}</dl>` : '<p class="empty-note" style="padding:8px 0">No details were shared for this report.</p>'}
+    </details>`;
+}
+/* Everything searchable on one report, lower-cased once per paint. */
+function incidentText(r) {
+  return [r.reference, r.definition_name, r.subject_label, fmtDateTime(r.occurred_at),
+    ...r.fields.map((f) => { const v = r.values[f.id]; return f.type === 'datetime' ? fmtDateTime(v) : (v === null || v === undefined ? '' : String(v)); }),
+  ].join(' ').toLowerCase();
+}
+let incidentRows = [];
+function filterIncidents() {
+  const q = (el('#incQ')?.value || '').trim().toLowerCase();
+  const kind = el('#incKind')?.value || '';
+  const sev = el('#incSev')?.value || '';
+  const words = q.split(/\s+/).filter(Boolean);
+  const shown = incidentRows.filter((x) =>
+    (!kind || x.kind === kind) && (!sev || x.sev === sev) && words.every((w) => x.text.includes(w)));
+  el('#incList').innerHTML = shown.length ? shown.map((x) => incidentCard(x.r)).join('') : '<p class="empty-note">No reports match.</p>';
+  const count = el('#incCount');
+  if (count) count.textContent = shown.length === incidentRows.length ? `${incidentRows.length} reports` : `${shown.length} of ${incidentRows.length}`;
+}
 async function paintIncidents() {
   const rows = await api('GET', withAs(`/api/client/sites/${currentSiteId}/incidents`)).catch(() => []);
-  el('#incidentsBody').innerHTML = rows.length ? rows.map((r) => `
-    <div style="border-bottom:1px solid var(--line-soft);padding:10px 0">
-      <div class="list-row" style="border:none;padding:0">
-        <span class="t mono">${esc(r.reference)}</span>
-        <span style="flex:1">${esc(r.definition_name)} <span class="dim" style="font-size:12px">— ${esc(r.subject_label)}</span></span>
-        <span class="t" style="min-width:auto">${esc(fmtDate(r.occurred_at))}</span>
-      </div>
-      ${r.fields.length ? `<dl style="margin:6px 0 0;font-size:12.5px;display:grid;grid-template-columns:140px 1fr;gap:4px 10px">${r.fields.map((f) => `<dt class="dim">${esc(f.label)}</dt><dd style="margin:0;white-space:pre-wrap">${fmtVal(f, r.values[f.id])}</dd>`).join('')}</dl>` : ''}
-    </div>`).join('') : '<p class="empty-note">No reports have been shared for this site yet.</p>';
+  if (!rows.length) { el('#incidentsBody').innerHTML = '<p class="empty-note">No reports have been shared for this site yet.</p>'; return; }
+  incidentRows = rows.map((r) => ({ r, kind: firstOf(r, 'select') || r.definition_name, sev: firstOf(r, 'severity') || '', text: incidentText(r) }));
+  // Search only earns its space once there are a few reports to sift.
+  const kinds = [...new Set(incidentRows.map((x) => x.kind))].sort();
+  const sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'].filter((s) => incidentRows.some((x) => x.sev === s));
+  const tools = rows.length > 3 ? `
+    <div class="inc-tools">
+      <input id="incQ" type="search" placeholder="Search reports…" aria-label="Search reports">
+      ${kinds.length > 1 ? `<select id="incKind" aria-label="Type"><option value="">All types</option>${kinds.map((k) => `<option>${esc(k)}</option>`).join('')}</select>` : ''}
+      ${sevs.length > 1 ? `<select id="incSev" aria-label="Severity"><option value="">Any severity</option>${sevs.map((s) => `<option>${s}</option>`).join('')}</select>` : ''}
+      <span class="dim" id="incCount"></span>
+    </div>` : '';
+  el('#incidentsBody').innerHTML = `${tools}<div id="incList"></div>`;
+  ['#incQ', '#incKind', '#incSev'].forEach((s) => { const n = el(s); if (n) n.addEventListener('input', filterIncidents); });
+  filterIncidents();
 }
 
 /** Coverage, not names — routes-client.js deliberately keeps personnel
