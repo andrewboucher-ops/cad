@@ -6758,6 +6758,8 @@ function start() {
   if (vehicleForms) { logEvent('form.defaults_installed', `${vehicleForms} FORM(S) INSTALLED (FUEL-UP / DEEP CLEAN / INCIDENT / USE OF FORCE)`); store.flushNow(); }
   const severityAdded = forms.ensureIncidentSeverity();
   if (severityAdded) { logEvent('form.defaults_installed', `SEVERITY FIELD ADDED TO ${severityAdded} INCIDENT-TYPE FORM(S)`); store.flushNow(); }
+  const statementsUpgraded = forms.ensureStatementCompliance();
+  if (statementsUpgraded) { logEvent('form.defaults_installed', `${statementsUpgraded} SAFEGUARDING / INCIDENT / USE OF FORCE FORM(S) UPDATED WITH COMPLIANCE FIELDS`); store.flushNow(); }
   // Same additive-and-idempotent shape as forms.installDefaults() — runs
   // once, only while the table is empty, so an admin's own edits (renaming
   // one, adding a sixth) are never overwritten on a later boot.

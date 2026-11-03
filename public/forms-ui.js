@@ -24,7 +24,9 @@ const CCCSForms = (() => {
     const st = document.createElement('style'); st.id = 'ff-style';
     st.textContent = `
       .ff-stack { display:flex; flex-direction:column; gap:8px; }
-      .ff-stack > label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-dim); margin-top:4px; }
+      .ff-stack > [data-ff-wrap] { display:contents; }
+      .ff-stack > [data-ff-wrap][hidden] { display:none; }
+      .ff-stack > label, .ff-stack > [data-ff-wrap] > label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-dim); margin-top:4px; }
       .ff-stack input:not([type=checkbox]), .ff-stack select, .ff-stack textarea { width:100%; box-sizing:border-box; }
       .ff-field { margin-bottom:6px; }
       .ff-field > span { display:block; font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-dim); }
@@ -152,7 +154,7 @@ const CCCSForms = (() => {
         ${def.visibility === 'RESTRICTED' ? `<p style="margin:0;padding:8px 10px;border-radius:8px;border:1px solid var(--priority);font-size:12.5px">
           <strong>Restricted report.</strong> Only you and the named people responsible for these reports will be able to read it. It will not appear in the control-room log.</p>` : ''}
         ${subject ? `<p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[subject.type] || subject.type)}: <strong>${esc(subject.label)}</strong></p>` : ''}
-        ${def.fields.map((f) => fieldHtml(f)).join('')}
+        ${def.fields.map((f) => `<div data-ff-wrap="${f.id}"${f.required_if ? ' hidden' : ''}>${fieldHtml(f)}</div>`).join('')}
         ${extra ? extra.html : ''}
         <p class="err" data-ff-err style="min-height:16px;margin:0"></p>
         <div class="btn-row">
@@ -181,6 +183,23 @@ const CCCSForms = (() => {
       if (f.type === 'datetime') host.querySelector(`[data-ff="${f.id}"]`).value = toLocalInput(new Date());
     }
 
+    // A field with required_if shows (and is required) only while its
+    // condition holds — e.g. "Police reference" once "Police informed" is
+    // ticked. The server checks the same rule.
+    const conditionMet = (c) => {
+      const ctl = host.querySelector(`[data-ff="${c.field}"]`);
+      if (!ctl) return false;
+      return c.equals === true ? ctl.checked === true : (c.in || []).includes(ctl.value);
+    };
+    const shown = (f) => !f.required_if || conditionMet(f.required_if);
+    const refresh = () => { for (const f of def.fields) if (f.required_if) host.querySelector(`[data-ff-wrap="${f.id}"]`).hidden = !shown(f); };
+    for (const f of def.fields) {
+      if (!f.required_if) continue;
+      const ctl = host.querySelector(`[data-ff="${f.required_if.field}"]`);
+      if (ctl) ctl.addEventListener('change', refresh);
+    }
+    refresh();
+
     const errEl = host.querySelector('[data-ff-err]');
     if (onCancel) host.querySelector('[data-ff-cancel]').onclick = onCancel;
     const submitBtn = host.querySelector('[data-ff-submit]');
@@ -188,6 +207,7 @@ const CCCSForms = (() => {
       errEl.textContent = '';
       const values = {};
       for (const f of def.fields) {
+        if (!shown(f)) continue;
         const input = host.querySelector(`[data-ff="${f.id}"]`);
         switch (f.type) {
           case 'checkbox': values[f.id] = input.checked; break;
@@ -230,7 +250,7 @@ const CCCSForms = (() => {
   }
 
   function fieldHtml(f) {
-    const req = f.required ? ' <span style="color:var(--priority)">*</span>' : '';
+    const req = f.required || f.required_if ? ' <span style="color:var(--priority)">*</span>' : '';
     const label = `<label>${esc(f.label)}${req}</label>${f.help ? `<p class="dim" style="margin:0 0 4px;font-size:12px">${esc(f.help)}</p>` : ''}`;
     switch (f.type) {
       case 'textarea': return `${label}<textarea data-ff="${f.id}" rows="3"></textarea>`;
@@ -239,7 +259,7 @@ const CCCSForms = (() => {
       case 'datetime': return `${label}<input data-ff="${f.id}" type="datetime-local">`;
       case 'select': return `${label}<select data-ff="${f.id}"><option value="">— choose —</option>${f.options.map((o) => `<option>${esc(o)}</option>`).join('')}</select>`;
       case 'severity': return `${label}<select data-ff="${f.id}"><option value="">— choose —</option>${SEVERITIES.map((o) => `<option>${esc(o)}</option>`).join('')}</select>`;
-      case 'checkbox': return `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input data-ff="${f.id}" type="checkbox" style="width:20px;height:20px">${esc(f.label)}${req}</label>`;
+      case 'checkbox': return `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input data-ff="${f.id}" type="checkbox" style="width:20px;height:20px">${esc(f.label)}${req}</label>${f.help ? `<p class="dim" style="margin:-4px 0 4px 28px;font-size:12px">${esc(f.help)}</p>` : ''}`;
       case 'signature': return `${label}<div data-ff-pad="${f.id}"></div><input data-ff-signer="${f.id}" placeholder="Name of person signing" style="margin-top:6px">`;
       case 'photo': return `${label}<div style="display:flex;gap:8px;align-items:center"><button type="button" class="btn" data-ff-photobtn="${f.id}">Take / choose photo</button><span class="dim" data-ff-photostatus="${f.id}"></span></div><input type="file" accept="image/*" class="hide" data-ff-photo="${f.id}">`;
       default: return `${label}<input data-ff="${f.id}" autocomplete="off">`;

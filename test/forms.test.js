@@ -137,7 +137,7 @@ test('a restricted report never reaches anyone without a grant — by any route,
     const filed = await call('POST', '/api/form-submissions', {
       definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: job.id,
       values: {
-        concern_about: `Child, approx 12 — ${CANARY}`, at_risk_group: 'Child (under 18)', observed_at: new Date().toISOString(),
+        concern_about: `Child, approx 12 — ${CANARY}`, at_risk_group: 'Child (under 18)', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(),
         what_happened: `Disclosed ${CANARY}`, action_taken: 'Stayed with child, called 999', officer_signature: sig('Dan Whitfield'),
       },
     }, danT);
@@ -187,7 +187,7 @@ test('a named grant lets exactly that person read it; revoking it closes it agai
   const d = def('safeguarding');
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: d.id, subject_type: 'SITE', subject_id: 1,
-    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
+    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
   }, danT);
   const id = filed.body.id;
   const sup = app.db.users.find((u) => u.username === 'supervisor');
@@ -316,7 +316,7 @@ test('a site service report aggregates alarm response against SLA, patrol visits
   const restricted = await call('POST', '/api/form-submissions', {
     definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: siteJob.id,
     values: {
-      concern_about: 'A member of the public', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      concern_about: 'A member of the public', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(),
       what_happened: 'Confidential detail that must not leak into any aggregate report.',
       action_taken: 'Safeguarding lead notified.', officer_signature: sig('Dan Whitfield'),
     },
@@ -352,19 +352,19 @@ test('the incident report requires a severity, rejects a bad one, and a HIGH/CRI
 
   const missing = await call('POST', '/api/form-submissions', {
     definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date().toISOString(), incident_type: 'Other', description: 'No severity given.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date().toISOString(), incident_type: 'Other', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'No severity given.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   assert.equal(missing.status, 400, 'severity is required');
 
   const bad = await call('POST', '/api/form-submissions', {
     definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date().toISOString(), severity: 'APOCALYPTIC', incident_type: 'Other', description: 'Bad severity.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date().toISOString(), severity: 'APOCALYPTIC', incident_type: 'Other', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Bad severity.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   assert.equal(bad.status, 400);
 
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date().toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', description: 'Smoke reported in plant room.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date().toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Smoke reported in plant room.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   assert.equal(filed.status, 201, JSON.stringify(filed.body));
   assert.equal(filed.body.values.severity, 'CRITICAL');
@@ -410,7 +410,7 @@ test('a brand-styled PDF can be built for a report exactly like an invoice or co
   const restricted = await call('POST', '/api/form-submissions', {
     definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: job.id,
     values: {
-      concern_about: 'someone', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      concern_about: 'someone', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(),
       what_happened: 'detail', action_taken: 'notified', officer_signature: sig('Dan Whitfield'),
     },
   }, danT);
@@ -424,7 +424,7 @@ test('a HIGH/CRITICAL report still open after the reminder window pushes once mo
   const filedAt = Date.now();
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'HIGH', incident_type: 'Fire or alarm', description: 'Reminder test.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'HIGH', incident_type: 'Fire or alarm', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Reminder test.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   assert.equal(filed.status, 201, JSON.stringify(filed.body));
   const raw = () => app.db.form_submissions.find((s) => s.id === filed.body.id);
@@ -443,7 +443,7 @@ test('a HIGH/CRITICAL report still open after the reminder window pushes once mo
   // Actioned before the window closes: no reminder, ever.
   const second = await call('POST', '/api/form-submissions', {
     definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', description: 'Reminder test 2 — actioned promptly.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Reminder test 2 — actioned promptly.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   await call('POST', `/api/form-submissions/${second.body.id}/action`, { outcome: 'NOTED' }, adminT);
   app.forms.severityEscalationTick(filedAt + 20 * 60000);
@@ -456,7 +456,7 @@ test('a RESTRICTED HIGH/CRITICAL report reminds its named readers only, content-
     definition_id: def('use-of-force').id, subject_type: 'JOB', subject_id: job.id,
     values: {
       occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL',
-      reason: 'Self-defence', force_type: 'Physical restraint or control',
+      reason: 'Self-defence', force_type: 'Physical restraint or control', location: 'Main gate', officer_sia_licence: '1234567890123456', threat: 'Swung a punch.', de_escalation: 'Talked, warned, backed off.', why_proportionate: 'Minimum hold until he calmed.', aftercare: 'Checked breathing, sat him down.', statement_true: true, 
       narrative: 'Confidential restricted narrative that must never appear in a broadcastable log line.',
       officer_signature: sig('Dan Whitfield'),
     },
@@ -476,7 +476,7 @@ function fileIncidentReport(token) {
   return call('POST', '/api/form-submissions', {
     definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
     values: {
-      occurred_at: new Date().toISOString(), severity: 'LOW', incident_type: 'Suspicious activity',
+      occurred_at: new Date().toISOString(), severity: 'LOW', incident_type: 'Suspicious activity', location: 'Fence line', immediate_action: 'Reported to control.', statement_true: true,
       description: 'Someone was seen near the fence line.', officer_signature: sig('Dan Whitfield'),
     },
   }, token);
@@ -567,7 +567,7 @@ test('investigation and risk assessment on a RESTRICTED form respect the same gr
   const d = def('safeguarding');
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: d.id, subject_type: 'JOB', subject_id: job.id,
-    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
+    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
   }, danT);
   const id = filed.body.id;
 

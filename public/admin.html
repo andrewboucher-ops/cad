@@ -2095,7 +2095,7 @@ function formFieldEditor(fields) {
           <button type="button" class="btn danger" data-ffx="${i}" style="padding:4px 8px;font-size:11px">✕</button>
         </span>
         ${r.type === 'select' ? `<input data-ffo="${i}" placeholder="Options, comma separated" value="${esc(r.options || '')}" style="grid-column:1 / -1">` : ''}
-        <span class="dim mono" style="grid-column:1 / -1;font-size:11px">id: ${esc(r.id || slug(r.label || '') || '—')}</span>
+        <span class="dim mono" style="grid-column:1 / -1;font-size:11px">id: ${esc(r.id || slug(r.label || '') || '—')}${r.required_if ? ` · shown and required only when ${esc(r.required_if.field)} ${r.required_if.equals === true ? 'is ticked' : `is ${esc((r.required_if.in || []).join(' / '))}`}` : ''}${r.alert && r.type === 'checkbox' ? ' · alerts control when ticked' : ''}</span>
       </div>`).join('') || '<p class="dim">No fields yet.</p>';
     els('#formFieldRows [data-ffl]').forEach((i) => i.addEventListener('input', () => { rows[+i.dataset.ffl].label = i.value; }));
     els('#formFieldRows [data-ffl]').forEach((i) => i.addEventListener('change', render));
@@ -2111,6 +2111,11 @@ function formFieldEditor(fields) {
     get: () => rows.filter((r) => (r.label || '').trim()).map((r) => {
       const out = { id: r.id || slug(r.label), label: r.label.trim(), type: r.type, required: Boolean(r.required) };
       if (r.help) out.help = r.help;
+      // Kept as they were: the editor has no controls for these, and the
+      // server drops a condition whose controlling field has gone.
+      if (r.required_if) out.required_if = r.required_if;
+      if (r.alert && r.type === 'checkbox') out.alert = true;
+      if (r.past_only && r.type === 'datetime') out.past_only = true;
       if (r.type === 'select') out.options = String(r.options || '').split(',').map((o) => o.trim()).filter(Boolean);
       return out;
     }),

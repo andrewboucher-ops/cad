@@ -178,6 +178,144 @@ const IMAGE_SIGNATURES = {
 };
 const IMAGE_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' };
 
+/*
+ * The three statement forms — safeguarding, use of force and incident —
+ * checked against what UK law and the regulators expect such a record to
+ * show (see docs/FORMS-COMPLIANCE.md for the reasoning, field by field).
+ * In short:
+ *   - Safeguarding: the Care Act 2014 s42 and its statutory guidance, and
+ *     Working Together to Safeguard Children 2023 — the type of concern,
+ *     the person's own words and wishes ("Making Safeguarding Personal"),
+ *     who was told and when, whether a referral was made, and — because
+ *     this is special-category data under UK GDPR — a recorded decision on
+ *     sharing, with the reason when it was shared without consent (DPA 2018
+ *     Schedule 8 para 4 / Schedule 1 para 18 allow that to protect someone).
+ *   - Use of force: the officer must be able to show the force was
+ *     necessary, proportionate and reasonable in the circumstances as they
+ *     honestly believed them (common law; Criminal Law Act 1967 s3; CJIA
+ *     2008 s76) — so the threat seen, what was tried first, why less would
+ *     not have worked, the restraint position (prone restraint carries a
+ *     positional-asphyxia risk), aftercare, and for a citizen's arrest the
+ *     grounds and hand-over (PACE s24A). SIA licence numbers of everyone
+ *     involved, since the SIA can review a licence on it.
+ *   - Incident: RIDDOR 2013, the 72-hour ICO personal-data-breach clock
+ *     (UK GDPR Art 33), CQC Registration Regulation 18 notifications where
+ *     a CQC-regulated service was being provided, and evidence handling
+ *     (CCTV / body-worn video preserved before it overwrites).
+ * All three end with a statement-of-truth tick, the shape a statement
+ * needs to be relied on later.
+ *
+ * required_if: { field, equals: true } or { field, in: [options] } — the
+ * field is shown, and required, only when the named checkbox is ticked or
+ * the named select has one of those answers. alert: a STANDARD form's
+ * ticked checkbox pushes control at once, the way HIGH severity does.
+ * past_only: a datetime that cannot be in the future.
+ */
+const STATEMENT_TRUE = { id: 'statement_true', label: 'This is a true and accurate account, written as soon as I reasonably could', type: 'checkbox', required: true, help: 'This report may be used as evidence, or by the SIA, CQC, police or a court.' };
+
+const SAFEGUARDING_FIELDS = [
+  { id: 'concern_about', label: 'Who the concern is about (name, approximate age, description)', type: 'textarea', required: true },
+  { id: 'at_risk_group', label: 'Concern relates to', type: 'select', required: true, options: ['Child (under 18)', 'Adult at risk', 'Not sure'] },
+  { id: 'concern_type', label: 'Type of concern', type: 'select', required: true, help: 'The categories in the Care Act 2014 guidance and Working Together to Safeguard Children. Pick the closest; the safeguarding lead can change it.',
+    options: ['Physical abuse', 'Sexual abuse or exploitation', 'Emotional or psychological abuse', 'Financial or material abuse', 'Neglect or acts of omission', 'Self-neglect', 'Domestic abuse', 'Modern slavery or trafficking', 'Criminal exploitation or county lines', 'Discriminatory abuse', 'Organisational abuse', 'Radicalisation (Prevent)', 'Not sure'] },
+  { id: 'observed_at', label: 'When', type: 'datetime', required: true, past_only: true },
+  { id: 'location', label: 'Where it happened, or where the person is now', type: 'text', required: true },
+  { id: 'what_happened', label: 'What you saw or were told — in their words where possible', type: 'textarea', required: true, help: 'Record facts, not opinions. Never promise to keep a disclosure secret: explain it may need to be shared to keep them safe.' },
+  { id: 'persons_views', label: 'What the person said they want to happen (if they could say)', type: 'textarea', help: 'Record their wishes even if you have to act anyway.' },
+  { id: 'alleged_harm_by', label: 'Who is alleged to have caused the harm (if known)', type: 'textarea' },
+  { id: 'alleged_is_staff', label: 'The concern is about one of our staff, or someone else in a position of trust', type: 'checkbox', help: 'Do not discuss it with them. The safeguarding lead must consider telling the LADO (for children) or the local authority.' },
+  { id: 'others_at_risk', label: 'Other children or adults may also be at risk', type: 'checkbox' },
+  { id: 'immediate_danger', label: 'Someone was in immediate danger', type: 'checkbox' },
+  { id: 'emergency_services', label: 'Police or ambulance (999) were called', type: 'checkbox' },
+  { id: 'emergency_reference', label: 'Police or ambulance reference, or the time you called', type: 'text', required_if: { field: 'emergency_services', equals: true } },
+  { id: 'action_taken', label: 'Action taken (including any 999 call)', type: 'textarea', required: true },
+  { id: 'dsl_informed', label: 'Safeguarding lead you told (name and time)', type: 'text', required: true, help: 'Tell the safeguarding lead the same shift. If you cannot reach them and someone is at risk, call 999 or the local authority yourself.' },
+  { id: 'referral_status', label: 'Referral to the local authority (adult social care, children\'s services or MASH)', type: 'select', required: true, options: ['Made by me', 'Left for the safeguarding lead to decide', 'Not needed', 'Not sure'] },
+  { id: 'referral_reference', label: 'Referral reference, or who you spoke to and when', type: 'text', required_if: { field: 'referral_status', in: ['Made by me'] } },
+  { id: 'consent_to_share', label: 'Did the person agree to this being shared?', type: 'select', required: true,
+    options: ['Yes they agreed', 'They refused but sharing is needed to protect them or others', 'Not asked because asking would increase the risk', 'Not asked because of their age or capacity or an emergency', 'Not shared outside Echelon'] },
+  { id: 'sharing_reason', label: 'Why sharing without their agreement was necessary', type: 'textarea', help: 'Data protection law allows sharing without consent to protect a child or adult at risk. Record the reason.',
+    required_if: { field: 'consent_to_share', in: ['They refused but sharing is needed to protect them or others', 'Not asked because asking would increase the risk', 'Not asked because of their age or capacity or an emergency'] } },
+  STATEMENT_TRUE,
+  { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
+];
+
+const INCIDENT_FIELDS = [
+  { id: 'occurred_at', label: 'When it happened', type: 'datetime', required: true, past_only: true },
+  { id: 'severity', label: 'Severity', type: 'severity', required: true, help: 'HIGH or CRITICAL alerts control immediately.' },
+  { id: 'incident_type', label: 'Type', type: 'select', required: true,
+    options: ['Theft', 'Criminal damage', 'Anti-social behaviour', 'Trespass', 'Assault', 'Violence or threats to staff', 'Suspicious activity', 'Fire or alarm', 'Medical', 'Injury or accident', 'Near miss', 'Health and safety', 'Data breach or lost information', 'Lost or found property', 'Safeguarding concern', 'Use of force', 'Other'] },
+  { id: 'location', label: 'Exact location', type: 'text', required: true },
+  { id: 'description', label: 'What happened', type: 'textarea', required: true },
+  { id: 'persons_involved', label: 'People involved (descriptions, names if known)', type: 'textarea', help: 'Only what is needed. A description is often enough.' },
+  { id: 'immediate_action', label: 'What you did straight away', type: 'textarea', required: true },
+  { id: 'anyone_injured', label: 'Someone was injured', type: 'checkbox' },
+  { id: 'injury_details', label: 'Who was hurt (staff, client or public), the injury, and any first aid or hospital visit', type: 'textarea', help: 'Also file a Patient care / first aid report for any first aid given.', required_if: { field: 'anyone_injured', equals: true } },
+  { id: 'riddor_possible', label: 'This may be reportable under RIDDOR', type: 'checkbox', alert: true,
+    help: 'A death, a specified injury (e.g. fracture, amputation, loss of sight), a worker off or on light duties for more than 7 days, a member of the public taken straight to hospital, or a dangerous occurrence. A manager decides and reports to HSE.' },
+  { id: 'data_breach', label: 'Personal information may have been lost, stolen, seen by the wrong person or sent to the wrong place', type: 'checkbox', alert: true, help: 'Tell control now. If it puts people at risk, the ICO must be told within 72 hours.' },
+  { id: 'data_breach_details', label: 'What information, whose, and what has been done to contain it', type: 'textarea', required_if: { field: 'data_breach', equals: true } },
+  { id: 'cqc_notifiable', label: 'This happened during a CQC-regulated service (e.g. medical cover or patient transport) and involves a death, serious injury, abuse or police involvement', type: 'checkbox', alert: true, help: 'The registered manager must notify CQC without delay, and the duty of candour may apply.' },
+  { id: 'safeguarding_concern', label: 'A child or adult at risk may be involved', type: 'checkbox', help: 'File a Safeguarding report too, and keep the detail of the concern in that report rather than here.' },
+  { id: 'force_used', label: 'Force or restraint was used', type: 'checkbox', help: 'File a Use of force report too.' },
+  { id: 'police_attended', label: 'Police attended or were called', type: 'checkbox' },
+  { id: 'police_reference', label: 'Police reference', type: 'text', required_if: { field: 'police_attended', equals: true } },
+  { id: 'witnesses', label: 'Witnesses (names and contact details if available)', type: 'textarea' },
+  { id: 'cctv_bwv_ref', label: 'CCTV / body-worn video reference', type: 'text' },
+  { id: 'footage_preserved', label: 'Footage has been saved, or the site asked to keep it', type: 'checkbox', help: 'CCTV often overwrites within 30 days.' },
+  { id: 'client_informed', label: 'The client has been told', type: 'checkbox' },
+  { id: 'photo', label: 'Photo', type: 'photo', help: 'Avoid faces and injuries unless they are needed and the person agrees.' },
+  { id: 'officer_sia_licence', label: 'Your SIA licence number (if licensed)', type: 'text' },
+  STATEMENT_TRUE,
+  { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
+];
+
+const USE_OF_FORCE_FIELDS = [
+  { id: 'occurred_at', label: 'Time force was used', type: 'datetime', required: true, past_only: true },
+  { id: 'severity', label: 'Severity', type: 'severity', required: true, help: 'HIGH or CRITICAL alerts control immediately.' },
+  { id: 'location', label: 'Exact location', type: 'text', required: true },
+  { id: 'officer_sia_licence', label: 'Your SIA licence number', type: 'text', required: true },
+  { id: 'subject_name', label: 'Name of the person force was used against (if known)', type: 'text' },
+  { id: 'subject_description', label: 'Description (if not known by name)', type: 'textarea' },
+  { id: 'subject_vulnerability', label: 'The person appeared to be', type: 'select', help: 'If they may be a child or an adult at risk, file a Safeguarding report too.',
+    options: ['No obvious vulnerability', 'Under 18', 'Intoxicated (drink or drugs)', 'In mental health crisis', 'Unwell or injured', 'Pregnant', 'Disabled or with a learning disability', 'Not sure'] },
+  { id: 'threat', label: 'What the person was doing that made you consider force (the threat you saw)', type: 'textarea', required: true },
+  { id: 'de_escalation', label: 'What you tried first (talking, warnings, giving space, backing off)', type: 'textarea', required: true, help: 'If there was no time to try anything, say why.' },
+  { id: 'reason', label: 'Reason force was necessary', type: 'select', required: true, options: ['Self-defence', 'Defence of another person', 'Prevention of a crime', 'Effecting a lawful arrest or detention', 'Preventing escape', 'Protecting property', 'Other'] },
+  { id: 'force_type', label: 'Type of force used', type: 'select', required: true, options: ['Verbal commands / de-escalation only', 'Guiding or escorting hold', 'Physical restraint or control', 'Handcuffs or limb restraints applied', 'Strike or parry', 'Use of an issued defensive item', 'Other'] },
+  { id: 'restraint_position', label: 'Position the person was held in', type: 'select', help: 'Face-down restraint risks positional asphyxia: keep it as short as possible and watch their breathing.',
+    options: ['Not held', 'Standing', 'Seated', 'Kneeling', 'On their side', 'On their back', 'Face down (prone)'] },
+  { id: 'prone_details', label: 'How long they were face down, and how their breathing was watched', type: 'textarea', required_if: { field: 'restraint_position', in: ['Face down (prone)'] } },
+  { id: 'force_duration', label: 'Approximate duration force was applied', type: 'text' },
+  { id: 'why_proportionate', label: 'Why the force was necessary and proportionate, and why less would not have worked', type: 'textarea', required: true,
+    help: 'The law allows only force that is reasonable in the circumstances as you honestly believed them to be.' },
+  { id: 'narrative', label: 'What happened, in sequence — what was said, what was done, and why', type: 'textarea', required: true },
+  { id: 'other_staff', label: 'Other staff involved (names and SIA licence numbers)', type: 'textarea' },
+  { id: 'subject_injured', label: 'The subject was injured', type: 'checkbox' },
+  { id: 'subject_injury_details', label: 'Details of the subject\'s injury', type: 'textarea', required_if: { field: 'subject_injured', equals: true } },
+  { id: 'officer_injured', label: 'The officer was injured', type: 'checkbox', help: 'Also file an Incident report: the injury may be reportable under RIDDOR.' },
+  { id: 'officer_injury_details', label: 'Details of the officer\'s injury', type: 'textarea', required_if: { field: 'officer_injured', equals: true } },
+  { id: 'medical_attention', label: 'Medical attention was given or requested', type: 'checkbox' },
+  { id: 'aftercare', label: 'Aftercare: how the person was checked and looked after once force stopped', type: 'textarea', required: true },
+  { id: 'arrested_detained', label: 'Subject was arrested or detained', type: 'checkbox' },
+  { id: 'arrest_grounds', label: 'Grounds for the arrest, what you told them, and when and to whom they were handed over', type: 'textarea', required_if: { field: 'arrested_detained', equals: true },
+    help: 'A citizen\'s arrest needs reasonable grounds that they committed an indictable offence, and the person must be handed to police as soon as possible.' },
+  { id: 'police_informed', label: 'Police informed', type: 'checkbox' },
+  { id: 'police_reference', label: 'Police reference', type: 'text', required_if: { field: 'police_informed', equals: true } },
+  { id: 'witnesses', label: 'Witnesses (names and contact details if available)', type: 'textarea' },
+  { id: 'bwv_recorded', label: 'Body-worn video was recording', type: 'checkbox' },
+  { id: 'cctv_bwv_ref', label: 'CCTV / body-worn video reference', type: 'text' },
+  { id: 'supervisor_notified', label: 'A supervisor was notified at the time', type: 'checkbox' },
+  { id: 'supervisor_name', label: 'Supervisor\'s name and the time you told them', type: 'text', required_if: { field: 'supervisor_notified', equals: true } },
+  { id: 'photo', label: 'Photo (e.g. scene — never an injury photo without the subject\'s consent)', type: 'photo' },
+  STATEMENT_TRUE,
+  { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
+];
+
+/** The keys ensureStatementCompliance() upgrades, and to what. */
+const STATEMENT_FORM_FIELDS = { safeguarding: SAFEGUARDING_FIELDS, 'incident-report': INCIDENT_FIELDS, 'use-of-force': USE_OF_FORCE_FIELDS };
+const STATEMENT_COMPLIANCE_VERSION = 1;
+
 /**
  * The forms the business asked for, installed once on a database that has
  * none. Patient care is RESTRICTED by default as well as safeguarding: it
@@ -252,15 +390,7 @@ const DEFAULT_FORMS = [
   {
     key: 'safeguarding', name: 'Safeguarding report', visibility: 'RESTRICTED', subject_types: ['JOB', 'SITE_VISIT', 'SITE', 'PERSONNEL'],
     description: 'A concern about the safety or welfare of a child or adult at risk. Visible only to you and the named safeguarding leads.',
-    fields: [
-      { id: 'concern_about', label: 'Who the concern is about', type: 'textarea', required: true },
-      { id: 'at_risk_group', label: 'Concern relates to', type: 'select', required: true, options: ['Child (under 18)', 'Adult at risk', 'Not sure'] },
-      { id: 'observed_at', label: 'When', type: 'datetime', required: true },
-      { id: 'what_happened', label: 'What you saw or were told — in their words where possible', type: 'textarea', required: true },
-      { id: 'immediate_danger', label: 'Someone was in immediate danger', type: 'checkbox' },
-      { id: 'action_taken', label: 'Action taken (including any 999 call)', type: 'textarea', required: true },
-      { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
-    ],
+    fields: SAFEGUARDING_FIELDS,
   },
 ];
 
@@ -303,18 +433,7 @@ const DEFAULT_EXTRA_FORMS = [
   {
     key: 'incident-report', name: 'Incident report', visibility: 'STANDARD', subject_types: ['JOB', 'SITE_VISIT', 'SITE'],
     description: 'Anything that happened on duty that needs writing up.',
-    fields: [
-      { id: 'occurred_at', label: 'When it happened', type: 'datetime', required: true },
-      { id: 'severity', label: 'Severity', type: 'severity', required: true, help: 'HIGH or CRITICAL alerts control immediately.' },
-      { id: 'incident_type', label: 'Type', type: 'select', required: true, options: ['Theft', 'Criminal damage', 'Anti-social behaviour', 'Trespass', 'Assault', 'Suspicious activity', 'Fire or alarm', 'Medical', 'Health and safety', 'Other'] },
-      { id: 'location', label: 'Exact location', type: 'text' },
-      { id: 'description', label: 'What happened', type: 'textarea', required: true },
-      { id: 'persons_involved', label: 'People involved (descriptions, names if known)', type: 'textarea' },
-      { id: 'police_attended', label: 'Police attended or were called', type: 'checkbox' },
-      { id: 'police_reference', label: 'Police reference', type: 'text' },
-      { id: 'photo', label: 'Photo', type: 'photo' },
-      { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
-    ],
+    fields: INCIDENT_FIELDS,
   },
   {
     // RESTRICTED by default, same reasoning as patient-care/safeguarding
@@ -324,29 +443,7 @@ const DEFAULT_EXTRA_FORMS = [
     // relax it in Admin -> Forms; relaxing is a logged decision.
     key: 'use-of-force', name: 'Use of force report', visibility: 'RESTRICTED', subject_types: ['JOB', 'SITE_VISIT', 'SITE', 'PERSONNEL'],
     description: 'Any physical force used on duty, including restraint — required whenever force is used, whether or not anyone was hurt.',
-    fields: [
-      { id: 'occurred_at', label: 'Time force was used', type: 'datetime', required: true },
-      { id: 'severity', label: 'Severity', type: 'severity', required: true, help: 'HIGH or CRITICAL alerts control immediately.' },
-      { id: 'subject_name', label: 'Name of the person force was used against (if known)', type: 'text' },
-      { id: 'subject_description', label: 'Description (if not known by name)', type: 'textarea' },
-      { id: 'reason', label: 'Reason force was necessary', type: 'select', required: true, options: ['Self-defence', 'Defence of another person', 'Prevention of a crime', 'Effecting a lawful arrest or detention', 'Preventing escape', 'Other'] },
-      { id: 'force_type', label: 'Type of force used', type: 'select', required: true, options: ['Verbal commands / de-escalation only', 'Physical restraint or control', 'Handcuffs or limb restraints applied', 'Strike or parry', 'Use of an issued defensive item', 'Other'] },
-      { id: 'force_duration', label: 'Approximate duration force was applied', type: 'text' },
-      { id: 'narrative', label: 'What happened, in sequence — what was said, what was done, and why', type: 'textarea', required: true },
-      { id: 'subject_injured', label: 'The subject was injured', type: 'checkbox' },
-      { id: 'subject_injury_details', label: 'Details of the subject\'s injury', type: 'textarea' },
-      { id: 'officer_injured', label: 'The officer was injured', type: 'checkbox' },
-      { id: 'officer_injury_details', label: 'Details of the officer\'s injury', type: 'textarea' },
-      { id: 'medical_attention', label: 'Medical attention was given or requested', type: 'checkbox' },
-      { id: 'arrested_detained', label: 'Subject was arrested or detained', type: 'checkbox' },
-      { id: 'police_informed', label: 'Police informed', type: 'checkbox' },
-      { id: 'police_reference', label: 'Police reference', type: 'text' },
-      { id: 'witnesses', label: 'Witnesses (names and contact details if available)', type: 'textarea' },
-      { id: 'cctv_bwv_ref', label: 'CCTV / body-worn video reference', type: 'text' },
-      { id: 'supervisor_notified', label: 'A supervisor was notified at the time', type: 'checkbox' },
-      { id: 'photo', label: 'Photo (e.g. scene — never an injury photo without the subject\'s consent)', type: 'photo' },
-      { id: 'officer_signature', label: 'Officer signature', type: 'signature', required: true },
-    ],
+    fields: USE_OF_FORCE_FIELDS,
   },
 ];
 
@@ -543,7 +640,7 @@ module.exports = function registerFormRoutes({
     if (!Array.isArray(raw) || !raw.length) throw httpError(400, 'a form needs at least one field');
     if (raw.length > MAX_FIELDS) throw httpError(400, `a form can have at most ${MAX_FIELDS} fields`);
     const seen = new Set();
-    return raw.map((f, i) => {
+    const cleaned = raw.map((f, i) => {
       const id = String(f.id || '').trim();
       if (!/^[a-z][a-z0-9_]{0,39}$/.test(id)) throw httpError(400, `field ${i + 1}: id must be lower-case letters, digits and _`);
       if (seen.has(id)) throw httpError(400, `field id ${id} is used twice`);
@@ -559,8 +656,32 @@ module.exports = function registerFormRoutes({
         if (options.length < 2) throw httpError(400, `field ${id}: a select needs at least two options`);
         out.options = [...new Set(options)];
       }
+      if (type === 'checkbox' && f.alert) out.alert = true;
+      if (type === 'datetime' && f.past_only) out.past_only = true;
+      if (f.required_if && typeof f.required_if === 'object') out.required_if = f.required_if;
       return out;
     });
+    // A condition must point at another checkbox or select on the same form.
+    // One whose controlling field has since been removed or retyped is
+    // dropped rather than refused: the admin editor has no way to edit a
+    // condition, so refusing would leave the form unsaveable.
+    for (const f of cleaned) {
+      if (!f.required_if) continue;
+      const c = f.required_if, ctl = cleaned.find((x) => x.id === String(c.field || '') && x.id !== f.id);
+      if (ctl && ctl.type === 'checkbox') f.required_if = { field: ctl.id, equals: true };
+      else if (ctl && ctl.type === 'select' && Array.isArray(c.in)) {
+        const opts = c.in.map(String).filter((o) => ctl.options.includes(o));
+        if (opts.length) f.required_if = { field: ctl.id, in: [...new Set(opts)] }; else delete f.required_if;
+      } else delete f.required_if;
+      if (f.required_if) f.required = false;
+    }
+    return cleaned;
+  }
+
+  /** Whether a required_if condition is met by the (validated) values. */
+  function conditionMet(cond, values) {
+    const v = values[cond.field];
+    return cond.equals === true ? v === true : Array.isArray(cond.in) && cond.in.includes(v);
   }
 
   function cleanSubjectTypes(raw) {
@@ -611,6 +732,7 @@ module.exports = function registerFormRoutes({
       db.form_definitions.push({
         id: nextId('form_definitions'), key: f.key, name: f.name, description: f.description, version: 1,
         visibility: f.visibility, subject_types: f.subject_types, fields: cleanFields(f.fields), active: true,
+        ...(STATEMENT_FORM_FIELDS[f.key] ? { compliance_version: STATEMENT_COMPLIANCE_VERSION } : {}),
         created_by: null, created_at: now, updated_at: now,
       });
     }
@@ -642,6 +764,7 @@ module.exports = function registerFormRoutes({
         id: nextId('form_definitions'), key: f.key, name: f.name, description: f.description, version: 1,
         visibility: f.visibility, subject_types: f.subject_types, fields: cleanFields(f.fields), active: true,
         effect: f.effect || null, notify_emails: [], created_by: null, created_at: now, updated_at: now,
+        ...(STATEMENT_FORM_FIELDS[f.key] ? { compliance_version: STATEMENT_COMPLIANCE_VERSION } : {}),
       });
       added++;
     }
@@ -666,6 +789,38 @@ module.exports = function registerFormRoutes({
       if (!d || d.fields.some((f) => f.type === 'severity')) continue;
       d.fields = [d.fields[0], SEVERITY_FIELD, ...d.fields.slice(1)];
       d.version += 1;
+      changed++;
+    }
+    return changed;
+  }
+
+  /** Brings an existing database's safeguarding, incident and use-of-force
+   * forms up to the field lists above, once each (marked with
+   * compliance_version, so an admin's edits afterwards are never undone).
+   * The default fields come first in their default order — an existing one
+   * keeps any extra select options and a required tick the admin added —
+   * and any field the admin added themselves is kept, just before the
+   * statement of truth. Bumps the version, so reports already filed keep
+   * the field list they were filled against. */
+  function ensureStatementCompliance() {
+    let changed = 0;
+    for (const [key, defaults] of Object.entries(STATEMENT_FORM_FIELDS)) {
+      const d = db.form_definitions.find((x) => x.key === key);
+      if (!d || (d.compliance_version || 0) >= STATEMENT_COMPLIANCE_VERSION) continue;
+      const merged = defaults.map((df) => {
+        const old = d.fields.find((x) => x.id === df.id);
+        if (!old || old.type !== df.type) return { ...df };
+        const f = { ...df, required: Boolean(df.required || (old.required && !df.required_if)) };
+        if (df.type === 'select') f.options = [...new Set([...df.options, ...(old.options || [])])];
+        return f;
+      });
+      const extras = d.fields.filter((x) => !defaults.some((df) => df.id === x.id));
+      const at = merged.findIndex((f) => f.id === 'statement_true');
+      merged.splice(at, 0, ...extras);
+      d.fields = cleanFields(merged);
+      d.compliance_version = STATEMENT_COMPLIANCE_VERSION;
+      d.version += 1;
+      d.updated_at = new Date().toISOString();
       changed++;
     }
     return changed;
@@ -734,12 +889,13 @@ module.exports = function registerFormRoutes({
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw httpError(400, 'values must be an object');
     const known = new Set(fields.map((f) => f.id));
     for (const k of Object.keys(raw)) if (!known.has(k)) throw httpError(400, `unknown field ${k}`);
-    const values = {}, files = [];
+    const values = {}, files = [], conditional = [];
     for (const f of fields) {
       const v = raw[f.id];
       const empty = v === undefined || v === null || v === '' || (f.type === 'checkbox' && v !== true);
       if (empty) {
         if (f.required) throw httpError(400, `${f.label} is required`);
+        if (f.required_if) conditional.push(f);
         values[f.id] = f.type === 'checkbox' ? false : null;
         continue;
       }
@@ -765,6 +921,9 @@ module.exports = function registerFormRoutes({
           values[f.id] = String(v); break;
         case 'datetime':
           if (isNaN(Date.parse(v))) throw httpError(400, `${f.label} must be a date and time`);
+          // Ten minutes' grace for a phone whose clock runs fast. A queued
+          // offline report is sent later, never earlier, so it still passes.
+          if (f.past_only && Date.parse(v) > Date.now() + 10 * 60000) throw httpError(400, `${f.label} cannot be in the future`);
           values[f.id] = new Date(v).toISOString(); break;
         case 'signature': {
           // A signature image alone proves little; the name it was given
@@ -787,6 +946,9 @@ module.exports = function registerFormRoutes({
         default: throw httpError(500, `unhandled field type ${f.type}`);
       }
     }
+    // Checked after every value is known, since the controlling field can
+    // come after the field it controls.
+    for (const f of conditional) if (conditionMet(f.required_if, values)) throw httpError(400, `${f.label} is required`);
     if (files.length > MAX_FILES) throw httpError(400, `at most ${MAX_FILES} images per form`);
     return { values, files };
   }
@@ -970,6 +1132,15 @@ module.exports = function registerFormRoutes({
       const severity = severityOf(sub);
       if (severity === 'HIGH' || severity === 'CRITICAL') {
         pushToRoles(CONTROL, { title: `${severity} severity — ${sub.reference}`, body: `${d.name}: ${subjectLabel}`, url: `/forms.html?id=${sub.id}`, tag: 'cccs-incident-severity' });
+      }
+      // A ticked alert box (possible RIDDOR, personal-data breach, CQC
+      // notification) starts a legal clock, so control hears at once —
+      // whatever severity the officer chose.
+      const alerts = sub.fields.filter((f) => f.type === 'checkbox' && f.alert && values[f.id] === true);
+      if (alerts.length) {
+        sub.alerts = alerts.map((f) => f.id);
+        logEvent('form.alert', `${sub.reference} FLAGGED: ${alerts.map((f) => f.label.toUpperCase()).join('; ')}`, { submission_id: sub.id, alerts: sub.alerts });
+        pushToRoles(CONTROL, { title: `Needs a manager now — ${sub.reference}`, body: alerts.map((f) => f.label).join('; ').slice(0, 180), url: `/forms.html?id=${sub.id}`, tag: 'cccs-form-alert' });
       }
     }
     if (d.effect && subjectType === 'VEHICLE') {
@@ -1741,7 +1912,7 @@ module.exports = function registerFormRoutes({
   if (severityTimer.unref) severityTimer.unref();
 
   return {
-    installDefaults, ensureApplicationForm, ensureVehicleForms, ensureIncidentSeverity, activeApplicationForm,
+    installDefaults, ensureApplicationForm, ensureVehicleForms, ensureIncidentSeverity, ensureStatementCompliance, activeApplicationForm,
     validateValues, IMAGE_EXT, canRead, effectiveVisibility, clientVisibleSubmissions, severityEscalationTick,
   };
 };
