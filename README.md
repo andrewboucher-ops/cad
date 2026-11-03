@@ -73,6 +73,7 @@ These are deliberately weak demo credentials for a POC. Replace them before the 
 | `RETAIN_LEAVERS_DAYS` | `2555` | leaver's personal details (BS 7858: employment + 7 years), then anonymised |
 | `RETAIN_TIMESHEETS_DAYS` | `2190` | shifts and clock-in/out |
 | `RETAIN_FORMS_DAYS` | `2190` | form submissions (incident reports, checks) and photos |
+| `RETAIN_SAFEGUARDING_DAYS` | `9125` | child and staff-allegation safeguarding reports, and use of force on under-18s (25 years) |
 | `RETAIN_CLIENT_REQUESTS_DAYS` | `730` | closed client portal requests |
 | `RETAIN_EMERGENCIES_DAYS` | `730` | resolved emergency activations and call-me requests |
 | `GUARDM8_SECRET` | — | shared secret for GuardM8's `POST /api/integrations/guardm8/jobs` |

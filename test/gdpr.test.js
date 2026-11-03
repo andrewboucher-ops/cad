@@ -91,6 +91,21 @@ test('old shifts, closed forms and client requests age out; open ones stay', asy
   assert.deepStrictEqual(app.db.client_requests.filter((r) => r.id >= 870001).map((r) => r.id), [870002]);
 });
 
+test('child and staff-allegation safeguarding reports are kept 25 years, adult ones the usual 6', async () => {
+  const sg = (id, values, age) => ({ id, definition_key: 'safeguarding', status: 'ACTIONED', submitted_at: longAgo(age), actioned_at: longAgo(age), values });
+  app.db.form_submissions.push(
+    sg(880001, { at_risk_group: 'Adult at risk' }, 2300),
+    sg(880002, { at_risk_group: 'Child (under 18)' }, 2300),
+    sg(880003, { at_risk_group: 'Not sure' }, 2300),
+    sg(880004, { at_risk_group: 'Adult at risk', alleged_is_staff: true }, 2300),
+    { id: 880005, definition_key: 'use-of-force', status: 'ACTIONED', submitted_at: longAgo(2300), values: { subject_vulnerability: 'Under 18' } },
+    { id: 880006, definition_key: 'use-of-force', status: 'ACTIONED', submitted_at: longAgo(2300), values: { subject_vulnerability: 'Not sure' } },
+    sg(880007, { at_risk_group: 'Child (under 18)' }, 9200),
+  );
+  app.retentionSweep();
+  assert.deepStrictEqual(app.db.form_submissions.filter((s) => s.id >= 880001 && s.id < 880100).map((s) => s.id), [880002, 880003, 880004, 880005]);
+});
+
 test('subject access export: everything about the person, nothing secret, admin only, logged', async () => {
   const danT = await login('dwhitfield', 'field123');
   const me = (await call('GET', '/api/me', undefined, danT)).body;

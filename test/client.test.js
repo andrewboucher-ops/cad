@@ -94,7 +94,7 @@ test('a client sees only their own sites, jobs, visits and documents — never a
   assert.equal(meA.body.sites[0].id, siteA.id);
   assert.equal(meA.body.sites[0].keyholder, undefined, 'client projection must not carry internal fields like keyholder');
 
-  const jobAtB = (await call('POST', '/api/jobs', { priority: 'AMBER', incident_type: 'Alarm activation', site: siteB.id }, dispT)).body;
+  const jobAtB = (await call('POST', '/api/jobs', { priority: 'AMBER', incident_type: 'Alarm activation', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, site: siteB.id }, dispT)).body;
 
   // Client A cannot see client B's job, whether unfiltered or by asking for B's site directly.
   const jobsA = await call('GET', '/api/client/jobs', undefined, clientAT);
@@ -329,7 +329,7 @@ test('a RESTRICTED report can still be shared once redacted, and a VEHICLE/PERSO
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: def('safeguarding').id, subject_type: 'SITE', subject_id: site.id,
     values: {
-      concern_about: canary, at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      concern_about: canary, at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(),
       what_happened: canary, action_taken: 'Safeguarding lead notified.', officer_signature: sig('Dan Whitfield'),
     },
   }, dispT);
