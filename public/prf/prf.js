@@ -1433,7 +1433,7 @@ function recordHtml(r) {
     r.status === "FINAL"
       ? `<p class="meta">Finalised ${esc(fmt(r.finalised_at))} by ${esc(r.finalised_by)}${r.job_reference ? " · " + esc(r.job_reference) : ""}<br><small>Content hash ${esc((r.content_hash || "").slice(0, 16))}…</small></p>`
       : `<p class="meta">DRAFT — not finalised${r.job_reference ? " · " + esc(r.job_reference) : ""}</p>`;
-  return `<p class="confidential">CONFIDENTIAL: contains health information. Handle under Echelon's data protection policy.</p><h2>${esc(r.pcr)}</h2>${head}${sections}${symHtml}${exHtml}${vitHtml}${txHtml}${injHtml}${sigHtml ? `<h3>Signatures</h3>${sigHtml}` : ""}${unable}${add}`;
+  return `<p class="confidential">CONFIDENTIAL: contains health information. Handle under Echelon's data protection policy.</p><h2>${esc(r.pcr)}</h2>${head}${sections}${symHtml}${exHtml}${vitHtml}${txHtml}${injHtml}${sigHtml ? `<h3>Signatures</h3>${sigHtml}` : ""}${unable}${add}<p class="confidential">How we use and keep the patient's information: ${esc(location.origin)}/prf-privacy.html</p>`;
 }
 function showRecord(r) {
   shown = r;

@@ -69,6 +69,15 @@ const GENESIS = '0'.repeat(64);
 const DRAFT_EDIT_WINDOW_MS = Number(process.env.PRF_DRAFT_EDIT_WINDOW_MS || 10 * 60 * 1000);
 const MAX_FIELD = 8000;
 const PRF_TIMEZONE = process.env.PRF_TIMEZONE || 'Europe/London';
+// Retention (NHS Records Management Code of Practice, general health records):
+// adults 8 years from the incident; children until their 25th birthday, or 26th
+// if they were 17 when treated. Nothing is deleted automatically: a PRF past its
+// date shows in PRF admin, where a supervisor disposes of it or holds it.
+const RETAIN_ADULT_YEARS = Number(process.env.RETAIN_PRF_ADULT_YEARS || 8);
+const RETAIN_CHILD_UNTIL_AGE = Number(process.env.RETAIN_PRF_CHILD_UNTIL_AGE || 25);
+// Echelon's medicines policy: no controlled drugs are carried. Set
+// PRF_CONTROLLED_DRUGS=on only if that policy changes.
+const CONTROLLED_ON = String(process.env.PRF_CONTROLLED_DRUGS || '').toLowerCase() === 'on';
 const MAX_VITAL_SETS = 50;
 
 // Fields a PRF may hold. Anything else in a PUT body is dropped, so the record
@@ -195,6 +204,25 @@ function keepStock(before, next) {
   return next;
 }
 
+const addYears = (d, n) => { const x = new Date(d); x.setUTCFullYear(x.getUTCFullYear() + n); return x; };
+/** When a PRF may be disposed of. An unknown age counts as a child's record. */
+function retainUntil(r) {
+  const d = r.data || {};
+  const at = Date.parse(d.callReceived || '') ? new Date(d.callReceived) : new Date(r.created_at);
+  let age = null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d.dob || '')) {
+    const b = new Date(d.dob + 'T00:00:00Z');
+    age = at.getUTCFullYear() - b.getUTCFullYear();
+    if (at < new Date(Date.UTC(at.getUTCFullYear(), b.getUTCMonth(), b.getUTCDate()))) age--;
+    if (age < 18) return addYears(b, RETAIN_CHILD_UNTIL_AGE + (age === 17 ? 1 : 0));
+  } else if (d.ageApprox !== undefined && d.ageApprox !== '' && Number.isFinite(Number(d.ageApprox))) {
+    age = Number(d.ageApprox);
+    if (age < 18) return addYears(at, Math.max(0, RETAIN_CHILD_UNTIL_AGE - age) + (age >= 17 ? 1 : 0));
+  }
+  if (age === null) return addYears(at, RETAIN_CHILD_UNTIL_AGE);
+  return addYears(at, RETAIN_ADULT_YEARS);
+}
+
 module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, store, assertJobAccess, stock = null, medication = null, canReadSubmission = () => false }) {
   if (!db.prfs) db.prfs = [];
   if (!db.prf_audit) db.prf_audit = [];
@@ -253,6 +281,7 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     return r;
   }
   function assertRead(r, user) {
+    if (r.status === 'DISPOSED') throw httpError(410, `${r.pcr} was disposed of on ${String(r.disposed_at).slice(0, 10)} at the end of its retention period`);
     if (r.author_user_id === user.id || readsAll(user)) return;
     throw httpError(403, 'not your PRF');
   }
@@ -358,14 +387,15 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
         const d = stock ? stock.describeLocation(l) : l;
         return { id: l.id, name: l.name, kind: l.kind || null, in_vehicle: d.in_vehicle || null };
       }),
-      medicines: medication ? db.medicines.filter((m) => m.active !== false).map((m) => ({ id: m.id, label: medication.label(m), unit: m.unit || '', controlled: Boolean(m.controlled), levels: levels(medication.levels(m.id)) })) : [],
+      controlled_drugs: CONTROLLED_ON,
+      medicines: medication ? db.medicines.filter((m) => m.active !== false && (CONTROLLED_ON || !m.controlled)).map((m) => ({ id: m.id, label: medication.label(m), unit: m.unit || '', controlled: Boolean(m.controlled), levels: levels(medication.levels(m.id)) })) : [],
       items: stock ? db.assets.filter((a) => a.is_stock_tracked && a.status !== 'RETIRED').filter((a) => { try { stock.findItem(a.id, user); return true; } catch { return false; } })
         .map((a) => ({ id: a.id, label: stock.label(a), unit: a.unit || '', category: a.category || null, levels: levels(stock.levels(a.id)) })) : [],
     };
   });
 
   route('GET', '/api/prfs', WRITE_ROLES, ({ query, user }) => {
-    let list = readsAll(user) && query.get('scope') === 'all' ? db.prfs : db.prfs.filter((r) => r.author_user_id === user.id);
+    let list = (readsAll(user) && query.get('scope') === 'all' ? db.prfs : db.prfs.filter((r) => r.author_user_id === user.id)).filter((r) => r.status !== 'DISPOSED');
     if (query.get('status')) list = list.filter((r) => r.status === query.get('status').toUpperCase());
     if (query.get('job_id')) list = list.filter((r) => r.job_id === Number(query.get('job_id')));
     return list.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).map(summary);
@@ -533,6 +563,7 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     if (kind === 'medicine') {
       item = medication.findMed(body.item_id);
       controlled = Boolean(item.controlled);
+      if (controlled && !CONTROLLED_ON) throw httpError(403, 'controlled drugs are not carried under the medicines policy, so a PRF cannot record one from stock');
       rows = medication.administer(item, {
         quantity: body.quantity, location_id: location.id, batch_no: body.batch_no || undefined,
         patient_name: patient, patient_ref: r.pcr, dose_given: body.dose || entry.dose, route: entry.route, note, authority,
@@ -621,7 +652,13 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     const now = Date.now();
     const rows = db.prfs.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).map((r) => {
       const used = (r.data.txLog || []).filter((x) => x && x.stock);
-      return { ...summary(r), stock_entries: used.length, stale: r.status === 'DRAFT' && now - Date.parse(r.updated_at) > STALE_DRAFT_MS };
+      const until = r.status === 'DISPOSED' ? null : retainUntil(r).toISOString().slice(0, 10);
+      return {
+        ...summary(r), dob: (r.data && r.data.dob) || null, stock_entries: used.length, stale: r.status === 'DRAFT' && now - Date.parse(r.updated_at) > STALE_DRAFT_MS,
+        retain_until: until, legal_hold: r.legal_hold || null,
+        due: Boolean(until && !r.legal_hold && Date.parse(until) <= now),
+        disposed_at: r.disposed_at || null, disposed_by: r.disposed_by || null, disposed_reason: r.disposed_reason || null,
+      };
     });
     const supplies = [];
     for (const r of db.prfs) for (const x of r.data.txLog || []) if (x && x.stock) {
@@ -636,13 +673,70 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
         finalised_7d: rows.filter((r) => r.finalised_at && Date.parse(r.finalised_at) >= weekAgo).length,
         total: rows.length,
         supplies_7d: supplies.filter((x) => Date.parse(x.at) >= weekAgo).length,
+        due: rows.filter((r) => r.due).length,
+        held: rows.filter((r) => r.legal_hold).length,
       },
       stale_hours: STALE_DRAFT_MS / 3600000,
+      retention: { adult_years: RETAIN_ADULT_YEARS, child_until_age: RETAIN_CHILD_UNTIL_AGE },
+      controlled_drugs: CONTROLLED_ON,
       prfs: rows,
       supplies,
       authors: [...new Set(rows.map((r) => r.author_name))].sort(),
     };
   });
 
-  return { verifyChain, flushEdits: () => [...pending.keys()].forEach(flushEdits), WRITE_ROLES, READ_ALL_ROLES };
+  /* ---- Retention: legal hold and disposal ---- */
+  route('POST', '/api/prf-admin/:pcr/hold', READ_ALL_ROLES, ({ params, body, user, req }) => {
+    const r = findPrf(params.pcr);
+    if (r.status === 'DISPOSED') throw httpError(409, 'already disposed of');
+    if (body.on === false) {
+      if (!r.legal_hold) return { ok: true, legal_hold: null };
+      r.legal_hold = null;
+      audit(user, 'hold.released', r.pcr, {}, req);
+    } else {
+      const reason = String(body.reason || '').trim().slice(0, 300);
+      if (!reason) throw httpError(400, 'say why it is being held (claim, complaint, inquest, safeguarding…)');
+      r.legal_hold = { reason, by: user.display_name || user.username, at: new Date().toISOString() };
+      audit(user, 'hold.placed', r.pcr, { reason }, req);
+    }
+    durable();
+    return { ok: true, legal_hold: r.legal_hold };
+  });
+
+  /** End of retention: the clinical content goes, a stub stays to prove it.
+   * Patient names on the medicines ledger for this PRF go too. */
+  route('POST', '/api/prf-admin/:pcr/dispose', READ_ALL_ROLES, ({ params, body, user, req }) => {
+    const r = findPrf(params.pcr);
+    if (r.status === 'DISPOSED') throw httpError(409, 'already disposed of');
+    if (r.legal_hold) throw httpError(409, `on legal hold: ${r.legal_hold.reason}`);
+    const until = retainUntil(r);
+    if (until.getTime() > Date.now()) throw httpError(409, `kept until ${until.toISOString().slice(0, 10)}; it can't be disposed of before then`);
+    if (String(body.confirm || '') !== r.pcr) throw httpError(400, 'type the PRF number to confirm');
+    const reason = String(body.reason || '').trim().slice(0, 300) || 'retention period ended';
+    flushEdits(r.pcr);
+    const now = new Date().toISOString();
+    r.data = {};
+    r.addenda = [];
+    r.status = 'DISPOSED';
+    r.disposed_at = now;
+    r.disposed_by = user.display_name || user.username;
+    r.disposed_reason = reason;
+    r.updated_at = now;
+    let ledger = 0;
+    for (const m of db.med_movements || []) if (m.prf_pcr === r.pcr || m.patient_ref === r.pcr) { if (m.patient_name) { m.patient_name = ''; ledger++; } }
+    audit(user, 'disposed', r.pcr, { reason, retain_until: until.toISOString().slice(0, 10), ledger_names_cleared: ledger }, req);
+    logEvent('prf.disposed', `PRF ${r.pcr} disposed of at the end of its retention period by ${r.disposed_by}`, { pcr: r.pcr });
+    durable();
+    return { ok: true, pcr: r.pcr, disposed_at: now };
+  });
+
+  /** Who the privacy notice names. Public: patients read it without signing in. */
+  route('GET', '/api/prf-privacy', null, () => ({
+    controller: process.env.PRF_CONTROLLER || 'Echelon',
+    email: process.env.PRF_PRIVACY_EMAIL || null,
+    safeguarding_email: process.env.PRF_SAFEGUARDING_EMAIL || null,
+    retention: { adult_years: RETAIN_ADULT_YEARS, child_until_age: RETAIN_CHILD_UNTIL_AGE },
+  }));
+
+  return { verifyChain, retainUntil, flushEdits: () => [...pending.keys()].forEach(flushEdits), WRITE_ROLES, READ_ALL_ROLES };
 };

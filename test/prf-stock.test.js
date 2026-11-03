@@ -8,6 +8,7 @@ process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';
 process.env.RETENTION = 'off';
 process.env.PRF_DRAFT_EDIT_WINDOW_MS = '0';
+process.env.PRF_CONTROLLED_DRUGS = 'on'; // the witness rules are tested here; off is tested in prf-governance
 
 const app = require('../server.js');
 const BASE = `http://127.0.0.1:${process.env.PORT}`;
