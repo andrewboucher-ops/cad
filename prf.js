@@ -732,7 +732,7 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
 
   /** Who the privacy notice names. Public: patients read it without signing in. */
   route('GET', '/api/prf-privacy', null, () => ({
-    controller: process.env.PRF_CONTROLLER || 'Echelon',
+    controller: process.env.PRF_CONTROLLER || 'Echelon Command Information Centre Ltd',
     email: process.env.PRF_PRIVACY_EMAIL || null,
     safeguarding_email: process.env.PRF_SAFEGUARDING_EMAIL || null,
     retention: { adult_years: RETAIN_ADULT_YEARS, child_until_age: RETAIN_CHILD_UNTIL_AGE },

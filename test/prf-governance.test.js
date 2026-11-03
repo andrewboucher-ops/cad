@@ -10,7 +10,7 @@ process.env.PERSISTENCE = 'off';
 process.env.RETENTION = 'off';
 process.env.PRF_DRAFT_EDIT_WINDOW_MS = '0';
 delete process.env.PRF_CONTROLLED_DRUGS;
-process.env.PRF_CONTROLLER = 'Specialist Solutions Group Ltd';
+process.env.PRF_CONTROLLER = 'Echelon Command Information Centre Ltd';
 process.env.PRF_PRIVACY_EMAIL = 'privacy@example.org';
 
 const app = require('../server.js');
@@ -99,7 +99,7 @@ test('a PRF inside its retention period cannot be disposed of', async () => {
 test('the privacy notice details are public', async () => {
   const r = await call('GET', '/api/prf-privacy');
   assert.strictEqual(r.status, 200);
-  assert.strictEqual(r.body.controller, 'Specialist Solutions Group Ltd');
+  assert.strictEqual(r.body.controller, 'Echelon Command Information Centre Ltd');
   assert.strictEqual(r.body.email, 'privacy@example.org');
   assert.deepStrictEqual(r.body.retention, { adult_years: 8, child_until_age: 25 });
 });
