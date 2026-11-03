@@ -1749,23 +1749,6 @@ route('GET', '/api/auth/microsoft/session', null, ({ query, req }) => {
 });
 route('GET', '/api/me', ALL, ({ user }) => publicUser(user));
 
-/** The separate PRF system's own base URL — set once by an admin, read
- * by anyone (the "Create full PRF" button on a patient-care report needs
- * it client-side, and that button is visible to whoever can already read
- * that report, not just admins). Empty until configured, which simply
- * hides the button rather than erroring. */
-route('GET', '/api/settings/prf-link', ALL, () => {
-  const row = db.ui_settings.find((x) => x.key === 'prf_link');
-  return { base_url: row && row.settings ? row.settings.base_url || '' : '' };
-});
-route('PUT', '/api/settings/prf-link', ADMIN, ({ body }) => {
-  let row = db.ui_settings.find((x) => x.key === 'prf_link');
-  if (!row) { row = { key: 'prf_link', settings: {} }; db.ui_settings.push(row); }
-  row.settings.base_url = String(body.base_url || '').trim().slice(0, 300).replace(/\/+$/, '');
-  store.flushNow();
-  return { base_url: row.settings.base_url };
-});
-
 /** Incident types offered on New job. The box stays free text — this is
  * only the drop-down of suggestions — so editing the list never breaks a
  * job that already has some other type. Supervisors and admins edit it. */

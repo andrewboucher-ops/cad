@@ -194,6 +194,7 @@ const TABS = [
           ["first", "First Name", "text"],
           ["last", "Last Name", "text"],
           ["dob", "Date of Birth", "date", { after: () => ageText() }],
+          ["ageApprox", "Approximate Age (if DOB unknown)", "number"],
           ["sex", "Sex", "pick"],
           ["health", "NHS Number", "text", { hint: 1 }],
           ["weight", "Weight (kg)", "number"],
@@ -519,7 +520,7 @@ function timesPanel() {
   const cad =
     rec && rec.job_id
       ? `<p><button type="button" id="cadPull">Update from CCCS job</button> <span class="muted" id="cadNote"></span></p>`
-      : `<p class="muted">Not linked to a CCCS job, so times are entered by hand.</p>`;
+      : `<p class="muted">Not linked to a CCCS job, so times are entered by hand.</p><p class="start-row"><select id="linkJob"><option value="">Choose a job…</option>${myJobs.map((j) => `<option value="${j.id}">${esc(j.reference)} · ${esc(j.incident_type || "")} · ${esc(j.location || "")}</option>`).join("")}</select><button type="button" id="linkJobBtn">Link to job</button></p>`;
   return `<div class="times">${rows}</div>${issues.size ? `<p class="blocked">Times in red are out of sequence.</p>` : ""}${cad}`;
 }
 
@@ -592,7 +593,9 @@ function txPanel() {
   const inp = (i, k, val, ph, type = "text") => `<input data-tx="${i}" data-tkey="${k}" type="${type}" value="${esc(val)}" placeholder="${ph}">`;
   const rows = log
     .map((x, i) => {
-      const list = (x.kind === "Medication" ? choice.txMedication : choice.txProcedure).concat(x.name && !(x.kind === "Medication" ? choice.txMedication : choice.txProcedure).includes(x.name) ? [x.name] : []);
+      const list = (x.kind === "Medication" ? choice.txMedication : choice.txProcedure).concat(
+        x.name && !(x.kind === "Medication" ? choice.txMedication : choice.txProcedure).includes(x.name) ? [x.name] : [],
+      );
       const st = x.stock;
       // Once an entry has taken something out of stock it stays on the record;
       // a mistake is marked "entered in error" and corrected on the Stock page.
@@ -600,7 +603,11 @@ function txPanel() {
         ? `<div class="stockline${x.error ? " struck" : ""}">✓ ${esc(st.quantity)} × ${esc(st.item)} from ${esc(st.location)}${st.batches && st.batches.length ? ` · batch ${esc(st.batches.join(", "))}` : ""}${st.witness ? ` · witness ${esc(st.witness)}` : ""}</div>`
         : `<button type="button" class="small" data-txstock="${i}">Take from stock…</button>`;
       const errorCell = x.error ? `<div class="errline">Entered in error: ${esc(x.error)}</div>` : "";
-      const end = st ? (x.error ? "" : `<button type="button" class="small" data-txerror="${i}" title="Mark entered in error">Error…</button>`) : `<button data-txremove="${i}" aria-label="Remove entry">×</button>`;
+      const end = st
+        ? x.error
+          ? ""
+          : `<button type="button" class="small" data-txerror="${i}" title="Mark entered in error">Error…</button>`
+        : `<button data-txremove="${i}" aria-label="Remove entry">×</button>`;
       return `<tr class="${x.error ? "in-error" : ""}"><td>${inp(i, "time", x.time, "", "time")}</td><td><b>${esc(x.kind)}</b></td><td>${sel(i, "name", list, x.name)}</td><td>${x.kind === "Medication" ? inp(i, "dose", x.dose, "Dose") + sel(i, "route", choice.route, x.route) : sel(i, "success", choice.success, x.success)}</td><td>${sel(i, "response", choice.response, x.response)}</td><td>${inp(i, "doneBy", x.doneBy, "Done by")}</td><td>${inp(i, "complications", x.complications, "Complications / notes")}</td><td>${end}</td></tr><tr class="stockrow${x.error ? " in-error" : ""}"><td></td><td colspan="7">${stockCell}${errorCell}</td></tr>`;
     })
     .join("");
@@ -709,7 +716,7 @@ function refreshChrome() {
   q("#pcr").textContent = rec ? rec.pcr : "";
   q("#patient").textContent = [v("first"), v("last")].filter(Boolean).join(" ") || "Unknown patient";
   q("#patientMeta").textContent = [ageText(), v("sex"), v("patientNo") && v("patientOf") ? `Patient ${v("patientNo")} of ${v("patientOf")}` : ""].filter(Boolean).join(" · ");
-  q("#jobref").textContent = rec && rec.job_reference ? rec.job_reference : "No linked job";
+  q("#jobref").textContent = [rec && rec.job_reference ? rec.job_reference : "No linked job", rec && rec.source_ref ? `from ${rec.source_ref}` : ""].filter(Boolean).join(" · ");
   q("#complete").textContent = Math.round(completion()) + "%";
   qa("[data-after]").forEach((el) => {
     const f = TABS.flatMap((t) => t.subs.flatMap((x) => x.fields || [])).find(([k]) => k === el.dataset.after);
@@ -901,6 +908,7 @@ function bind() {
   qa("[data-goto]").forEach((b) => (b.onclick = () => goTo(b.dataset.goto)));
   if (q("#openFinalise")) q("#openFinalise").onclick = openFinalise;
   if (q("#cadPull")) q("#cadPull").onclick = pullFromCad;
+  if (q("#linkJobBtn")) q("#linkJobBtn").onclick = linkJob;
   // Signatures
   qa("[data-sigclear]").forEach(
     (b) =>
@@ -1009,7 +1017,11 @@ function drawStockItems(prefer) {
   const list = (kind === "medicine" ? supplies.medicines : supplies.items).map((it) => ({ ...it, here: (it.levels.find((l) => l.location_id === loc) || {}).qty || 0 }));
   list.sort((a, b) => (b.here > 0) - (a.here > 0) || a.label.localeCompare(b.label));
   q("#stItem").innerHTML = list.length
-    ? list.map((it) => `<option value="${it.id}" ${it.here ? "" : "disabled"}>${esc(it.label)} · ${it.here ? `${it.here} ${esc(it.unit || "")} here` : "none here"}${it.controlled ? " · CD" : ""}</option>`).join("")
+    ? list
+        .map(
+          (it) => `<option value="${it.id}" ${it.here ? "" : "disabled"}>${esc(it.label)} · ${it.here ? `${it.here} ${esc(it.unit || "")} here` : "none here"}${it.controlled ? " · CD" : ""}</option>`,
+        )
+        .join("")
     : `<option value="">Nothing of this kind in CCCS stock</option>`;
   const p = prefer && list.find((it) => it.here && it.label.toLowerCase().includes(String(prefer).toLowerCase().split(" ")[0]));
   const first = p || list.find((it) => it.here);
@@ -1123,6 +1135,23 @@ async function pullFromCad() {
     toast(e.message);
   }
 }
+// Link a PRF started without a job (e.g. a walk-up casualty control logged later).
+let myJobs = [];
+async function linkJob() {
+  const id = q("#linkJob").value;
+  if (!id) return toast("Choose the job first");
+  try {
+    if (!(await saveNow()) && dirty) throw new Error("Couldn't save the latest changes first");
+    const r = await api("POST", `/api/prfs/${encodeURIComponent(rec.pcr)}/link`, { job_id: Number(id) });
+    rec = r;
+    s = r.data;
+    render();
+    checkCad();
+    toast(`Linked to ${r.job_reference}`);
+  } catch (e) {
+    toast(e.message);
+  }
+}
 async function checkCad() {
   if (!rec || !rec.job_id) return (q("#cadState").textContent = "");
   try {
@@ -1199,6 +1228,7 @@ async function loadHome() {
     const [drafts, finals, jobs] = await Promise.all([api("GET", "/api/prfs?status=DRAFT"), api("GET", "/api/prfs?status=FINAL" + scope), api("GET", "/api/prfs/jobs")]);
     q("#drafts").innerHTML = drafts.length ? drafts.map(rowHtml).join("") : "<p class='muted'>No drafts.</p>";
     q("#finals").innerHTML = finals.length ? finals.map(rowHtml).join("") : "<p class='muted'>No finalised PRFs yet.</p>";
+    myJobs = jobs;
     q("#jobSelect").innerHTML =
       `<option value="">No linked job</option>` + jobs.map((j) => `<option value="${j.id}">${esc(j.reference)} · ${esc(j.incident_type || "")} · ${esc(j.location || "")}</option>`).join("");
     qa("[data-open]").forEach((x) => (x.onclick = () => openPrf(x.dataset.open).catch((e) => toast(e.message))));
@@ -1439,3 +1469,11 @@ qa("[data-close]").forEach((b) => (b.onclick = () => q("#" + b.dataset.close).cl
 
 show("home");
 loadHome();
+// Opened from a first aid report or a link: /prf.html?pcr=PRF-…
+{
+  const pcr = new URLSearchParams(location.search).get("pcr");
+  if (pcr) {
+    history.replaceState(null, "", "/prf.html");
+    openPrf(pcr).catch((e) => toast(e.message));
+  }
+}
