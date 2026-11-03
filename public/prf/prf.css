@@ -590,6 +590,12 @@ button.danger {
     display: none !important;
   }
 }
-#auditBody td small {
-  word-break: break-all;
+table.record.audit th {
+  width: auto;
+}
+table.record.audit td:first-child {
+  white-space: nowrap;
+}
+table.record.audit td:last-child {
+  width: 50%;
 }

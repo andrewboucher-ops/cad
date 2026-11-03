@@ -621,12 +621,17 @@ const LABELS = {
   monitoring: "Ongoing Monitoring",
   handover: "Handover Notes",
 };
+// Show datetime-local / date values the UK way on the record.
+function readable(x) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)(?:T(\d\d:\d\d))?$/.exec(String(x));
+  return m ? `${m[3]}/${m[2]}/${m[1]}${m[4] ? " " + m[4] : ""}` : x;
+}
 let shown = null;
 function recordHtml(r) {
   const d = r.data || {};
   const rows = Object.entries(LABELS)
     .filter(([k]) => String(d[k] ?? "").trim())
-    .map(([k, l]) => `<tr><th>${l}</th><td>${esc(d[k])}</td></tr>`)
+    .map(([k, l]) => `<tr><th>${l}</th><td>${esc(readable(d[k]))}</td></tr>`)
     .join("");
   const vit = (d.vitals || []).filter((x) => Object.values(x).some(Boolean));
   const vitHtml = vit.length
@@ -681,11 +686,19 @@ async function showAudit() {
     "GET",
     `/api/prf-audit?pcr=${encodeURIComponent(shown.pcr)}`,
   );
+  // Readable detail: changed field names as a list, hashes shortened.
+  const detail = (d) => {
+    if (!d) return "";
+    if (d.fields) return "Fields changed: " + d.fields.join(", ");
+    return Object.entries(d)
+      .map(([k, x]) => `${k.replace(/_/g, " ")}: ${typeof x === "string" && /^[0-9a-f]{64}$/.test(x) ? x.slice(0, 12) + "…" : x}`)
+      .join(" · ");
+  };
   q("#auditBody").innerHTML =
-    `<table class="record"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th></tr></thead><tbody>${rows
+    `<table class="record audit"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th></tr></thead><tbody>${rows
       .map(
         (a) =>
-          `<tr><td>${esc(fmt(a.at))}</td><td>${esc(a.username)}</td><td>${esc(a.action)}</td><td><small>${esc(a.detail && a.detail.fields ? a.detail.fields.join(", ") : JSON.stringify(a.detail || {}))}</small></td></tr>`,
+          `<tr><td>${esc(fmt(a.at))}</td><td>${esc(a.username)}</td><td>${esc(a.action)}</td><td><small>${esc(detail(a.detail))}</small></td></tr>`,
       )
       .join("")}</tbody></table>`;
   q("#audit").showModal();
