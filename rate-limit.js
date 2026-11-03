@@ -22,7 +22,7 @@
 
 const WINDOW_MS = 60 * 1000;
 const LIMITS = { user: 600, auth: 120, ip: 600 };
-const AUTH_PATH_RE = /^\/api\/auth\/(login|microsoft\/(login|callback|session)|session-cookie)$/;
+const AUTH_PATH_RE = /^\/api\/auth\/(login|microsoft\/(status|login|callback|session)|session-cookie)$/;
 
 function createRateLimiter({ limits = LIMITS, windowMs = WINDOW_MS, now = Date.now, log = console.warn } = {}) {
   const buckets = new Map();
