@@ -479,6 +479,7 @@ const CCCSForms = (() => {
         ${s.severity ? `<span class="pri pri-${SEVERITY_PRI[s.severity] || 'ROUTINE'}" style="font-size:10px">${esc(s.severity)}</span>` : ''}
         ${s.visibility === 'RESTRICTED' ? '<span class="pri pri-RED" style="font-size:10px">R</span>' : ''}
         ${s.status === 'ACTIONED' ? `<span style="font-size:10px;font-weight:700;color:${OUTCOME_COLOUR[s.outcome] || 'inherit'}">${esc(OUTCOME_LABEL[s.outcome] || s.outcome)}</span>` : ''}
+        ${s.status === 'UNDER_INVESTIGATION' || s.status === 'RETURNED_FOR_CORRECTION' ? `<span style="font-size:10px;font-weight:700;color:var(--on-task)" title="${esc(s.investigator ? `Investigator: ${s.investigator}` : '')}">${s.status === 'RETURNED_FOR_CORRECTION' ? 'RETURNED' : 'INVESTIGATING'}${s.open_actions ? ` · ${s.open_actions} action${s.open_actions === 1 ? '' : 's'}` : ''}</span>` : ''}
         <span class="dim" style="font-size:11px">${esc(fmt(s.submitted_at))}</span>
       </div>`).join('') : `<p class="dim">${esc(empty)}</p>`;
     host.querySelectorAll('[data-ff-open]').forEach((r) => (r.onclick = () => onOpen(Number(r.dataset.ffOpen))));

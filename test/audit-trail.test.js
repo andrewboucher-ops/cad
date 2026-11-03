@@ -51,3 +51,33 @@ test('the window held before the table existed is carried into it once', () => {
     second.close();
   } finally { cleanup(file); }
 });
+
+test('the trail is hash-chained: edits are refused, and an edit made behind CCCS\'s back is detected', () => {
+  const file = tmpFile();
+  try {
+    const store = createStore({ audit_logs: [] }, {}, { file });
+    store.load();
+    for (let i = 1; i <= 20; i++) store.appendAudit({ id: i, type: 'job.created', summary: `JOB ${i}`, data: { n: i }, at: new Date().toISOString() });
+    const ok = store.verifyAudit();
+    assert.strictEqual(ok.ok, true);
+    assert.strictEqual(ok.checked, 20);
+    assert.match(ok.head_hash, /^[0-9a-f]{64}$/);
+    store.close();
+
+    const { DatabaseSync } = require('node:sqlite');
+    const raw = new DatabaseSync(file);
+    assert.throws(() => raw.exec("UPDATE audit_events SET summary = 'JOB X' WHERE id = 5"), /append-only/);
+    assert.throws(() => raw.exec('DELETE FROM audit_events WHERE id = 5'), /cannot be deleted/);
+    // Someone with the file drops the trigger and edits a row anyway.
+    raw.exec('DROP TRIGGER audit_events_no_update');
+    raw.exec("UPDATE audit_events SET summary = 'JOB X' WHERE id = 5");
+    raw.close();
+
+    const again = createStore({ audit_logs: [] }, {}, { file });
+    again.load();
+    const bad = again.verifyAudit();
+    assert.strictEqual(bad.ok, false);
+    assert.strictEqual(bad.broken_at.id, 5);
+    again.close();
+  } finally { cleanup(file); }
+});

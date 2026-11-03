@@ -40,6 +40,7 @@
     <div class="body">
       <div class="rp-filters" id="statusChips">
         <button class="btn" data-status="OPEN">Open</button>
+        <button class="btn" data-status="INVESTIGATING">Investigating</button>
         <button class="btn" data-status="ACTIONED">Actioned</button>
         <button class="btn" data-status="ALL">All</button>
       </div>
@@ -68,6 +69,7 @@
 <script src="/app.js"></script>
 <script src="/nav.js"></script>
 <script src="/forms-ui.js"></script>
+<script src="/investigation-ui.js"></script>
 <script>
 const { api, el, esc } = CCCS;
 // Every staff role: a safeguarding lead may be an officer. What each person
@@ -95,11 +97,18 @@ async function openReport(id) {
   let sub;
   try { sub = await api('GET', `/api/form-submissions/${id}`); }
   catch (e) { el('#detail').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
-  el('#detail').innerHTML = '<div id="viewHost"></div><div id="actionHost"></div><div id="shareHost"></div>';
+  el('#detail').innerHTML = '<div id="viewHost"></div><div id="invHost"></div><div id="actionHost"></div><div id="shareHost"></div>';
   CCCSForms.view(el('#viewHost'), sub, { onChanged: () => refresh() });
   history.replaceState(null, '', `?id=${id}`);
-  if (isAdmin && sub.status === 'OPEN') paintAction(sub);
-  if (isAdmin && sub.status === 'ACTIONED') paintDelete(sub);
+  const investigated = Boolean(sub.investigation && sub.investigation.started_at);
+  if (isAdmin || sub.can_investigate || sub.can_see_trail || investigated) {
+    CCCSInvestigation.render(el('#invHost'), sub, { isAdmin, reload: () => { refresh(); openReport(sub.id); } });
+  }
+  if (investigated && !sub.can_investigate && sub.investigation.restricted_to_investigators) {
+    el('#invHost').innerHTML = `<p class="dim" style="font-size:12.5px;margin-top:10px">An investigation into this report is in progress${sub.investigation.investigator ? `, led by ${esc(sub.investigation.investigator)}` : ''}. Its notes are only visible to the people running it.</p>`;
+  }
+  if (isAdmin && ['OPEN', 'UNDER_INVESTIGATION', 'RETURNED_FOR_CORRECTION'].includes(sub.status)) paintAction(sub, investigated);
+  if (isAdmin && sub.status === 'ACTIONED' && !investigated) paintDelete(sub);
   if (isAdmin) CCCSForms.shareEditor(el('#shareHost'), sub, { onChanged: () => { refresh(); openReport(sub.id); } });
 }
 
@@ -128,15 +137,16 @@ function paintDelete(sub) {
 
 /** The admin's review: an outcome and feedback. The server records it,
  * takes the report out of the open queue and tells whoever filed it. */
-function paintAction(sub) {
+function paintAction(sub, investigated) {
   el('#actionHost').innerHTML = `
     <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
-      <label>Action this report</label>
+      <label>${investigated ? 'Sign off the investigation and close' : 'Action this report'}</label>
+      ${investigated ? '<p class="dim" style="font-size:12px;margin:4px 0">Needs findings, a root cause, no open actions, and a closing summary below. Your name and the time are recorded as the sign-off.</p>' : ''}
       <div style="display:flex;gap:8px;margin:6px 0">
         <select id="aOutcome" style="flex:1"><option value="APPROVED">Approve</option><option value="REJECTED">Reject</option><option value="NOTED">Note — no further action</option></select>
       </div>
-      <textarea id="aFeedback" rows="3" placeholder="Feedback for ${esc(sub.submitted_by)} (required to approve or reject)" style="width:100%;box-sizing:border-box"></textarea>
-      <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="aGo">Send feedback &amp; close</button></div>
+      <textarea id="aFeedback" rows="3" placeholder="${investigated ? 'Closing summary — what was found and what was done (the officer sees this)' : `Feedback for ${esc(sub.submitted_by)} (required to approve or reject)`}" style="width:100%;box-sizing:border-box"></textarea>
+      <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="aGo">${investigated ? 'Sign off &amp; close' : 'Send feedback &amp; close'}</button></div>
       <p class="dim" style="font-size:12px;margin:6px 0 0">${sub.visibility === 'RESTRICTED'
         ? 'Restricted: the filer is told it was reviewed and reads your feedback on the report itself — it is not sent as a message.'
         : 'The filer gets your feedback as a message and a notification.'}</p>
