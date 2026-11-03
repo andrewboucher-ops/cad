@@ -52,7 +52,7 @@ after(() => { app.server.closeAllConnections?.(); app.server.close(); });
 
 const fileIncident = (token = danT) => call('POST', '/api/form-submissions', {
   definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
-  values: { occurred_at: new Date().toISOString(), severity: 'MEDIUM', incident_type: 'Assault', description: 'Visitor pushed an officer at the gate.', officer_signature: sig('Dan Whitfield') },
+  values: { occurred_at: new Date().toISOString(), severity: 'MEDIUM', incident_type: 'Assault', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Visitor pushed an officer at the gate.', officer_signature: sig('Dan Whitfield') },
 }, token);
 const sub = (id) => app.db.form_submissions.find((s) => s.id === id);
 
@@ -148,7 +148,7 @@ test('a RESTRICTED report: investigator must hold a grant, and no content reache
   const d = def('safeguarding');
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: d.id, subject_type: 'JOB', subject_id: job.id,
-    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
+    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
   }, danT);
   assert.equal(filed.status, 201, JSON.stringify(filed.body));
   const id = filed.body.id;
