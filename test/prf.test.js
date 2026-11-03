@@ -30,6 +30,7 @@ const COMPLETE = {
   assessment: 'Alert, minor graze', disposition: 'Treated and released', destination: 'Discharged on scene',
   capacity: 'Has capacity', consent: 'Verbal consent', safeguarding: 'No', narrative: 'Cleaned and dressed.',
   first: 'Test', last: 'Patient', health: '9434765919',
+  signatures: { clinician: { data: 'data:image/png;base64,iVBORw0KGgo=', name: 'Dan Whitfield', role: 'Clinician', at: '2026-11-03T12:30:00Z' } },
   vitals: [{ hr: '72', rr: '16', spo2: '98', o2: 'Air', sys: '120', acvpu: 'A', temp: '37' }],
 };
 
@@ -106,8 +107,15 @@ test('draft lifecycle: author-only edits, version check, server-side completenes
   put = await call('PUT', `/api/prfs/${pcr}`, { version: put.body.version, data: { ...COMPLETE, disposition: 'Refused care' } }, danT);
   const refusal = await call('POST', `/api/prfs/${pcr}/finalise`, { attest: true }, danT);
   assert.ok(refusal.body.missing.some((m) => m.label === 'Refusal of Care Details'));
+  assert.ok(refusal.body.missing.some((m) => m.key === 'sig_patient'), 'a refusal needs the patient signature or a reason');
+  // Warnings (e.g. times out of sequence) never block finalising.
+  put = await call('PUT', `/api/prfs/${pcr}`, { version: put.body.version, data: { ...COMPLETE, signatures: {} } }, danT);
+  assert.ok((await call('POST', `/api/prfs/${pcr}/finalise`, { attest: true }, danT)).body.missing.some((m) => m.label === 'Clinician Signature'));
+  // Signature images must be PNG data URLs; anything else is dropped.
+  put = await call('PUT', `/api/prfs/${pcr}`, { version: put.body.version, data: { ...COMPLETE, signatures: { clinician: { data: 'javascript:alert(1)' } } } }, danT);
+  assert.strictEqual((await call('GET', `/api/prfs/${pcr}`, undefined, danT)).body.data.signatures?.clinician, undefined);
 
-  put = await call('PUT', `/api/prfs/${pcr}`, { version: put.body.version, data: COMPLETE }, danT);
+  put = await call('PUT', `/api/prfs/${pcr}`, { version: put.body.version, data: { ...COMPLETE, scene: '2026-11-03T12:20', dispatch: '2026-11-03T12:30' } }, danT);
   const fin = await call('POST', `/api/prfs/${pcr}/finalise`, { attest: true }, danT);
   assert.strictEqual(fin.status, 200, JSON.stringify(fin.body));
   assert.strictEqual(fin.body.status, 'FINAL');
@@ -138,6 +146,33 @@ test('draft lifecycle: author-only edits, version check, server-side completenes
   assert.ok((await call('GET', '/api/prfs', undefined, danT)).body.some((r) => r.pcr === pcr));
   assert.ok(!(await call('GET', '/api/prfs', undefined, ellieT)).body.some((r) => r.pcr === pcr));
   assert.ok((await call('GET', '/api/prfs?scope=all', undefined, supT)).body.some((r) => r.pcr === pcr));
+});
+
+test('a PRF is prefilled with CCCS job times, numbered per patient, and can be re-pulled from the job', async () => {
+  const a = (await call('POST', '/api/prfs', { job_id: jobId }, danT)).body;
+  assert.ok(a.data.dispatch, 'dispatch time comes from the job');
+  assert.ok(a.data.patientNo >= 1);
+  const b = (await call('POST', '/api/prfs', { job_id: jobId }, danT)).body;
+  assert.strictEqual(Number(b.data.patientNo), Number(a.data.patientNo) + 1);
+  const cad = await call('GET', `/api/prfs/${a.pcr}/cad`, undefined, danT);
+  assert.strictEqual(cad.status, 200);
+  assert.strictEqual(cad.body.facts.address, '12 Market Square');
+  assert.strictEqual((await call('GET', `/api/prfs/${a.pcr}/cad`, undefined, ellieT)).status, 403);
+});
+
+test('a draft can be transferred to a colleague, who then owns it', async () => {
+  const { pcr } = (await call('POST', '/api/prfs', {}, danT)).body;
+  const people = (await call('GET', '/api/prfs/colleagues', undefined, danT)).body;
+  const ellie = people.find((p) => p.name === 'Ellie Marsh' || /marsh/i.test(p.name));
+  assert.ok(ellie, JSON.stringify(people));
+  assert.ok(!people.some((p) => /whitfield/i.test(p.name)), 'you cannot transfer to yourself');
+  assert.strictEqual((await call('POST', `/api/prfs/${pcr}/transfer`, { user_id: ellie.id }, ellieT)).status, 403);
+  const t = await call('POST', `/api/prfs/${pcr}/transfer`, { user_id: ellie.id }, danT);
+  assert.strictEqual(t.status, 200, JSON.stringify(t.body));
+  assert.strictEqual((await call('GET', `/api/prfs/${pcr}`, undefined, ellieT)).status, 200);
+  assert.strictEqual((await call('PUT', `/api/prfs/${pcr}`, { data: { chief: 'Fall' } }, danT)).status, 403);
+  const rows = (await call('GET', `/api/prf-audit?pcr=${pcr}`, undefined, supT)).body;
+  assert.ok(rows.some((r) => r.action === 'transferred'));
 });
 
 test('a draft can be discarded by its author, and that is audited', async () => {

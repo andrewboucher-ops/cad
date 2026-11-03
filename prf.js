@@ -37,7 +37,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { checkRecord } = require('./public/prf/rules.js');
+const { blocking } = require('./public/prf/rules.js');
 
 const WRITE_ROLES = ['FIELD_USER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
 const READ_ALL_ROLES = ['SUPERVISOR', 'SYSTEM_ADMIN'];
@@ -50,16 +50,29 @@ const MAX_VITAL_SETS = 50;
 // Fields a PRF may hold. Anything else in a PUT body is dropped, so the record
 // can't become a place to stash arbitrary data.
 const FIELDS = [
-  'event', 'callType', 'mpds', 'dispatch', 'scene', 'contact', 'address', 'municipality', 'incidentPostcode', 'sceneNotes',
-  'first', 'last', 'dob', 'health', 'sex', 'weight', 'home', 'postal',
-  'chief', 'onset', 'priority', 'statement', 'airway', 'breathing', 'circulation', 'loc', 'impression',
-  'symptoms', 'allergies', 'meds', 'history', 'intake', 'events',
-  'assessment', 'pain', 'treatment', 'response',
-  'disposition', 'destination', 'transportPriority', 'depart', 'arrive', 'transfer', 'receiver', 'available',
-  'capacity', 'consent', 'refusal', 'safeguarding', 'safeguardingDetails',
-  'narrative', 'monitoring', 'handover',
+  // Incident
+  'event', 'callReceived', 'callType', 'mpds', 'patientNo', 'patientOf', 'callsign', 'vehicle', 'crew',
+  'address', 'address2', 'roomLocation', 'municipality', 'incidentPostcode', 'locationType', 'sceneNotes',
+  'destination', 'destinationType', 'destinationReason', 'responseMode', 'transportMode', 'transportPriority',
+  'dispatch', 'enRoute', 'scene', 'contact', 'depart', 'arrive', 'transfer', 'available',
+  // Patient ID
+  'first', 'last', 'dob', 'sex', 'health', 'weight', 'home', 'postal', 'contactName', 'contactRel', 'contactPhone', 'gp',
+  // Primary
+  'primaryTime', 'catHaem', 'airway', 'breathing', 'circulation', 'loc', 'chief', 'onset', 'priority', 'statement',
+  // History
+  'pqrsP', 'pqrsQ', 'pqrsR', 'pqrsS', 'pqrsT', 'events', 'intake', 'allergyNotes', 'meds', 'medsStatus', 'history', 'social', 'alerts',
+  // Vital signs: scores
+  'pain', 'glucose', 'gcsE', 'gcsV', 'gcsM', 'fast',
+  // Assess / Tx, Outcomes, Care Plan, Review
+  'assessment', 'disposition', 'receiver', 'handover', 'capacity', 'consent', 'refusal', 'safeguarding', 'safeguardingDetails',
+  'impression', 'narrative', 'concerns', 'monitoring', 'unableToSign',
 ];
-const VITAL_KEYS = ['time', 'hr', 'rr', 'sys', 'dia', 'spo2', 'o2', 'acvpu', 'gcs', 'temp'];
+const LIST_FIELDS = ['precautions', 'sceneFindings', 'allergies', 'pmh'];
+const VITAL_KEYS = ['time', 'hr', 'rr', 'sys', 'dia', 'spo2', 'o2', 'acvpu', 'gcs', 'temp', 'doneBy'];
+const TX_KEYS = ['time', 'kind', 'name', 'dose', 'route', 'doneBy', 'success', 'response', 'complications'];
+const INJURY_TYPES = ['Wound', 'Bruise', 'Burn', 'Deformity', 'Pain', 'Swelling', 'Other'];
+const MAX_SIGNATURE = 200000; // a signature PNG as a data URL; well above a real one
+const SIG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 
 function canonical(value) {
   // Stable JSON (sorted keys) so the same content always hashes the same.
@@ -73,6 +86,7 @@ function rowHash(r) {
   return sha256(JSON.stringify([r.prev_hash, r.at, r.user_id, r.username, r.role, r.action, r.pcr, r.detail, r.ip]));
 }
 
+const short = (x, n = 200) => String(x).slice(0, n);
 function cleanData(input) {
   const out = {};
   const src = input && typeof input === 'object' ? input : {};
@@ -80,14 +94,54 @@ function cleanData(input) {
     if (src[k] === undefined || src[k] === null) continue;
     out[k] = String(src[k]).slice(0, MAX_FIELD);
   }
+  for (const k of LIST_FIELDS) if (Array.isArray(src[k])) out[k] = src[k].slice(0, 60).map((x) => short(x, 120));
   if (Array.isArray(src.vitals)) {
     out.vitals = src.vitals.slice(0, MAX_VITAL_SETS).map((v) => {
       const row = {};
-      for (const k of VITAL_KEYS) if (v && v[k] !== undefined && v[k] !== null && v[k] !== '') row[k] = String(v[k]).slice(0, 20);
+      for (const k of VITAL_KEYS) if (v && v[k] !== undefined && v[k] !== null && v[k] !== '') row[k] = short(v[k], 60);
       return row;
     });
   }
-  if (Array.isArray(src.treatments)) out.treatments = src.treatments.slice(0, 50).map((t) => String(t).slice(0, 100));
+  // Symptoms: { name: 'yes' | 'no' } — 'no' is a pertinent negative (asked, absent).
+  if (src.symptoms && typeof src.symptoms === 'object') {
+    out.symptoms = {};
+    for (const [k, x] of Object.entries(src.symptoms).slice(0, 150)) if (x === 'yes' || x === 'no') out.symptoms[short(k, 80)] = x;
+  }
+  // Examination by body system: { system: { status, note } }.
+  if (src.exam && typeof src.exam === 'object') {
+    out.exam = {};
+    for (const [k, x] of Object.entries(src.exam).slice(0, 30)) {
+      if (!x || typeof x !== 'object') continue;
+      const e = {};
+      if (x.status) e.status = short(x.status, 40);
+      if (x.note) e.note = short(x.note, 2000);
+      if (e.status || e.note) out.exam[short(k, 60)] = e;
+    }
+  }
+  if (Array.isArray(src.txLog)) {
+    out.txLog = src.txLog.slice(0, 100).map((x) => {
+      const row = {};
+      for (const k of TX_KEYS) if (x && x[k] !== undefined && x[k] !== null && x[k] !== '') row[k] = short(x[k], k === 'complications' ? 2000 : 200);
+      return row;
+    });
+  }
+  if (Array.isArray(src.injuries)) {
+    out.injuries = src.injuries.slice(0, 60).filter((x) => x && Number.isFinite(+x.x) && Number.isFinite(+x.y)).map((x) => ({
+      view: x.view === 'back' ? 'back' : 'front',
+      x: Math.max(0, Math.min(100, Math.round(+x.x * 10) / 10)),
+      y: Math.max(0, Math.min(100, Math.round(+x.y * 10) / 10)),
+      type: INJURY_TYPES.includes(x.type) ? x.type : 'Other',
+      ...(x.note ? { note: short(x.note, 500) } : {}),
+    }));
+  }
+  if (src.signatures && typeof src.signatures === 'object') {
+    out.signatures = {};
+    for (const who of ['clinician', 'patient']) {
+      const g = src.signatures[who];
+      if (!g || typeof g.data !== 'string' || g.data.length > MAX_SIGNATURE || !SIG_RE.test(g.data)) continue;
+      out.signatures[who] = { data: g.data, name: short(g.name || '', 120), role: short(g.role || '', 60), at: short(g.at || '', 40) };
+    }
+  }
   return out;
 }
 
@@ -174,6 +228,27 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
   });
   const full = (r) => ({ ...summary(r), author_user_id: r.author_user_id, version: r.version, data: r.data, addenda: r.addenda || [], content_hash: r.content_hash || null, finalised_by: r.finalised_by || null });
 
+  // datetime-local inputs want wall-clock time, not UTC.
+  const local = (iso) => (iso ? new Date(iso).toLocaleString('sv-SE', { timeZone: PRF_TIMEZONE }).replace(' ', 'T').slice(0, 16) : undefined);
+  /** What CCCS knows about a job, in PRF field terms. Used to prefill a new
+   * PRF and to offer later updates (times move on after the PRF is started). */
+  function jobFacts(job) {
+    const f = { event: job.reference };
+    if (job.location) f.address = String(job.location);
+    if (job.created_at) f.callReceived = local(job.created_at);
+    if (job.dispatched_at || job.created_at) f.dispatch = local(job.dispatched_at || job.created_at);
+    if (job.en_route_at) f.enRoute = local(job.en_route_at);
+    if (job.on_scene_at) f.scene = local(job.on_scene_at);
+    if (job.transporting_at) f.depart = local(job.transporting_at);
+    if (job.completed_at) f.available = local(job.completed_at);
+    const assigns = db.job_assignments.filter((a) => a.job_id === job.id);
+    const callsigns = [...new Set(assigns.map((a) => (db.callsigns.find((c) => c.id === a.callsign_id) || {}).name).filter(Boolean))];
+    const crew = [...new Set(assigns.map((a) => (db.personnel.find((p) => p.id === a.personnel_id) || {}).name).filter(Boolean))];
+    if (callsigns.length) f.callsign = callsigns.join(', ');
+    if (crew.length) f.crew = crew.join(', ');
+    return f;
+  }
+
   /** Jobs the user could attach a PRF to: their own assignments, or anything recent for supervisors. */
   route('GET', '/api/prfs/jobs', WRITE_ROLES, ({ user }) => {
     const cutoff = Date.now() - 2 * 86400000;
@@ -183,6 +258,11 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
       .slice(-50).reverse()
       .map((j) => ({ id: j.id, reference: j.reference, incident_type: j.incident_type, location: j.location, status: j.status, created_at: j.created_at }));
   });
+
+  /** People a PRF can be handed to: anyone else who can write PRFs. */
+  route('GET', '/api/prfs/colleagues', WRITE_ROLES, ({ user }) => db.users
+    .filter((u) => u.id !== user.id && WRITE_ROLES.includes(u.role) && !u.disabled)
+    .map((u) => ({ id: u.id, name: u.display_name || u.username, role: u.role })));
 
   route('GET', '/api/prfs', WRITE_ROLES, ({ query, user }) => {
     let list = readsAll(user) && query.get('scope') === 'all' ? db.prfs : db.prfs.filter((r) => r.author_user_id === user.id);
@@ -199,15 +279,12 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
       assertJobAccess(job, user);
     }
     const now = new Date().toISOString();
-    const data = {};
+    const data = job ? jobFacts(job) : {};
     if (job) {
-      // Prefill what CCCS already knows, so the crew doesn't retype it.
-      data.event = job.reference;
-      if (job.location) data.address = String(job.location);
-      // datetime-local inputs want wall-clock time, not UTC.
-      const local = (iso) => (iso ? new Date(iso).toLocaleString('sv-SE', { timeZone: PRF_TIMEZONE }).replace(' ', 'T').slice(0, 16) : undefined);
-      if (job.dispatched_at || job.created_at) data.dispatch = local(job.dispatched_at || job.created_at);
-      if (job.on_scene_at) data.scene = local(job.on_scene_at);
+      // Patient X of Y: each casualty at a job gets their own PRF.
+      const n = db.prfs.filter((x) => x.job_id === job.id).length + 1;
+      data.patientNo = String(n);
+      data.patientOf = String(n);
     }
     const r = {
       id: nextId('prfs'),
@@ -256,11 +333,39 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     return { ok: true };
   });
 
+  /** The linked job's current facts, so the form can offer to bring times up to date. */
+  route('GET', '/api/prfs/:pcr/cad', WRITE_ROLES, ({ params, user }) => {
+    const r = findPrf(params.pcr);
+    assertRead(r, user);
+    const job = r.job_id ? db.jobs.find((x) => x.id === r.job_id) : null;
+    if (!job) return { job: null, facts: {} };
+    return { job: { id: job.id, reference: job.reference, status: job.status }, facts: jobFacts(job) };
+  });
+
+  /** Hand a draft to another crew member, e.g. when another unit takes over care. */
+  route('POST', '/api/prfs/:pcr/transfer', WRITE_ROLES, ({ params, body, user, req }) => {
+    const r = findPrf(params.pcr);
+    assertAuthorDraft(r, user);
+    const to = db.users.find((u) => u.id === Number(body.user_id));
+    if (!to || !WRITE_ROLES.includes(to.role) || to.disabled) throw httpError(400, 'user_id must be someone who can write PRFs');
+    if (to.id === user.id) throw httpError(400, 'that PRF is already yours');
+    flushEdits(r.pcr);
+    const from = r.author_name;
+    r.author_user_id = to.id;
+    r.author_name = to.display_name || to.username;
+    r.version++;
+    r.updated_at = new Date().toISOString();
+    audit(user, 'transferred', r.pcr, { from_user_id: user.id, to_user_id: to.id, to: r.author_name }, req);
+    logEvent('prf.transferred', `PRF ${r.pcr} handed from ${from} to ${r.author_name}`, { pcr: r.pcr });
+    durable();
+    return full(r);
+  });
+
   route('POST', '/api/prfs/:pcr/finalise', WRITE_ROLES, ({ params, body, user, req }) => {
     const r = findPrf(params.pcr);
     assertAuthorDraft(r, user);
     if (body.attest !== true) throw httpError(400, 'the author must confirm the record is accurate (attest: true)');
-    const gaps = checkRecord(r.data).filter((c) => !c.ok);
+    const gaps = blocking(r.data);
     if (gaps.length) return { __status: 422, __body: { error: 'PRF is incomplete', missing: gaps } };
     flushEdits(r.pcr);
     const now = new Date().toISOString();
