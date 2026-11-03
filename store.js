@@ -26,6 +26,13 @@ try { ({ DatabaseSync } = require('node:sqlite')); }
 catch { DatabaseSync = null; }
 
 const FLUSH_MS = Number(process.env.FLUSH_MS || 1000);
+const crypto = require('crypto');
+/** The audit trail's hash chain — see the audit_events table below. */
+const AUDIT_MIN_KEEP_DAYS = 30;
+const GENESIS = '0'.repeat(64);
+function chainHash(prev, id, type, summary, data, at) {
+  return crypto.createHash('sha256').update(`${prev}\n${JSON.stringify([id, type, summary, data, at])}`).digest('hex');
+}
 
 /** Tables held as whole-collection JSON documents. */
 const TABLES = [
@@ -108,7 +115,7 @@ function createStore(db, seq, opts = {}) {
   if (!enabled) {
     if (!DatabaseSync) console.warn('[store] node:sqlite unavailable — running in memory only, state is lost on restart');
     return { load: () => false, flushNow: () => {}, close: () => {}, enabled: false, file: null, getMeta: () => null, setMeta: () => {},
-      appendAudit: () => {}, queryAudit: null, pruneAudit: () => 0 };
+      appendAudit: () => null, queryAudit: null, pruneAudit: () => 0, verifyAudit: null };
   }
 
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -141,6 +148,28 @@ function createStore(db, seq, opts = {}) {
     );
     CREATE INDEX IF NOT EXISTS audit_events_at ON audit_events(at);
   `);
+  // Tamper evidence. Each row carries the SHA-256 of the row before it plus
+  // its own content (chain_seq is insertion order), so an edited, inserted or
+  // removed row breaks the chain at that point — verifyAudit() says where.
+  // The triggers stop CCCS itself (or anyone using its database through
+  // ordinary SQL) changing a row, or deleting one younger than 30 days; the
+  // retention sweep only ever removes old rows from the front of the chain.
+  // Someone with shell access to the file can still drop the triggers, which
+  // is why the chain exists: they cannot then rewrite history unnoticed
+  // unless they also recompute every later hash, and the head hash shown in
+  // Admin changes whenever that happens.
+  const auditCols = new Set(sql.prepare('PRAGMA table_info(audit_events)').all().map((c) => c.name));
+  if (!auditCols.has('chain_seq')) sql.exec('ALTER TABLE audit_events ADD COLUMN chain_seq INTEGER');
+  if (!auditCols.has('prev_hash')) sql.exec('ALTER TABLE audit_events ADD COLUMN prev_hash TEXT');
+  if (!auditCols.has('hash')) sql.exec('ALTER TABLE audit_events ADD COLUMN hash TEXT');
+  sql.exec(`
+    CREATE INDEX IF NOT EXISTS audit_events_chain ON audit_events(chain_seq);
+    CREATE TRIGGER IF NOT EXISTS audit_events_no_update BEFORE UPDATE ON audit_events
+      BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
+    CREATE TRIGGER IF NOT EXISTS audit_events_no_recent_delete BEFORE DELETE ON audit_events
+      WHEN old.at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${AUDIT_MIN_KEEP_DAYS} days')
+      BEGIN SELECT RAISE(ABORT, 'audit_events younger than ${AUDIT_MIN_KEEP_DAYS} days cannot be deleted'); END;
+  `);
 
   const put = sql.prepare('INSERT INTO collections(name,payload,updated_at) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at');
   const get = sql.prepare('SELECT payload FROM collections WHERE name = ?');
@@ -148,7 +177,11 @@ function createStore(db, seq, opts = {}) {
   const allCounters = sql.prepare('SELECT name, value FROM counters');
   const putMeta = sql.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
   const getMetaStmt = sql.prepare('SELECT value FROM meta WHERE key = ?');
-  const putAudit = sql.prepare('INSERT OR IGNORE INTO audit_events(id,type,summary,data,at) VALUES(?,?,?,?,?)');
+  const putAudit = sql.prepare('INSERT OR IGNORE INTO audit_events(id,type,summary,data,at,chain_seq,prev_hash,hash) VALUES(?,?,?,?,?,?,?,?)');
+  const chainHead = sql.prepare('SELECT chain_seq, hash FROM audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq DESC LIMIT 1');
+  const chainRows = sql.prepare('SELECT id, type, summary, data, at, chain_seq, prev_hash, hash FROM audit_events WHERE chain_seq IS NOT NULL ORDER BY chain_seq');
+  const countUnchained = sql.prepare('SELECT COUNT(*) AS n FROM audit_events WHERE chain_seq IS NULL');
+  let head = chainHead.get() || { chain_seq: 0, hash: GENESIS };
   const pruneAuditStmt = sql.prepare('DELETE FROM audit_events WHERE at < ?');
 
   /** Written straight away rather than on the flush timer: an audit row is
@@ -157,11 +190,32 @@ function createStore(db, seq, opts = {}) {
   function appendAudit(ev) {
     // Before load() the id counter isn't restored yet, so an id could collide.
     if (!loaded) return;
-    putAudit.run(ev.id, ev.type, ev.summary, JSON.stringify(ev.data || {}), ev.at);
+    const data = JSON.stringify(ev.data || {});
+    const seqNo = head.chain_seq + 1;
+    const hash = chainHash(head.hash, ev.id, ev.type, ev.summary, data, ev.at);
+    const r = putAudit.run(ev.id, ev.type, ev.summary, data, ev.at, seqNo, head.hash, hash);
+    if (Number(r.changes)) head = { chain_seq: seqNo, hash };
+    return hash;
+  }
+  /** Walks the chain from its oldest surviving row. The first row's
+   * prev_hash is taken as given (older rows may have been removed by the
+   * retention sweep); every row after must link to the one before and hash
+   * to what it says. */
+  function verifyAudit() {
+    let prev = null, checked = 0, first = null, last = null;
+    for (const r of chainRows.iterate()) {
+      if (prev !== null && r.prev_hash !== prev) return { ok: false, checked, broken_at: { id: r.id, chain_seq: r.chain_seq, at: r.at, reason: 'does not link to the row before it (a row was removed or inserted)' } };
+      if (chainHash(r.prev_hash, r.id, r.type, r.summary, r.data, r.at) !== r.hash) return { ok: false, checked, broken_at: { id: r.id, chain_seq: r.chain_seq, at: r.at, reason: 'its content no longer matches its hash (the row was edited)' } };
+      if (!first) first = { id: r.id, at: r.at };
+      last = { id: r.id, at: r.at };
+      prev = r.hash; checked++;
+    }
+    return { ok: true, checked, first, last, head_hash: prev, unchained_legacy_rows: Number(countUnchained.get().n) };
   }
   /** Search the whole trail, newest last, the same shape logEvent() makes. */
-  function queryAudit({ type, q, since, until, personnelId, userId, limit = 200 } = {}) {
+  function queryAudit({ type, q, since, until, personnelId, userId, submissionId, limit = 200 } = {}) {
     const where = []; const args = [];
+    if (submissionId) { where.push("json_extract(data, '$.submission_id') = ?"); args.push(Number(submissionId)); }
     // Subject access: every row about one person, by the ids logEvent() stamps.
     if (personnelId || userId) {
       const who = [];
@@ -177,7 +231,12 @@ function createStore(db, seq, opts = {}) {
     const rows = sql.prepare(`SELECT id, type, summary, data, at FROM audit_events ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id DESC LIMIT ${n}`).all(...args);
     return rows.reverse().map((r) => ({ id: r.id, type: r.type, summary: r.summary, data: JSON.parse(r.data), at: r.at }));
   }
-  function pruneAudit(cutoffIso) { return Number(pruneAuditStmt.run(cutoffIso).changes || 0); }
+  function pruneAudit(cutoffIso) {
+    // Never ask for what the delete trigger would refuse: that aborts the
+    // whole statement, so a short RETAIN_AUDIT_DAYS would prune nothing.
+    const floor = new Date(Date.now() - AUDIT_MIN_KEEP_DAYS * 86400000 - 60000).toISOString();
+    return Number(pruneAuditStmt.run(cutoffIso < floor ? cutoffIso : floor).changes || 0);
+  }
 
   const lastWritten = new Map();
   let timer = null;
@@ -270,7 +329,7 @@ function createStore(db, seq, opts = {}) {
   process.once('SIGINT', () => { close(); process.exit(0); });
   process.once('SIGTERM', () => { close(); process.exit(0); });
 
-  return { load, flushNow, close, enabled: true, file, getMeta, setMeta, appendAudit, queryAudit, pruneAudit };
+  return { load, flushNow, close, enabled: true, file, getMeta, setMeta, appendAudit, queryAudit, pruneAudit, verifyAudit };
 }
 
-module.exports = { createStore, TABLES, CAPS };
+module.exports = { createStore, TABLES, CAPS, chainHash };

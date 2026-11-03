@@ -95,7 +95,10 @@ module.exports = function registerGdpr({ route, httpError, ADMIN, db, logEvent, 
     removed.shift_assignments = assignmentsBefore - db.shift_assignments.length;
 
     before = cutoff(RETENTION_PEOPLE.forms);
-    const goneForms = db.form_submissions.filter((s) => s.status !== 'OPEN' && older(s.submitted_at, before));
+    // Only closed reports, counted from when they were closed: a report still
+    // under investigation (or returned for correction) is live, and one
+    // signed off years after it was filed keeps its full period from then.
+    const goneForms = db.form_submissions.filter((s) => s.status === 'ACTIONED' && older(s.actioned_at || s.submitted_at, before));
     for (const s of goneForms) rmDir(path.join(UPLOADS_DIR, 'forms', String(s.id)));
     db.form_submissions = db.form_submissions.filter((s) => !goneForms.includes(s));
     removed.form_submissions = goneForms.length;

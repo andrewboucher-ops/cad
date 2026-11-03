@@ -509,7 +509,12 @@ test('a report can be claimed for investigation, worked on, and closed without e
 
   // Closed straight from UNDER_INVESTIGATION — the pre-existing /action
   // route, now also reachable from here, not just OPEN.
-  const closed = await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT);
+  // An investigation is signed off, not just noted: it needs a root cause
+  // and a closing summary first.
+  assert.equal((await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT)).status, 409, 'no root cause yet');
+  await call('PATCH', `/api/form-submissions/${id}/investigation`, { root_cause: 'Passer-by, no intent to enter.' }, adminT);
+  assert.equal((await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT)).status, 400, 'no closing summary');
+  const closed = await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED', feedback: 'No further action.' }, adminT);
   assert.equal(closed.status, 200, JSON.stringify(closed.body));
   assert.equal(closed.body.status, 'ACTIONED');
   assert.equal((await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT)).status, 409, 'already actioned');

@@ -271,7 +271,10 @@ const findMdt = (v) =>
 const findPersonnel = (v) =>
   db.personnel.find((p) => p.id === Number(v) || (p.employee_no && p.employee_no === String(v))) || null;
 
-function logEvent(type, summary, data = {}) {
+/** opts.broadcast false: written to the trail but not pushed to the live
+ * event feed — for "who opened this report" rows, which are a record, not
+ * news, and would bury the control room's feed in noise. */
+function logEvent(type, summary, data = {}, opts = {}) {
   const ev = { id: nextId('audit_logs'), type, summary, data, at: new Date().toISOString() };
   db.audit_logs.push(ev);
   // Memory keeps the recent window the live screens use; the full trail is
@@ -280,7 +283,7 @@ function logEvent(type, summary, data = {}) {
   try { store.appendAudit(ev); } catch (e) { console.error('[cccs] audit write failed:', e.message); }
   // Control only: the log carries failed-login usernames, sickness leave,
   // applicant names and raw alarm payloads — not for every officer's phone.
-  broadcast('event.logged', ev, { controlOnly: true });
+  if (opts.broadcast !== false) broadcast('event.logged', ev, { controlOnly: true });
   return ev;
 }
 
@@ -4314,6 +4317,16 @@ route('POST', '/api/messages/:id/read', ALL, ({ params, user }) => {
 });
 
 // Events / audit
+/* Checks the audit trail's hash chain end to end (store.js verifyAudit):
+ * ok, how many rows, and the head hash — note it down somewhere outside
+ * CCCS from time to time; if it ever stops matching a later check's chain,
+ * the trail was rewritten. The check itself is logged. */
+route('GET', '/api/events/verify', ADMIN, ({ user }) => {
+  if (!store.verifyAudit) return { ok: null, note: 'persistence is off, so there is no stored trail to check' };
+  const result = store.verifyAudit();
+  logEvent('audit.verified', `AUDIT TRAIL CHECKED BY ${user.username}: ${result.ok ? `INTACT (${result.checked} ROWS)` : `BROKEN AT ROW ${result.broken_at.id}`}`, { by: user.id, ok: result.ok });
+  return { ...result, checked_at: new Date().toISOString() };
+});
 route('GET', '/api/events', CONTROL, ({ query }) => {
   // With persistence on, search the whole trail rather than the in-memory window.
   if (store.queryAudit) {
@@ -5953,6 +5966,7 @@ const forms = require('./routes-forms.js')({
   assertJobAccess, assertVisitAccess, pushToUsers, pushToRoles, CONTROL, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
   applyVehicleReport, reapplyVehicleReport, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html), publicBaseUrl: PUBLIC_BASE_URL,
   vehicleKit: (id) => inventory.vehicleKit(id), assetEvent: (e) => db.asset_events.push({ id: nextId('asset_events'), ...e }),
+  queryAudit: (o) => (store.queryAudit ? store.queryAudit(o) : db.audit_logs.filter((e) => e.data && e.data.submission_id === Number(o.submissionId))),
 });
 
 // Client portal — see routes-client.js for the trust-boundary invariants.
