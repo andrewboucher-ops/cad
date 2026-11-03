@@ -186,11 +186,14 @@ if (ssoCode) {
 }
 
 // Only offer the Microsoft button when the server has SSO configured.
-CCCS.api('GET', '/api/auth/microsoft/status').then((s) => {
-  if (!s.enabled) return;
-  el('#ms-sso').hidden = false;
-  el('#ms-go').addEventListener('click', () => { location.href = '/api/auth/microsoft/login'; });
-}).catch(() => {});
+// A failed check (a busy server, a dropped connection) is retried a few
+// times rather than silently leaving the button hidden for the whole visit.
+el('#ms-go').addEventListener('click', () => { location.href = '/api/auth/microsoft/login'; });
+(function checkMicrosoft(attempt) {
+  CCCS.api('GET', '/api/auth/microsoft/status').then((s) => {
+    if (s.enabled) el('#ms-sso').hidden = false;
+  }).catch(() => { if (attempt < 5) setTimeout(() => checkMicrosoft(attempt + 1), 3000 * attempt); });
+})(1);
 
 async function submit() {
   el('#err').textContent = '';

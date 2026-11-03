@@ -24,6 +24,7 @@ test('anonymous traffic filling the address bucket does not block signing in', (
   assert.equal(rl.check({ pathname: '/api/public/applications', ip: '203.0.113.5' }), false);
   assert.equal(rl.check({ pathname: '/api/auth/microsoft/callback', ip: '203.0.113.5' }), true);
   assert.equal(rl.check({ pathname: '/api/auth/login', ip: '203.0.113.5' }), true);
+  assert.equal(rl.bucketFor({ pathname: '/api/auth/microsoft/status', ip: 'x' }).key, 'auth:x', 'the sign-in button check is a sign-in route');
   assert.equal(rl.check({ pathname: '/api/auth/microsoft/login', ip: '203.0.113.5' }), false, 'sign-in still has its own cap');
 });
 
