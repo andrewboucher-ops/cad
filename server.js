@@ -49,6 +49,7 @@ const PRF_INTEGRATION_SECRET = process.env.PRF_INTEGRATION_SECRET || '';
 const { CHIEF_COMPLAINTS, CHIEF_COMPLAINT_CODES, complaintLabel } = require('./complaint-list.js');
 const { screeningStatus } = require('./routes-screening.js');
 const { verifyMicrosoftIdToken } = require('./msauth.js');
+const { createRateLimiter } = require('./rate-limit.js');
 const webpush = require('./webpush.js');
 const sms = require('./sms.js');
 const dvla = require('./dvla.js');
@@ -1163,9 +1164,16 @@ function idempotencyPut(key, status, body) {
  * sender wrote. */
 const TRUSTED_PROXIES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1',
   ...String(process.env.TRUSTED_PROXIES || '').split(',').map((x) => x.trim()).filter(Boolean)]);
+const warnedUntrustedProxy = new Set();
 function clientIp(req) {
   const remote = String(req.socket.remoteAddress || '');
-  if (!TRUSTED_PROXIES.has(remote) && !TRUSTED_PROXIES.has(remote.replace(/^::ffff:/, ''))) return remote || 'unknown';
+  if (!TRUSTED_PROXIES.has(remote) && !TRUSTED_PROXIES.has(remote.replace(/^::ffff:/, ''))) {
+    if (req.headers['x-forwarded-for'] && !warnedUntrustedProxy.has(remote) && warnedUntrustedProxy.size < 20) {
+      warnedUntrustedProxy.add(remote);
+      console.warn(`[cccs] requests from ${remote} carry X-Forwarded-For but ${remote} isn't in TRUSTED_PROXIES, so everyone behind it is treated as one address. If it is your reverse proxy, add TRUSTED_PROXIES=${remote.replace(/^::ffff:/, '')} to the env file.`);
+    }
+    return remote || 'unknown';
+  }
   const real = String(req.headers['x-real-ip'] || '').trim();
   const fwd = String(req.headers['x-forwarded-for'] || '').split(',').map((x) => x.trim()).filter(Boolean);
   return real || fwd[fwd.length - 1] || remote || 'unknown';
@@ -1203,16 +1211,11 @@ function integrationAddressAllowed(pathname, ip) {
   return INTEGRATION_ALLOWED.some((rule) => addressMatches(String(ip), rule));
 }
 
-const rate = new Map();
-function rateLimit(ip) {
-  const now = Date.now();
-  const win = rate.get(ip) || { start: now, count: 0 };
-  if (now - win.start > 60000) { win.start = now; win.count = 0; }
-  win.count++; rate.set(ip, win);
-  return win.count <= 600;
-}
+// Signed-in requests are counted per user, sign-in routes get their own
+// per-address bucket, everything else per address: see rate-limit.js.
+const rateLimiter = createRateLimiter();
 
-/* Per-account login lockout — on top of the general per-IP rateLimit()
+/* Per-account login lockout — on top of the general rate limiter
  * above, which caps request volume but does nothing to stop a slow,
  * distributed credential-stuffing run against one known username. Keyed
  * by username, not IP, and only ever populated for a username that
@@ -1382,7 +1385,17 @@ const requestHandler = async (req, res) => {
 
   if (url.pathname.startsWith('/api/')) {
     const ip = clientIp(req);
-    if (!rateLimit(ip)) return send(429, { error: 'rate limit exceeded' });
+    const rateUser = authFrom(req, url);
+    if (!rateLimiter.check({ pathname: url.pathname, ip, userId: rateUser ? rateUser.id : null })) {
+      // A browser landing here from Microsoft gets the sign-in page back with
+      // a message, not a bare JSON error.
+      if (req.method === 'GET' && /^\/api\/auth\/microsoft\/(login|callback)$/.test(url.pathname)) {
+        const msg = encodeURIComponent('Too many sign-in attempts from this connection. Wait a minute and try again.');
+        res.writeHead(302, { location: `/index.html?sso_error=${msg}`, 'cache-control': 'no-store', 'retry-after': '60' });
+        return res.end();
+      }
+      return send(429, { error: 'rate limit exceeded' }, { 'retry-after': '60' });
+    }
     if (!integrationAddressAllowed(url.pathname, ip)) {
       logEvent('integration.address_refused', `INTEGRATION CALL REFUSED FROM ${ip} (${url.pathname.replace(/\/[0-9a-f]{16,}(?=\/|$)/gi, '/…')})`);
       return send(403, { error: 'not allowed from this address' });
