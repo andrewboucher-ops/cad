@@ -11,6 +11,7 @@
 #   BACKUP_KEEP           how many archives to keep    (14)
 #   BACKUP_KEY_FILE       passphrase file, root only   (/etc/cccs/backup.key)
 #   BACKUP_RCLONE_REMOTE  e.g. onedrive:cccs-backups   (unset = stays on this box)
+#   BACKUP_REMOTE_KEEP_DAYS  delete remote copies older than this (90; 0 = keep all)
 #
 # Restore:
 #   openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:/etc/cccs/backup.key \
@@ -32,6 +33,7 @@ DEST=$(cfg BACKUP_DIR /var/backups/cccs)
 KEEP=$(cfg BACKUP_KEEP 14)
 KEY_FILE=$(cfg BACKUP_KEY_FILE /etc/cccs/backup.key)
 REMOTE=$(cfg BACKUP_RCLONE_REMOTE "")
+REMOTE_KEEP_DAYS=$(cfg BACKUP_REMOTE_KEEP_DAYS 90)
 DATA_DIR="$(dirname "$DATA_FILE")"
 STAMP=$(date +%Y%m%d-%H%M%S)
 ENC_ARGS=(-aes-256-cbc -pbkdf2 -iter 200000 -salt)
@@ -89,6 +91,11 @@ echo "Backed up to $OUT ($(du -h "$OUT" | cut -f1))"
 if [ -n "$REMOTE" ]; then
   if command -v rclone >/dev/null; then
     rclone copy "$OUT" "$REMOTE" && echo "Copied off this server to $REMOTE"
+    # Old copies hold records that may since have been disposed of at the end
+    # of their retention period, so they don't stay off-site for ever either.
+    if [ "$REMOTE_KEEP_DAYS" -gt 0 ] 2>/dev/null; then
+      rclone delete --min-age "${REMOTE_KEEP_DAYS}d" --include 'cccs-*.tar.gz*' "$REMOTE" && echo "Removed remote copies older than $REMOTE_KEEP_DAYS days"
+    fi
   else
     echo "WARNING: BACKUP_RCLONE_REMOTE is set but rclone is not installed — NOT copied off this server." >&2
     exit 2
