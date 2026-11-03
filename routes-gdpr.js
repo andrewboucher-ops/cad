@@ -24,6 +24,17 @@
  *   RETAIN_FORMS_DAYS         2190   form submissions (incident reports,
  *                                    checks) and their photos: 6 years for a
  *                                    personal injury or contract claim.
+ *   RETAIN_SAFEGUARDING_DAYS  9125   the exception to the line above: a
+ *                                    safeguarding report about a child (or
+ *                                    where the officer wasn't sure), one
+ *                                    alleging harm by staff or someone in a
+ *                                    position of trust, and a use-of-force
+ *                                    report on someone who seemed under 18.
+ *                                    25 years: records guidance keeps a
+ *                                    child's file to their 25th birthday,
+ *                                    and a staff allegation to retirement
+ *                                    or 10 years. CCCS holds no date of
+ *                                    birth, so a flat 25 years covers both.
  *   RETAIN_CLIENT_REQUESTS_DAYS 730  closed client portal requests.
  *   RETAIN_EMERGENCIES_DAYS    730   resolved emergency activations and
  *                                    call-me requests, same as jobs.
@@ -50,9 +61,20 @@ const RETENTION_PEOPLE = {
   leavers: days('RETAIN_LEAVERS_DAYS', 2555),
   timesheets: days('RETAIN_TIMESHEETS_DAYS', 2190),
   forms: days('RETAIN_FORMS_DAYS', 2190),
+  safeguarding: days('RETAIN_SAFEGUARDING_DAYS', 9125),
   client_requests: days('RETAIN_CLIENT_REQUESTS_DAYS', 730),
   emergencies: days('RETAIN_EMERGENCIES_DAYS', 730),
 };
+
+/** Reports kept for RETAIN_SAFEGUARDING_DAYS instead of RETAIN_FORMS_DAYS
+ * (see the header). Read from the answers, so it follows the report, not
+ * whatever the form looks like today. */
+function isLongRetentionReport(s) {
+  const v = s.values || {};
+  if (s.definition_key === 'safeguarding') return v.at_risk_group !== 'Adult at risk' || v.alleged_is_staff === true;
+  if (s.definition_key === 'use-of-force') return v.subject_vulnerability === 'Under 18';
+  return false;
+}
 
 // Never in an export: these prove identity or open something.
 const SECRET_KEYS = new Set(['password_hash', 'welfare_pin_hash', 'welfare_checkcall_token', 'token', 'ical_token', 'calendar_token', 'access_token', 'refresh_token', 'secret']);
@@ -98,7 +120,8 @@ module.exports = function registerGdpr({ route, httpError, ADMIN, db, logEvent, 
     // Only closed reports, counted from when they were closed: a report still
     // under investigation (or returned for correction) is live, and one
     // signed off years after it was filed keeps its full period from then.
-    const goneForms = db.form_submissions.filter((s) => s.status === 'ACTIONED' && older(s.actioned_at || s.submitted_at, before));
+    const beforeLong = cutoff(RETENTION_PEOPLE.safeguarding);
+    const goneForms = db.form_submissions.filter((s) => s.status === 'ACTIONED' && older(s.actioned_at || s.submitted_at, isLongRetentionReport(s) ? beforeLong : before));
     for (const s of goneForms) rmDir(path.join(UPLOADS_DIR, 'forms', String(s.id)));
     db.form_submissions = db.form_submissions.filter((s) => !goneForms.includes(s));
     removed.form_submissions = goneForms.length;
