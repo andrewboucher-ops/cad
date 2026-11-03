@@ -687,5 +687,12 @@ module.exports = function registerInventoryRoutes({
     if (a.check_interval_days && !a.next_check_due_at) a.next_check_due_at = addDays(a.check_interval_days);
   }
 
-  return { mainStore, firstDueDates, vehicleKit };
+  // Used by prf.js: a treatment recorded on a PRF consumes stock through
+  // the same function as POST /api/stock/:id/use, so the ledger, the batch
+  // rules and the logging are identical.
+  const prfSupplies = {
+    useInTreatment, findItem, describeLocation, label, publicMovement,
+    levels: (itemId) => batches(itemId),
+  };
+  return { mainStore, firstDueDates, vehicleKit, prfSupplies };
 };

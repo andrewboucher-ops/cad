@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Patient Report Forms · CCCS</title>
+    <link rel="stylesheet" href="/prf/prf.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <b>+</b
+        ><span><strong>Patient Report Forms</strong><small>CCCS · <span id="who"></span></small></span>
+      </div>
+      <div class="status">
+        <i id="dot"></i><span id="connection">Connected</span
+        ><a class="hbtn" href="/officer.html">Officer console</a
+        ><button id="signOut">Sign out</button>
+      </div>
+    </header>
+
+    <!-- List of PRFs -->
+    <main id="home" class="home">
+      <div class="form-section">
+        <div class="section-title">Start a PRF</div>
+        <div class="start-row">
+          <label for="jobSelect">Link to job</label>
+          <select id="jobSelect"></select>
+          <button id="newPrf" class="primary">New PRF</button>
+        </div>
+        <p class="muted">Only jobs you're assigned to are listed. A PRF can also be started without a job, for example for a walk-up casualty.</p>
+      </div>
+      <div class="form-section">
+        <div class="section-title">My drafts</div>
+        <div id="drafts" class="records-list"></div>
+      </div>
+      <div class="form-section">
+        <div class="section-title">
+          Finalised PRFs
+          <span id="scopeWrap" class="scope" hidden
+            ><label><input type="checkbox" id="scope" /> Show everyone's</label
+            ><button id="auditVerify" class="small">Verify audit trail</button></span
+          >
+        </div>
+        <div id="finals" class="records-list"></div>
+      </div>
+    </main>
+
+    <!-- Editor: section tabs along the bottom, sub-sections across the top -->
+    <div id="editor" class="app" hidden>
+      <div class="casebar">
+        <div class="case">
+          <b id="pcr"></b><span><strong id="patient">Unknown patient</strong> <small id="patientMeta"></small></span><span id="jobref"></span>
+          <button id="cadState" class="cad" title="Compare with the CCCS job"></button>
+        </div>
+        <div class="case-actions">
+          <div class="meter"><b id="complete">0%</b><small>complete</small></div>
+          <button id="save">Save</button
+          ><button id="reviewBtn" class="success">Review</button
+          ><button id="transferBtn">Transfer</button
+          ><button id="home-btn">All PRFs</button
+          ><button id="discard" class="danger">Discard</button>
+        </div>
+      </div>
+      <main>
+        <div class="page-head">
+          <div>
+            <h1 id="title"></h1>
+            <p id="help"></p>
+          </div>
+        </div>
+        <nav id="subtabs" class="subtabs"></nav>
+        <section id="panel"></section>
+      </main>
+      <nav id="tabbar" class="tabbar"></nav>
+    </div>
+
+    <dialog id="picker">
+      <div class="dialog-head">
+        <h2 id="pickTitle">Select</h2>
+        <button data-close="picker">×</button>
+      </div>
+      <input id="search" placeholder="Search list..." />
+      <div id="items" class="items"></div>
+      <div class="dialog-actions"><button data-close="picker">Cancel</button></div>
+    </dialog>
+
+    <dialog id="transferDialog">
+      <div class="dialog-head">
+        <h2>Transfer this PRF</h2>
+        <button data-close="transferDialog">×</button>
+      </div>
+      <p>Hand the draft to a colleague, for example when they take over care. They become its author and it leaves your drafts. The audit trail records the transfer.</p>
+      <label for="transferTo">Transfer to</label>
+      <select id="transferTo"></select>
+      <div class="dialog-actions">
+        <button data-close="transferDialog">Cancel</button
+        ><button id="transferYes" class="primary">Transfer</button>
+      </div>
+    </dialog>
+
+    <dialog id="stockDialog">
+      <div class="dialog-head">
+        <h2>Take from stock</h2>
+        <button data-close="stockDialog">×</button>
+      </div>
+      <p class="muted" id="stEntry"></p>
+      <div class="stock-form">
+        <label for="stKind">Type</label>
+        <select id="stKind"><option value="medicine">Medicine (medication register)</option><option value="stock">Consumable (stock)</option></select>
+        <label for="stLoc">Taken from</label>
+        <select id="stLoc"></select>
+        <label for="stItem">Item</label>
+        <select id="stItem"></select>
+        <label for="stQty">Quantity</label>
+        <div class="input-row"><input id="stQty" type="number" min="0.01" step="any" inputmode="decimal" /><span id="stUnit" class="muted"></span></div>
+        <div id="stDoseRow" class="stock-sub"><label for="stDose">Dose given</label><input id="stDose" placeholder="e.g. 1 g" /></div>
+        <div id="stWitnessRow" class="stock-sub" hidden>
+          <p class="blocked">Controlled drug: a colleague must witness this with their own CCCS sign-in.</p>
+          <label for="stWitness">Witness username</label><input id="stWitness" autocomplete="off" />
+          <label for="stWitnessPw">Witness password</label><input id="stWitnessPw" type="password" autocomplete="off" />
+        </div>
+      </div>
+      <p class="muted">This comes off CCCS stock against this PRF number straight away. If it's wrong, mark the entry "entered in error" and correct the stock on the Stock or Medication page.</p>
+      <div class="dialog-actions">
+        <button data-close="stockDialog">Cancel</button
+        ><button id="stTake" class="primary">Take from stock</button>
+      </div>
+    </dialog>
+
+    <dialog id="txErrorDialog">
+      <div class="dialog-head">
+        <h2>Entered in error</h2>
+        <button data-close="txErrorDialog">×</button>
+      </div>
+      <p>The entry stays on the record, struck through, with your reason. Stock isn't put back automatically: return or adjust it on the Stock or Medication page.</p>
+      <label for="txErrorReason">Reason</label>
+      <textarea id="txErrorReason" rows="3"></textarea>
+      <div class="dialog-actions">
+        <button data-close="txErrorDialog">Cancel</button
+        ><button id="txErrorYes" class="danger">Mark entered in error</button>
+      </div>
+    </dialog>
+
+    <dialog id="review">
+      <div class="dialog-head">
+        <h2>Finalise PRF</h2>
+        <button data-close="review">×</button>
+      </div>
+      <div id="reviewBody"></div>
+      <label class="attest"
+        ><input id="attest" type="checkbox" /> I confirm this record is accurate and complete to the best of my knowledge.</label
+      >
+      <div class="dialog-actions">
+        <button data-close="review">Return to form</button
+        ><button id="submit" class="success">Finalise PRF</button>
+      </div>
+    </dialog>
+
+    <dialog id="discardDialog">
+      <div class="dialog-head">
+        <h2>Discard this draft?</h2>
+        <button data-close="discardDialog">×</button>
+      </div>
+      <p>The draft is deleted. The audit trail keeps a record that it existed and was discarded.</p>
+      <div class="dialog-actions">
+        <button data-close="discardDialog">Keep it</button
+        ><button id="discardYes" class="danger">Discard</button>
+      </div>
+    </dialog>
+
+    <dialog id="record" class="record-dialog">
+      <div class="dialog-head">
+        <h2>Patient Report Form</h2>
+        <button data-close="record">×</button>
+      </div>
+      <div id="recordBody"></div>
+      <div class="addendum-form">
+        <label for="addendumText">Add an addendum (the record itself is locked)</label>
+        <textarea id="addendumText" rows="3"></textarea>
+        <button id="addAddendum">Add addendum</button>
+      </div>
+      <div class="dialog-actions">
+        <button data-close="record">Close</button
+        ><button id="auditBtn">Audit trail</button
+        ><button id="printRecord" class="primary">Print / Save as PDF</button>
+      </div>
+    </dialog>
+
+    <dialog id="audit" class="record-dialog">
+      <div class="dialog-head">
+        <h2>Audit trail</h2>
+        <button data-close="audit">×</button>
+      </div>
+      <div id="auditBody"></div>
+      <div class="dialog-actions"><button data-close="audit">Close</button></div>
+    </dialog>
+
+    <div id="toast"></div>
+    <script src="/app.js"></script>
+    <script src="/prf/uk.js"></script>
+    <script src="/prf/rules.js"></script>
+    <script src="/prf/prf.js"></script>
+  </body>
+</html>

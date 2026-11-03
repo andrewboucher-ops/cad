@@ -115,6 +115,8 @@ const db = {
   training_courses: [], training_records: [],
   leave_requests: [],
   ui_settings: [],
+  // Patient report forms and their own hash-chained audit trail — see prf.js.
+  prfs: [], prf_audit: [],
   stock_locations: [], stock_subcategories: [], gas_cylinders: [], cylinder_events: [], medicines: [], med_movements: [], asset_events: [], stocktakes: [], rentals: [],
   agreements: [], invoices: [],
   payroll_runs: [], payslips: [],
@@ -5910,7 +5912,14 @@ const inventory = require('./routes-inventory.js')({
 require('./routes-cylinders.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent });
 
 // Medication and the controlled drugs register — see routes-medication.js.
-require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow(), prfIntegrationSecret: PRF_INTEGRATION_SECRET });
+const medication = require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow(), prfIntegrationSecret: PRF_INTEGRATION_SECRET });
+
+// Patient report forms — routes, access rules and the clinical audit trail
+// live in prf.js. A treatment or medicine recorded on a PRF is taken out of
+// stock through the two modules above, against the PRF number.
+const prf = require('./prf.js')({ route, db, nextId, httpError, logEvent, store, assertJobAccess, stock: inventory.prfSupplies, medication: medication.prfSupplies,
+  // forms is registered further down; only called once requests arrive.
+  canReadSubmission: (sub, user) => forms.canRead(sub, user) });
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
 // BS 7858 screening record and sign-off; the SIA ACS complaints log.
@@ -6805,4 +6814,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, prf, start, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };

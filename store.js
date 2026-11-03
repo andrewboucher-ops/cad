@@ -29,6 +29,7 @@ const FLUSH_MS = Number(process.env.FLUSH_MS || 1000);
 
 /** Tables held as whole-collection JSON documents. */
 const TABLES = [
+  'prfs', 'prf_audit', // never capped: clinical records and their audit trail
   'users', 'mdts', 'callsigns', 'vehicles', 'personnel', 'sites',
   'jobs', 'job_assignments', 'messages', 'call_requests',
   'locations', 'emergency_events', 'audit_logs',
