@@ -171,6 +171,7 @@ Targeting is explicit: `broadcast(type, payload, { personnelIds, mdtIds })` send
 
 ```
 server.js            REST API, WebSocket server, domain logic, seed data
+prf.js               patient report forms: routes, access rules, hash-chained audit
 openapi.json         API documentation (served at /api/openapi.json)
 public/
   index.html         sign-in and console launcher
@@ -182,6 +183,7 @@ public/
   app.js             shared client: auth, REST, WS bus, Leaflet map
   theme-init.js      no-flash theme stamp, runs before console.css paints
   console.css        design tokens, themes, and status colours
+  prf.html           patient report forms (client code in public/prf/)
 db/schema.sql        target PostgreSQL schema
 test/cccs.test.js    hand-rolled WebSocket client included
 Dockerfile · docker-compose.yml · .env.example
@@ -332,6 +334,42 @@ test either record already answers, so there's no separate roster to
 maintain. `admin.html`'s site editor shows and adds to a site's log;
 `officer.html` shows the log for whichever site the officer's current shift
 or patrol visit puts them at, with a box to add a note before they hand over.
+
+## Patient report forms (PRF)
+
+First-aid and event-medical care records, at `/prf.html` (linked from the
+officer terminal and the admin rail). The form is the nine-step ResponseChart
+layout adapted for UK practice: NHS number with check-digit validation, UK
+postcodes, ACVPU, live NEWS2 scoring (SpO₂ scale 1) on every set of
+observations, mental capacity and consent, refusal of care, and safeguarding.
+
+- **Who.** Field officers, supervisors and admins write PRFs under their own
+  login. Supervisors and admins can read every PRF and its audit trail.
+  Dispatchers and vehicle terminals have no access: control doesn't need
+  clinical detail to dispatch, and an MDT is a shared device.
+- **Jobs.** A PRF can be started from a job the officer is assigned to, which
+  fills in the incident reference, address and times. It can also be
+  started without one, for a walk-up casualty.
+- **Storage.** Drafts autosave to the server. Patient data is never written to
+  browser storage, so a lost or shared device holds none.
+- **Finalising.** The server re-runs the same completeness rules the form shows
+  (`public/prf/rules.js`, shared by both). It then stamps a SHA-256 of the
+  content and locks the record. After that, corrections are signed,
+  timestamped addenda.
+- **Audit.** PRF activity has its own hash-chained trail (`prf_audit`), kept
+  apart from the general event log because that log is capped, pruned and
+  broadcast to every console. The trail records creation, which fields changed
+  (never their values), finalising, addenda, printing, every view of a
+  finalised record and any view by someone other than the author.
+  `GET /api/prf-audit/verify` checks the chain. The general log only gets a
+  one-line, patient-free note that a PRF exists for a job.
+- **Retention.** PRFs and their audit trail are not touched by the retention
+  sweep. See `docs/PRIVACY.md` for the retention decision that still needs
+  making.
+
+Server code is in `prf.js`, the client in `public/prf.html` and `public/prf/`,
+and the tests in `test/prf.test.js`. `PRF_TIMEZONE` (default `Europe/London`)
+sets the wall-clock time used when prefilling from a job.
 
 ## Fuel logs
 

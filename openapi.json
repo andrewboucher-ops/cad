@@ -601,6 +601,110 @@
           }
         }
       }
+    },
+    "/api/prfs": {
+      "get": {
+        "summary": "List PRFs: your own, or everyone's with scope=all (SUPERVISOR, SYSTEM_ADMIN). Filters: status, job_id",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "post": {
+        "summary": "Start a draft PRF, optionally from an assigned job (job_id)",
+        "responses": {
+          "201": {
+            "description": "created"
+          }
+        }
+      }
+    },
+    "/api/prfs/jobs": {
+      "get": {
+        "summary": "Jobs the caller can attach a PRF to",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/prfs/{pcr}": {
+      "get": {
+        "summary": "Read a PRF (author, SUPERVISOR, SYSTEM_ADMIN); views of finalised PRFs are audited",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "put": {
+        "summary": "Save a draft (author only; send version for conflict detection)",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Discard a draft (author only)",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/prfs/{pcr}/finalise": {
+      "post": {
+        "summary": "Finalise and lock a draft (attest: true); 422 lists missing items",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/prfs/{pcr}/addenda": {
+      "post": {
+        "summary": "Add an addendum to a finalised PRF",
+        "responses": {
+          "201": {
+            "description": "created"
+          }
+        }
+      }
+    },
+    "/api/prfs/{pcr}/printed": {
+      "post": {
+        "summary": "Record that the PRF was printed",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/prf-audit": {
+      "get": {
+        "summary": "PRF audit trail, newest first (SUPERVISOR, SYSTEM_ADMIN). Filters: pcr, limit",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    },
+    "/api/prf-audit/verify": {
+      "get": {
+        "summary": "Verify the PRF audit hash chain",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
     }
   }
 }

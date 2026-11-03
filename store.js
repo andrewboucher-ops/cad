@@ -34,6 +34,7 @@ const TABLES = [
   'locations', 'emergency_events', 'audit_logs',
   'push_subscriptions', 'patrol_schedules', 'site_visits', 'shifts', 'assets', 'passdown_logs', 'fuel_logs',
   'asset_checkouts', 'maintenance_logs', 'beats',
+  'prfs', 'prf_audit', // never capped: clinical records and their audit trail
 ];
 
 /** Rows we deliberately cap so the file cannot grow without bound. */

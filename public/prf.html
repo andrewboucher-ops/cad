@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Patient Report Forms · CCCS</title>
+    <link rel="stylesheet" href="/prf/prf.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <b>+</b
+        ><span><strong>Patient Report Forms</strong><small>CCCS · <span id="who"></span></small></span>
+      </div>
+      <div class="status">
+        <i id="dot"></i><span id="connection">Connected</span
+        ><a class="hbtn" href="/officer.html">Officer console</a
+        ><button id="signOut">Sign out</button>
+      </div>
+    </header>
+
+    <!-- List of PRFs -->
+    <main id="home" class="home">
+      <div class="form-section">
+        <div class="section-title">Start a PRF</div>
+        <div class="start-row">
+          <label for="jobSelect">Link to job</label>
+          <select id="jobSelect"></select>
+          <button id="newPrf" class="primary">New PRF</button>
+        </div>
+        <p class="muted">Only jobs you're assigned to are listed. A PRF can also be started without a job, for example for a walk-up casualty.</p>
+      </div>
+      <div class="form-section">
+        <div class="section-title">My drafts</div>
+        <div id="drafts" class="records-list"></div>
+      </div>
+      <div class="form-section">
+        <div class="section-title">
+          Finalised PRFs
+          <span id="scopeWrap" class="scope" hidden
+            ><label><input type="checkbox" id="scope" /> Show everyone's</label
+            ><button id="auditVerify" class="small">Verify audit trail</button></span
+          >
+        </div>
+        <div id="finals" class="records-list"></div>
+      </div>
+    </main>
+
+    <!-- Editor -->
+    <div id="editor" class="app" hidden>
+      <aside>
+        <div class="case">
+          <b id="pcr"></b><span id="patient">Unknown patient</span><span id="jobref"></span>
+        </div>
+        <nav id="nav"></nav>
+        <div class="side-actions">
+          <button id="save">Save Draft</button
+          ><button id="finalize" class="success">Review &amp; Finalise</button
+          ><button id="home-btn">← All PRFs</button
+          ><button id="discard" class="danger">Discard draft</button>
+        </div>
+      </aside>
+      <main>
+        <div class="page-head">
+          <div>
+            <h1 id="title"></h1>
+            <p id="help"></p>
+          </div>
+          <div class="meter"><b id="complete">0%</b><small>complete</small></div>
+        </div>
+        <section id="panel"></section>
+        <div class="pager">
+          <button id="prev">← Previous</button
+          ><button id="next" class="primary">Next →</button>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="picker">
+      <div class="dialog-head">
+        <h2 id="pickTitle">Select</h2>
+        <button data-close="picker">×</button>
+      </div>
+      <input id="search" placeholder="Search list..." />
+      <div id="items" class="items"></div>
+      <div class="dialog-actions"><button data-close="picker">Cancel</button></div>
+    </dialog>
+
+    <dialog id="review">
+      <div class="dialog-head">
+        <h2>Review PRF</h2>
+        <button data-close="review">×</button>
+      </div>
+      <div id="reviewBody"></div>
+      <label class="attest"
+        ><input id="attest" type="checkbox" /> I confirm this record is accurate and complete to the best of my knowledge.</label
+      >
+      <div class="dialog-actions">
+        <button data-close="review">Return to form</button
+        ><button id="submit" class="success">Finalise PRF</button>
+      </div>
+    </dialog>
+
+    <dialog id="discardDialog">
+      <div class="dialog-head">
+        <h2>Discard this draft?</h2>
+        <button data-close="discardDialog">×</button>
+      </div>
+      <p>The draft is deleted. The audit trail keeps a record that it existed and was discarded.</p>
+      <div class="dialog-actions">
+        <button data-close="discardDialog">Keep it</button
+        ><button id="discardYes" class="danger">Discard</button>
+      </div>
+    </dialog>
+
+    <dialog id="record" class="record-dialog">
+      <div class="dialog-head">
+        <h2>Patient Report Form</h2>
+        <button data-close="record">×</button>
+      </div>
+      <div id="recordBody"></div>
+      <div class="addendum-form">
+        <label for="addendumText">Add an addendum (the record itself is locked)</label>
+        <textarea id="addendumText" rows="3"></textarea>
+        <button id="addAddendum">Add addendum</button>
+      </div>
+      <div class="dialog-actions">
+        <button data-close="record">Close</button
+        ><button id="auditBtn">Audit trail</button
+        ><button id="printRecord" class="primary">Print / Save as PDF</button>
+      </div>
+    </dialog>
+
+    <dialog id="audit" class="record-dialog">
+      <div class="dialog-head">
+        <h2>Audit trail</h2>
+        <button data-close="audit">×</button>
+      </div>
+      <div id="auditBody"></div>
+      <div class="dialog-actions"><button data-close="audit">Close</button></div>
+    </dialog>
+
+    <div id="toast"></div>
+    <script src="/app.js"></script>
+    <script src="/prf/uk.js"></script>
+    <script src="/prf/rules.js"></script>
+    <script src="/prf/prf.js"></script>
+  </body>
+</html>

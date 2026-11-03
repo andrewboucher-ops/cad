@@ -82,6 +82,8 @@ const db = {
   locations: [], emergency_events: [], audit_logs: [],
   push_subscriptions: [], patrol_schedules: [], site_visits: [], shifts: [], assets: [],
   passdown_logs: [], fuel_logs: [], asset_checkouts: [], maintenance_logs: [], beats: [],
+  // Patient report forms and their own hash-chained audit trail — see prf.js.
+  prfs: [], prf_audit: [],
 };
 const seq = {};
 const nextId = (t) => (seq[t] = (seq[t] || 0) + 1);
@@ -3145,6 +3147,10 @@ function simulationTick() {
 /* ------------------------------------------------------------------ *
  * Boot
  * ------------------------------------------------------------------ */
+/* Patient report forms — routes, access rules and the clinical audit trail
+ * live in prf.js. Registered here, after every helper it borrows exists. */
+const prf = require('./prf.js')({ route, db, nextId, httpError, logEvent, store, assertJobAccess });
+
 function start() {
   const restored = store.load();
   if (restored) console.log(`[cccs] state restored from ${store.file}`);
@@ -3179,4 +3185,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, seed, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, prf, start, seed, retentionSweep, patrolScheduleTick, RETENTION, hashPassword, verifyPassword, sign, PORT };

@@ -41,6 +41,36 @@ belongs to. Nothing is copied in bulk: each answer is one lookup, made when an
 operator is working on that footage in DEMS. Caller details are not shared.
 Mention this in the staff notice alongside body-worn video.
 
+## Patient report forms — patient data, not staff data
+
+PRFs hold **special category health data about members of the public**. That's
+a different position from everything else on this page, which is about staff.
+Before real use:
+
+1. **A DPIA.** Health data processed at scale, often about vulnerable people,
+   needs a data protection impact assessment.
+2. **A lawful basis and an Article 9 condition.** Typically Article 6(1)(e) or
+   (f), with Article 9(2)(h) (provision of health care), but get that confirmed.
+   Record it in the DPIA.
+3. **A retention period.** PRFs are deliberately left out of the automatic
+   retention sweep, because deleting clinical records on a timer is worse than
+   keeping them too long. The NHS Records Management Code of Practice is the
+   usual reference (commonly 8 years for adults, and until the 25th birthday,
+   or 26th if 17 at the time, for children). Decide, write it here, then
+   implement it.
+4. **Who can see what.** Supervisors and admins can read every PRF. If your
+   supervisors aren't the people responsible for clinical governance, add a
+   dedicated clinical-lead role rather than widening access.
+5. **Subject access.** A patient can ask for their record. Search finalised
+   PRFs by name or NHS number, print the record and addenda, and log the
+   disclosure.
+6. **Clinical sign-off.** Have a clinical lead review the form content,
+   including the NEWS2 scoring and the consent, capacity and refusal wording,
+   before staff rely on it.
+
+The PRF audit trail records who looked at or changed a record, and is kept for
+as long as the records are.
+
 ## What is not collected
 
 - **No audio is recorded.** Voice passes between devices and is not stored.

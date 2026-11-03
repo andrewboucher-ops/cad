@@ -268,8 +268,10 @@ tracking's extended roadmap is now fully built out.
 - ~~Beats (patrol routes as their own entity)~~ — done, see above
 - ~~Passdown logs (per-site shift-handover notes)~~ — done, see above
 - Forms: trespass advisals, parking citations, vehicle inspections,
-  patient care/first-aid reports, safeguarding reports (the latter needs
-  restricted-visibility handling given its sensitivity)
+  ~~patient care/first-aid reports~~ (done: patient report forms, see README),
+  safeguarding reports (the latter needs restricted-visibility handling given
+  its sensitivity; the PRF's safeguarding section records a concern and
+  referral but isn't a full safeguarding report)
 
 **Extends HR Rota**
 - Full HR suite: leave management, attendance reporting, onboarding
