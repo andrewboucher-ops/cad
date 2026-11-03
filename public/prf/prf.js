@@ -1182,7 +1182,8 @@ function show(screen) {
 let cadTimer = null;
 async function openPrf(pcr) {
   const r = await api("GET", `/api/prfs/${encodeURIComponent(pcr)}`);
-  if (r.status === "FINAL") return showRecord(r);
+  // Finalised, or someone else's draft (a supervisor reviewing): read-only.
+  if (r.status === "FINAL" || r.author_user_id !== me.id) return showRecord(r);
   rec = r;
   s = r.data || {};
   tab = 0;
@@ -1382,6 +1383,8 @@ function showRecord(r) {
   shown = r;
   q("#recordBody").innerHTML = recordHtml(r);
   q("#addendumText").value = "";
+  q(".addendum-form").hidden = r.status !== "FINAL";
+  q("#printRecord").hidden = r.status !== "FINAL";
   q("#auditBtn").hidden = !READS_ALL;
   q("#record").showModal();
 }

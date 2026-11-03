@@ -42,6 +42,7 @@ const SECTIONS = [
   { key: 'reports', label: 'Reports', group: 'Reports', icon: 'reports', desktop: '/forms.html', mobile: '#reports', home: true, allowed: [...STAFF, 'MDT_USER'], default: [...STAFF, 'MDT_USER'] },
   // Clinical records: dispatchers and vehicle terminals have no access (prf.js).
   { key: 'prf', label: 'Patient report forms', group: 'Reports', icon: 'prf', desktop: '/prf.html', mobile: '/prf.html', home: true, allowed: ['FIELD_USER', 'SUPERVISOR', 'SYSTEM_ADMIN'], default: ['FIELD_USER', 'SUPERVISOR', 'SYSTEM_ADMIN'] },
+  { key: 'prf_admin', label: 'PRF admin', group: 'Reports', icon: 'prf', desktop: '/prf-admin.html', mobile: '/prf-admin.html', allowed: ['SUPERVISOR', 'SYSTEM_ADMIN'], default: ['SUPERVISOR', 'SYSTEM_ADMIN'] },
   { key: 'passdown', label: 'Site handover', group: 'Reports', icon: 'passdown', mobile: '#passdown', needs_person: true, allowed: STAFF, default: STAFF },
   // Fleet & people
   { key: 'vehicle_check', label: 'Vehicle check', group: 'Fleet & people', icon: 'check', mobile: '#vehicle-check', home: true, allowed: STAFF, default: STAFF },

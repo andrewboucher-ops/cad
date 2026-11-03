@@ -608,5 +608,36 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
   });
   route('GET', '/api/prf-audit/verify', READ_ALL_ROLES, () => verifyChain());
 
+  /** Everything the PRF admin page needs in one read: every PRF's summary
+   * (no clinical content beyond what the list already shows), drafts left
+   * open too long, and what PRFs have taken out of stock. */
+  const STALE_DRAFT_MS = Number(process.env.PRF_STALE_DRAFT_HOURS || 24) * 3600000;
+  route('GET', '/api/prf-admin/overview', READ_ALL_ROLES, () => {
+    const now = Date.now();
+    const rows = db.prfs.slice().sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).map((r) => {
+      const used = (r.data.txLog || []).filter((x) => x && x.stock);
+      return { ...summary(r), stock_entries: used.length, stale: r.status === 'DRAFT' && now - Date.parse(r.updated_at) > STALE_DRAFT_MS };
+    });
+    const supplies = [];
+    for (const r of db.prfs) for (const x of r.data.txLog || []) if (x && x.stock) {
+      supplies.push({ pcr: r.pcr, status: r.status, at: x.stock.at, by: x.stock.by, kind: x.stock.kind, item: x.stock.item, quantity: x.stock.quantity, unit: x.stock.unit, location: x.stock.location, batches: x.stock.batches || [], controlled: Boolean(x.stock.controlled), witness: x.stock.witness || null, in_error: Boolean(x.error) });
+    }
+    supplies.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    const weekAgo = now - 7 * 86400000;
+    return {
+      summary: {
+        drafts: rows.filter((r) => r.status === 'DRAFT').length,
+        stale: rows.filter((r) => r.stale).length,
+        finalised_7d: rows.filter((r) => r.finalised_at && Date.parse(r.finalised_at) >= weekAgo).length,
+        total: rows.length,
+        supplies_7d: supplies.filter((x) => Date.parse(x.at) >= weekAgo).length,
+      },
+      stale_hours: STALE_DRAFT_MS / 3600000,
+      prfs: rows,
+      supplies,
+      authors: [...new Set(rows.map((r) => r.author_name))].sort(),
+    };
+  });
+
   return { verifyChain, flushEdits: () => [...pending.keys()].forEach(flushEdits), WRITE_ROLES, READ_ALL_ROLES };
 };

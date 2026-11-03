@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — PRF admin</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .cd { display:inline-block; font-size:10.5px; font-weight:700; letter-spacing:.04em; padding:1px 6px; border-radius:4px; background:var(--emergency); color:#fff; vertical-align:1px; }
+  tr.clickable { cursor:pointer; }
+  tr.clickable:hover td { background: rgba(124,108,232,.08); }
+  .struck { text-decoration: line-through; opacity: .7; }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>PRF admin</h1>
+  <span class="dim" id="updated"></span>
+  <button class="btn" id="bVerify">Verify audit trail</button>
+  <a class="btn primary" href="/prf.html">Open PRFs</a>
+</div>
+<div class="k-body">
+  <div class="tiles" id="tiles"></div>
+  <div class="bar" id="views">
+    <button class="chip on" data-view="prfs">All PRFs</button>
+    <button class="chip" data-view="stale">Unfinished drafts</button>
+    <button class="chip" data-view="supplies">Stock used</button>
+    <button class="chip" data-view="audit">Audit trail</button>
+  </div>
+  <div class="bar" id="filters">
+    <input id="q" placeholder="Search PRF, job, patient or author">
+    <select id="fStatus"><option value="">Any status</option><option value="DRAFT">Drafts</option><option value="FINAL">Finalised</option></select>
+    <select id="fAuthor"></select>
+    <input id="fFrom" type="date" title="Updated from">
+    <input id="fTo" type="date" title="Updated to">
+  </div>
+  <div id="main"><p class="dim">Loading…</p></div>
+  <p class="dim" style="font-size:12px;margin-top:14px">Opening a PRF here is recorded in its audit trail. Finalised PRFs can't be changed; corrections are added as addenda by the author or a supervisor.</p>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+let data = null, audit = null, view = 'prfs';
+const when = (iso) => (iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
+const status = (r) => r.status === 'FINAL' ? '<span class="pill good">Finalised</span>' : r.stale ? '<span class="pill warn">Draft, unfinished</span>' : '<span class="pill">Draft</span>';
+
+async function load() {
+  try { data = await api('GET', '/api/prf-admin/overview'); } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  el('#updated').textContent = `updated ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+  const keep = el('#fAuthor').value;
+  el('#fAuthor').innerHTML = '<option value="">Anyone</option>' + data.authors.map((a) => `<option ${a === keep ? 'selected' : ''}>${esc(a)}</option>`).join('');
+  paint();
+}
+function paintTiles() {
+  const s = data.summary;
+  const t = (n, l, cls, go) => `<button class="tile ${cls}" data-go="${go}"><div class="n">${n}</div><div class="l">${l}</div></button>`;
+  el('#tiles').innerHTML = [
+    t(s.total, 'PRFs', '', 'prfs'), t(s.drafts, 'Open drafts', '', 'prfs'),
+    t(s.stale, `Unfinished over ${data.stale_hours}h`, s.stale ? 'warn' : 'good', 'stale'),
+    t(s.finalised_7d, 'Finalised, last 7 days', '', 'prfs'), t(s.supplies_7d, 'Stock entries, last 7 days', '', 'supplies'),
+  ].join('');
+  els('#tiles [data-go]').forEach((b) => (b.onclick = () => setView(b.dataset.go)));
+}
+function setView(v) { view = v; els('#views .chip').forEach((c) => c.classList.toggle('on', c.dataset.view === v)); paint(); }
+els('#views .chip').forEach((c) => (c.onclick = () => setView(c.dataset.view)));
+['#fStatus', '#fAuthor', '#fFrom', '#fTo'].forEach((s) => el(s).addEventListener('change', () => paint()));
+el('#q').addEventListener('input', () => paint());
+
+function inRange(iso) {
+  const d = String(iso || '').slice(0, 10), from = el('#fFrom').value, to = el('#fTo').value;
+  return (!from || d >= from) && (!to || d <= to);
+}
+function filteredPrfs() {
+  const q = el('#q').value.trim().toLowerCase(), st = el('#fStatus').value, au = el('#fAuthor').value;
+  return data.prfs.filter((r) => (view !== 'stale' || r.stale) && (!st || r.status === st) && (!au || r.author_name === au) && inRange(r.updated_at)
+    && (!q || [r.pcr, r.job_reference, r.patient, r.chief, r.author_name, r.source_ref].join(' ').toLowerCase().includes(q)));
+}
+async function paint() {
+  if (!data) return;
+  paintTiles();
+  el('#filters').style.display = view === 'audit' ? 'none' : '';
+  if (view === 'prfs' || view === 'stale') return paintPrfs();
+  if (view === 'supplies') return paintSupplies();
+  return paintAudit();
+}
+function paintPrfs() {
+  const rows = filteredPrfs();
+  el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k"><thead><tr><th>PRF</th><th>Status</th><th>Patient</th><th>Complaint</th><th>Job</th><th>Author</th><th>Updated</th><th class="num">Stock</th><th class="num">Addenda</th></tr></thead><tbody>${rows.map((r) => `
+    <tr class="clickable" data-open="${esc(r.pcr)}"><td><strong>${esc(r.pcr)}</strong>${r.source_ref ? `<div class="dim" style="font-size:11.5px">from ${esc(r.source_ref)}</div>` : ''}</td><td>${status(r)}</td><td>${esc(r.patient || '—')}</td><td>${esc(r.chief || '—')}</td><td>${esc(r.job_reference || '—')}</td><td>${esc(r.author_name)}</td><td>${esc(when(r.updated_at))}</td><td class="num">${r.stock_entries || ''}</td><td class="num">${r.addenda || ''}</td></tr>`).join('')}</tbody></table></div>`
+    : `<p class="dim">${view === 'stale' ? 'No unfinished drafts. 👍' : 'No PRFs match.'}</p>`;
+  els('[data-open]').forEach((tr) => (tr.onclick = () => (location.href = `/prf.html?pcr=${encodeURIComponent(tr.dataset.open)}`)));
+}
+function paintSupplies() {
+  const q = el('#q').value.trim().toLowerCase(), au = el('#fAuthor').value;
+  const rows = data.supplies.filter((x) => inRange(x.at) && (!au || x.by === au) && (!q || [x.pcr, x.item, x.location, x.by].join(' ').toLowerCase().includes(q)));
+  el('#main').innerHTML = rows.length ? `<div style="overflow-x:auto"><table class="k"><thead><tr><th>When</th><th>PRF</th><th>Item</th><th class="num">Qty</th><th>From</th><th>Batch</th><th>By</th><th>Witness</th></tr></thead><tbody>${rows.map((x) => `
+    <tr class="clickable${x.in_error ? ' struck' : ''}" data-open="${esc(x.pcr)}"><td>${esc(when(x.at))}</td><td>${esc(x.pcr)}</td><td>${x.controlled ? '<span class="cd">CD</span> ' : ''}${esc(x.item)}${x.in_error ? ' <span class="pill bad">Entered in error</span>' : ''}</td><td class="num">${esc(x.quantity)} <span class="dim">${esc(x.unit || '')}</span></td><td>${esc(x.location)}</td><td>${esc(x.batches.join(', ') || '—')}</td><td>${esc(x.by)}</td><td>${esc(x.witness || '')}</td></tr>`).join('')}</tbody></table></div>
+    <p class="dim" style="font-size:12px">Each row is also on the Stock or Medication page's ledger, against the PRF number. A wrong entry is corrected there (return or adjust), not here.</p>`
+    : '<p class="dim">Nothing has been taken from stock on a PRF yet.</p>';
+  els('[data-open]').forEach((tr) => (tr.onclick = () => (location.href = `/prf.html?pcr=${encodeURIComponent(tr.dataset.open)}`)));
+}
+async function paintAudit() {
+  try { audit = await api('GET', '/api/prf-audit?limit=500'); } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const detail = (d) => !d ? '' : d.fields ? 'Fields: ' + d.fields.join(', ') : Object.entries(d).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) ? v.slice(0, 12) + '…' : Array.isArray(v) ? v.join(', ') : v}`).join(' · ');
+  el('#main').innerHTML = `<div style="overflow-x:auto"><table class="k" style="font-size:12.5px"><thead><tr><th>When</th><th>Who</th><th>PRF</th><th>Action</th><th>Detail</th></tr></thead><tbody>${audit.map((a) => `
+    <tr><td>${esc(when(a.at))}</td><td>${esc(a.username)}</td><td>${esc(a.pcr || '')}</td><td>${esc(a.action)}</td><td class="dim">${esc(detail(a.detail))}</td></tr>`).join('')}</tbody></table></div>
+    <p class="dim" style="font-size:12px">The latest 500 entries. Each one is chained to the last by a hash, so a changed or removed entry shows up in Verify audit trail.</p>`;
+}
+el('#bVerify').onclick = async () => {
+  try {
+    const v = await api('GET', '/api/prf-audit/verify');
+    alert(v.ok ? `Audit trail intact: ${v.rows} entries.` : `Audit trail BROKEN at entry ${v.broken_at}: ${v.reason}`);
+  } catch (e) { alert(e.message); }
+};
+load();
+</script>
+</body>
+</html>

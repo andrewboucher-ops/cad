@@ -107,3 +107,13 @@ test('a finalised PRF cannot take more stock', async () => {
   app.db.prfs.find((x) => x.pcr === pcr).status = 'FINAL';
   assert.strictEqual((await call('POST', `/api/prfs/${pcr}/supplies`, { entry_id: 'f1', kind: 'stock', item_id: dressing.id, quantity: 1, location_id: bag.id }, danT)).status, 409);
 });
+
+test('PRF admin overview is for supervisors and admins, and lists stock used per PRF', async () => {
+  assert.strictEqual((await call('GET', '/api/prf-admin/overview', undefined, danT)).status, 403);
+  const o = await call('GET', '/api/prf-admin/overview', undefined, adminT);
+  assert.strictEqual(o.status, 200);
+  assert.ok(o.body.summary.total >= 3);
+  assert.ok(o.body.supplies.some((x) => x.item.includes('Trauma dressing') && x.quantity === 2));
+  assert.ok(o.body.supplies.some((x) => x.controlled && x.witness));
+  assert.ok(o.body.prfs.some((r) => r.stock_entries > 0));
+});
