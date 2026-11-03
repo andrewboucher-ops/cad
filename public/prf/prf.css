@@ -1072,3 +1072,147 @@ tr.in-error td select,
   font-size: 12px;
   font-weight: bold;
 }
+
+/* ---- Clinical look: white work surface, navy chrome, icon tabs ---- */
+body.editing {
+  background: #eef2f5;
+}
+.banner {
+  position: sticky;
+  top: 52px;
+  z-index: 4;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 18px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
+.ban {
+  padding: 3px 10px;
+  border-radius: 3px;
+  font-size: 12.5px;
+  font-weight: bold;
+  background: #eef2f5;
+  color: var(--ink);
+}
+.ban.alert {
+  background: #c33b3b;
+  color: #fff;
+}
+.ban.warn {
+  background: #e3a008;
+  color: #1d1d1d;
+}
+.ban.ok {
+  background: #e3f1e8;
+  color: var(--green);
+}
+.ban.unknown {
+  background: #fff3c4;
+  color: #6b4f00;
+}
+.ban[hidden] {
+  display: none;
+}
+.app .form-section {
+  background: #fff;
+  border: 1px solid #d3dde4;
+  border-radius: 4px;
+  box-shadow: none;
+}
+.app .section-title {
+  background: #f4f7f9;
+  border-bottom: 1px solid #d3dde4;
+  color: var(--navy);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 12.5px;
+}
+.field label {
+  font-size: 12.5px;
+  color: #3d5160;
+}
+.field input,
+.field textarea,
+.field select,
+.time-row input {
+  min-height: 40px;
+  background: #fbfcfd;
+  border-color: #b6c4ce;
+}
+.field input:focus,
+.field textarea:focus,
+.time-row input:focus {
+  outline: 2px solid #1d6b98;
+  outline-offset: 0;
+  background: #fff;
+}
+/* An empty required field gets a red bar down its left edge. */
+.field:has(label.required) input:placeholder-shown,
+.field:has(label.required) textarea:placeholder-shown {
+  border-left: 4px solid #c33b3b;
+}
+.tabbar button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 62px;
+  font-size: 12px;
+}
+.tabbar svg.ti {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tabbar i.gap,
+.tabbar i.tick {
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  margin: 0;
+}
+.tabbar i.tick {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: #287f51;
+  color: #fff;
+  font-style: normal;
+  font-size: 11px;
+}
+.tabbar i.tick[hidden] {
+  display: none;
+}
+.app {
+  padding-bottom: 70px;
+}
+.subtabs button.on {
+  background: #fff;
+  border: 1px solid #d3dde4;
+  border-bottom: 3px solid var(--blue);
+  border-radius: 4px 4px 0 0;
+}
+@media (max-width: 850px) {
+  .banner {
+    top: 0;
+    position: static;
+    padding: 6px 12px;
+  }
+  .tabbar button span {
+    font-size: 11px;
+  }
+}
+@media print {
+  .banner {
+    display: none !important;
+  }
+}

@@ -503,16 +503,16 @@ function field([key, label, type, o = {}]) {
   const lab = `<label class="${req}" for="f-${key}">${esc(label)}</label>`;
   const after = o.after ? `<small class="aside" data-after="${key}">${esc(o.after())}</small>` : "";
   if (type === "pick")
-    return `<div class="${c}">${lab}<div class="input-row"><input id="f-${key}" data-key="${key}" value="${esc(v(key))}" readonly data-open-pick="${key}"><button type="button" data-pick="${key}" aria-label="Choose ${esc(label)}">▾</button></div></div>`;
+    return `<div class="${c}">${lab}<div class="input-row"><input id="f-${key}" data-key="${key}" placeholder=" " value="${esc(v(key))}" readonly data-open-pick="${key}"><button type="button" data-pick="${key}" aria-label="Choose ${esc(label)}">▾</button></div></div>`;
   if (type === "multi") {
     const sel = s[key] || [];
     return `<div class="${c}">${lab}<div class="chips">${choice[key].map((x) => `<button type="button" class="chip ${sel.includes(x) ? "on" : ""}" data-multi="${key}" data-val="${esc(x)}">${esc(x)}</button>`).join("")}</div></div>`;
   }
-  if (type === "area") return `<div class="${c}">${lab}<textarea id="f-${key}" data-key="${key}">${esc(v(key))}</textarea></div>`;
+  if (type === "area") return `<div class="${c}">${lab}<textarea id="f-${key}" data-key="${key}" placeholder=" ">${esc(v(key))}</textarea></div>`;
   if (type === "datetime")
     return `<div class="${c}">${lab}<div class="input-row"><input id="f-${key}" data-key="${key}" type="datetime-local" value="${esc(v(key))}"><button type="button" class="now" data-now="${key}">Now</button></div></div>`;
   const hint = o.hint ? `<small class="hint" data-hint="${key}">${esc(PRFRules.formatHint(s, key))}</small>` : "";
-  return `<div class="${c}">${lab}<input id="f-${key}" data-key="${key}" type="${type}" ${type === "number" ? 'inputmode="decimal" step="any"' : ""} value="${esc(v(key))}">${hint}${after}</div>`;
+  return `<div class="${c}">${lab}<input id="f-${key}" data-key="${key}" placeholder=" " type="${type}" ${type === "number" ? 'inputmode="decimal" step="any"' : ""} value="${esc(v(key))}">${hint}${after}</div>`;
 }
 const grid = (fields) => `<div class="grid">${fields.map(field).join("")}</div>`;
 
@@ -722,7 +722,7 @@ function refreshChrome() {
   // a tap that lands while an input is blurring.
   const bar = q("#tabbar");
   if (!bar.children.length) {
-    bar.innerHTML = TABS.map((t, i) => `<button data-tab="${i}">${esc(t.name)}<i class="gap" hidden></i></button>`).join("");
+    bar.innerHTML = TABS.map((t, i) => `<button data-tab="${i}"><svg class="ti" viewBox="0 0 24 24" aria-hidden="true">${TAB_ICONS[i] || ""}</svg><span>${esc(t.name)}</span><i class="gap" hidden></i><i class="tick" hidden>✓</i></button>`).join("");
     qa("[data-tab]").forEach((b) => (b.onclick = () => go(+b.dataset.tab)));
   }
   const gaps = blockingItems();
@@ -732,7 +732,21 @@ function refreshChrome() {
     const g = b.querySelector(".gap");
     g.hidden = !n;
     g.textContent = n || "";
+    // A tick once a tab has something in it and nothing outstanding.
+    b.querySelector(".tick").hidden = n > 0 || i === TABS.length - 1 || !tabHasData(i);
   });
+  // Patient banner: the facts anyone treating needs at a glance.
+  const allergies = (s.allergies || []).filter((a) => a !== "No known allergies");
+  q("#banAllergy").textContent = allergies.length ? `Allergies: ${allergies.join(", ")}${s.allergyNotes ? " (" + s.allergyNotes + ")" : ""}` : (s.allergies || []).includes("No known allergies") ? "NKDA" : "Allergies not recorded";
+  q("#banAllergy").className = allergies.length ? "ban alert" : (s.allergies || []).length ? "ban ok" : "ban unknown";
+  q("#banAlerts").textContent = s.alerts ? `Alert: ${s.alerts}` : "";
+  q("#banAlerts").hidden = !s.alerts;
+  const lastNews = (s.vitals || []).map((x) => news2(x)).filter((x) => !x.missing).pop();
+  q("#banNews").textContent = lastNews ? `NEWS2 ${lastNews.score}` : "";
+  q("#banNews").className = lastNews ? "ban " + (lastNews.score >= 7 ? "alert" : lastNews.score >= 5 ? "warn" : "ok") : "ban";
+  q("#banNews").hidden = !lastNews;
+  q("#banNhs").textContent = s.health ? `NHS ${s.health}` : "";
+  q("#banNhs").hidden = !s.health;
   q("#pcr").textContent = rec ? rec.pcr : "";
   q("#patient").textContent = [v("first"), v("last")].filter(Boolean).join(" ") || "Unknown patient";
   q("#patientMeta").textContent = [ageText(), v("sex"), v("patientNo") && v("patientOf") ? `Patient ${v("patientNo")} of ${v("patientOf")}` : ""].filter(Boolean).join(" · ");
@@ -743,6 +757,26 @@ function refreshChrome() {
     if (f) el.textContent = f[3].after();
   });
 }
+function tabHasData(i) {
+  const keys = TABS[i].subs.flatMap((x) => (x.fields || []).map(([k]) => k));
+  const extra = { 0: PRFRules.TIME_ORDER.map(([k]) => k), 3: ["symptoms"], 4: ["vitals"], 5: ["exam", "txLog", "injuries"] }[i] || [];
+  return keys.concat(extra).some((k) => {
+    const x = s[k];
+    return Array.isArray(x) ? x.length : x && typeof x === "object" ? Object.keys(x).length : String(x ?? "").trim() !== "";
+  });
+}
+// Simple line icons for the section tabs (original drawings).
+const TAB_ICONS = [
+  '<path d="M4 20h16M6 20V9l6-5 6 5v11M10 20v-5h4v5"/>',
+  '<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4.5-6 8-6s7 2 8 6"/>',
+  '<path d="M3 12h4l2-5 4 10 2-5h6"/>',
+  '<path d="M7 3h8l4 4v14H7z"/><path d="M15 3v4h4M10 12h6M10 16h4"/>',
+  '<path d="M12 21s-7-4.5-7-10a4 4 0 017-2.5A4 4 0 0119 11c0 5.5-7 10-7 10z"/>',
+  '<path d="M10 3h4v7h7v4h-7v7h-4v-7H3v-4h7z"/>',
+  '<path d="M4 12l5 5L20 6"/>',
+  '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2M9 10h6M9 14h6M9 18h3"/>',
+  '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+];
 function go(t, si) {
   tab = Math.max(0, Math.min(TABS.length - 1, t));
   if (si != null) sub[tab] = si;
