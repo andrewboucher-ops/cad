@@ -84,13 +84,14 @@ test('a consumable used on a PRF comes off stock against the PRF number, once', 
 
 test('a medicine given goes into the medication register; a controlled drug needs a witness', async () => {
   const pcr = await draftWith([{ id: 'm1', kind: 'Medication', name: 'Paracetamol', dose: '1 g', route: 'Oral' }, { id: 'm2', kind: 'Medication', name: 'Morphine', dose: '5 mg', route: 'IV' }]);
-  let r = await call('POST', `/api/prfs/${pcr}/supplies`, { entry_id: 'm1', kind: 'medicine', item_id: paracetamol.id, quantity: 2, location_id: bag.id }, danT);
+  assert.strictEqual((await call('POST', `/api/prfs/${pcr}/supplies`, { entry_id: 'm1', kind: 'medicine', item_id: paracetamol.id, quantity: 2, location_id: bag.id }, danT)).status, 400, 'a medicine needs its authority');
+  let r = await call('POST', `/api/prfs/${pcr}/supplies`, { entry_id: 'm1', kind: 'medicine', item_id: paracetamol.id, quantity: 2, location_id: bag.id, authority: 'General sale / pharmacy medicine under protocol' }, danT);
   assert.strictEqual(r.status, 200, JSON.stringify(r.body));
   const rows = app.db.med_movements.filter((m) => r.body.data.txLog[0].stock.movement_ids.includes(m.id));
-  assert.ok(rows.every((m) => m.type === 'ADMINISTERED' && m.patient_ref === pcr && m.dose_given === '1 g' && m.source === 'PRF'));
+  assert.ok(rows.every((m) => m.type === 'ADMINISTERED' && m.patient_ref === pcr && m.dose_given === '1 g' && m.source === 'PRF' && m.authority.startsWith('General sale')));
 
-  assert.strictEqual((await call('POST', `/api/prfs/${pcr}/supplies`, { entry_id: 'm2', kind: 'medicine', item_id: morphine.id, quantity: 1, location_id: bag.id }, danT)).status, 400, 'CD without a witness');
-  r = await call('POST', `/api/prfs/${pcr}/supplies`, { entry_id: 'm2', kind: 'medicine', item_id: morphine.id, quantity: 1, location_id: bag.id, witness_username: 'emarsh', witness_password: 'field123' }, danT);
+  assert.strictEqual((await call('POST', `/api/prfs/${pcr}/supplies`, { entry_id: 'm2', kind: 'medicine', item_id: morphine.id, quantity: 1, location_id: bag.id, authority: 'Prescriber\'s instruction' }, danT)).status, 400, 'CD without a witness');
+  r = await call('POST', `/api/prfs/${pcr}/supplies`, { entry_id: 'm2', kind: 'medicine', item_id: morphine.id, quantity: 1, location_id: bag.id, authority: 'Prescriber\'s instruction', witness_username: 'emarsh', witness_password: 'field123' }, danT);
   assert.strictEqual(r.status, 200, JSON.stringify(r.body));
   const cd = r.body.data.txLog.find((x) => x.id === 'm2').stock;
   assert.ok(cd.controlled && cd.witness);

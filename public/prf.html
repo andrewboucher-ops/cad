@@ -28,6 +28,7 @@
           <select id="jobSelect"></select>
           <button id="newPrf" class="primary">New PRF</button>
         </div>
+        <p class="muted privacy">PRFs hold health information. Only open the records you need for care or for your role; every view and print is recorded.</p>
         <p class="muted">Only jobs you're assigned to are listed. A PRF can also be started without a job, for example for a walk-up casualty.</p>
       </div>
       <div class="form-section">
@@ -114,7 +115,7 @@
         <select id="stItem"></select>
         <label for="stQty">Quantity</label>
         <div class="input-row"><input id="stQty" type="number" min="0.01" step="any" inputmode="decimal" /><span id="stUnit" class="muted"></span></div>
-        <div id="stDoseRow" class="stock-sub"><label for="stDose">Dose given</label><input id="stDose" placeholder="e.g. 1 g" /></div>
+        <div id="stDoseRow" class="stock-sub"><label for="stDose">Dose given</label><input id="stDose" placeholder="e.g. 1 g" /><label for="stAuthority">Authority</label><select id="stAuthority"></select></div>
         <div id="stWitnessRow" class="stock-sub" hidden>
           <p class="blocked">Controlled drug: a colleague must witness this with their own CCCS sign-in.</p>
           <label for="stWitness">Witness username</label><input id="stWitness" autocomplete="off" />

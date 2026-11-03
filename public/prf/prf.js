@@ -116,6 +116,14 @@ const choice = {
   success: ["Successful", "Unsuccessful", "Partially successful"],
   response: ["Improved", "No change", "Worse", "Not assessed"],
   examStatus: ["Normal", "Abnormal", "Not examined"],
+  riddor: ["Not a workplace injury", "Workplace injury, not reportable", "Possibly RIDDOR reportable: tell the employer"],
+  consentBy: ["Patient", "Patient (under 16, Gillick competent)", "Parent / guardian", "Other person with parental responsibility", "No one available (emergency, best interests)"],
+  mcaImpairment: ["No", "Yes"],
+  mcaUnderstand: ["Yes", "No"],
+  mcaRetain: ["Yes", "No"],
+  mcaWeigh: ["Yes", "No"],
+  mcaCommunicate: ["Yes", "No"],
+  authority: ["Patient Group Direction (PGD)", "Schedule 17 exemption (registered paramedic)", "Schedule 19 exemption (emergency use)", "Prescriber's instruction", "Patient's own medicine", "General sale / pharmacy medicine under protocol"],
   injuryType: ["Wound", "Bruise", "Burn", "Deformity", "Pain", "Swelling", "Other"],
 };
 // Symptoms by body system. Each can be marked present, or as a pertinent negative.
@@ -314,6 +322,7 @@ const TABS = [
           ["disposition", "Disposition", "pick"],
           ["receiver", "Care Handed To", "text"],
           ["handover", "Handover Notes", "area", { cls: "full" }],
+          ["riddor", "Workplace Injury (RIDDOR)", "pick"],
         ],
       },
       {
@@ -321,6 +330,13 @@ const TABS = [
         fields: [
           ["capacity", "Mental Capacity", "pick"],
           ["consent", "Consent", "pick"],
+          ["consentBy", "Consent Given By", "pick"],
+          ["mcaImpairment", "MCA stage 1: Impairment of, or disturbance in, the mind or brain?", "pick", { cls: "wide" }],
+          ["mcaUnderstand", "Can understand the information", "pick"],
+          ["mcaRetain", "Can retain it", "pick"],
+          ["mcaWeigh", "Can use or weigh it", "pick"],
+          ["mcaCommunicate", "Can communicate a decision", "pick"],
+          ["bestInterests", "Best Interests: Decision, Reasons & Who Was Consulted", "area", { cls: "full" }],
           ["refusal", "Refusal of Care: Risks Explained & Advice Given", "area", { cls: "full" }],
         ],
       },
@@ -330,6 +346,10 @@ const TABS = [
           ["safeguarding", "Safeguarding Concern", "pick"],
           ["safeguardingDetails", "Safeguarding Details & Referral", "area", { cls: "full" }],
         ],
+        render: () =>
+          PRFRules.safeguardingRaised(s)
+            ? `<p class="callout">A concern has been raised. Also file a <b>Safeguarding report</b> in CCCS Reports, so the safeguarding leads are told. <a href="/forms.html" target="_blank" rel="noopener">Open Reports</a></p>`
+            : "",
       },
     ],
   },
@@ -1005,6 +1025,7 @@ async function openStock(i) {
   if (locs.some((l) => String(l.id) === lastLoc())) q("#stLoc").value = lastLoc();
   q("#stQty").value = 1;
   q("#stDose").value = x.dose || "";
+  q("#stAuthority").innerHTML = `<option value="">Choose…</option>` + choice.authority.map((a) => `<option>${esc(a)}</option>`).join("");
   q("#stWitness").value = "";
   q("#stWitnessPw").value = "";
   q("#stEntry").textContent = `${x.time || ""} ${x.kind}${x.name ? ": " + x.name : ""}`;
@@ -1055,6 +1076,7 @@ async function takeFromStock() {
       location_id: Number(q("#stLoc").value),
       quantity: Number(q("#stQty").value),
       dose: q("#stDose").value,
+      authority: q("#stAuthority").value,
       witness_username: q("#stWitness").value.trim() || undefined,
       witness_password: q("#stWitnessPw").value || undefined,
     });
@@ -1357,7 +1379,7 @@ function recordHtml(r) {
     ? `<h3>Treatment log</h3><table class="vitals"><thead><tr><th>Time</th><th>Type</th><th>What</th><th>Dose / route · Success</th><th>Response</th><th>By</th><th>Notes</th><th>From stock</th></tr></thead><tbody>${tx
         .map(
           (x) =>
-            `<tr${x.error ? ' class="in-error"' : ""}><td>${esc(x.time)}</td><td>${esc(x.kind)}</td><td>${esc(x.name)}</td><td>${esc([x.dose, x.route, x.success].filter(Boolean).join(" "))}</td><td>${esc(x.response)}</td><td>${esc(x.doneBy)}</td><td>${esc(x.complications)}${x.error ? `<br><b>Entered in error:</b> ${esc(x.error)}` : ""}</td><td>${x.stock ? `${esc(x.stock.quantity)} × ${esc(x.stock.item)}, ${esc(x.stock.location)}${x.stock.batches && x.stock.batches.length ? `, batch ${esc(x.stock.batches.join(", "))}` : ""}${x.stock.witness ? `, witness ${esc(x.stock.witness)}` : ""}` : ""}</td></tr>`,
+            `<tr${x.error ? ' class="in-error"' : ""}><td>${esc(x.time)}</td><td>${esc(x.kind)}</td><td>${esc(x.name)}</td><td>${esc([x.dose, x.route, x.success].filter(Boolean).join(" "))}</td><td>${esc(x.response)}</td><td>${esc(x.doneBy)}</td><td>${esc(x.complications)}${x.error ? `<br><b>Entered in error:</b> ${esc(x.error)}` : ""}</td><td>${x.stock ? `${esc(x.stock.quantity)} × ${esc(x.stock.item)}, ${esc(x.stock.location)}${x.stock.batches && x.stock.batches.length ? `, batch ${esc(x.stock.batches.join(", "))}` : ""}${x.stock.witness ? `, witness ${esc(x.stock.witness)}` : ""}${x.stock.authority ? `, authority: ${esc(x.stock.authority)}` : ""}` : ""}</td></tr>`,
         )
         .join("")}</tbody></table>`
     : "";
@@ -1377,7 +1399,7 @@ function recordHtml(r) {
     r.status === "FINAL"
       ? `<p class="meta">Finalised ${esc(fmt(r.finalised_at))} by ${esc(r.finalised_by)}${r.job_reference ? " · " + esc(r.job_reference) : ""}<br><small>Content hash ${esc((r.content_hash || "").slice(0, 16))}…</small></p>`
       : `<p class="meta">DRAFT — not finalised${r.job_reference ? " · " + esc(r.job_reference) : ""}</p>`;
-  return `<h2>${esc(r.pcr)}</h2>${head}${sections}${symHtml}${exHtml}${vitHtml}${txHtml}${injHtml}${sigHtml ? `<h3>Signatures</h3>${sigHtml}` : ""}${unable}${add}`;
+  return `<p class="confidential">CONFIDENTIAL: contains health information. Handle under Echelon's data protection policy.</p><h2>${esc(r.pcr)}</h2>${head}${sections}${symHtml}${exHtml}${vitHtml}${txHtml}${injHtml}${sigHtml ? `<h3>Signatures</h3>${sigHtml}` : ""}${unable}${add}`;
 }
 function showRecord(r) {
   shown = r;

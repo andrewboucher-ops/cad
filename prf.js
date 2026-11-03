@@ -90,6 +90,7 @@ const FIELDS = [
   // Assess / Tx, Outcomes, Care Plan, Review
   'assessment', 'disposition', 'receiver', 'handover', 'capacity', 'consent', 'refusal', 'safeguarding', 'safeguardingDetails',
   'impression', 'narrative', 'concerns', 'monitoring', 'unableToSign',
+  'riddor', 'consentBy', 'mcaImpairment', 'mcaUnderstand', 'mcaRetain', 'mcaWeigh', 'mcaCommunicate', 'bestInterests',
 ];
 const LIST_FIELDS = ['precautions', 'sceneFindings', 'allergies', 'pmh'];
 const VITAL_KEYS = ['time', 'hr', 'rr', 'sys', 'dia', 'spo2', 'o2', 'acvpu', 'gcs', 'temp', 'doneBy'];
@@ -521,6 +522,9 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     const kind = body.kind === 'medicine' ? 'medicine' : body.kind === 'stock' ? 'stock' : null;
     if (!kind) throw httpError(400, 'kind must be medicine or stock');
     if ((kind === 'medicine' && !medication) || (kind === 'stock' && !stock)) throw httpError(503, 'stock is not available on this server');
+    // Human Medicines Regulations 2012: every medicine given needs a legal authority (PGD, exemption, prescriber…).
+    const authority = String(body.authority || '').trim().slice(0, 80);
+    if (kind === 'medicine' && !authority) throw httpError(400, 'record the authority for giving this medicine');
     const location = (db.stock_locations || []).find((l) => l.id === Number(body.location_id));
     if (!location) throw httpError(400, 'choose where it came from');
     const patient = [r.data.first, r.data.last].filter(Boolean).join(' ');
@@ -531,7 +535,7 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
       controlled = Boolean(item.controlled);
       rows = medication.administer(item, {
         quantity: body.quantity, location_id: location.id, batch_no: body.batch_no || undefined,
-        patient_name: patient, patient_ref: r.pcr, dose_given: body.dose || entry.dose, route: entry.route, note,
+        patient_name: patient, patient_ref: r.pcr, dose_given: body.dose || entry.dose, route: entry.route, note, authority,
         witness_username: body.witness_username, witness_password: body.witness_password,
       }, user, { source: 'PRF', prf_pcr: r.pcr });
       label = medication.label(item);
@@ -549,6 +553,7 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
       batches: [...new Set(rows.map((m) => m.batch_no).filter(Boolean))],
       movement_ids: rows.map((m) => m.id),
       witness: rows[0] && rows[0].witness_name ? rows[0].witness_name : null,
+      authority: kind === 'medicine' ? authority : null,
       by: user.display_name || user.username, at: new Date().toISOString(),
     };
     if (!entry.name) entry.name = label;

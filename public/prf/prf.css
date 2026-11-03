@@ -1058,3 +1058,17 @@ tr.in-error td select,
 #txErrorReason {
   margin: 6px 0 12px;
 }
+.callout {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-left: 4px solid #b7791f;
+  background: #fff7e6;
+}
+.confidential {
+  margin: 0 0 8px;
+  padding: 4px 8px;
+  border: 1px solid #c33b3b;
+  color: #c33b3b;
+  font-size: 12px;
+  font-weight: bold;
+}

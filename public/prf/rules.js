@@ -48,6 +48,20 @@
   const str = (d, k) => String((d || {})[k] ?? '').trim();
   const refused = (d) => str(d, 'disposition') === 'Refused care' || str(d, 'consent') === 'Refused';
   const safeguardingRaised = (d) => str(d, 'safeguarding').startsWith('Yes');
+  const lacksCapacity = (d) => str(d, 'capacity').startsWith('Lacks');
+  /** Age in whole years from the date of birth, else the approximate age, else null. */
+  function ageYears(d) {
+    const dob = str(d, 'dob');
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+      const b = new Date(dob + 'T00:00:00'), n = new Date();
+      let a = n.getFullYear() - b.getFullYear();
+      if (n < new Date(n.getFullYear(), b.getMonth(), b.getDate())) a--;
+      return a;
+    }
+    const approx = Number(str(d, 'ageApprox'));
+    return str(d, 'ageApprox') && Number.isFinite(approx) ? approx : null;
+  }
+  const minor = (d) => { const a = ageYears(d); return a !== null && a < 18; };
   const sig = (d, who) => {
     const s = d && d.signatures && d.signatures[who];
     return Boolean(s && typeof s.data === 'string' && s.data.startsWith('data:image/png;base64,'));
@@ -78,6 +92,8 @@
     const keys = new Set(REQUIRED.map(([, k]) => k));
     if (refused(d)) keys.add('refusal');
     if (safeguardingRaised(d)) keys.add('safeguardingDetails');
+    if (lacksCapacity(d)) ['mcaImpairment', 'mcaUnderstand', 'mcaRetain', 'mcaWeigh', 'mcaCommunicate', 'bestInterests'].forEach((k) => keys.add(k));
+    if (minor(d)) keys.add('consentBy');
     return keys;
   }
 
@@ -93,6 +109,12 @@
       out.push(item('Patient Signature or Reason Unable to Sign', 'sig_patient', sig(d, 'patient') || filled('unableToSign'), 'Required (care refused)'));
     }
     if (safeguardingRaised(d)) out.push(item('Safeguarding Details & Referral', 'safeguardingDetails', filled('safeguardingDetails'), 'Required (concern raised)'));
+    // Mental Capacity Act 2005: a lack of capacity needs the two-stage test and the best-interests reasoning.
+    if (lacksCapacity(d)) {
+      out.push(item('Capacity Assessment (MCA two-stage test)', 'mcaImpairment', ['mcaImpairment', 'mcaUnderstand', 'mcaRetain', 'mcaWeigh', 'mcaCommunicate'].every(filled), 'Required (lacks capacity)'));
+      out.push(item('Best Interests Decision', 'bestInterests', filled('bestInterests'), 'Required (lacks capacity)'));
+    }
+    if (minor(d)) out.push(item('Consent Given By', 'consentBy', filled('consentBy'), 'Required (under 18)'));
     out.push(item('Clinician Signature', 'sig_clinician', sig(d, 'clinician'), 'Required'));
     for (const k of Object.keys(FORMAT)) if (formatHint(d, k)) out.push({ label: FORMAT[k][0], key: k, level: 'format', ok: false, status: 'Invalid format' });
 
@@ -110,12 +132,14 @@
     if (!filled('dob')) warn('Date of Birth', 'dob', 'Not recorded');
     if (!filled('health')) warn('NHS Number', 'health', 'Not recorded');
     if ((d.txLog || []).some((x) => x && !x.response)) warn('Treatment Log', 'txLog', 'An entry has no response recorded');
+    if ((d.txLog || []).some((x) => x && x.kind === 'Medication' && !x.stock && !x.error)) warn('Medicines', 'txLog', 'A medicine is not recorded in the medication register (Take from stock)');
+    if (str(d, 'riddor').startsWith('Possibly')) warn('RIDDOR', 'riddor', 'Tell the employer: they decide whether to report to the HSE');
     return out;
   }
 
   const blocking = (d) => checkRecord(d).filter((c) => !c.ok && c.level !== 'warning');
 
-  const api = { REQUIRED, FORMAT, TIME_ORDER, checkRecord, blocking, requiredKeys, formatHint, timeIssues, refused, safeguardingRaised };
+  const api = { REQUIRED, FORMAT, TIME_ORDER, checkRecord, blocking, requiredKeys, formatHint, timeIssues, refused, safeguardingRaised, ageYears };
   if (typeof module !== 'undefined') module.exports = api;
   else root.PRFRules = api;
 })(typeof window !== 'undefined' ? window : globalThis);
