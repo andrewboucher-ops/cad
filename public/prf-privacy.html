@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>How we use your information</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<style>
+  /* Public: a patient reads this from the link on their copy of the PRF. */
+  :root { --ink: #0f172a; --dim: #475569; --line: #e2e8f0; --bg: #f8fafc; --card: #fff; --navy: #0b1f3a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); line-height: 1.55; }
+  .wrap { width: min(720px, 100%); margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 24px; margin: 0 0 4px; color: var(--navy); }
+  .lead { color: var(--dim); margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+  h2 { font-size: 16px; margin: 0 0 6px; color: var(--navy); }
+  p { margin: 0 0 8px; } p:last-child { margin: 0; }
+  a { color: #1d4ed8; }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <h1>How we use your information when we treat you</h1>
+  <p class="lead">This explains the record our medical team made when they looked after you, and your rights over it.</p>
+  <section><h2>Who we are</h2><p><span data-k="controller">We</span> provided your care at this event and are responsible for the record we made about you.</p></section>
+  <section><h2>What we record</h2><p>Your name, your age or date of birth, and contact details if you give them. What happened, your symptoms and medical history, our observations, the treatment and any medicines we gave, and where you went afterwards. We may also record a concern about your safety or wellbeing.</p></section>
+  <section><h2>Why</h2><p>To treat you safely, to pass on what we did to the ambulance service or hospital, to check the quality of our care, and to answer any legal claim or complaint. The law allows us to do this to provide health care (UK GDPR Articles 6(1)(f) and 9(2)(h)). In an emergency it also allows us to act to protect your life.</p></section>
+  <section><h2>Who we share it with</h2><p>The ambulance crew or hospital taking over your care. You or your representative, if you ask. A coroner, court or the police, only where the law allows. The safeguarding team, if we are worried about you or a child. The event organiser gets numbers only, never your name.</p></section>
+  <section><h2>How long we keep it</h2><p>For adults, <span data-k="adult">8</span> years after we treated you. For children, until their <span data-k="child">25th</span> birthday, or the year after if they were 17 when treated. We keep it longer if a claim or investigation is still open. After that it is securely destroyed.</p></section>
+  <section><h2>Where it is kept</h2><p>On our own secure server in the UK, and encrypted when it is backed up. Only authorised staff can open it, and every time someone opens it is recorded.</p></section>
+  <section><h2>Your rights</h2><p>You can ask for a copy of your record. We reply within one month, free of charge. You can ask us to correct something that is wrong. We add a dated note rather than rewrite a clinical record. You can object to, or ask us to limit, how we use it. You can't usually ask us to delete a clinical record while we still need it for your care or for legal claims.</p></section>
+  <section><h2>Contact us</h2><p id="contact">Ask the medical team at the event, or contact our office.</p><p>If you're not happy with our answer, you can complain to the Information Commissioner's Office at <a href="https://ico.org.uk/make-a-complaint/" rel="noopener">ico.org.uk/make-a-complaint</a> or on 0303 123 1113.</p></section>
+</main>
+<script>
+fetch('/api/prf-privacy').then((r) => (r.ok ? r.json() : null)).then((p) => {
+  if (!p) return;
+  const set = (k, v) => document.querySelectorAll(`[data-k="${k}"]`).forEach((n) => (n.textContent = v));
+  if (p.controller) set('controller', p.controller);
+  if (p.retention) {
+    set('adult', String(p.retention.adult_years));
+    const n = p.retention.child_until_age;
+    set('child', n + (n % 10 === 1 && n % 100 !== 11 ? 'st' : n % 10 === 2 && n % 100 !== 12 ? 'nd' : n % 10 === 3 && n % 100 !== 13 ? 'rd' : 'th'));
+  }
+  if (p.email) {
+    const c = document.getElementById('contact');
+    c.textContent = 'Email ';
+    const a = document.createElement('a');
+    a.href = 'mailto:' + p.email; a.textContent = p.email;
+    c.append(a, ' to ask for a copy of your record or to raise a concern about how it is used.');
+  }
+}).catch(() => {});
+</script>
+</body>
+</html>

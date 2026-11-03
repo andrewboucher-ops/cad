@@ -115,6 +115,8 @@ const db = {
   training_courses: [], training_records: [],
   leave_requests: [],
   ui_settings: [],
+  // Patient report forms and their own hash-chained audit trail — see prf.js.
+  prfs: [], prf_audit: [],
   stock_locations: [], stock_subcategories: [], gas_cylinders: [], cylinder_events: [], medicines: [], med_movements: [], asset_events: [], stocktakes: [], rentals: [],
   agreements: [], invoices: [],
   payroll_runs: [], payslips: [],
@@ -1749,23 +1751,6 @@ route('GET', '/api/auth/microsoft/session', null, ({ query, req }) => {
   return { __body: { token: entry.token, user: entry.user }, __headers: { 'set-cookie': sessionCookie(req, entry.token) } };
 });
 route('GET', '/api/me', ALL, ({ user }) => publicUser(user));
-
-/** The separate PRF system's own base URL — set once by an admin, read
- * by anyone (the "Create full PRF" button on a patient-care report needs
- * it client-side, and that button is visible to whoever can already read
- * that report, not just admins). Empty until configured, which simply
- * hides the button rather than erroring. */
-route('GET', '/api/settings/prf-link', ALL, () => {
-  const row = db.ui_settings.find((x) => x.key === 'prf_link');
-  return { base_url: row && row.settings ? row.settings.base_url || '' : '' };
-});
-route('PUT', '/api/settings/prf-link', ADMIN, ({ body }) => {
-  let row = db.ui_settings.find((x) => x.key === 'prf_link');
-  if (!row) { row = { key: 'prf_link', settings: {} }; db.ui_settings.push(row); }
-  row.settings.base_url = String(body.base_url || '').trim().slice(0, 300).replace(/\/+$/, '');
-  store.flushNow();
-  return { base_url: row.settings.base_url };
-});
 
 /** Incident types offered on New job. The box stays free text — this is
  * only the drop-down of suggestions — so editing the list never breaks a
@@ -5923,7 +5908,14 @@ const inventory = require('./routes-inventory.js')({
 require('./routes-cylinders.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent });
 
 // Medication and the controlled drugs register — see routes-medication.js.
-require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow(), prfIntegrationSecret: PRF_INTEGRATION_SECRET });
+const medication = require('./routes-medication.js')({ route, httpError, CONTROL, ADMIN, db, nextId, logEvent, verifyPassword, flushNow: () => store.flushNow(), prfIntegrationSecret: PRF_INTEGRATION_SECRET });
+
+// Patient report forms — routes, access rules and the clinical audit trail
+// live in prf.js. A treatment or medicine recorded on a PRF is taken out of
+// stock through the two modules above, against the PRF number.
+const prf = require('./prf.js')({ route, db, nextId, httpError, logEvent, store, assertJobAccess, stock: inventory.prfSupplies, medication: medication.prfSupplies,
+  // forms is registered further down; only called once requests arrive.
+  canReadSubmission: (sub, user) => forms.canRead(sub, user) });
 
 // Hiring assets out to clients, with signed PDF agreements — see routes-rentals.js.
 // BS 7858 screening record and sign-off; the SIA ACS complaints log.
@@ -6819,4 +6811,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, prf, start, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };

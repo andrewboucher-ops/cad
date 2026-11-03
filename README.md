@@ -73,6 +73,10 @@ These are deliberately weak demo credentials for a POC. Replace them before the 
 | `RETAIN_LEAVERS_DAYS` | `2555` | leaver's personal details (BS 7858: employment + 7 years), then anonymised |
 | `RETAIN_TIMESHEETS_DAYS` | `2190` | shifts and clock-in/out |
 | `RETAIN_FORMS_DAYS` | `2190` | form submissions (incident reports, checks) and photos |
+| `RETAIN_PRF_ADULT_YEARS` | `8` | adult PRFs, from the incident. PRFs are never deleted automatically: past this date they show in PRF admin → Retention for a supervisor to dispose of or hold |
+| `RETAIN_PRF_CHILD_UNTIL_AGE` | `25` | children's PRFs, until this birthday (one year more if 17 when treated); a PRF with no age is treated as a child's |
+| `PRF_CONTROLLED_DRUGS` | off | `on` lets a PRF record controlled drugs from the register. Off because the medicines policy carries none |
+| `PRF_CONTROLLER`, `PRF_PRIVACY_EMAIL` | — | the organisation and contact address named on the public patient privacy notice, `/prf-privacy.html` |
 | `RETAIN_CLIENT_REQUESTS_DAYS` | `730` | closed client portal requests |
 | `RETAIN_EMERGENCIES_DAYS` | `730` | resolved emergency activations and call-me requests |
 | `GUARDM8_SECRET` | — | shared secret for GuardM8's `POST /api/integrations/guardm8/jobs` |
