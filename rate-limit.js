@@ -13,6 +13,12 @@
  *    stop anyone signing in. Password guessing is still held back by the
  *    per-account lockout in server.js, and a Microsoft callback is useless
  *    without a state value this server issued.
+ *  - Control room PCs and the check call host (/api/integrations/workstation
+ *    and /checkcall-host) have their own per-address bucket too. PCs off the
+ *    VPN poll alerts and check calls every few seconds, and without
+ *    TRUSTED_PROXIES every outside caller looks like the proxy: sharing the
+ *    general bucket, they ran it dry and were refused ("CCCS: " with a 429),
+ *    so alerts could not be acknowledged — and they starved everyone else.
  *  - Everything else is counted per address, as before.
  *
  * A bucket that overflows is logged once per window with the paths that
@@ -21,8 +27,9 @@
 'use strict';
 
 const WINDOW_MS = 60 * 1000;
-const LIMITS = { user: 600, auth: 120, ip: 600 };
+const LIMITS = { user: 600, auth: 120, ip: 600, integration: 1200 };
 const AUTH_PATH_RE = /^\/api\/auth\/(login|microsoft\/(status|login|callback|session)|session-cookie)$/;
+const INTEGRATION_PATH_RE = /^\/api\/integrations\/(workstation|checkcall-host)\//;
 
 function createRateLimiter({ limits = LIMITS, windowMs = WINDOW_MS, now = Date.now, log = console.warn } = {}) {
   const buckets = new Map();
@@ -30,6 +37,7 @@ function createRateLimiter({ limits = LIMITS, windowMs = WINDOW_MS, now = Date.n
   function bucketFor({ pathname, ip, userId }) {
     if (userId != null) return { key: `user:${userId}`, limit: limits.user };
     if (AUTH_PATH_RE.test(pathname)) return { key: `auth:${ip}`, limit: limits.auth };
+    if (INTEGRATION_PATH_RE.test(pathname)) return { key: `integration:${ip}`, limit: limits.integration ?? LIMITS.integration };
     return { key: `ip:${ip}`, limit: limits.ip };
   }
 
@@ -61,4 +69,4 @@ function createRateLimiter({ limits = LIMITS, windowMs = WINDOW_MS, now = Date.n
   return { check, bucketFor, reset: () => buckets.clear(), stop: () => clearInterval(sweep) };
 }
 
-module.exports = { createRateLimiter, AUTH_PATH_RE, LIMITS };
+module.exports = { createRateLimiter, AUTH_PATH_RE, INTEGRATION_PATH_RE, LIMITS };
