@@ -34,12 +34,16 @@ CCCS_CONF="$(pct config "$CCCS_CT")"
 STORAGE="$(sed -n 's/^rootfs: \([^:]*\):.*/\1/p' <<<"$CCCS_CONF")"
 NET0="$(sed -n 's/^net0: //p' <<<"$CCCS_CONF")"
 BRIDGE="$(tr ',' '\n' <<<"$NET0" | sed -n 's/^bridge=//p')"
-GW="$(tr ',' '\n' <<<"$NET0" | sed -n 's/^gw=//p')"
-CCCS_IP="$(tr ',' '\n' <<<"$NET0" | sed -n 's/^ip=\([^/]*\).*/\1/p')"
-PREFIX="$(tr ',' '\n' <<<"$NET0" | sed -n 's/^ip=[^/]*\/\([0-9]*\).*/\1/p')"
-[ -n "$STORAGE" ] && [ -n "$BRIDGE" ] || die "Could not read CT $CCCS_CT's storage/bridge."
-[ -n "$GW" ] || die "CT $CCCS_CT has no fixed gateway (DHCP?). Set GW=… and run again."
-[ -n "$CCCS_IP" ] && [ "$CCCS_IP" != "dhcp" ] || CCCS_IP="192.168.7.54"
+GW="${GW:-$(tr ',' '\n' <<<"$NET0" | sed -n 's/^gw=//p')}"
+CCCS_IP="${CCCS_IP:-$(tr ',' '\n' <<<"$NET0" | sed -n 's/^ip=\([0-9.]*\)\/.*/\1/p')}"
+PREFIX="${PREFIX:-$(tr ',' '\n' <<<"$NET0" | sed -n 's/^ip=[0-9.]*\/\([0-9]*\).*/\1/p')}"
+# CT 140 on DHCP has no gw= or ip= in its config: use the host's own
+# default route (same LAN) and ask the container for its current address.
+[ -n "$GW" ] || GW="$(ip route | awk '/^default/ {print $3; exit}')"
+[ -n "$CCCS_IP" ] || CCCS_IP="$(pct exec "$CCCS_CT" -- hostname -I 2>/dev/null | awk '{print $1}')"
+[ -n "$PREFIX" ] || PREFIX="$(ip -o -4 addr show | awk -v gw="${GW%.*}." 'index($4, gw) == 1 {split($4, a, "/"); print a[2]; exit}')"
+[ -n "$GW" ] || die "Could not find the network gateway. Run again with GW=<router address>."
+[ -n "$CCCS_IP" ] || die "Could not find CT $CCCS_CT's address. Run again with CCCS_IP=<its address>."
 PREFIX="${PREFIX:-24}"
 
 # ---- Size it to the host ------------------------------------------------
@@ -52,7 +56,7 @@ elif [ "$AVAIL_MB" -ge 7000 ]; then MODEL="qwen2.5:3b"; MEM_MB=6144
 else die "Only ${AVAIL_MB} MB of memory free on this host; the local AI needs at least 7000 MB. CCCS will keep using the template drafter."
 fi
 say "Host has ${AVAIL_MB} MB free and ${HOST_CORES} cores: CT $CTID gets ${MEM_MB} MB, ${CORES} cores, model ${MODEL}"
-say "Copying from CT $CCCS_CT: storage ${STORAGE}, bridge ${BRIDGE}, gateway ${GW}"
+say "Copying from CT $CCCS_CT: storage ${STORAGE}, bridge ${BRIDGE}, gateway ${GW}, CCCS at ${CCCS_IP}"
 
 # ---- 1. Container ---------------------------------------------------------
 if pct status "$CTID" >/dev/null 2>&1; then
