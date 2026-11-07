@@ -311,6 +311,36 @@ function leaveForPersonOnDay(personId, d) {
 /** Asks before putting someone on a shift that falls on their booked or
  * requested leave. A warning, not a hard block: control sometimes does
  * need to call someone in, but it should never happen by accident. */
+/** How a person reads in a picker: a quick-added subcontractor carries
+ * their company so two "John"s from different firms can be told apart. */
+function personLabel(p) {
+  if (!p.external_sub) return p.name;
+  return `${p.name} (${p.company ? `${p.company} · ` : ''}subcontractor)`;
+}
+/** The few fields needed to put a subcontractor with no personnel file on
+ * a shift. `pre` keeps two copies (new-shift form, add-to-shift) apart. */
+function subFormHtml(pre, hidden) {
+  const f = (id, label, type = 'text', ph = '') => `<div><label for="${pre}${id}" style="font-size:11px">${label}</label><input id="${pre}${id}" type="${type}" placeholder="${ph}" style="width:100%"></div>`;
+  return `<div id="${pre}Box" class="${hidden ? 'hide' : ''}" style="border:1px dashed var(--line);border-radius:6px;padding:10px;margin-top:8px">
+    <p class="dim" style="margin:0 0 8px;font-size:12px">For a subcontractor with no personnel file. Only the name is required; they won't get a staff number, onboarding or screening, and won't be able to sign in to the officer app, so clock them in and out from here.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      ${f('Name', 'Name *')}${f('Company', 'Company')}
+      ${f('Sia', 'SIA licence number', 'text', '16 digits, if known')}${f('SiaExpiry', 'SIA licence expiry', 'date')}
+      ${f('Phone', 'Phone', 'tel')}
+    </div>
+  </div>`;
+}
+/** Creates the subcontractor from subFormHtml(pre) and returns them. */
+async function createSubFromForm(pre) {
+  const v = (id) => el(`#${pre}${id}`).value.trim();
+  if (!v('Name')) throw new Error('Enter the subcontractor\'s name');
+  const p = await api('POST', '/api/subcontractors', {
+    name: v('Name'), company: v('Company'), sia_licence_no: v('Sia'),
+    sia_licence_expiry: v('SiaExpiry') || null, contact_phone: v('Phone'),
+  });
+  allPersonnel.push(p);
+  return p;
+}
 /** An expired SIA licence or right to work blocks rostering and clock-in;
  * an admin can still go ahead by giving a reason, which the server logs. */
 async function withLicenceOverride(call) {
@@ -412,12 +442,15 @@ function paintGridByStaff() {
   const days = weekDays();
   const today = new Date();
   const shifts = visibleShifts();
-  const rows = allPersonnel.filter((p) => p.employment_status !== 'TERMINATED').sort((a, b) => a.name.localeCompare(b.name));
+  // A quick-added subcontractor only gets a row in a week they're working,
+  // so a one-off cover doesn't sit on every future week's rota.
+  const rows = allPersonnel.filter((p) => p.employment_status !== 'TERMINATED' && (!p.external_sub || shifts.some((s) => s.assignments.some((a) => a.personnel_id === p.id && a.status !== 'REMOVED'))))
+    .sort((a, b) => a.name.localeCompare(b.name));
   let html = `<div class="rota-grid">`;
   html += `<div class="hdr"></div>`;
   for (const d of days) html += `<div class="hdr ${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()].slice(0, 3)} ${d.getDate()}</div>`;
   for (const p of rows) {
-    html += `<div class="person-name" title="${esc(p.name)}"><span class="main">${esc(p.name)}</span><span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
+    html += `<div class="person-name" title="${esc(p.name)}"><span class="main">${esc(p.name)}</span><span class="sub">${esc(p.external_sub ? `${p.company || 'Subcontractor'} · sub` : (p.callsign || p.rank || ''))}</span></div>`;
     for (const d of days) {
       const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.assignments.some((a) => a.personnel_id === p.id));
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
@@ -549,7 +582,9 @@ function shiftForm(s, defaults) {
   return `
     <form class="stack" id="shForm">
       ${isNew ? `<label>Personnel</label>
-      <select id="shPersonnel" ${dis}>${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
+      <select id="shPersonnel" ${dis}>${allPersonnel.filter((p) => p.employment_status !== 'TERMINATED' || d.personnelId === p.id).map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(personLabel(p))}</option>`).join('')}
+        ${isAdmin ? '<option value="new-sub">+ New subcontractor (no personnel file)…</option>' : ''}</select>
+      ${isAdmin ? subFormHtml('nsSub', true) : ''}` : ''}
       <label>Shift type</label>
       <select id="shType" ${dis}>${allShiftTypes.map((t) => `<option value="${t.id}" ${Number(typeIdSel) === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
         ${!isNew && !allShiftTypes.some((t) => t.id === s.shift_type_id) ? `<option value="${s.shift_type_id}" ${Number(typeIdSel) === s.shift_type_id ? 'selected' : ''}>${esc(s.shift_type_name)} (retired)</option>` : ''}</select>
@@ -588,7 +623,7 @@ function shiftForm(s, defaults) {
 function assignmentsSection(s) {
   const active = s.assignments.filter((a) => a.status !== 'REMOVED');
   const onShiftIds = active.map((a) => a.personnel_id);
-  const available = allPersonnel.filter((p) => !onShiftIds.includes(p.id));
+  const available = allPersonnel.filter((p) => !onShiftIds.includes(p.id) && p.employment_status !== 'TERMINATED');
   return `
     <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
       <label style="display:flex;justify-content:space-between;align-items:center">
@@ -636,9 +671,12 @@ function assignmentsSection(s) {
           </div>` : ''}`).join('') || '<p class="dim" style="font-size:13px">Nobody assigned yet.</p>'}
       </div>
       ${isAdmin && available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
-        <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+        <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(personLabel(p))}</option>`).join('')}</select>
         <button type="button" class="btn" id="shAddPerson" style="padding:6px 12px;font-size:12px">Add</button>
       </div>` : ''}
+      ${isAdmin ? `<button type="button" class="btn" id="shSubToggle" style="padding:4px 10px;font-size:11px;margin-top:8px">+ Subcontractor with no personnel file</button>
+      ${subFormHtml('asSub', true)}
+      <div id="asSubActions" class="hide" style="margin-top:8px"><button type="button" class="btn primary" id="shAddSub" style="padding:6px 12px;font-size:12px">Add subcontractor to shift</button></div>` : ''}
       <label style="margin-top:14px">Applications for this shift</label>
       <div id="shApplications" class="dim" style="font-size:13px">Loading…</div>
     </div>`;
@@ -839,6 +877,14 @@ function shiftModal(s, defaults) {
       try { await withLicenceOverride((o) => api('POST', `/api/shifts/${s.id}/assignments`, { personnel: Number(el('#shAddPersonnel').value), ...o })); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
+    if (el('#shSubToggle')) el('#shSubToggle').onclick = () => { el('#asSubBox').classList.toggle('hide'); el('#asSubActions').classList.toggle('hide'); };
+    if (el('#shAddSub')) el('#shAddSub').onclick = async () => {
+      try {
+        const p = await createSubFromForm('asSub');
+        await withLicenceOverride((o) => api('POST', `/api/shifts/${s.id}/assignments`, { personnel: p.id, ...o }));
+        await reopen();
+      } catch (e) { el('#shError').textContent = e.message; }
+    };
     if (el('#shApplications')) {
       api('GET', `/api/shift-applications?shift_id=${s.id}`).then((apps) => {
         const open = apps.filter((a) => ['APPLIED', 'SHORTLISTED'].includes(a.status));
@@ -891,6 +937,7 @@ function shiftModal(s, defaults) {
       try { await api('PATCH', `/api/shift-asset-allocations/${b.dataset.returnasset}`, {}); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     }));
+    if (el('#shPersonnel') && el('#nsSubBox')) el('#shPersonnel').onchange = () => el('#nsSubBox').classList.toggle('hide', el('#shPersonnel').value !== 'new-sub');
     if (el('#shSave')) el('#shSave').onclick = async () => {
       let scope = 'one';
       if (s && (s.recurrence || s.recurrence_root_id)) {
@@ -917,7 +964,7 @@ function shiftModal(s, defaults) {
             });
           }
         } else {
-          body.personnel = Number(el('#shPersonnel').value);
+          body.personnel = el('#shPersonnel').value === 'new-sub' ? (await createSubFromForm('nsSub')).id : Number(el('#shPersonnel').value);
           if (!confirmLeaveClash(body.personnel, body.starts_at, body.ends_at)) return;
           if (el('#shDraft') && el('#shDraft').checked) body.status = 'DRAFT';
           await withLicenceOverride((o) => api('POST', '/api/shifts', { ...body, ...o }));

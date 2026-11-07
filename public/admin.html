@@ -731,7 +731,7 @@ function paintPersonnel() {
   const status = el('#pnStatus').value;
   let rows = allPersonnel.slice().sort((a, b) => a.name.localeCompare(b.name));
   if (status) rows = rows.filter((p) => p.employment_status === status);
-  if (q) rows = rows.filter((p) => p.name.toLowerCase().includes(q) || (p.employee_no || '').toLowerCase().includes(q));
+  if (q) rows = rows.filter((p) => p.name.toLowerCase().includes(q) || (p.employee_no || '').toLowerCase().includes(q) || (p.company || '').toLowerCase().includes(q));
   el('#pnTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
       <thead><tr><th>Name</th><th style="width:100px">Rank</th><th style="width:100px">Callsign</th><th style="width:110px">Status</th><th style="width:70px">Login</th><th style="width:120px">Compliance</th><th style="width:70px"></th></tr></thead>
@@ -749,7 +749,7 @@ function paintPersonnel() {
         <td>${esc(p.name)}</td>
         <td class="dim">${esc(p.rank || '—')}</td>
         <td class="dim">${esc(p.callsign || '—')}</td>
-        <td class="dim">${esc(EMPLOYMENT_LABEL[p.employment_status] || p.employment_status)}</td>
+        <td class="dim">${esc(EMPLOYMENT_LABEL[p.employment_status] || p.employment_status)}${p.external_sub ? `<div style="font-size:11px">Subcontractor${p.company ? ` · ${esc(p.company)}` : ''} · no file</div>` : ''}</td>
         <td class="dim">${p.has_login ? 'Yes' : 'No'}</td>
         <td>${flags.length ? `<span class="err">${esc(flags.join(', '))}</span>` : '<span class="dim">—</span>'}</td>
         <td><button class="btn danger" data-delpersonnel="${p.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
@@ -857,6 +857,13 @@ function personnelForm(p) {
   const isNew = !p;
   return `
     <form class="stack" id="pnForm">
+      ${!isNew && p.external_sub ? `<div style="border:1px solid var(--line);border-radius:6px;padding:10px;background:var(--panel-2)">
+        <strong>Subcontractor with no personnel file</strong>
+        <p class="dim" style="margin:4px 0 8px;font-size:12px">Added from the rota with just the details needed to put them on a shift. They have no staff number and are left out of onboarding, BS 7858 screening, payroll and leave. Their shifts, timesheets, invoices and incident reports work as normal.</p>
+        <label>Company</label>
+        <input id="npnCompany" autocomplete="off" value="${esc(p.company || '')}">
+        <button type="button" class="btn" id="pnPromote" style="margin-top:8px">Give them a full personnel file</button>
+      </div>` : ''}
       <label>Name</label>
       <input id="npnName" autocomplete="off" value="${isNew ? '' : esc(p.name)}">
       <label>Staff number — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">leave blank and the next number is given automatically</span></label>
@@ -1135,6 +1142,11 @@ function personnelModal(p) {
         </span>
       </div>`;
     el('#pnCancel').onclick = closeModal;
+    if (el('#pnPromote')) el('#pnPromote').onclick = async () => {
+      if (!confirm(`Give ${p.name} a full personnel file? They'll get a staff number and appear on the onboarding and screening lists like any other member of staff.`)) return;
+      try { await api('PATCH', `/api/personnel/${p.id}`, { external_sub: false }); await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id)); }
+      catch (e) { el('#pnError').textContent = e.message; }
+    };
     if (el('#pnFile')) el('#pnFile').onclick = () => personnelFileModal(p);
     if (el('#pnScreening')) el('#pnScreening').onclick = () => screeningModal(p);
     // UK GDPR Article 15: reply within a month. Downloads one JSON file.
@@ -1244,6 +1256,7 @@ function personnelModal(p) {
       if (!name) { el('#pnError').textContent = 'name is required'; return; }
       const empType = el('#npnEmpType').value;
       const body = {
+        ...(el('#npnCompany') ? { company: el('#npnCompany').value.trim() } : {}),
         name, employee_no: el('#npnEmpNo').value.trim() || null, rank: el('#npnRank').value.trim(),
         // Omitted entirely when blank (not sent as null): a new record's
         // POST→PATCH save round-trip would otherwise have the follow-up
