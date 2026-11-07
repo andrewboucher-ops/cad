@@ -142,3 +142,14 @@ test('the sign-in route is only for quick-added subcontractors', async () => {
   const staff = (await call('POST', '/api/personnel', { name: 'Normal Staff Member' }, adminT)).body;
   assert.equal((await call('POST', `/api/subcontractors/${staff.id}/login`, {}, adminT)).status, 404);
 });
+
+test('when no text goes out, the reply says why', async () => {
+  const none = (await call('POST', '/api/subcontractors', { name: 'No Phone Sub' }, adminT)).body;
+  const a = (await call('POST', `/api/subcontractors/${none.id}/login`, {}, adminT)).body;
+  assert.equal(a.sms, false);
+  assert.match(a.sms_problem, /no phone number/);
+  const bad = (await call('POST', '/api/subcontractors', { name: 'Bad Phone Sub', contact_phone: '12345' }, adminT)).body;
+  assert.match((await call('POST', `/api/subcontractors/${bad.id}/login`, {}, adminT)).body.sms_problem, /isn't a UK mobile/);
+  const ok = (await call('POST', '/api/subcontractors', { name: 'Test Mode Sub', contact_phone: '07700900789' }, adminT)).body;
+  assert.match((await call('POST', `/api/subcontractors/${ok.id}/login`, {}, adminT)).body.sms_problem, /test mode/);
+});

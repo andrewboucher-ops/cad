@@ -1151,7 +1151,13 @@ function personnelModal(p) {
       try {
         const r = await api('POST', `/api/subcontractors/${p.id}/login`, { contact_phone: el('#npnPhone').value.trim(), contact_email: el('#npnEmail').value.trim() });
         const how = [r.sms ? 'text' : '', r.email ? 'email' : ''].filter(Boolean).join(' and ');
-        msg.textContent = how ? `Sent by ${how}. Username: ${r.username}.` : `Nothing could be sent (no working phone or email, or texting isn't set up). Username: ${r.username}. Pass this link on: ${r.link}`;
+        const why = [r.sms_problem ? `No text: ${r.sms_problem}.` : '', r.email_problem && !r.email ? `No email: ${r.email_problem}.` : ''].filter(Boolean).join(' ');
+        msg.innerHTML = `${how ? `Sent by ${esc(how)}. ` : ''}Username: <strong>${esc(r.username)}</strong>.${why ? `<br>${esc(why)}` : ''}${how ? '' : '<br>Copy the link and send it to them yourself (WhatsApp, text from your phone, email):'}
+          <div style="display:flex;gap:6px;margin-top:6px"><input id="pnSubLink" readonly value="${esc(r.link)}" style="flex:1;font-size:11px"><button type="button" class="btn" id="pnSubCopy" style="padding:4px 10px;font-size:11px">Copy link</button></div>`;
+        el('#pnSubCopy').onclick = async () => {
+          try { await navigator.clipboard.writeText(r.link); } catch { el('#pnSubLink').select(); document.execCommand('copy'); }
+          el('#pnSubCopy').textContent = 'Copied';
+        };
       } catch (e) { msg.textContent = e.message; }
     };
     if (el('#pnPromote')) el('#pnPromote').onclick = async () => {
