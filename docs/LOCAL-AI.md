@@ -13,7 +13,7 @@ There are two drafters, and neither costs anything to run:
 |---|---|---|
 | Needs | An LXC on the Proxmox host (steps below) | Nothing, it's built in |
 | Quality | Proper written sentences, sorted into the right boxes, plus "worth adding" questions | Tidies the notes ("arrived 2215" → "I arrived at 22:15."), sorts them by keyword, opens with the job details |
-| Speed | About 20–90 seconds on CPU | Instant |
+| Speed | About 30 seconds to 2 minutes on CPU (runs in the background, the form shows a timer) | Instant |
 | Data | Stays on our network | Stays in CCCS |
 
 CCCS uses the local AI when `LOCAL_AI_URL` is set. If the AI is down, slow,
@@ -117,5 +117,5 @@ reason says what went wrong.
 |---|---|---|
 | `LOCAL_AI_URL` | (off) | e.g. `http://192.168.7.202:11434`. Unset = template only |
 | `LOCAL_AI_MODEL` | `qwen2.5:7b` | Any Ollama model that supports structured output |
-| `LOCAL_AI_TIMEOUT_MS` | `120000` | Past this, the template is used |
+| `LOCAL_AI_TIMEOUT_MS` | `240000` | Past this, the template is used |
 | `LOCAL_AI_MAX_QUEUE` | `2` | Drafts sent to the AI at once; extra ones get the template |
