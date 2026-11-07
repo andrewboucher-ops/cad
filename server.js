@@ -3051,6 +3051,13 @@ route('GET', '/api/config', ALL, () => ({
 
 route('GET', '/api/openapi.json', null, () => require('./openapi.json'));
 
+// AI assistance (call triage, report drafting, unit ranking) and the phone
+// agent's integration routes — see ai.js.
+require('./ai.js').register({
+  route, db, ALL, CONTROL, PRIORITIES, httpError, logEvent, broadcast, pushToRoles,
+  publicJob, nextId, instantiateChecklist, assertJobAccess, store,
+});
+
 // Admin: users
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function normalizeEmail(raw, { forId } = {}) {

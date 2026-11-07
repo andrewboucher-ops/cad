@@ -296,7 +296,9 @@ tracking's extended roadmap is now fully built out.
 - Training/academy module, applicant tracking
 - Multi-branch — only worth building if the business genuinely operates as
   multiple branches
-- AI assistant — revisit once the core product has real usage data
+- AI assistant — first cut shipped (call-notes triage, report drafting, nearest
+  units, unanswered-call phone assistant in `voice-agent/`); extend once it has
+  real usage data
 
 ## What I'd defer or skip entirely
 

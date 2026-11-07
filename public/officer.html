@@ -342,6 +342,42 @@ el('#passdownSend').onclick = async () => {
   paintPassdownLogs();
 };
 
+/* AI report assist — drafts from the officer's rough notes plus the checklist;
+ * nothing is saved until the officer presses "Use this report". */
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+let aiEnabled = false;
+api('GET', '/api/ai/status').then((r) => { aiEnabled = Boolean(r && r.enabled); if (aiEnabled && job) paintJob(); }).catch(() => {});
+function wireReportAssist() {
+  if (el('#aiDictate')) el('#aiDictate').onclick = () => {
+    const rec = new SpeechRec(); rec.lang = 'en-GB'; rec.interimResults = false; rec.continuous = false;
+    const btn = el('#aiDictate'); btn.textContent = 'Listening…'; btn.disabled = true;
+    rec.onresult = (e) => { const t = [...e.results].map((r) => r[0].transcript).join(' '); const ta = el('#aiRough'); ta.value = (ta.value ? ta.value + ' ' : '') + t; };
+    rec.onend = () => { btn.textContent = 'Dictate'; btn.disabled = false; };
+    rec.onerror = () => { btn.textContent = 'Dictate'; btn.disabled = false; };
+    rec.start();
+  };
+  el('#aiWrite').onclick = async () => {
+    const host = el('#aiDraftHost'), btn = el('#aiWrite');
+    btn.disabled = true; host.innerHTML = '<p class="dim">Writing…</p>';
+    try {
+      const r = await api('POST', `/api/ai/jobs/${job.id}/report`, { notes: el('#aiRough').value });
+      host.innerHTML = `<label for="aiDraft">Draft report — edit anything that's wrong</label>
+        <textarea id="aiDraft" rows="8" style="width:100%">${esc(r.report)}</textarea>
+        ${r.missing.length ? `<p class="dim" style="font-size:12.5px">Worth adding: ${r.missing.map(esc).join('; ')}</p>` : ''}
+        <div class="btn-row"><button class="btn ok" id="aiUse">Use this report</button></div>`;
+      el('#aiUse').onclick = async () => {
+        const text = el('#aiDraft').value.trim(); if (!text) return;
+        const item = (job.checklist || []).find((c) => /report/i.test(c.title));
+        job = item
+          ? await api('PATCH', `/api/jobs/${job.id}/checklist/${item.id}`, { notes: text })
+          : await api('PATCH', `/api/jobs/${job.id}`, { notes: [job.notes, text].filter(Boolean).join('\n\n') });
+        paintJob();
+      };
+    } catch (e) { host.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+    finally { btn.disabled = false; }
+  };
+}
+
 function paintJob() {
   if (!job) {
     el('#jobBody').innerHTML = '<p class="dim">No job assigned. Dispatched jobs appear here immediately.</p>';
@@ -366,7 +402,14 @@ function paintJob() {
       <button class="btn" id="jDone">Completed</button>
     </div>
     ${checklist.length ? `<label style="margin-top:10px">Checklist</label><div id="checklistHost"></div>` : ''}
-    <div class="btn-row" style="margin-top:10px"><button class="btn" id="jAddPhoto">Add photo</button></div>`;
+    <div class="btn-row" style="margin-top:10px"><button class="btn" id="jAddPhoto">Add photo</button></div>
+    ${aiEnabled ? `<label for="aiRough" style="margin-top:14px">Write my report <span class="dim">— jot down what happened in any order; AI writes it up for you to check</span></label>
+    <textarea id="aiRough" rows="3" style="width:100%" placeholder="e.g. arrived 2215, rear fire door open, no one inside, secured it, rang keyholder 2230"></textarea>
+    <div class="btn-row" style="margin-top:6px">
+      ${SpeechRec ? '<button class="btn" id="aiDictate">Dictate</button>' : ''}
+      <button class="btn" id="aiWrite">Write report</button>
+    </div>
+    <div id="aiDraftHost"></div>` : ''}`;
 
   if (checklist.length) {
     el('#checklistHost').innerHTML = checklist.map((item) => `
@@ -390,6 +433,7 @@ function paintJob() {
     CCCS.els('[data-photofor]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = b.dataset.photofor; pendingPhotoKind = 'job'; el('#photoInput').click(); }));
   }
   el('#jAddPhoto').onclick = () => { pendingPhotoItemId = null; pendingPhotoKind = 'job'; el('#photoInput').click(); };
+  if (el('#aiWrite')) wireReportAssist();
 
   if (el('#jAck')) el('#jAck').onclick = async () => {
     const r = await CCCS.send('POST', `/api/jobs/${job.id}/ack`, {}, `acknowledge ${job.reference}`);
