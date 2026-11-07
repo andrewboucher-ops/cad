@@ -205,6 +205,9 @@ if (!isPopout) {
 }
 
 const state = { personnel: [], mdts: [], jobs: [], sites: [], site_visits: [], requests: [], emergencies: [], events: [], selected: null };
+// AI assistant — buttons only appear when the server has it switched on.
+let aiEnabled = false;
+api('GET', '/api/ai/status').then((r) => { aiEnabled = Boolean(r && r.enabled); }).catch(() => {});
 let map; // assigned once the 'map' panel is mounted, below
 
 /* ---------- rendering ---------- */
@@ -608,6 +611,11 @@ function messageModal(preselect) {
 
 function openNewJobModal() {
   modal('Create job', `
+  ${aiEnabled ? `<div class="ai-box" style="border:1px dashed var(--line,#3a3f4b);border-radius:8px;padding:8px 10px;margin-bottom:10px">
+    <label for="aiNotes" style="margin-top:0">Call notes <span class="dim">— type or paste what the caller said; AI fills the form for you to check</span></label>
+    <textarea id="aiNotes" rows="3" style="width:100%;resize:vertical" placeholder="e.g. Mark from Meridian Point, 07700 900123, sees two lads climbing the back fence now"></textarea>
+    <div class="btn-row" style="margin-top:6px"><button class="btn" id="aiFill">Fill form from notes</button><span id="aiOut" class="dim" style="margin-left:8px"></span></div>
+  </div>` : ''}
   <label for="jType">Incident type</label>
   <input id="jType" list="incidentTypes" value="Alarm activation">
   <datalist id="incidentTypes">
@@ -630,6 +638,27 @@ function openNewJobModal() {
   <label for="jRes">Resources to dispatch</label>
   <select id="jRes" multiple size="6">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)} — ${esc(p.employment_status.replace('_', ' '))}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
   <div style="height:12px"></div><button class="btn primary" id="jGo">Create and dispatch</button>`, () => {
+  if (el('#aiFill')) el('#aiFill').onclick = async () => {
+    const out = el('#aiOut'), btn = el('#aiFill');
+    const text = el('#aiNotes').value.trim();
+    if (!text) { out.textContent = 'Add some notes first.'; return; }
+    btn.disabled = true; out.textContent = 'Working…';
+    try {
+      const r = await api('POST', '/api/ai/triage', { text });
+      el('#jType').value = r.incident_type || el('#jType').value;
+      el('#jPri').value = r.priority;
+      el('#jSite').value = r.site_id ? String(r.site_id) : '';
+      el('#jLoc').value = r.location || '';
+      el('#jW3w').value = r.what3words || '';
+      el('#jDesc').value = r.description || '';
+      el('#jCaller').value = r.caller || '';
+      const notes = [];
+      if (r.emergency_services) notes.push('<strong class="err">Consider calling 999 now.</strong>');
+      if (r.missing && r.missing.length) notes.push('Still to ask: ' + r.missing.map(esc).join('; '));
+      out.innerHTML = notes.length ? notes.join(' ') : 'Filled — check before dispatching.';
+    } catch (e) { out.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    finally { btn.disabled = false; }
+  };
   el('#jGo').onclick = async () => {
     try {
       const job = await api('POST', '/api/jobs', {
@@ -724,7 +753,9 @@ function renderJobDetail() {
 
     <label for="jAdd" style="margin-top:12px;display:block">Assign more resources</label>
     <select id="jAdd" multiple size="4">${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}</option>`).join('')}${state.mdts.map((m) => `<option value="${m.mdt_code}">${esc(m.mdt_code)}</option>`).join('')}</select>
+    <div id="jUnits" class="dim" style="margin-top:6px;font-size:12.5px"></div>
     <div class="btn-row" style="margin-top:12px">
+      <button class="btn" id="jSuggest">Suggest nearest units</button>
       <button class="btn primary" id="jAssign">Dispatch</button>
       <button class="btn ok" id="jDone">Mark completed</button>
       <button class="btn danger" id="jCancel">Cancel job</button>
@@ -732,6 +763,18 @@ function renderJobDetail() {
   el('#jAssign').onclick = async () => {
     const picks = [...el('#jAdd').selectedOptions].map((o) => o.value);
     if (picks.length) await api('POST', `/api/jobs/${j.id}/assign`, { resources: picks });
+  };
+  el('#jSuggest').onclick = async () => {
+    const host = el('#jUnits');
+    try {
+      const r = await api('GET', `/api/ai/jobs/${j.id}/units`);
+      if (!r.job_located) { host.textContent = 'This job has no map position, so units cannot be ranked.'; return; }
+      if (!r.units.length) { host.textContent = 'No vehicle terminals are online with a position.'; return; }
+      host.innerHTML = r.units.map((u) => `<div>${u.available ? '' : '<s>'}<strong class="mono">${esc(u.callsign || u.mdt)}</strong> ${esc(u.mdt)} — ${u.distance_km} km, about ${u.eta_min} min${u.available ? '' : `</s> (${esc(u.duty_status)}${u.duty_status === 'AVAILABLE' ? ', on a job' : ''})`}</div>`).join('') +
+        '<div>Straight-line distance; select a unit above and press Dispatch.</div>';
+      const best = r.units.find((u) => u.available);
+      if (best) { const opt = [...el('#jAdd').options].find((o) => o.value === best.mdt); if (opt) opt.selected = true; }
+    } catch (e) { host.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
   };
   el('#jDone').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'COMPLETED' }); };
   el('#jCancel').onclick = async () => { await api('PATCH', `/api/jobs/${j.id}`, { status: 'CANCELLED' }); };

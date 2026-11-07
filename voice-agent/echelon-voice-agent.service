@@ -1,0 +1,20 @@
+[Unit]
+Description=Echelon AI phone assistant
+After=network-online.target cccs.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cccs
+WorkingDirectory=/opt/cccs/voice-agent
+EnvironmentFile=/etc/cccs/voice-agent.env
+ExecStart=/usr/bin/node agent.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -41,6 +41,19 @@ belongs to. Nothing is copied in bulk: each answer is one lookup, made when an
 operator is working on that footage in DEMS. Caller details are not shared.
 Mention this in the staff notice alongside body-worn video.
 
+### Sent to the AI assistant (Anthropic, Deepgram)
+
+When `ANTHROPIC_API_KEY` is set, pressing an AI button sends that job's
+details, its checklist notes and what the user typed to Anthropic's API to
+draft a suggestion; the site list (names and addresses only) goes with a
+call-notes request. Nothing is sent unless someone presses the button, and
+nothing is saved unless they accept it. The phone assistant (`voice-agent/`)
+streams caller audio to Deepgram's EU endpoint for transcription and the
+transcript to Anthropic; the transcript is kept on the resulting job or
+message. Anthropic's API does not train on this data by default. List both as
+processors in your ROPA, and tell callers in your privacy notice that
+unanswered calls are handled by an automated assistant.
+
 ## What is not collected
 
 - **No audio is recorded.** Voice passes between devices and is not stored.
