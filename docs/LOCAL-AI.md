@@ -29,6 +29,14 @@ made, by whom, for which form, and by which drafter.
 
 ## Setting up the local AI
 
+**The quick way.** On the Proxmox host shell (web UI → the host → Shell), paste this one line. It does steps 1–4 below for you, sizes the container to the host's free memory, and prints what it did:
+
+```
+pct exec 140 -- cat /opt/cccs-src/deploy/install-local-ai.sh > /root/install-local-ai.sh && bash /root/install-local-ai.sh
+```
+
+The steps below are the same thing by hand.
+
 You need about **8 GB of RAM** spare for the default model (`qwen2.5:7b`).
 With less, use `qwen2.5:3b` (about 3 GB), which is faster but writes less well.
 
