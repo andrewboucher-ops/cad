@@ -32,6 +32,8 @@
  */
 'use strict';
 
+const crypto = require('node:crypto');
+
 const clip = (v, n) => String(v == null ? '' : v).slice(0, n);
 const londonTime = (iso) => new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', dateStyle: 'short', timeStyle: 'short' });
 const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit' });
@@ -216,10 +218,10 @@ async function aiDraft(def, notes, ctx) {
   const fields = fillableFields(def);
   const out = await transport({
     url: `${aiUrl()}/api/chat`,
-    timeoutMs: Number(process.env.LOCAL_AI_TIMEOUT_MS || 120000),
+    timeoutMs: Number(process.env.LOCAL_AI_TIMEOUT_MS || 240000),
     body: {
       model: aiModel(), stream: false, format: aiSchema(fields), keep_alive: '30m',
-      options: { temperature: 0.2, num_ctx: 8192 },
+      options: { temperature: 0.2, num_ctx: 4096, num_predict: 900 },
       messages: [{ role: 'system', content: STYLE }, { role: 'user', content: aiPrompt(def, notes, ctx, fields) }],
     },
   });
@@ -291,30 +293,57 @@ function register({ route, db, ALL, httpError, logEvent, assertJobAccess, assert
 
   route('GET', '/api/report-assist/status', ALL, () => ({ available: true, ai: aiConfigured(), model: aiConfigured() ? aiModel() : null }));
 
-  route('POST', '/api/report-assist', ALL, async ({ body, user }) => {
+  /* A CPU-only model can take a minute or two, longer than the web proxy in
+   * front of CCCS waits for one request (it answered 504). So an AI draft
+   * runs in the background: POST answers 202 with an id at once, and the
+   * form asks GET /api/report-assist/drafts/:id every couple of seconds.
+   * Drafts live in memory only, for their author only, for 10 minutes. */
+  const drafts = new Map();
+  const DRAFT_TTL_MS = 10 * 60 * 1000;
+  const sweep = () => { const cutoff = Date.now() - DRAFT_TTL_MS; for (const [id, d] of drafts) if (d.at < cutoff) drafts.delete(id); };
+
+  function finish(def, notes, ctx, user, ai, note) {
+    const sourceText = [notes, ctx.reference, ctx.location, ctx.description, ...(ctx.timeline || []), ...(ctx.checklist || [])].filter(Boolean).join('\n');
+    const source = ai ? 'ai' : 'template';
+    const values = ai ? ai.values : templateDraft(def, notes, ctx);
+    // The job or site's own address is better than nothing for "Exact location".
+    if (ai && !values.location && ctx.location && fillableFields(def).some((f) => f.id === 'location')) values.location = ctx.location;
+    const check = ai ? unsupportedNumbers(values, sourceText) : [];
+    const missing = [...(ai ? ai.missing : []), ...stillToAdd(def, values)].slice(0, 8);
+    logEvent('report.assist', `REPORT DRAFT (${ai ? 'local AI' : 'template'}) FOR ${user.display_name}: ${def.name}`,
+      { user_id: user.id, definition_id: def.id, source });
+    return { values, missing, check, source, model: ai ? aiModel() : null, note };
+  }
+
+  route('POST', '/api/report-assist', ALL, ({ body, user }) => {
     const def = (db.form_definitions || []).find((d) => d.id === Number(body.definition_id));
     if (!def) throw httpError(404, 'form not found');
     const notes = clip(body.notes, 6000).trim();
     if (notes.length < 3) throw httpError(400, 'write a few notes first');
     if (!fillableFields(def).length) throw httpError(400, 'this form has nothing to write up');
     const ctx = contextFor(String(body.subject_type || ''), body.subject_id, user);
-    const sourceText = [notes, ctx.reference, ctx.location, ctx.description, ...(ctx.timeline || []), ...(ctx.checklist || [])].filter(Boolean).join('\n');
 
-    let source = 'template', note = null, values, missing = [];
-    if (aiConfigured() && inFlight < MAX_IN_FLIGHT) {
-      inFlight++;
-      try { ({ values, missing } = await aiDraft(def, notes, ctx)); source = 'ai'; }
-      catch (e) { note = `${e.message}: used the simple template instead.`; }
-      finally { inFlight--; }
-    } else if (aiConfigured()) note = 'The local AI is busy: used the simple template instead.';
+    if (!aiConfigured()) return finish(def, notes, ctx, user, null, null);
+    if (inFlight >= MAX_IN_FLIGHT) return finish(def, notes, ctx, user, null, 'The local AI is busy: used the simple template instead.');
 
-    if (source === 'template') values = templateDraft(def, notes, ctx);
-    const check = source === 'ai' ? unsupportedNumbers(values, sourceText) : [];
-    missing = [...missing, ...stillToAdd(def, values)].slice(0, 8);
+    sweep();
+    const id = crypto.randomBytes(12).toString('hex');
+    const entry = { user_id: user.id, at: Date.now(), result: null };
+    drafts.set(id, entry);
+    inFlight++;
+    aiDraft(def, notes, ctx)
+      .then((ai) => { entry.result = finish(def, notes, ctx, user, ai, null); })
+      .catch((e) => { entry.result = finish(def, notes, ctx, user, null, `${e.message}: used the simple template instead.`); })
+      .finally(() => { inFlight--; });
+    return { __status: 202, __body: { pending: true, id } };
+  });
 
-    logEvent('report.assist', `REPORT DRAFT (${source === 'ai' ? 'local AI' : 'template'}) FOR ${user.display_name}: ${def.name}`,
-      { user_id: user.id, definition_id: def.id, source });
-    return { values, missing, check, source, model: source === 'ai' ? aiModel() : null, note };
+  route('GET', '/api/report-assist/drafts/:id', ALL, ({ params, user }) => {
+    const d = drafts.get(String(params.id));
+    if (!d || d.user_id !== user.id) throw httpError(404, 'draft not found (they are kept for 10 minutes)');
+    if (!d.result) return { pending: true };
+    drafts.delete(String(params.id));
+    return d.result;
   });
 }
 

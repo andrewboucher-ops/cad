@@ -44,7 +44,17 @@ before(async () => {
 });
 after(() => { assist.setTransport(null); app.server.closeAllConnections?.(); app.server.close(); });
 
-const draft = (body, token = danT) => call('POST', '/api/report-assist', { definition_id: incident.id, subject_type: 'JOB', subject_id: job.id, notes: NOTES, ...body }, token);
+/** POST a draft; an AI draft answers 202 + id, so follow it the way the form does. */
+async function draft(body, token = danT) {
+  let r = await call('POST', '/api/report-assist', { definition_id: incident.id, subject_type: 'JOB', subject_id: job.id, notes: NOTES, ...body }, token);
+  for (let i = 0; r.status === 202 && i < 50; i++) {
+    const id = r.body.id;
+    await new Promise((res) => setTimeout(res, 20));
+    r = await call('GET', `/api/report-assist/drafts/${id}`, undefined, token);
+    if (r.status === 200 && r.body.pending) r = { status: 202, body: { id } };
+  }
+  return r;
+}
 
 test('tidies rough notes into first-person sentences', () => {
   assert.deepStrictEqual(assist.sentences('arrived 2215, secured it, rang keyholder 10pm'),
@@ -126,6 +136,27 @@ for (const [name, fake] of [
     } finally { delete process.env.LOCAL_AI_URL; assist.setTransport(null); }
   });
 }
+
+test('an AI draft runs in the background and only its author can collect it', async () => {
+  process.env.LOCAL_AI_URL = 'http://ai.test:11434';
+  let release;
+  assist.setTransport(() => new Promise((res) => { release = () => res({ message: { content: JSON.stringify({ fields: { description: 'I arrived.' }, missing: [] }) } }); }));
+  try {
+    const first = await call('POST', '/api/report-assist', { definition_id: incident.id, subject_type: 'JOB', subject_id: job.id, notes: NOTES }, danT);
+    assert.equal(first.status, 202);
+    assert.equal(first.body.pending, true);
+    const path = `/api/report-assist/drafts/${first.body.id}`;
+    assert.deepStrictEqual((await call('GET', path, undefined, danT)).body, { pending: true });
+    assert.equal((await call('GET', path, undefined, ellieT)).status, 404, 'another officer cannot read it');
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    const done = await call('GET', path, undefined, danT);
+    assert.equal(done.status, 200);
+    assert.equal(done.body.source, 'ai');
+    assert.equal(done.body.values.description, 'I arrived.');
+    assert.equal((await call('GET', path, undefined, danT)).status, 404, 'collected once, then gone');
+  } finally { delete process.env.LOCAL_AI_URL; assist.setTransport(null); }
+});
 
 test('notes are not written to the audit log', async () => {
   await draft({ notes: 'CANARY-NOTES-7731 arrived 2215' });

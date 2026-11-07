@@ -218,9 +218,17 @@ const CCCSForms = (() => {
       goBtn.onclick = async () => {
         const notes = host.querySelector('[data-ff-assist-notes]').value.trim();
         if (notes.length < 3) { out.innerHTML = '<p class="err" style="margin:6px 0 0">Write a few notes first.</p>'; return; }
-        goBtn.disabled = true; goBtn.textContent = 'Writing… (can take up to a minute)'; out.innerHTML = '';
+        goBtn.disabled = true; goBtn.textContent = 'Writing…'; out.innerHTML = '';
         try {
-          const r = await api('POST', '/api/report-assist', { definition_id: def.id, subject_type: subject && subject.type, subject_id: subject && subject.id, notes });
+          let r = await api('POST', '/api/report-assist', { definition_id: def.id, subject_type: subject && subject.type, subject_id: subject && subject.id, notes });
+          // The local AI works in the background; ask every 2s until it's done.
+          const started = Date.now(), draftId = r && r.id;
+          while (r && r.pending) {
+            if (Date.now() - started > 5 * 60 * 1000) throw new Error('The local AI is taking too long. Try again, or write it up yourself.');
+            await new Promise((res) => setTimeout(res, 2000));
+            goBtn.textContent = `Writing… ${Math.round((Date.now() - started) / 1000)}s`;
+            r = await api('GET', `/api/report-assist/drafts/${draftId}`);
+          }
           const kept = [];
           for (const [id, val] of Object.entries(r.values || {})) {
             const ctl = host.querySelector(`[data-ff="${id}"]`); if (!ctl) continue;
