@@ -334,6 +334,10 @@
 const { api, el, els, esc } = CCCS;
 if (!CCCS.requireAuth(['FIELD_USER', 'DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
 const me = CCCS.getSession().user;
+/** Couldn't reach the server (no signal, CCCS restarting, signed out) —
+ * as opposed to the server refusing the request. */
+const noLink = (e) => e && (e instanceof TypeError || [401, 408, 429, 500, 502, 503, 504].includes(e.status) || /Failed to fetch|NetworkError|Load failed/i.test(e.message || ''));
+const nowIso = () => new Date().toISOString();
 const isControl = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role);
 setInterval(() => (el('#clock').textContent = CCCS.hhmmss().slice(0, 5)), 1000);
 el('#clock').textContent = CCCS.hhmmss().slice(0, 5);
@@ -507,7 +511,18 @@ function paintShiftBar() {
   const pl = el('#sbPush');
   if (pl) pl.onclick = async (e) => { e.preventDefault(); try { await CCCS.push.enable(); pushState = 'subscribed'; toast('Reminders on.'); paintShiftBar(); } catch (x) { alert(x.message); } };
   el('#sbBrk').onclick = async () => {
-    try { await api('POST', `/api/shift-assignments/${my.id}/${h.onBreak ? 'break-end' : 'break-start'}`, {}); toast(h.onBreak ? 'Break ended.' : 'Break started.'); } catch (e) { alert(e.message); }
+    // CCCS.send: a break pressed with no signal is kept and sent later,
+    // timed when it was pressed (offline-time.js on the server).
+    try {
+      const r = await CCCS.send('POST', `/api/shift-assignments/${my.id}/${h.onBreak ? 'break-end' : 'break-start'}`, {}, h.onBreak ? 'end break' : 'start break');
+      if (r.queued) {
+        if (h.onBreak) h.onBreak.end = nowIso(); else (my.breaks = my.breaks || []).push({ start: nowIso(), end: null });
+        saveOfficerSnapshot(); paintShift();
+        toast(`${h.onBreak ? 'Break ended' : 'Break started'} — saved on this phone, will send when you have signal.`);
+        return;
+      }
+      toast(h.onBreak ? 'Break ended.' : 'Break started.');
+    } catch (e) { alert(e.message); }
     await refreshShifts();
   };
   el('#sbOut').onclick = () => clockOut(c);
@@ -772,6 +787,7 @@ async function clockIn(s, reason) {
   try {
     const r = await CCCS.send('POST', `/api/shift-assignments/${s.my.id}/clock-in`, { ...(f || {}), ...(reason ? { reason } : {}) }, 'clock in');
     startFootTracking(); toast(r.queued ? 'Saved — will clock you in automatically when you have signal.' : (reason ? 'Clocked in — reason sent for approval.' : 'Clocked in.'));
+    if (r.queued) { s.my.clocked_in_at = nowIso(); s.my.queued = true; saveOfficerSnapshot(); paintShift(); return; }
   } catch (e) {
     if (e.status === 428 && !reason) { if (msg) msg.textContent = ''; const r = await askReason(e.message.replace(/ — please give a reason$/, '')); if (r) return clockIn(s, r.reason); return; }
     const text = !f && /location/i.test(e.message) ? 'Turn on location for this app (and allow it in your browser), then try again.' : e.message;
@@ -788,7 +804,13 @@ async function clockOut(s, reason) {
   try {
     const r = await CCCS.send('POST', `/api/shift-assignments/${s.my.id}/clock-out`, reason ? { reason } : {}, 'clock out');
     stopFootTracking();
-    if (r.queued) { toast('Saved — will clock you out automatically when you have signal.'); }
+    if (r.queued) {
+      toast('Clocked out on this phone — it will send automatically when you have signal, timed now.');
+      s.my.clocked_out_at = nowIso(); s.my.queued = true;
+      for (const b of s.my.breaks || []) if (!b.end) b.end = s.my.clocked_out_at;
+      saveOfficerSnapshot(); paintShift(); managePresence();
+      return;
+    }
     else { const mine = r.assignments && r.assignments.find((x) => x.id === s.my.id); toast(mine ? `Clocked out — ${dur(hoursOf(mine).worked)} worked.` : 'Clocked out.'); }
   }
   catch (e) {
@@ -844,7 +866,24 @@ async function loadRotaSiteInfo(siteId) {
 async function refreshShifts() {
   if (!person) { el('#rotaList').innerHTML = '<p class="dim">No officer record is linked to this login.</p>'; return; }
   const from = new Date(Date.now() - 12 * 3600000).toISOString();
-  shifts = await api('GET', `/api/shifts?personnel_id=${person.id}&from=${encodeURIComponent(from)}`);
+  try {
+    shifts = await api('GET', `/api/shifts?personnel_id=${person.id}&from=${encodeURIComponent(from)}`);
+  } catch (e) {
+    if (!noLink(e)) throw e;
+    return; // no signal: keep what's on screen (and any clock-out made offline) as it is
+  }
+  // While a clock action made offline is still waiting to send, the
+  // server doesn't know about it yet: keep showing it as done.
+  if (CCCS.outbox.count()) {
+    const waiting = CCCS.outbox.pending();
+    for (const sh of shifts) {
+      if (!sh.my) continue;
+      const w = (verb) => waiting.find((x) => x.path === `/api/shift-assignments/${sh.my.id}/${verb}`);
+      if (!sh.my.clocked_in_at && w('clock-in')) { sh.my.clocked_in_at = w('clock-in').at; sh.my.queued = true; }
+      if (sh.my.clocked_in_at && !sh.my.clocked_out_at && w('clock-out')) { sh.my.clocked_out_at = w('clock-out').at; sh.my.queued = true; }
+    }
+  }
+  saveOfficerSnapshot();
   paintShift();
   managePresence();
 }
@@ -873,8 +912,11 @@ async function refreshPassdown() {
 el('#passdownSend').onclick = async () => {
   const body = el('#passdownNote').value.trim();
   if (!body || !passdownSiteId) return;
-  const log = await api('POST', '/api/passdown-logs', { site_id: passdownSiteId, body });
+  let log;
+  try { log = await CCCS.send('POST', '/api/passdown-logs', { site_id: passdownSiteId, body }, 'handover note'); }
+  catch (e) { alert(`Handover note not saved: ${e.message}`); return; }
   el('#passdownNote').value = '';
+  if (log.queued) { toast('Handover note saved on this phone — it will send when you have signal.'); log = { author_name: `${(person && person.name) || me.display_name} (waiting to send)`, created_at: nowIso(), body }; }
   passdownLogs.unshift(log);
   paintPassdownLogs();
 };
@@ -941,10 +983,11 @@ function paintRecentJobs() {
     const text = el(`[data-notebox="${id}"] textarea`).value.trim();
     if (!text) return;
     try {
-      const updated = await api('POST', `/api/jobs/${id}/notes`, { text });
+      const updated = await CCCS.send('POST', `/api/jobs/${id}/notes`, { text }, 'note on a job');
+      if (updated.queued) { el(`[data-notebox="${id}"] textarea`).value = ''; el(`[data-notebox="${id}"]`).classList.add('hide'); toast('Note saved on this phone — it will send when you have signal.'); return; }
       setRecentJobs([...recentJobs.filter((x) => x.id !== id), updated]);
       toast('Note added ✓');
-    } catch (e) { alert(navigator.onLine === false ? 'No signal, so the note was not saved. Try again once you have signal.' : `Note not added: ${e.message}`); }
+    } catch (e) { alert(`Note not added: ${e.message}`); }
   }));
   CCCS.els('[data-recentphoto]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = null; pendingPhotoKind = 'recent'; pendingRecentJobId = Number(b.dataset.recentphoto); el('#photoInput').click(); }));
 }
@@ -990,12 +1033,22 @@ function paintJob() {
           <div class="btn-row" style="margin-top:6px"><button class="btn" style="padding:2px 8px;font-size:11px" data-photofor="${item.id}">Photo</button></div>
         </div>
       </div>`).join('');
+    // CCCS.send: ticks and notes made with no signal are kept and sent later.
     CCCS.els('[data-check]').forEach((cb) => (cb.onchange = async () => {
-      job = await api('PATCH', `/api/jobs/${job.id}/checklist/${cb.dataset.check}`, { status: cb.checked ? 'COMPLETE' : 'PENDING' });
+      const item = checklist.find((x) => String(x.id) === cb.dataset.check);
+      try {
+        const r = await CCCS.send('PATCH', `/api/jobs/${job.id}/checklist/${cb.dataset.check}`, { status: cb.checked ? 'COMPLETE' : 'PENDING' }, `checklist on ${job.reference}`);
+        if (r.queued) { if (item) item.status = cb.checked ? 'COMPLETE' : 'PENDING'; saveOfficerSnapshot(); } else job = r;
+      } catch (e) { alert(e.message); }
       paintJob();
     }));
     CCCS.els('[data-note]').forEach((ta) => (ta.onblur = async () => {
-      job = await api('PATCH', `/api/jobs/${job.id}/checklist/${ta.dataset.note}`, { notes: ta.value });
+      const item = checklist.find((x) => String(x.id) === ta.dataset.note);
+      if (item && (item.notes || '') === ta.value) return;
+      try {
+        const r = await CCCS.send('PATCH', `/api/jobs/${job.id}/checklist/${ta.dataset.note}`, { notes: ta.value }, `checklist note on ${job.reference}`);
+        if (r.queued) { if (item) item.notes = ta.value; saveOfficerSnapshot(); } else job = r;
+      } catch (e) { alert(e.message); }
     }));
     CCCS.els('[data-photofor]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = b.dataset.photofor; pendingPhotoKind = 'job'; el('#photoInput').click(); }));
   }
@@ -1012,8 +1065,11 @@ function paintJob() {
   if (el('#jobBody [data-sitedocs]')) el('#jobBody [data-sitedocs]').onclick = () => openSiteDocsModal(job.site_id);
 }
 async function setJobStatus(status) {
-  const r = await CCCS.send('PATCH', `/api/jobs/${job.id}`, { status }, `${job.reference} → ${status}`);
-  if (!r.queued) { job = r; paintJob(); }
+  let r;
+  try { r = await CCCS.send('PATCH', `/api/jobs/${job.id}`, { status }, `${job.reference} → ${status}`); } catch (e) { alert(e.message); return; }
+  if (!r.queued) { job = r; paintJob(); return; }
+  job.status = status; saveOfficerSnapshot(); paintJob();
+  toast(`${status.replace('_', ' ').toLowerCase()} — saved on this phone, will send when you have signal.`);
 }
 
 /* Opening/resealing a wallet needs an immediate, live answer from the
@@ -1119,11 +1175,20 @@ function paintVisit() {
         </div>
       </div>`).join('');
     CCCS.els('[data-vcheck]').forEach((cb) => (cb.onchange = async () => {
-      visit = await api('PATCH', `/api/site-visits/${visit.id}/checklist/${cb.dataset.vcheck}`, { status: cb.checked ? 'COMPLETE' : 'PENDING' });
+      const item = (visit.checklist || []).find((x) => String(x.id) === cb.dataset.vcheck);
+      try {
+        const r = await CCCS.send('PATCH', `/api/site-visits/${visit.id}/checklist/${cb.dataset.vcheck}`, { status: cb.checked ? 'COMPLETE' : 'PENDING' }, `checklist on ${visit.reference}`);
+        if (r.queued) { if (item) item.status = cb.checked ? 'COMPLETE' : 'PENDING'; saveOfficerSnapshot(); } else visit = r;
+      } catch (e) { alert(e.message); }
       paintVisit();
     }));
     CCCS.els('[data-vnote]').forEach((ta) => (ta.onblur = async () => {
-      visit = await api('PATCH', `/api/site-visits/${visit.id}/checklist/${ta.dataset.vnote}`, { notes: ta.value });
+      const item = (visit.checklist || []).find((x) => String(x.id) === ta.dataset.vnote);
+      if (item && (item.notes || '') === ta.value) return;
+      try {
+        const r = await CCCS.send('PATCH', `/api/site-visits/${visit.id}/checklist/${ta.dataset.vnote}`, { notes: ta.value }, `checklist note on ${visit.reference}`);
+        if (r.queued) { if (item) item.notes = ta.value; saveOfficerSnapshot(); } else visit = r;
+      } catch (e) { alert(e.message); }
     }));
     CCCS.els('[data-vphotofor]').forEach((b) => (b.onclick = () => { pendingPhotoItemId = b.dataset.vphotofor; pendingPhotoKind = 'visit'; el('#photoInput').click(); }));
   }
@@ -1140,8 +1205,11 @@ function paintVisit() {
   refreshPassdown();
 }
 async function setVisitStatus(status) {
-  const r = await CCCS.send('PATCH', `/api/site-visits/${visit.id}`, { status }, `${visit.reference} → ${status}`);
-  if (!r.queued) { visit = r; paintVisit(); }
+  let r;
+  try { r = await CCCS.send('PATCH', `/api/site-visits/${visit.id}`, { status }, `${visit.reference} → ${status}`); } catch (e) { alert(e.message); return; }
+  if (!r.queued) { visit = r; paintVisit(); return; }
+  visit.status = status; saveOfficerSnapshot(); paintVisit();
+  toast(`${status.replace('_', ' ').toLowerCase()} — saved on this phone, will send when you have signal.`);
 }
 
 /* Checkpoint scanning — QR and NFC both just carry a waypoint's own id as
@@ -1267,17 +1335,20 @@ el('#photoInput').onchange = async () => {
   const target = kind === 'visit' ? visit : kind === 'recent' ? recentJobs.find((j) => j.id === pendingRecentJobId) : job;
   if (!files.length || !target) return;
   const path = kind === 'visit' ? `/api/site-visits/${target.id}/media` : `/api/jobs/${target.id}/media`;
-  let sent = 0;
+  let sent = 0, queuedPhotos = 0;
   for (const file of files) {
     toast(files.length > 1 ? `Uploading photo ${sent + 1} of ${files.length}…` : 'Uploading photo…');
     try {
-      await api('POST', path, { ...(await photoPayload(file)), checklist_item_id: itemId || undefined });
-      sent++;
+      // sendSecure: a photo taken with no signal is kept on this phone
+      // (IndexedDB, which has room for photos) and sent later.
+      const r = await CCCS.sendSecure('POST', path, { ...(await photoPayload(file)), checklist_item_id: itemId || undefined }, `photo for ${target.reference || 'a job'}`);
+      if (r.queued) queuedPhotos++; else sent++;
     } catch (e) {
-      alert(navigator.onLine === false ? 'No signal, so the photo was not sent. Add it again from the gallery once you have signal.' : `Photo not added: ${e.message}`);
+      alert(`Photo not added: ${e.message}`);
       break;
     }
   }
+  if (queuedPhotos) { toast(`${queuedPhotos === 1 ? 'Photo' : `${queuedPhotos} photos`} saved on this phone — will send when you have signal.`); return; }
   if (sent) toast(sent === 1 ? 'Photo added ✓' : `${sent} photos added ✓`);
   try {
     if (kind === 'visit') {
@@ -1334,11 +1405,31 @@ function stopFootTracking() {
   el('#trackingStrip').classList.add('hide');
 }
 
+/* ---- Live link ----------------------------------------------------------
+ * The bus (app.js) reconnects on its own, forever, and the session renews
+ * itself. When the link comes back after being down, this page picks up
+ * where it was: the queue sends and the shift, job and visit reload. */
+let linkWasDown = false, signedOut = false;
+function paintNet(up) {
+  const n = el('#net');
+  n.textContent = signedOut ? 'signed out — tap to sign in' : up ? 'link up' : 'reconnecting…';
+  n.classList.toggle('up', up && !signedOut);
+  n.style.cursor = signedOut ? 'pointer' : '';
+  n.title = signedOut ? 'Your sign-in has run out. Anything waiting to send is kept and sends after you sign in.' : up ? '' : 'No connection to CCCS right now. Keep working: clock out, reports, notes and job updates are saved on this phone and send by themselves.';
+}
 const bus = CCCS.bus((up) => {
-  el('#net').textContent = up ? 'link up' : 'link down';
-  el('#net').classList.toggle('up', up);
-  if (up) { CCCS.outbox.flush(); CCCS.secureOutbox.flush(); }
+  paintNet(up);
+  if (!up) { linkWasDown = true; return; }
+  CCCS.outbox.flushAll();
+  if (linkWasDown) { linkWasDown = false; resumeAfterReconnect(); }
 });
+let resumeTimer = null;
+function resumeAfterReconnect() {
+  clearTimeout(resumeTimer);
+  resumeTimer = setTimeout(() => { boot().catch(() => {}); }, 1500); // let the queue go first, then reload
+}
+CCCS.onSessionExpired(() => { signedOut = true; paintNet(false); });
+el('#net').addEventListener('click', () => { if (signedOut) location.href = `/index.html?next=${encodeURIComponent('/officer.html')}`; });
 
 /* ---- Pending-outbox indicator — "told plainly", not a silent queue ----
  * Combines the plain outbox (jobs/visits/emergency/messages) and the
@@ -1347,20 +1438,38 @@ const bus = CCCS.bus((up) => {
  * infer from nothing happening. secureOutbox also distinguishes "mine,
  * will send itself" from "someone else's, still waiting on this device"
  * (relevant on a shared handset, e.g. an MDT) for the tooltip. */
-let plainPending = 0, securePending = 0, secureMine = 0;
+let plainPending = 0, securePending = 0, secureMine = 0, failedCount = 0;
 function paintPending() {
   const total = plainPending + securePending;
   const badge = el('#pending');
-  badge.classList.toggle('hide', total === 0);
-  if (!total) return;
-  badge.textContent = `${total} waiting to send`;
+  badge.classList.toggle('hide', total === 0 && failedCount === 0);
+  badge.style.cursor = 'pointer';
+  badge.onclick = showOutbox;
+  if (!total) { if (failedCount) { badge.textContent = `${failedCount} couldn't send`; badge.title = 'Tap to see what CCCS turned down, and why.'; } return; }
+  badge.textContent = `${total} waiting to send${failedCount ? ` · ${failedCount} couldn't send` : ''}`;
   const othersCount = securePending - secureMine;
   badge.title = othersCount > 0
     ? `${secureMine + plainPending} of these are yours and will send automatically. ${othersCount} belong to someone else signed in on this device before — they'll send once that person is signed in again.`
     : 'Will send automatically once you have signal.';
 }
+async function countFailed() { failedCount = CCCS.outbox.failed().length + (await CCCS.secureOutbox.failed()).length; paintPending(); }
 CCCS.outbox.onChange((n) => { plainPending = n; paintPending(); });
-CCCS.secureOutbox.onChange(async (items) => { securePending = items.length; secureMine = await CCCS.secureOutbox.mine(); paintPending(); });
+CCCS.outbox.onFailed(() => countFailed());
+CCCS.secureOutbox.onChange(async (items) => { const waiting = items.filter((x) => !x.failed); securePending = waiting.length; secureMine = await CCCS.secureOutbox.mine(); countFailed(); });
+/** What's waiting on this phone, and anything CCCS turned down. */
+async function showOutbox() {
+  const when = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const waiting = [...CCCS.outbox.pending(), ...(await CCCS.secureOutbox.pending()).filter((x) => x.queued_by === me.personnel_id)];
+  const failed = [...CCCS.outbox.failed().map((x) => ({ ...x, src: 'plain' })), ...(await CCCS.secureOutbox.failed()).map((x) => ({ ...x, error: x.failed.error, src: 'secure' }))];
+  modal('Saved on this phone', `
+    ${waiting.length ? `<p class="dim">These send by themselves when there is signal, timed when you pressed them.</p>${waiting.map((x) => `<div class="field"><span>${esc(when(x.at))}</span><div>${esc(x.label)}</div></div>`).join('')}
+      <div class="btn-row"><button class="btn" id="obRetry">Try now</button></div>` : '<p class="dim">Nothing waiting to send.</p>'}
+    ${failed.length ? `<label style="margin-top:12px">CCCS turned these down</label><p class="dim">Tell control if any of these still needs doing.</p>${failed.map((x) => `<div class="field"><span>${esc(when(x.at))}</span><div>${esc(x.label)} — <span class="err">${esc(x.error)}</span></div></div>`).join('')}
+      <div class="btn-row"><button class="btn" id="obDismiss">Clear this list</button></div>` : ''}`, () => {
+    if (el('#obRetry')) el('#obRetry').onclick = async () => { el('#obRetry').disabled = true; await CCCS.outbox.flushAll(); closeModal(); };
+    if (el('#obDismiss')) el('#obDismiss').onclick = async () => { CCCS.outbox.dismissFailed(); await CCCS.secureOutbox.dismissFailed(); closeModal(); };
+  });
+}
 
 /* ---- Reports, training, shifts, leave --------------------------------- */
 let formDefs = [], allSites = null;
@@ -1548,18 +1657,28 @@ async function openReport(id) {
   });
 }
 async function reportSubjects() {
-  if (!allSites) allSites = await api('GET', '/api/sites');
+  // No signal: the sites list can't load, but a report about the job,
+  // visit or vehicle you're on can still be filed and sent later.
+  if (!allSites) { try { allSites = await api('GET', '/api/sites'); } catch (e) { if (!noLink(e)) throw e; } }
+  const sitesNow = allSites || [];
   const out = [];
   if (job) out.push({ type: 'JOB', id: job.id, label: `${job.reference} — ${job.location}` });
   if (visit) out.push({ type: 'SITE_VISIT', id: visit.id, label: `${visit.reference} — ${visit.site_name || ''}` });
   const hereSiteIds = [job && job.site_id, visit && visit.site_id].filter(Boolean);
-  for (const sid of [...new Set(hereSiteIds)]) { const st = allSites.find((x) => x.id === sid); if (st) out.push({ type: 'SITE', id: st.id, label: st.name }); }
+  for (const sid of [...new Set(hereSiteIds)]) { const st = sitesNow.find((x) => x.id === sid); out.push(st ? { type: 'SITE', id: st.id, label: st.name } : { type: 'SITE', id: sid, label: (visit && visit.site_id === sid && visit.site_name) || (job && job.site_id === sid && job.location) || 'This site' }); }
   if (person && person.vehicle_id) out.push({ type: 'VEHICLE', id: person.vehicle_id, label: person.vehicle || 'My vehicle' });
-  for (const st of allSites) if (!hereSiteIds.includes(st.id)) out.push({ type: 'SITE', id: st.id, label: st.name });
+  for (const st of sitesNow) if (!hereSiteIds.includes(st.id)) out.push({ type: 'SITE', id: st.id, label: st.name });
   return out;
 }
 el('#bFileReport').onclick = async () => {
-  if (!formDefs.length) formDefs = await api('GET', '/api/form-definitions');
+  if (!formDefs.length) {
+    try { formDefs = await api('GET', '/api/form-definitions'); saveOfficerSnapshot(); }
+    catch (e) {
+      const snap = CCCS.snapshot.load('officer');
+      if (!noLink(e) || !snap || !snap.data.formDefs) { alert(noLink(e) ? 'No signal, and this phone hasn\'t saved the report forms yet. Open Reports once with signal and they\'ll be kept for next time.' : e.message); return; }
+      formDefs = snap.data.formDefs;
+    }
+  }
   const subjects = await reportSubjects();
   modal('File a report', `
     <label>Report</label>
@@ -1765,25 +1884,58 @@ async function openVehicleForm(key) {
 }
 
 /* ---- Start -------------------------------------------------------------- */
+/* A copy of this officer's own shift, job and visit, so the app still
+ * opens and still offers clock-out, job updates and reports when it is
+ * started with no signal (app.js "Saved copies"; removed at sign-out). */
+function saveOfficerSnapshot() {
+  if (person) CCCS.snapshot.save('officer', { person, job, visit, shifts, formDefs: formDefs.length ? formDefs : undefined });
+}
+let bootedLive = false;
+function paintSaved(at) {
+  let n = el('#savedCopy');
+  if (!at) { if (n) n.remove(); return; }
+  if (!n) { n = document.createElement('p'); n.id = 'savedCopy'; n.className = 'dim'; n.style.cssText = 'margin:0 0 10px;padding:8px 10px;border:1px dashed var(--line, #888);border-radius:8px;font-size:12.5px'; el('#alertHost').before(n); }
+  n.textContent = `No connection — showing what this phone saved at ${new Date(at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}. You can still clock out, update jobs and file reports; they send by themselves.`;
+}
 async function boot() {
-  const all = await api('GET', '/api/personnel');
-  person = all.find((p) => p.id === me.personnel_id) || null;
-  paintWho();
-  const jobs = await api('GET', '/api/jobs');
-  job = jobs.find((j) => j.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
-  paintJob();
-  setRecentJobs(jobs);
-  const visits = await api('GET', '/api/site-visits');
-  visit = visits.find((v) => v.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) || null;
-  paintVisit();
-  await refreshShifts();
-  await loadMessages();
+  try {
+    const all = await api('GET', '/api/personnel');
+    person = all.find((p) => p.id === me.personnel_id) || null;
+    paintWho();
+    const jobs = await api('GET', '/api/jobs');
+    job = jobs.find((j) => j.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED'].includes(j.status)) || null;
+    paintJob();
+    setRecentJobs(jobs);
+    const visits = await api('GET', '/api/site-visits');
+    visit = visits.find((v) => v.resources.some((r) => r.personnel === (person && person.name)) && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) || null;
+    paintVisit();
+    await refreshShifts();
+    bootedLive = true; paintSaved(null);
+  } catch (e) {
+    if (!noLink(e)) throw e;
+    // No signal: if this page hasn't shown live data yet, show the saved copy.
+    const snap = !bootedLive && CCCS.snapshot.load('officer');
+    if (snap && snap.data) {
+      ({ person = null, job = null, visit = null, shifts = [] } = snap.data);
+      if (snap.data.formDefs && !formDefs.length) formDefs = snap.data.formDefs;
+      paintWho(); paintJob(); paintVisit(); paintShift();
+      paintSaved(snap.at);
+    }
+    route();
+    return;
+  }
+  saveOfficerSnapshot();
+  // Kept so a report can be started with no signal later.
+  if (!formDefs.length) api('GET', '/api/form-definitions').then((d) => { formDefs = d; saveOfficerSnapshot(); }).catch(() => {});
+  await loadMessages().catch(() => {});
   route();
   refreshEquipment(); refreshLeave();
   footTrackingEnabled = await api('GET', '/api/config').then((c) => c.foot_tracking).catch(() => false);
   if (currentShift() && clockedIn(currentShift())) startFootTracking();
 }
 boot();
+// Lets the app open with no signal next time (sw.js keeps the app's own files).
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 bus.on('welfare.started', ({ personnel }) => { if (person && personnel.id === person.id) { person = personnel; paintWho(); } })
    .on('welfare.checked_in', (p) => { if (person && p.id === person.id) { person = p; paintWho(); } })

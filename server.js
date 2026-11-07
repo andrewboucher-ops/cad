@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
+const offlineTime = require('./offline-time.js');
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -22,6 +23,13 @@ const TOKEN_TTL_MS = Number(process.env.TOKEN_TTL_MS || 8 * 60 * 60 * 1000);
 // Vehicle terminals stay signed in for the shift (or longer) — crew sign in
 // and out of the vehicle separately, without touching this session at all.
 const MDT_TOKEN_TTL_MS = Number(process.env.MDT_TOKEN_TTL_MS || 24 * 60 * 60 * 1000);
+// A page that is open renews its token (POST /api/auth/refresh) well before
+// it runs out, so an officer on a 12-hour shift is never quietly signed out
+// at hour 8 — which used to leave the live link refused on every reconnect
+// ("link down" with signal) and every write failing. Renewal stops this long
+// after the original sign-in, so a lost or stolen phone can't keep a
+// session going forever.
+const SESSION_MAX_MS = Number(process.env.SESSION_MAX_MS || 7 * 24 * 60 * 60 * 1000);
 const DIAL_RINGS_OPERATOR_FIRST = process.env.DIAL_RINGS_OPERATOR_FIRST !== 'off';
 
 const SIMULATION = process.env.SIMULATION !== 'off';
@@ -1610,7 +1618,7 @@ route('POST', '/api/auth/login', null, ({ body, req }) => {
     throw e;
   }
   const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
-  const token = sign({ sub: user.id, role: user.role, iat: Date.now(), exp: Date.now() + ttl });
+  const token = sign({ sub: user.id, role: user.role, iat: Date.now(), auth_at: Date.now(), exp: Date.now() + ttl });
   recordLogin(user, `${user.username} signed in (${user.role})`);
   return { __body: { token, user: publicUser(user) }, __headers: { 'set-cookie': sessionCookie(req, token) } };
 });
@@ -1621,6 +1629,21 @@ route('POST', '/api/auth/session-cookie', [], ({ req }) => {
   const header = req.headers.authorization || '';
   if (!header.startsWith('Bearer ')) throw httpError(400, 'send the session as a Bearer header');
   return { __body: { ok: true }, __headers: { 'set-cookie': sessionCookie(req, header.slice(7)) } };
+});
+/** Swaps a still-valid session for a fresh one, so a page left open all
+ * shift stays signed in. Same user, same role as now (a role change made
+ * since sign-in is picked up), and the original sign-in time carries over:
+ * renewal stops SESSION_MAX_MS after it. A token from before a password
+ * change is already refused by authFrom(). */
+route('POST', '/api/auth/refresh', [], ({ user, req }) => {
+  const header = req.headers.authorization || '';
+  const old = verifyToken(header.startsWith('Bearer ') ? header.slice(7) : readCookie(req, SESSION_COOKIE));
+  if (!old) throw httpError(401, 'authentication required');
+  const authAt = old.auth_at || old.iat || Date.now();
+  if (Date.now() - authAt > SESSION_MAX_MS) throw httpError(401, 'please sign in again');
+  const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
+  const token = sign({ sub: user.id, role: user.role, iat: Date.now(), auth_at: authAt, exp: Date.now() + ttl });
+  return { __body: { token, user: publicUser(user), expires_at: new Date(Date.now() + ttl).toISOString() }, __headers: { 'set-cookie': sessionCookie(req, token) } };
 });
 route('POST', '/api/auth/logout', null, ({ req }) => ({ __body: { ok: true }, __headers: { 'set-cookie': clearSessionCookie(req) } }));
 /** A "create your password" link — reuses the existing sign()/verifyToken()
@@ -1734,7 +1757,7 @@ route('GET', '/api/auth/microsoft/callback', null, async ({ query }) => {
     return { __status: 302, __headers: { location: `/index.html?sso_error=${msg}` }, __body: '' };
   }
 
-  const token = sign({ sub: localUser.id, role: localUser.role, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
+  const token = sign({ sub: localUser.id, role: localUser.role, iat: Date.now(), auth_at: Date.now(), exp: Date.now() + (localUser.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS) });
   const oneTime = crypto.randomBytes(16).toString('hex');
   ssoExchange.set(oneTime, { token, user: publicUser(localUser), created: Date.now() });
   recordLogin(localUser, `${localUser.username} signed in via Microsoft (${localUser.role})`);
@@ -5677,7 +5700,7 @@ route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
   logEvent('shift_assignment.updated', `${p ? p.name : 'PERSON'} ON SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: a.personnel_id });
   return publicShift(s, undefined, user);
 });
-route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user }) => {
+route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user, req }) => {
   const a = findAssignment(params.id);
   assertAssignmentAccess(a, user);
   const s = findShift(a.shift_id);
@@ -5685,12 +5708,16 @@ route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user 
   if (a.status === 'REMOVED') throw httpError(409, 'no longer on this shift');
   const who = db.personnel.find((x) => x.id === a.personnel_id);
   if (who) assertDeployable(who, body, user, 'CLOCK-IN');
+  // Pressed with no signal and sent later: recorded at the phone's time
+  // (offline-time.js), held for control's approval (routes-timeclock.js).
+  const at = offlineTime.occurredAt(req);
   // Outside the rostered time needs a reason (routes-timeclock.js), and
   // the on-site check (routes-attendance.js) — each throws if not met.
-  const pending = timeclock.check(a, s, body || {}, user, 'IN');
+  const pending = timeclock.check(a, s, body || {}, user, 'IN', { at, replay: offlineTime.isReplay(req) });
   attendance.checkClockIn(a, s, body || {}, user);
-  a.clocked_in_at = new Date().toISOString(); a.updated_at = a.clocked_in_at;
+  a.clocked_in_at = at || new Date().toISOString(); a.updated_at = new Date().toISOString();
   timeclock.record(a, pending, user);
+  timeclock.recordOffline(a, 'IN', at, user);
   if (s.status === 'PUBLISHED') { s.status = 'IN_PROGRESS'; }
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   const pub = publicShift(s);
@@ -5698,17 +5725,22 @@ route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user 
   logEvent('shift.clocked_in', `${p ? p.name : 'PERSON'} CLOCKED IN`, { shift_id: s.id, personnel_id: a.personnel_id });
   return pub;
 });
-route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, body, user }) => {
+route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, body, user, req }) => {
   const a = findAssignment(params.id);
   assertAssignmentAccess(a, user);
   const s = findShift(a.shift_id);
   if (!a.clocked_in_at) throw httpError(409, 'not clocked in');
   if (a.clocked_out_at) throw httpError(409, 'already clocked out');
-  const pending = timeclock.check(a, s, body || {}, user, 'OUT');
-  a.clocked_out_at = new Date().toISOString(); a.updated_at = a.clocked_out_at;
+  // Pressed with no signal and sent later: recorded at the phone's time,
+  // never before they clocked in or started their open break.
+  const openBreak = (a.breaks || []).find((b) => !b.end);
+  const at = offlineTime.occurredAt(req, openBreak && openBreak.start > a.clocked_in_at ? openBreak.start : a.clocked_in_at);
+  const pending = timeclock.check(a, s, body || {}, user, 'OUT', { at, replay: offlineTime.isReplay(req) });
+  a.clocked_out_at = at || new Date().toISOString(); a.updated_at = new Date().toISOString();
   attendance.closeBreaks(a, a.clocked_out_at);
   attendance.finishAdHoc(a, s);
   timeclock.record(a, pending, user);
+  timeclock.recordOffline(a, 'OUT', at, user);
   if (!a.attendance) a.attendance = 'ATTENDED';
   const p = db.personnel.find((x) => x.id === a.personnel_id);
   const pub = publicShift(s);

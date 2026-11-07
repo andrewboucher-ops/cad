@@ -2,6 +2,7 @@
 const CCCS = (() => {
   const KEY = 'cccs.session';
   let session = null;
+  let expiredNotified = false; // see "Staying signed in" below
   try {
     session = JSON.parse(sessionStorage.getItem(KEY) || 'null')
       || JSON.parse(localStorage.getItem(KEY + '.mirror') || 'null');
@@ -12,7 +13,7 @@ const CCCS = (() => {
   // "popout" panel is: without this, the new window has no session and its
   // auth check fails before it ever renders anything, i.e. a blank window.
   function setSession(s) {
-    session = s; sessionStorage.setItem(KEY, JSON.stringify(s)); try { localStorage.setItem(KEY + '.mirror', JSON.stringify(s)); } catch {} applyTheme(s && s.user && s.user.ui_prefs);
+    session = s; expiredNotified = false; sessionStorage.setItem(KEY, JSON.stringify(s)); try { localStorage.setItem(KEY + '.mirror', JSON.stringify(s)); } catch {} applyTheme(s && s.user && s.user.ui_prefs);
     syncSessionCookie();
     // The right person being signed in is itself a trigger: a secure item
     // left queued because it belonged to someone else may now be sendable,
@@ -22,6 +23,7 @@ const CCCS = (() => {
   }
   function clearSession() {
     session = null; sessionStorage.removeItem(KEY); try { localStorage.removeItem(KEY + '.mirror'); } catch {}
+    clearSnapshots();
     if (typeof fetch === 'function' && document.documentElement) try { fetch('/api/auth/logout', { method: 'POST', keepalive: true }).catch(() => {}); } catch {}
   }
   /** Links to PDFs, photos and downloads carry no token in their address:
@@ -65,14 +67,61 @@ const CCCS = (() => {
         'content-type': 'application/json',
         ...(session ? { authorization: `Bearer ${session.token}` } : {}),
         ...(opts.idempotencyKey ? { 'idempotency-key': opts.idempotencyKey } : {}),
+        // A write replayed from the offline queue says when it was really
+        // made, so a clock-out pressed in a dead spot is timed then, not
+        // when signal came back (offline-time.js on the server).
+        ...(opts.occurredAt ? { 'x-cccs-occurred-at': opts.occurredAt } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
-    if (!res.ok) { const err = new Error((data && data.error) || `${res.status} ${res.statusText}`); err.status = res.status; if (data && data.code) err.code = data.code; throw err; }
+    if (!res.ok) {
+      const err = new Error((data && data.error) || `${res.status} ${res.statusText}`); err.status = res.status; if (data && data.code) err.code = data.code;
+      if (res.status === 401 && session && !opts.noExpiryEvent) sessionExpired();
+      throw err;
+    }
     return data;
+  }
+
+  /* ---- Staying signed in -----------------------------------------------
+     A session token lasts 8 hours; a security shift is often 12. Nothing
+     used to renew it, so at hour 8 the live link was refused on every
+     reconnect and every write failed — "link down" with full signal, and
+     the only fix was signing out and in. Now an open page swaps its token
+     for a fresh one (POST /api/auth/refresh) every half hour, whenever it
+     comes back to the foreground, and whenever the link drops. If the
+     session truly can't be renewed (signed out elsewhere, password reset,
+     a week since sign-in), the page is told so it can ask the officer to
+     sign in again — nothing queued is lost, it sends after. */
+  const REFRESH_EVERY_MS = 30 * 60 * 1000;
+  const expiredListeners = new Set();
+  function sessionExpired() {
+    if (expiredNotified) return;
+    expiredNotified = true;
+    expiredListeners.forEach((fn) => { try { fn(); } catch {} });
+  }
+  function tokenPayload(t) {
+    try { const b = String(t).split('.')[0].replace(/-/g, '+').replace(/_/g, '/'); return JSON.parse(atob(b)); } catch { return null; }
+  }
+  let refreshing = null;
+  /** Renews the session if it is due (or always, with force). Resolves
+   * true when signed in with a usable token, false when the server said
+   * the session is over, and null when the server couldn't be reached. */
+  function refreshSession({ force = false } = {}) {
+    if (!session || !session.token || typeof fetch !== 'function') return Promise.resolve(false);
+    const p = tokenPayload(session.token);
+    if (!force && p && p.iat && Date.now() - p.iat < REFRESH_EVERY_MS) return Promise.resolve(true);
+    if (refreshing) return refreshing;
+    refreshing = api('POST', '/api/auth/refresh', {}, { noExpiryEvent: true })
+      .then((out) => { if (out && out.token && session) { setSession({ ...session, token: out.token, user: out.user || session.user }); expiredNotified = false; } return true; })
+      .catch((e) => { if (e.status === 401) { sessionExpired(); return false; } return null; })
+      .finally(() => { refreshing = null; });
+    return refreshing;
+  }
+  if (typeof setInterval === 'function' && typeof document !== 'undefined' && document.documentElement) {
+    setInterval(() => { refreshSession(); }, 5 * 60 * 1000);
   }
 
   async function login(username, password) {
@@ -106,6 +155,22 @@ const CCCS = (() => {
     return entry;
   }
 
+  /* Writes that reached the server and were refused (a clock-out the
+     server says already happened, a job that was closed meanwhile) are
+     kept here with the reason, for the officer to see and dismiss —
+     never silently thrown away. */
+  const FAILED_KEY = 'cccs.outbox.failed';
+  const failedListeners = new Set();
+  function readFailed() { try { return JSON.parse(localStorage.getItem(FAILED_KEY) || '[]'); } catch { return []; } }
+  function writeFailed(items) {
+    try { localStorage.setItem(FAILED_KEY, JSON.stringify(items.slice(-50))); } catch {}
+    failedListeners.forEach((fn) => fn(items));
+  }
+  function recordFailed(entry, e) {
+    const { body, ...rest } = entry; // keep the label and when, not a photo
+    writeFailed([...readFailed(), { ...rest, error: e.message || String(e), status: e.status || null, failed_at: new Date().toISOString() }]);
+  }
+
   let flushing = false;
   async function flushOutbox() {
     if (flushing) return;
@@ -115,10 +180,15 @@ const CCCS = (() => {
       while (items.length) {
         const next = items[0];
         try {
-          await api(next.method, next.path, next.body, { idempotencyKey: next.key });
+          await api(next.method, next.path, next.body, { idempotencyKey: next.key, occurredAt: next.at });
         } catch (e) {
-          if (isOffline(e)) break;               // still down — keep the queue intact
-          console.warn('dropping unreplayable queued write', next.path, e.message);
+          if (shouldWait(e)) break;              // no signal, server restarting, or signed out — keep the queue intact
+          if (isRetryable(e) && (next.tries || 0) < MAX_SERVER_RETRIES) {
+            writeOutbox(readOutbox().map((x) => (x.key === next.key ? { ...x, tries: (x.tries || 0) + 1 } : x)));
+            break;
+          }
+          console.warn('queued write refused', next.path, e.message);
+          recordFailed(next, e);
         }
         items = readOutbox().filter((x) => x.key !== next.key);
         writeOutbox(items);
@@ -126,28 +196,63 @@ const CCCS = (() => {
     } finally { flushing = false; }
   }
 
-  const isOffline = (e) => e instanceof TypeError || /Failed to fetch|NetworkError|Load failed/i.test(e.message || '');
+  const isOffline = (e) => e instanceof TypeError || /Failed to fetch|NetworkError|Load failed|network connection was lost/i.test(e.message || '');
+  /* The server being briefly unreachable is not the same as it refusing
+     the write: a deploy restarts CCCS (502/503 from the proxy for a few
+     seconds), a busy minute can 429. Those are retried, a few times, not
+     dropped. A 401 means the session ran out: wait for sign-in. */
+  const MAX_SERVER_RETRIES = 30;
+  const isRetryable = (e) => [408, 425, 429, 500, 502, 503, 504].includes(e.status);
+  const shouldWait = (e) => isOffline(e) || e.status === 401;
+  const shouldQueue = (e) => isOffline(e) || e.status === 401 || isRetryable(e);
 
   /** Write that survives losing signal: queued locally and replayed in order. */
   async function send(method, path, body, label) {
     const key = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
+    const at = new Date().toISOString();
     try {
       return await api(method, path, body, { idempotencyKey: key });
     } catch (e) {
-      if (!isOffline(e)) throw e;
-      enqueue({ key, method, path, body, label: label || path, at: new Date().toISOString() });
+      if (!shouldQueue(e)) throw e;
+      enqueue({ key, method, path, body, label: label || path, at });
+      scheduleRetry();
       return { queued: true, key };
     }
   }
 
-  window.addEventListener('online', flushOutbox);
+  /* 'online' alone is not enough: phones fire it unreliably, and it says
+     nothing about a server that was restarting. While anything is queued,
+     try again every 20 seconds as well. */
+  let retryTimer = null;
+  function scheduleRetry() {
+    if (retryTimer || typeof setTimeout !== 'function') return;
+    const t = retryTimer = setTimeout(async () => {
+      retryTimer = null;
+      await flushAll();
+      let waiting = readOutbox().length;
+      try { waiting += (await secureAll()).filter((x) => x.queued_by === myId() && !x.failed).length; } catch {}
+      if (waiting) scheduleRetry();
+    }, 20000);
+    if (t && t.unref) t.unref(); // Node test harness only
+  }
+  async function flushAll() {
+    if (session && session.token) await refreshSession();
+    await flushOutbox();
+    await flushSecureOutbox();
+  }
+
+  window.addEventListener('online', () => { flushAll(); });
 
   const outbox = {
     pending: () => readOutbox(),
     count: () => readOutbox().length,
     flush: flushOutbox,
+    flushAll,
     onChange(fn) { outboxListeners.add(fn); fn(readOutbox().length); },
     clear() { writeOutbox([]); },
+    failed: () => readFailed(),
+    onFailed(fn) { failedListeners.add(fn); fn(readFailed()); },
+    dismissFailed(key) { writeFailed(key ? readFailed().filter((x) => x.key !== key) : []); },
   };
 
   /* ---- Secure offline outbox (reports, checkpoint scans) ---------------
@@ -190,15 +295,20 @@ const CCCS = (() => {
     if (!mine) return; // nobody with a staff record signed in — nothing can safely send
     let items;
     try { items = await secureAll(); } catch { return; } // IndexedDB unavailable — leave the queue for next time
+    items.sort((x, y) => String(x.at).localeCompare(String(y.at)));
     for (const item of items) {
       if (item.queued_by !== mine) continue; // someone else's — stays queued, never sent under this session
+      if (item.failed) continue; // refused by the server — shown to the officer, not retried
       try {
-        await api(item.method, item.path, item.body, { idempotencyKey: item.key });
+        await api(item.method, item.path, item.body, { idempotencyKey: item.key, occurredAt: item.at });
         await secureDelete(item.key);
       } catch (e) {
-        if (isOffline(e)) break; // still down — keep the rest of the queue intact
-        console.warn('dropping unreplayable secure write', item.path, e.message);
-        await secureDelete(item.key);
+        if (shouldWait(e)) break; // still down or signed out — keep the rest of the queue intact
+        if (isRetryable(e) && (item.tries || 0) < MAX_SERVER_RETRIES) { await securePut({ ...item, tries: (item.tries || 0) + 1 }); break; }
+        console.warn('queued secure write refused', item.path, e.message);
+        // Kept (it may be a whole report the officer wrote), marked as
+        // refused with the reason, until they look at it and dismiss it.
+        await securePut({ ...item, failed: { error: e.message || String(e), status: e.status || null, at: new Date().toISOString() } });
       }
     }
   }
@@ -221,32 +331,79 @@ const CCCS = (() => {
    * still signed in on this device. */
   async function sendSecure(method, path, body, label) {
     const key = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
+    const at = new Date().toISOString();
     try {
       return await api(method, path, body, { idempotencyKey: key });
     } catch (e) {
-      if (!isOffline(e)) throw e;
-      const entry = { key, method, path, body, label: label || path, queued_by: myId(), at: new Date().toISOString() };
+      if (!shouldQueue(e)) throw e;
+      const entry = { key, method, path, body, label: label || path, queued_by: myId(), at };
       try { await securePut(entry); } catch (e2) { throw e; } // IndexedDB unavailable too — surface the original offline error, nothing was queued
       notifySecure();
+      scheduleRetry();
       return { queued: true, key };
     }
   }
-  window.addEventListener('online', flushSecureOutbox);
 
+  const waitingItems = (items) => items.filter((x) => !x.failed);
   const secureOutbox = {
-    pending: () => secureAll().catch(() => []),
-    count: () => secureAll().then((items) => items.length).catch(() => 0),
-    mine: () => secureAll().then((items) => items.filter((x) => x.queued_by === myId()).length).catch(() => 0),
-    othersWaiting: () => secureAll().then((items) => items.some((x) => x.queued_by !== myId())).catch(() => false),
+    pending: () => secureAll().then(waitingItems).catch(() => []),
+    count: () => secureAll().then((items) => waitingItems(items).length).catch(() => 0),
+    mine: () => secureAll().then((items) => waitingItems(items).filter((x) => x.queued_by === myId()).length).catch(() => 0),
+    othersWaiting: () => secureAll().then((items) => waitingItems(items).some((x) => x.queued_by !== myId())).catch(() => false),
+    /** Refused by the server — this officer's only. */
+    failed: () => secureAll().then((items) => items.filter((x) => x.failed && x.queued_by === myId())).catch(() => []),
+    async dismissFailed(key) { try { const items = await secureAll(); for (const x of items) if (x.failed && x.queued_by === myId() && (!key || x.key === key)) await secureDelete(x.key); } catch {} notifySecure(); },
     flush: flushSecureOutbox,
     onChange(fn) { secureListeners.add(fn); secureAll().then(fn).catch(() => fn([])); },
   };
 
-  /* ---- WebSocket bus with auto-reconnect ---- */
+  /* ---- Saved copies for working offline --------------------------------
+     A page reloaded with no signal used to come up empty: no shift, so no
+     clock-out button, even though a clock-out can be queued. The officer
+     app keeps a copy of its own shift, job and visit here (only this
+     user's, removed at sign-out) and shows it, clearly marked as saved,
+     when the server can't be reached. Reads through api() still fail
+     honestly everywhere else. */
+  const SNAP_PREFIX = 'cccs.snap.';
+  const snapKey = (name) => `${SNAP_PREFIX}${(session && session.user && session.user.id) || 'anon'}.${name}`;
+  function clearSnapshots() {
+    try { for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (k && k.startsWith(SNAP_PREFIX)) localStorage.removeItem(k); } } catch {}
+  }
+  const snapshot = {
+    save(name, data) { try { const v = JSON.stringify({ at: new Date().toISOString(), data }); if (v.length < 500000) localStorage.setItem(snapKey(name), v); } catch {} },
+    load(name) { try { return JSON.parse(localStorage.getItem(snapKey(name)) || 'null'); } catch { return null; } },
+  };
+  /** GET that falls back to the saved copy when the server can't be
+   * reached. Returns { data, savedAt } — savedAt is null when live. */
+  async function readThrough(name, path) {
+    try {
+      const data = await api('GET', path);
+      snapshot.save(name, data);
+      return { data, savedAt: null };
+    } catch (e) {
+      if (!shouldQueue(e)) throw e;
+      const snap = snapshot.load(name);
+      if (!snap) throw e;
+      return { data: snap.data, savedAt: snap.at };
+    }
+  }
+
+  /* ---- WebSocket bus with auto-reconnect ----------------------------
+     Phones are hard on a live link: a tower handover, Wi-Fi to 4G, or the
+     screen locking can leave a socket that looks open but is dead, and
+     the browser may never report it closed. So the bus:
+       - pings every 20 s and treats 45 s of silence as a dead link;
+       - reconnects straight away when the phone comes back online, the
+         app comes back to the foreground, or the page is shown again;
+       - backs off to at most 10 s between attempts, and never gives up;
+       - renews the session when the server keeps refusing the link, so an
+         expired sign-in is fixed (or reported) instead of looping. */
   function bus(onStatus) {
     const handlers = new Map();
     const binaryHandlers = [];
-    let ws = null, retry = 0, closed = false;
+    let ws = null, retry = 0, closed = false, timer = null, lastRx = 0, refused = 0, isUp = false, startedAt = 0;
+    const PING_MS = 20000, DEAD_MS = 45000;
+    const status = (up) => { isUp = up; onStatus && onStatus(up); };
     // The live link signs in with the HttpOnly cookie, which proxies leave
     // out of their logs. If the cookie turns out to be someone else's (a
     // different sign-in in another tab), it falls back to sending this tab's
@@ -254,23 +411,55 @@ const CCCS = (() => {
     let viaProtocol = false;
     const queue = [];
 
-    function connect() { cookieReady.then(open); }
+    function connect() { timer = null; cookieReady.then(open); }
+    function schedule(ms) {
+      if (closed || timer) return;
+      timer = setTimeout(connect, ms);
+    }
+    /** Drop whatever we have and reconnect now — used when the phone says
+     * it is back, rather than waiting out the backoff. */
+    function kick() {
+      if (closed) return;
+      if (ws && ws.readyState === 1 && Date.now() - lastRx < DEAD_MS) { try { ws.send(JSON.stringify({ type: 'ping', payload: {} })); } catch {} return; }
+      if (ws && ws.readyState === 0 && Date.now() - startedAt < 15000) return; // still connecting — let it finish
+      if (timer) { clearTimeout(timer); timer = null; }
+      retry = 0;
+      if (ws && ws.readyState <= 1) { const old = ws; ws = null; try { old.onclose = null; old.close(); } catch {} status(false); }
+      connect();
+    }
     function open() {
       if (closed) return;
+      if (ws && ws.readyState <= 1) return; // already connecting or open
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = viaProtocol ? new WebSocket(`${proto}://${location.host}/ws`, ['cccs', session.token]) : new WebSocket(`${proto}://${location.host}/ws`);
+      let sock;
+      try {
+        sock = viaProtocol && session ? new WebSocket(`${proto}://${location.host}/ws`, ['cccs', session.token]) : new WebSocket(`${proto}://${location.host}/ws`);
+      } catch { retry = Math.min(retry + 1, 6); schedule(backoff()); return; }
+      ws = sock; startedAt = Date.now();
       ws.binaryType = 'arraybuffer';
       let opened = false;
-      ws.onopen = () => { opened = true; retry = 0; onStatus && onStatus(true); while (queue.length) ws.send(queue.shift()); };
+      ws.onopen = () => {
+        if (ws !== sock) return;
+        opened = true; retry = 0; refused = 0; lastRx = Date.now(); status(true);
+        while (queue.length) ws.send(queue.shift());
+        // Anything queued while the link was down goes now, not on the next timer.
+        flushAll();
+      };
       ws.onclose = () => {
-        if (!opened) viaProtocol = true; // refused: no cookie yet (or a blocked one)
-        onStatus && onStatus(false);
+        if (ws !== sock) return; // a socket we already replaced
+        ws = null;
+        if (!opened) { viaProtocol = true; refused++; } // refused: no cookie yet (or a blocked one)
+        if (isUp || !opened) status(false);
         if (closed) return;
         retry = Math.min(retry + 1, 6);
-        setTimeout(connect, 400 * retry);
+        // Refused over and over with the network fine is what an expired
+        // sign-in looks like: renew it (or let the page ask to sign in).
+        if (refused >= 2 && refused % 2 === 0) refreshSession({ force: true }).then((ok) => { if (ok) viaProtocol = false; });
+        schedule(backoff());
       };
-      ws.onerror = () => { try { ws.close(); } catch {} };
+      ws.onerror = () => { try { sock.close(); } catch {} };
       ws.onmessage = (e) => {
+        lastRx = Date.now();
         // Raw PCM from a legacy handset's floor time (relayAudioFrame in
         // server.js) — JSON.parse would just throw and silently discard
         // this on every frame, which is exactly what happened before
@@ -283,6 +472,23 @@ const CCCS = (() => {
         (handlers.get(msg.type) || []).forEach((fn) => fn(msg.payload, msg));
         (handlers.get('*') || []).forEach((fn) => fn(msg.payload, msg));
       };
+    }
+    const backoff = () => Math.min(10000, 500 * 2 ** (retry - 1)) * (0.75 + Math.random() * 0.5);
+    // Heartbeat: the server answers 'ping' with 'pong'; silence means dead.
+    if (typeof setInterval === 'function') setInterval(() => {
+      if (closed || !ws) return;
+      if (ws.readyState === 0 && Date.now() - startedAt > 15000) { kick(); return; } // a connect that hangs
+      if (ws.readyState !== 1) return;
+      if (Date.now() - lastRx > DEAD_MS) { kick(); return; }
+      try { ws.send(JSON.stringify({ type: 'ping', payload: {} })); } catch {}
+    }, PING_MS);
+    if (typeof window !== 'undefined' && window.addEventListener) {
+      window.addEventListener('online', kick);
+      window.addEventListener('pageshow', kick);
+      window.addEventListener('focus', kick);
+    }
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { refreshSession(); kick(); } });
     }
     connect();
     return {
@@ -297,7 +503,9 @@ const CCCS = (() => {
       // noise well after the fact.
       sendBinary(data) { if (ws && ws.readyState === 1) ws.send(data); },
       wsState() { return ws ? ws.readyState : 'no-socket'; },
-      close() { closed = true; try { ws.close(); } catch {} },
+      isUp: () => isUp,
+      reconnect: kick,
+      close() { closed = true; if (timer) clearTimeout(timer); try { ws.close(); } catch {} },
     };
   }
 
@@ -675,5 +883,5 @@ const CCCS = (() => {
     catch (e) { body.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
   }
 
-  return { api, send, outbox, sendSecure, secureOutbox, login, getSession, setSession, clearSession, applyTheme, bus, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth, deviceKind, detectedDevice, isMobile, viewPreference, setViewPreference, calendarSync };
+  return { api, send, outbox, sendSecure, secureOutbox, snapshot, readThrough, refreshSession, onSessionExpired(fn) { expiredListeners.add(fn); }, login, getSession, setSession, clearSession, applyTheme, bus, makeMap, push, navAnnouncer, navIcon, hhmmss, el, els, esc, requireAuth, deviceKind, detectedDevice, isMobile, viewPreference, setViewPreference, calendarSync };
 })();
