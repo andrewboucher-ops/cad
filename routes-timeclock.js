@@ -28,6 +28,7 @@
 const TOLERANCE_MIN = Number(process.env.TIMECLOCK_TOLERANCE_MIN || 5);
 const KIND = {
   EARLY_IN: 'Clocked in early', LATE_IN: 'Clocked in late', EARLY_OUT: 'Clocked out early', LATE_OUT: 'Clocked out late', UNSCHEDULED: 'Clocked in with no shift',
+  OFFLINE_IN: 'Clocked in with no signal', OFFLINE_OUT: 'Clocked out with no signal',
 };
 
 module.exports = function registerTimeclock({
@@ -35,6 +36,7 @@ module.exports = function registerTimeclock({
   isControlRole, siteVisibleTo = () => true, flushNow = () => {}, assertDeployable = () => {},
 }) {
   const crypto = require('crypto');
+  const { occurredAt } = require('./offline-time.js');
   const minutes = (ms) => Math.round(ms / 60000);
   const nameOf = (pid) => { const p = db.personnel.find((x) => x.id === pid); return p ? p.name : 'PERSON'; };
   const onBehalf = (a, user) => isControlRole(user.role) && user.personnel_id !== a.personnel_id;
@@ -58,14 +60,17 @@ module.exports = function registerTimeclock({
 
   /** Called by the clock-in / clock-out routes before they change anything.
    * Throws 428 (with a message saying why) when a reason is needed. */
-  function check(a, s, body, user, direction) {
+  function check(a, s, body, user, direction, { at = null, replay = false } = {}) {
     if (s.ad_hoc) return;
-    const reason = String((body && body.reason) || '').trim().slice(0, 300);
-    const now = Date.now();
+    let reason = String((body && body.reason) || '').trim().slice(0, 300);
+    const now = at ? Date.parse(at) : Date.now();
     const target = Date.parse(direction === 'IN' ? s.starts_at : s.ends_at);
     const diff = minutes(now - target);
     if (Math.abs(diff) <= TOLERANCE_MIN) return;
     const kind = direction === 'IN' ? (diff < 0 ? 'EARLY_IN' : 'LATE_IN') : (diff < 0 ? 'EARLY_OUT' : 'LATE_OUT');
+    // A write replayed from the phone's offline queue can't stop and ask:
+    // it goes through, and the exception waits for control like any other.
+    if (!reason && replay && !onBehalf(a, user)) reason = 'Sent with no signal — no reason given';
     if (!reason && !onBehalf(a, user)) {
       throw needReason(`You're ${direction === 'IN' ? 'clocking in' : 'clocking out'} ${span(Math.abs(diff))} ${diff < 0 ? 'before' : 'after'} the rostered ${direction === 'IN' ? 'start' : 'finish'} (${new Date(target).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' })})`);
     }
@@ -73,6 +78,30 @@ module.exports = function registerTimeclock({
     return { kind, mins: Math.abs(diff), reason };
   }
   function record(a, pending, user) { if (pending) addException(a, pending.kind, pending.mins, pending.reason, user); }
+  /** A clock-in or clock-out made with no signal is recorded at the time
+   * on the phone (offline-time.js) and noted here. A clock-in recorded
+   * earlier than it reached CCCS adds hours on the phone's word, so it
+   * waits for control (rejecting it counts from when it arrived). An
+   * earlier clock-out only ever takes hours away: noted, already approved. */
+  function recordOffline(a, direction, at, user) {
+    if (!at) return;
+    const received = new Date().toISOString();
+    const mins = minutes(Date.parse(received) - Date.parse(at));
+    if (mins < 1) return;
+    const kind = direction === 'IN' ? 'OFFLINE_IN' : 'OFFLINE_OUT';
+    const hhmm = (iso) => new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
+    const reason = `Pressed at ${hhmm(at)} with no signal; reached CCCS at ${hhmm(received)}`;
+    if (direction === 'IN' && !onBehalf(a, user)) {
+      const ex = addException(a, kind, mins, reason, user);
+      ex.received_at = received;
+      return ex;
+    }
+    if (!Array.isArray(a.exceptions)) a.exceptions = [];
+    const ex = { id: crypto.randomUUID(), kind, minutes: mins, reason, at: received, received_at: received, status: 'APPROVED', decided_by: 'automatic (takes hours away only)', decided_at: received };
+    a.exceptions.push(ex);
+    logEvent('timeclock.offline', `${nameOf(a.personnel_id)}: ${KIND[kind].toUpperCase()} — RECORDED AT ${hhmm(at)}, ARRIVED ${mins} MIN LATER`, { personnel_id: a.personnel_id });
+    return ex;
+  }
 
   /* ---- ad-hoc clock-in ---- */
   function adHocType() {
@@ -82,7 +111,7 @@ module.exports = function registerTimeclock({
   }
   const openFor = (pid) => db.shift_assignments.find((x) => x.personnel_id === pid && x.clocked_in_at && !x.clocked_out_at && x.status !== 'REMOVED');
   /** Also behind POST /api/shifts/adhoc (server.js), the same thing. */
-  function clockInAdHoc(body, user) {
+  function clockInAdHoc(body, user, { at = null } = {}) {
     const pid = isControlRole(user.role) && body.personnel_id ? Number(body.personnel_id) : user.personnel_id;
     const person = db.personnel.find((p) => p.id === pid);
     if (!person) throw httpError(400, isControlRole(user.role) ? 'choose who to clock in' : 'this login is not linked to a member of staff');
@@ -91,7 +120,9 @@ module.exports = function registerTimeclock({
     const site = db.sites.find((x) => x.id === Number(body.site_id));
     if (!site || !siteVisibleTo(site.id, user)) throw httpError(400, 'choose the site you are working at');
     const reason = String(body.reason || '').trim().slice(0, 300);
-    const now = new Date();
+    // Pressed with no signal (offline-time.js): starts when they pressed it.
+    // Already waits for control's approval as UNSCHEDULED, so no extra flag.
+    const now = at ? new Date(at) : new Date();
     const s = {
       id: nextId('shifts'), site_id: site.id, shift_type_id: adHocType().id, ad_hoc: true, // detail.adhoc: the rota's "AD HOC" badge
       starts_at: now.toISOString(), ends_at: new Date(now.getTime() + 12 * 3600000).toISOString(), // set at clock-out
@@ -115,7 +146,7 @@ module.exports = function registerTimeclock({
     flushNow();
     return { __status: 201, __body: pub };
   }
-  route('POST', '/api/timeclock/clock-in', ['FIELD_USER', ...CONTROL], ({ body, user }) => clockInAdHoc(body, user));
+  route('POST', '/api/timeclock/clock-in', ['FIELD_USER', ...CONTROL], ({ body, user, req }) => clockInAdHoc(body, user, { at: occurredAt(req) }));
 
   /* ---- approvals ---- */
   function exceptionRows(filter) {
@@ -150,6 +181,12 @@ module.exports = function registerTimeclock({
       if (ex.kind === 'EARLY_IN' && a.clocked_in_at && a.clocked_in_at < s.starts_at) { edit({ in: s.starts_at, out: a.clocked_out_at }); a.clocked_in_at = s.starts_at; effect = ' — counted from the rostered start'; }
       if (ex.kind === 'LATE_OUT' && a.clocked_out_at && a.clocked_out_at > s.ends_at) { edit({ in: a.clocked_in_at, out: s.ends_at }); a.clocked_out_at = s.ends_at; attendance.closeBreaks(a, s.ends_at); effect = ' — counted to the rostered finish'; }
       if (ex.kind === 'UNSCHEDULED') { a.time_rejected = true; effect = ' — no hours counted'; }
+      if (ex.kind === 'OFFLINE_IN' && ex.received_at && a.clocked_in_at && a.clocked_in_at < ex.received_at) {
+        const to = a.clocked_out_at && a.clocked_out_at < ex.received_at ? a.clocked_out_at : ex.received_at;
+        edit({ in: to, out: a.clocked_out_at }); a.clocked_in_at = to;
+        for (const b of a.breaks || []) { if (b.start < to) b.start = to; if (b.end && b.end < to) b.end = to; }
+        effect = ' — counted from when it reached CCCS';
+      }
     }
     a.updated_at = new Date().toISOString();
     broadcast('shift.updated', publicShift(s), { personnelIds: [a.personnel_id] });
@@ -292,5 +329,5 @@ module.exports = function registerTimeclock({
     return { moved_to: { shift_id: t.id, assignment_id: ta.id }, deleted_shift_id: left ? null : s.id, clocked_in_at: ta.clocked_in_at, clocked_out_at: ta.clocked_out_at || null };
   });
 
-  return { check, record, clockInAdHoc, KIND };
+  return { check, record, recordOffline, clockInAdHoc, KIND };
 };
