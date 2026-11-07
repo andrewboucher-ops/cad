@@ -859,10 +859,14 @@ function personnelForm(p) {
     <form class="stack" id="pnForm">
       ${!isNew && p.external_sub ? `<div style="border:1px solid var(--line);border-radius:6px;padding:10px;background:var(--panel-2)">
         <strong>Subcontractor with no personnel file</strong>
-        <p class="dim" style="margin:4px 0 8px;font-size:12px">Added from the rota with just the details needed to put them on a shift. They have no staff number and are left out of onboarding, BS 7858 screening, payroll and leave. Their shifts, timesheets, invoices and incident reports work as normal.</p>
+        <p class="dim" style="margin:4px 0 8px;font-size:12px">Added from the rota with just the details needed to put them on a shift. They have no staff number and are left out of onboarding, BS 7858 screening, payroll and leave. With an officer app sign-in they see only their own shifts and their own record. Their shifts, timesheets, invoices and incident reports work as normal.</p>
         <label>Company</label>
         <input id="npnCompany" autocomplete="off" value="${esc(p.company || '')}">
-        <button type="button" class="btn" id="pnPromote" style="margin-top:8px">Give them a full personnel file</button>
+        <div class="btn-row" style="margin-top:8px">
+          <button type="button" class="btn" id="pnSubLogin">${p.has_login ? 'Resend officer app sign-in link' : 'Send officer app sign-in link'}</button>
+          <button type="button" class="btn" id="pnPromote">Give them a full personnel file</button>
+        </div>
+        <p class="dim" id="pnSubLoginMsg" style="margin:6px 0 0;font-size:12px;word-break:break-all"></p>
       </div>` : ''}
       <label>Name</label>
       <input id="npnName" autocomplete="off" value="${isNew ? '' : esc(p.name)}">
@@ -1142,6 +1146,14 @@ function personnelModal(p) {
         </span>
       </div>`;
     el('#pnCancel').onclick = closeModal;
+    if (el('#pnSubLogin')) el('#pnSubLogin').onclick = async () => {
+      const msg = el('#pnSubLoginMsg'); msg.textContent = 'Sending…';
+      try {
+        const r = await api('POST', `/api/subcontractors/${p.id}/login`, { contact_phone: el('#npnPhone').value.trim(), contact_email: el('#npnEmail').value.trim() });
+        const how = [r.sms ? 'text' : '', r.email ? 'email' : ''].filter(Boolean).join(' and ');
+        msg.textContent = how ? `Sent by ${how}. Username: ${r.username}.` : `Nothing could be sent (no working phone or email, or texting isn't set up). Username: ${r.username}. Pass this link on: ${r.link}`;
+      } catch (e) { msg.textContent = e.message; }
+    };
     if (el('#pnPromote')) el('#pnPromote').onclick = async () => {
       if (!confirm(`Give ${p.name} a full personnel file? They'll get a staff number and appear on the onboarding and screening lists like any other member of staff.`)) return;
       try { await api('PATCH', `/api/personnel/${p.id}`, { external_sub: false }); await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id)); }

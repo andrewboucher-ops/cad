@@ -2442,7 +2442,13 @@ route('POST', '/api/assets/:id/return', ALL, ({ params, body, user }) => {
   logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
   return publicAsset(a);
 });
-route('GET', '/api/personnel', ALL, ({ user }) => db.personnel.filter((p) => visibleToUser(p, user)).map((p) => publicPersonnel(p, user)));
+route('GET', '/api/personnel', ALL, ({ user }) => {
+  // A subcontractor signed in to the officer app sees themselves, not our
+  // whole staff list with phone numbers: they work for another company.
+  const me = user.personnel_id ? db.personnel.find((p) => p.id === user.personnel_id) : null;
+  if (me && me.external_sub) return [publicPersonnel(me, user)];
+  return db.personnel.filter((p) => visibleToUser(p, user)).map((p) => publicPersonnel(p, user));
+});
 /** One screen listing everyone with an expired, expiring or overdue SIA/
  * DBS/RTW check — the same personnelCompliance() flag already shown
  * inline on the personnel list, just gathered into one place instead of
@@ -5379,12 +5385,16 @@ route('GET', '/api/shifts', ALL, ({ query, user }) => {
   // itself had been missed — a scoped SUPERVISOR could otherwise see (and,
   // via the write routes below, touch) every other branch's shifts too.
   rows = rows.filter((s) => siteVisibleTo(s.site_id, user));
+  const idx = buildShiftIndex();
+  // A signed-in subcontractor sees their own shifts only, not who else we
+  // have working where.
+  const mePerson = user.personnel_id ? db.personnel.find((p) => p.id === user.personnel_id) : null;
+  if (mePerson && mePerson.external_sub) rows = rows.filter((s) => (idx.assignmentsByShift.get(s.id) || []).some((a) => a.status !== 'REMOVED' && a.personnel_id === mePerson.id));
   if (query.get('site_id')) rows = rows.filter((s) => s.site_id === Number(query.get('site_id')));
   if (query.get('shift_type_id')) rows = rows.filter((s) => s.shift_type_id === Number(query.get('shift_type_id')));
   if (query.get('status')) rows = rows.filter((s) => s.status === query.get('status').toUpperCase());
   if (query.get('from')) rows = rows.filter((s) => s.ends_at >= query.get('from'));
   if (query.get('to')) rows = rows.filter((s) => s.starts_at <= query.get('to'));
-  const idx = buildShiftIndex();
   const personnelId = query.get('personnel_id') ? Number(query.get('personnel_id')) : null;
   if (personnelId) rows = rows.filter((s) => (idx.assignmentsByShift.get(s.id) || []).some((a) => a.status !== 'REMOVED' && a.personnel_id === personnelId));
   const out = rows.sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)).map((s) => publicShift(s, idx, user));
@@ -6627,6 +6637,63 @@ route('POST', '/api/users/:id/send-welcome-link', ADMIN, async ({ params }) => {
   }
   logEvent('user.welcome_link_sent', `WELCOME LINK SENT TO ${u.username} (email: ${sent.email ? 'yes' : 'no'}, sms: ${sent.sms ? 'yes' : 'no'})`, { user_id: u.id });
   return sent;
+});
+
+/** Officer app sign-in for a subcontractor with no personnel file. They
+ * have no work Microsoft account, so this makes a FIELD_USER login with a
+ * password they choose from a one-time link (the same set-password flow as
+ * the client portal), sent by SMS to their phone and by email if one is on
+ * file. Calling it again sends a fresh link to the same login. The link is
+ * also returned so control can pass it on by hand when SMS isn't set up. */
+route('POST', '/api/subcontractors/:id/login', ADMIN, async ({ params, body, user }) => {
+  const p = db.personnel.find((x) => x.id === Number(params.id));
+  if (!p || !p.external_sub) throw httpError(404, 'subcontractor not found');
+  if (body && 'contact_phone' in body && body.contact_phone) p.contact_phone = String(body.contact_phone).trim().slice(0, 40);
+  if (body && 'contact_email' in body && body.contact_email) p.contact_email = String(body.contact_email).trim().slice(0, 160);
+  let u = p.user_id ? db.users.find((x) => x.id === p.user_id) : null;
+  let created = false;
+  if (!u) {
+    const base = p.name.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '') || 'subcontractor';
+    let username = base, n = 1;
+    while (db.users.some((x) => x.username === username)) username = `${base}${++n}`;
+    u = {
+      id: nextId('users'), username, password_hash: hashPassword(crypto.randomBytes(24).toString('hex')),
+      role: 'FIELD_USER', display_name: p.name, personnel_id: p.id, mdt_id: null, client_id: null,
+      branch_id: p.branch_id || null, site_ids: null, email: null, created_at: new Date().toISOString(),
+    };
+    db.users.push(u);
+    p.user_id = u.id;
+    created = true;
+    logEvent('user.created', `USER ${username} CREATED (FIELD_USER, SUBCONTRACTOR ${p.name}) BY ${user.username}`, { user_id: u.id, by: user.id, personnel_id: p.id });
+  }
+  if (u.role !== 'FIELD_USER') throw httpError(409, `${p.name}'s login is not an officer login`);
+  const iat = Date.now();
+  const token = sign({ purpose: 'set_password', user_id: u.id, iat, exp: iat + 72 * 3600000 });
+  const link = `${PUBLIC_BASE_URL}/set-password.html?for=officer&u=${encodeURIComponent(u.username)}&token=${encodeURIComponent(token)}`;
+  const first = p.name.split(/\s+/)[0];
+  const sent = { sms: false, email: false };
+  const phone = !p.sms_opt_out ? sms.normalizeNumber(p.contact_phone) : null;
+  if (phone) {
+    const text = `Hi ${first}, Echelon has set you up on the officer app. Your username is ${u.username}. Choose a password here (link works for 3 days): ${link}`;
+    const r = await sms.send({ to: phone, body: text, label: p.name });
+    writeNotifyLog({ channel: 'SMS', personnel_id: p.id, to_number: phone, body: 'Officer app sign-in link', provider: r.dryRun ? 'none' : 'twilio', provider_ref: r.sid || null, outcome: r.ok ? (r.dryRun ? 'ATTEMPTED' : 'QUEUED') : 'FAILED', error_code: r.ok ? null : (r.error || 'send failed') });
+    sent.sms = Boolean(r.ok && !r.dryRun);
+  }
+  if (p.contact_email && !p.email_opt_out) {
+    const html = `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;color:#111827">
+      <p>Hi ${escHtml(first)},</p>
+      <p>Echelon has set you up on the CCCS officer app for your shifts with us.</p>
+      <p>Your username is <strong>${escHtml(u.username)}</strong>. Choose a password using the link below (it works for 3 days), then sign in at ${escHtml(PUBLIC_BASE_URL.replace(/^https?:\/\//, ''))}.</p>
+      <p><a href="${link}">Choose your password</a></p>
+    </body></html>`;
+    // Backgrounded like the client portal's link: Graph mail can be slow.
+    Promise.resolve(mailer.send(p.contact_email, 'Your Echelon officer app sign-in', html))
+      .then((r) => writeNotifyLog({ channel: 'EMAIL', personnel_id: p.id, to_email: p.contact_email, body: 'Officer app sign-in link', provider: r && r.ok ? 'graph' : 'none', outcome: r && r.ok ? 'QUEUED' : 'FAILED', error_code: r && r.ok ? null : (r && r.error) || 'send failed' }))
+      .catch((e) => writeNotifyLog({ channel: 'EMAIL', personnel_id: p.id, to_email: p.contact_email, body: 'Officer app sign-in link', provider: 'none', outcome: 'FAILED', error_code: e.message }));
+    sent.email = true;
+  }
+  logEvent('user.signin_link_sent', `OFFICER APP SIGN-IN LINK FOR SUBCONTRACTOR ${p.name} (${u.username}) BY ${user.username} (sms: ${sent.sms ? 'yes' : 'no'}, email: ${sent.email ? 'yes' : 'no'})`, { user_id: u.id, personnel_id: p.id });
+  return { username: u.username, created, link, sms: sent.sms, email: sent.email };
 });
 
 /* Branches — see the comment on BRANCH_SCOPED_ROLES for what this does and
