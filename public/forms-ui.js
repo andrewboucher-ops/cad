@@ -147,13 +147,23 @@ const CCCSForms = (() => {
    * (apply.html) has no session and posts elsewhere — and `subject` may then
    * be null. `submitLabel` names the button.
    */
-  function fill(host, def, subject, { signerName = '', onDone, onCancel, submit, submitLabel = 'Submit report', extra = null } = {}) {
+  function fill(host, def, subject, { signerName = '', onDone, onCancel, submit, submitLabel = 'Submit report', extra = null, assist = false } = {}) {
     const pads = {}, photos = {};
+    // "Write it up for me" (report-assist.js): only on forms with text
+    // boxes to fill, and only where a session can call the server.
+    const showAssist = assist && !submit && def.id && def.fields.some((f) => f.type === 'textarea');
     host.innerHTML = `
       <div class="ff-stack">
         ${def.visibility === 'RESTRICTED' ? `<p style="margin:0;padding:8px 10px;border-radius:8px;border:1px solid var(--priority);font-size:12.5px">
           <strong>Restricted report.</strong> Only you and the named people responsible for these reports will be able to read it. It will not appear in the control-room log.</p>` : ''}
         ${subject ? `<p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[subject.type] || subject.type)}: <strong>${esc(subject.label)}</strong></p>` : ''}
+        ${showAssist ? `<div data-ff-assist style="padding:10px;border-radius:8px;border:1px solid var(--line, #8884)">
+          <label for="ffAssistNotes" style="margin-top:0">Write it up for me</label>
+          <p class="dim" style="margin:0 0 4px;font-size:12px">Jot down what happened in any order, or use your keyboard's microphone. It fills in the boxes below for you to check and correct.</p>
+          <textarea id="ffAssistNotes" data-ff-assist-notes rows="3" placeholder="e.g. arrived 2215, rear fire door open, no one inside, secured it, rang keyholder 2230"></textarea>
+          <div class="btn-row" style="margin-top:6px"><button type="button" class="btn" data-ff-assist-go>Fill in the form from my notes</button></div>
+          <div data-ff-assist-out style="font-size:12.5px"></div>
+        </div>` : ''}
         ${def.fields.map((f) => `<div data-ff-wrap="${f.id}"${f.required_if ? ' hidden' : ''}>${fieldHtml(f)}</div>`).join('')}
         ${extra ? extra.html : ''}
         <p class="err" data-ff-err style="min-height:16px;margin:0"></p>
@@ -199,6 +209,37 @@ const CCCSForms = (() => {
       if (ctl) ctl.addEventListener('change', refresh);
     }
     refresh();
+
+    if (showAssist) {
+      // Fill only boxes that are empty or still hold an earlier draft, so
+      // a second press never wipes what the officer has typed themselves.
+      const drafted = {};
+      const goBtn = host.querySelector('[data-ff-assist-go]'), out = host.querySelector('[data-ff-assist-out]');
+      goBtn.onclick = async () => {
+        const notes = host.querySelector('[data-ff-assist-notes]').value.trim();
+        if (notes.length < 3) { out.innerHTML = '<p class="err" style="margin:6px 0 0">Write a few notes first.</p>'; return; }
+        goBtn.disabled = true; goBtn.textContent = 'Writing… (can take up to a minute)'; out.innerHTML = '';
+        try {
+          const r = await api('POST', '/api/report-assist', { definition_id: def.id, subject_type: subject && subject.type, subject_id: subject && subject.id, notes });
+          const kept = [];
+          for (const [id, val] of Object.entries(r.values || {})) {
+            const ctl = host.querySelector(`[data-ff="${id}"]`); if (!ctl) continue;
+            if (ctl.value.trim() && ctl.value !== drafted[id]) { kept.push(id); continue; }
+            ctl.value = val; drafted[id] = ctl.value;
+            ctl.dispatchEvent(new Event('change'));
+          }
+          const label = (id) => (def.fields.find((f) => f.id === id) || {}).label || id;
+          out.innerHTML = `<p style="margin:8px 0 0"><strong>Draft added below.</strong> ${r.source === 'ai' ? 'Written by the local AI.' : 'Written by the simple template.'}
+              Read every box and correct anything that is wrong or missing before you sign. It is your statement.</p>
+            ${r.note ? `<p class="dim" style="margin:4px 0 0">${esc(r.note)}</p>` : ''}
+            ${r.check && r.check.length ? `<p style="margin:4px 0 0;color:var(--priority)">Check these, they are not in your notes: ${r.check.map(esc).join(', ')}</p>` : ''}
+            ${kept.length ? `<p class="dim" style="margin:4px 0 0">Left as you typed them: ${kept.map((id) => esc(label(id))).join('; ')}</p>` : ''}
+            ${r.missing && r.missing.length ? `<p class="dim" style="margin:4px 0 0">Worth adding:</p><ul style="margin:2px 0 0;padding-left:18px">${r.missing.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>` : ''}
+            <p class="dim" style="margin:4px 0 0">Tick boxes, times and your signature are left for you.</p>`;
+        } catch (e) { out.innerHTML = `<p class="err" style="margin:6px 0 0">${esc(e.message)}</p>`; }
+        finally { goBtn.disabled = false; goBtn.textContent = 'Fill in the form again from my notes'; }
+      };
+    }
 
     const errEl = host.querySelector('[data-ff-err]');
     if (onCancel) host.querySelector('[data-ff-cancel]').onclick = onCancel;
