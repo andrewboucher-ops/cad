@@ -139,7 +139,7 @@ function registerScreening({ route, httpError, ADMIN, db, logEvent, flushNow = (
   });
 
   route('GET', '/api/screening/overview', ADMIN, () => db.personnel
-    .filter((p) => p.employment_status !== 'TERMINATED')
+    .filter((p) => p.employment_status !== 'TERMINATED' && !p.external_sub)
     .map((p) => { const st = statusOf(p); return { id: p.id, name: p.name, status: st.status, conditional_until: st.conditional_until, outstanding: st.checks.filter((c) => !c.done).map((c) => c.key) }; }));
 
   return { screeningStatus: statusOf };

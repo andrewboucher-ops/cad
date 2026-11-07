@@ -915,6 +915,9 @@ function publicPersonnel(p, user) {
     has_photo: Boolean(p.id_photo), photo_updated_at: p.id_photo ? p.id_photo.uploaded_at : null, id_card_issued_at: p.id_card_issued_at || null,
     branch_id: p.branch_id || null,
     employment_type: p.employment_type || 'EMPLOYED',
+    // A subcontractor quick-added from the rota (POST /api/subcontractors):
+    // just enough to put them on a shift, with no personnel file behind it.
+    external_sub: p.external_sub === true, company: p.company || '',
     ...(canSeeStaffRecord ? {
       welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
       welfare_note: p.welfare_note || null,
@@ -933,7 +936,7 @@ function publicPersonnel(p, user) {
     // Same audience as emergency_contact/bank_details above: onboarding
     // status is an HR-chasing concern, not something a colleague needs to
     // see about another officer, even as a boolean checklist with no detail.
-    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, date_of_birth: p.date_of_birth || null, onboarding: onboardingStatusForPerson(p) } : {}),
+    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, date_of_birth: p.date_of_birth || null, onboarding: p.external_sub ? null : onboardingStatusForPerson(p) } : {}),
     ...(canSeePayroll ? { payroll: p.payroll || null } : {}),
   };
 }
@@ -2496,6 +2499,43 @@ route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
   logEvent('personnel.created', `PERSONNEL ${name} ADDED`, { personnel_id: p.id });
   return { __status: 201, __body: publicPersonnel(p, user) };
 });
+/** A subcontractor put on a shift with only what control needs on the night
+ * (name, company, SIA licence if known, phone) — no personnel file, staff
+ * number, onboarding checklist or BS 7858 screening, all of which belong to
+ * our own staff. It is still a personnel row underneath, so the shift
+ * assignment, clock times, timesheet, invoice and incident log all work
+ * exactly as for anyone else; payroll and leave already skip SUBCONTRACTOR.
+ * An expired SIA licence still blocks rostering (assertDeployable), same as
+ * for staff. "Give them a full personnel file" later is PATCH
+ * /api/personnel/:id { external_sub: false }. */
+route('POST', '/api/subcontractors', ADMIN, ({ body, user }) => {
+  const name = String(body.name || '').trim().slice(0, 120);
+  if (!name) throw httpError(400, 'name required');
+  const company = String(body.company || '').trim().slice(0, 120);
+  const licenceNo = String(body.sia_licence_no || '').replace(/[\s-]/g, '').slice(0, 40);
+  const expiry = body.sia_licence_expiry ? String(body.sia_licence_expiry).slice(0, 10) : null;
+  if (expiry && isNaN(Date.parse(expiry))) throw httpError(400, 'invalid SIA licence expiry');
+  const licenceType = String(body.sia_licence_type || '').trim().slice(0, 80) || 'Door Supervision';
+  const p = {
+    id: nextId('personnel'), employee_no: null, name, rank: '',
+    contact_phone: String(body.contact_phone || '').trim().slice(0, 40), contact_email: String(body.contact_email || '').trim().slice(0, 160),
+    sms_opt_out: false, email_opt_out: false,
+    employment_status: 'ACTIVE', employment_type: 'SUBCONTRACTOR',
+    external_sub: true, company,
+    annual_leave_allowance_days: null, payroll: null,
+    sia_licences: licenceNo ? [{ id: 1, licence_type: licenceType, licence_no: licenceNo, expiry }] : [],
+    start_date: new Date().toISOString().slice(0, 10),
+    onboarding_completed_at: null, onboarding_completed_by: null,
+    callsign_id: null, user_id: null, vehicle_id: null,
+    welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: null,
+    notes: String(body.notes || '').slice(0, 2000), branch_id: normalizedBranchId(body.branch_id),
+    lat: null, lon: null, location_at: null,
+    created_by: user.id, created_at: new Date().toISOString(),
+  };
+  db.personnel.push(p);
+  logEvent('personnel.subcontractor_added', `SUBCONTRACTOR ${name}${company ? ` (${company})` : ''} ADDED BY ${user.username} — NO PERSONNEL FILE`, { personnel_id: p.id });
+  return { __status: 201, __body: publicPersonnel(p, user) };
+});
 route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
   const p = db.personnel.find((x) => x.id === Number(params.id)); if (!p) throw httpError(404, 'personnel not found');
   if ('name' in body) { const name = String(body.name || '').trim(); if (!name) throw httpError(400, 'name required'); p.name = name; }
@@ -2604,6 +2644,15 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
     p.date_of_birth = body.date_of_birth ? String(body.date_of_birth).slice(0, 10) : null;
   }
   if ('notes' in body) p.notes = body.notes || '';
+  if ('company' in body) p.company = String(body.company || '').trim().slice(0, 120);
+  // Giving a quick-added subcontractor a full personnel file: from here on
+  // they are on the onboarding checklist, screening and staff numbering like
+  // anyone else. One way only — a file, once started, is not hidden again.
+  if (body.external_sub === false && p.external_sub) {
+    p.external_sub = false;
+    staffId.assignNumber(p);
+    logEvent('personnel.subcontractor_promoted', `SUBCONTRACTOR ${p.name} GIVEN A FULL PERSONNEL FILE BY ${user.username}`, { personnel_id: p.id });
+  }
   // Both fields are validated against the FULL intended result before either
   // is written — a request that sets both at once (e.g. SUBCONTRACTOR + an
   // allowance) must be rejected without mutating employment_type first and

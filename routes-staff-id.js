@@ -54,7 +54,7 @@ module.exports = function registerStaffId({
   function assignNumber(p) { if (!p.employee_no) p.employee_no = nextNumber(); return p.employee_no; }
   route('GET', '/api/admin/staff-numbers', ADMIN, () => {
     const r = numbering();
-    return { prefix: r.prefix, next: r.next, digits: r.digits, example: `${r.prefix}${String(r.next).padStart(r.digits, '0')}`, without_number: db.personnel.filter((p) => !p.employee_no).length };
+    return { prefix: r.prefix, next: r.next, digits: r.digits, example: `${r.prefix}${String(r.next).padStart(r.digits, '0')}`, without_number: db.personnel.filter((p) => !p.employee_no && !p.external_sub).length };
   });
   route('PUT', '/api/admin/staff-numbers', ADMIN, ({ body }) => {
     const r = numbering();
@@ -62,10 +62,10 @@ module.exports = function registerStaffId({
     if ('next' in body) { const v = Number(body.next); if (!Number.isInteger(v) || v < 1) throw httpError(400, 'next number must be a whole number'); r.next = v; }
     if ('digits' in body) { const v = Number(body.digits); if (!Number.isInteger(v) || v < 1 || v > 8) throw httpError(400, 'digits must be 1–8'); r.digits = v; }
     flushNow();
-    return { prefix: r.prefix, next: r.next, digits: r.digits, example: `${r.prefix}${String(r.next).padStart(r.digits, '0')}`, without_number: db.personnel.filter((p) => !p.employee_no).length };
+    return { prefix: r.prefix, next: r.next, digits: r.digits, example: `${r.prefix}${String(r.next).padStart(r.digits, '0')}`, without_number: db.personnel.filter((p) => !p.employee_no && !p.external_sub).length };
   });
   route('POST', '/api/admin/staff-numbers/assign-missing', ADMIN, ({ user }) => {
-    const done = db.personnel.filter((p) => !p.employee_no).sort((a, b) => a.id - b.id).map((p) => ({ id: p.id, name: p.name, employee_no: assignNumber(p) }));
+    const done = db.personnel.filter((p) => !p.employee_no && !p.external_sub).sort((a, b) => a.id - b.id).map((p) => ({ id: p.id, name: p.name, employee_no: assignNumber(p) }));
     if (done.length) logEvent('personnel.numbered', `${done.length} STAFF NUMBER(S) ASSIGNED BY ${user.display_name}`, {});
     flushNow();
     return { assigned: done };
