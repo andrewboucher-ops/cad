@@ -322,12 +322,13 @@ function personLabel(p) {
 function subFormHtml(pre, hidden) {
   const f = (id, label, type = 'text', ph = '') => `<div><label for="${pre}${id}" style="font-size:11px">${label}</label><input id="${pre}${id}" type="${type}" placeholder="${ph}" style="width:100%"></div>`;
   return `<div id="${pre}Box" class="${hidden ? 'hide' : ''}" style="border:1px dashed var(--line);border-radius:6px;padding:10px;margin-top:8px">
-    <p class="dim" style="margin:0 0 8px;font-size:12px">For a subcontractor with no personnel file. Only the name is required; they won't get a staff number, onboarding or screening, and won't be able to sign in to the officer app, so clock them in and out from here.</p>
+    <p class="dim" style="margin:0 0 8px;font-size:12px">For a subcontractor with no personnel file. Only the name is required; they won't get a staff number, onboarding or screening. Without an officer app sign-in, clock them in and out from here.</p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
       ${f('Name', 'Name *')}${f('Company', 'Company')}
       ${f('Sia', 'SIA licence number', 'text', '16 digits, if known')}${f('SiaExpiry', 'SIA licence expiry', 'date')}
-      ${f('Phone', 'Phone', 'tel')}
+      ${f('Phone', 'Phone', 'tel')}${f('Email', 'Email', 'email')}
     </div>
+    <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:12px;margin-top:8px"><input type="checkbox" id="${pre}Login"> Send them an officer app sign-in link (by text, and email if given)</label>
   </div>`;
 }
 /** Creates the subcontractor from subFormHtml(pre) and returns them. */
@@ -336,10 +337,21 @@ async function createSubFromForm(pre) {
   if (!v('Name')) throw new Error('Enter the subcontractor\'s name');
   const p = await api('POST', '/api/subcontractors', {
     name: v('Name'), company: v('Company'), sia_licence_no: v('Sia'),
-    sia_licence_expiry: v('SiaExpiry') || null, contact_phone: v('Phone'),
+    sia_licence_expiry: v('SiaExpiry') || null, contact_phone: v('Phone'), contact_email: v('Email'),
   });
   allPersonnel.push(p);
+  if (el(`#${pre}Login`).checked) await sendSubLogin(p);
   return p;
+}
+/** Makes (or re-sends) a subcontractor's officer app sign-in, and tells
+ * control how it went, with the link to pass on if nothing was sent. */
+async function sendSubLogin(p) {
+  try {
+    const r = await api('POST', `/api/subcontractors/${p.id}/login`, {});
+    const how = [r.sms ? 'text' : '', r.email ? 'email' : ''].filter(Boolean).join(' and ');
+    if (how) alert(`Sign-in link sent to ${p.name} by ${how}. Their username is ${r.username}.`);
+    else prompt(`Nothing could be sent to ${p.name} (no working phone or email, or texting isn't set up). Their username is ${r.username}. Copy this link and pass it on:`, r.link);
+  } catch (e) { alert(`${p.name} was added, but the sign-in link failed: ${e.message}`); }
 }
 /** An expired SIA licence or right to work blocks rostering and clock-in;
  * an admin can still go ahead by giving a reason, which the server logs. */

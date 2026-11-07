@@ -109,3 +109,36 @@ test('they are left out of staff numbering and screening until given a full pers
   const overview2 = (await call('GET', '/api/screening/overview', undefined, adminT)).body;
   assert.ok(overview2.some((x) => x.id === sub.id));
 });
+
+test('a subcontractor can be given an officer app sign-in, and then sees only their own shifts and record', async () => {
+  const sub = (await call('POST', '/api/subcontractors', { name: 'Login Sub', company: 'Cover Co', contact_phone: '07700900456' }, adminT)).body;
+  assert.equal((await call('POST', `/api/subcontractors/${sub.id}/login`, {}, dispT)).status, 403);
+  const r = await call('POST', `/api/subcontractors/${sub.id}/login`, {}, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.username, 'login.sub');
+  assert.equal(r.body.created, true);
+  assert.ok(r.body.link.includes('/set-password.html?for=officer'));
+  const token = new URL(r.body.link).searchParams.get('token');
+  assert.equal((await call('POST', '/api/auth/set-password', { token, password: 'Cover-Shift-2026!' })).status, 200);
+  const subT = await login('login.sub', 'Cover-Shift-2026!');
+  assert.ok(subT, 'they can sign in');
+
+  const mine = await newShift(2, -6);
+  await call('POST', `/api/shifts/${mine.id}/assignments`, { personnel: sub.id }, adminT);
+  const other = await newShift(3, -5);
+  const shifts = (await call('GET', '/api/shifts', undefined, subT)).body;
+  assert.ok(shifts.some((s) => s.id === mine.id), 'their own shift');
+  assert.ok(!shifts.some((s) => s.id === other.id), 'not other shifts');
+  const people = (await call('GET', '/api/personnel', undefined, subT)).body;
+  assert.deepEqual(people.map((p) => p.id), [sub.id], 'only their own record');
+
+  const again = await call('POST', `/api/subcontractors/${sub.id}/login`, {}, adminT);
+  assert.equal(again.body.username, 'login.sub');
+  assert.equal(again.body.created, false, 'a resend reuses the same login');
+  assert.equal((await call('POST', '/api/auth/set-password', { token, password: 'Another-Pass-2026!' })).status, 400, 'the first link is used up');
+});
+
+test('the sign-in route is only for quick-added subcontractors', async () => {
+  const staff = (await call('POST', '/api/personnel', { name: 'Normal Staff Member' }, adminT)).body;
+  assert.equal((await call('POST', `/api/subcontractors/${staff.id}/login`, {}, adminT)).status, 404);
+});
