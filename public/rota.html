@@ -350,7 +350,7 @@ async function sendSubLogin(p) {
     const r = await api('POST', `/api/subcontractors/${p.id}/login`, {});
     const how = [r.sms ? 'text' : '', r.email ? 'email' : ''].filter(Boolean).join(' and ');
     if (how) alert(`Sign-in link sent to ${p.name} by ${how}. Their username is ${r.username}.`);
-    else prompt(`Nothing could be sent to ${p.name} (no working phone or email, or texting isn't set up). Their username is ${r.username}. Copy this link and pass it on:`, r.link);
+    else prompt(`Nothing was sent to ${p.name}. ${r.sms_problem ? `No text: ${r.sms_problem}. ` : ''}Their username is ${r.username}. Copy this link and send it to them yourself:`, r.link);
   } catch (e) { alert(`${p.name} was added, but the sign-in link failed: ${e.message}`); }
 }
 /** An expired SIA licence or right to work blocks rostering and clock-in;

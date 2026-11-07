@@ -6673,11 +6673,18 @@ route('POST', '/api/subcontractors/:id/login', ADMIN, async ({ params, body, use
   const first = p.name.split(/\s+/)[0];
   const sent = { sms: false, email: false };
   const phone = !p.sms_opt_out ? sms.normalizeNumber(p.contact_phone) : null;
+  // Why no text went, in words control can act on.
+  let smsProblem = !p.contact_phone ? 'there is no phone number on their record'
+    : p.sms_opt_out ? 'they have opted out of texts'
+    : !phone ? `the phone number "${p.contact_phone}" isn't a UK mobile (07…) or +country number`
+    : null;
   if (phone) {
     const text = `Hi ${first}, Echelon has set you up on the officer app. Your username is ${u.username}. Choose a password here (link works for 3 days): ${link}`;
     const r = await sms.send({ to: phone, body: text, label: p.name });
     writeNotifyLog({ channel: 'SMS', personnel_id: p.id, to_number: phone, body: 'Officer app sign-in link', provider: r.dryRun ? 'none' : 'twilio', provider_ref: r.sid || null, outcome: r.ok ? (r.dryRun ? 'ATTEMPTED' : 'QUEUED') : 'FAILED', error_code: r.ok ? null : (r.error || 'send failed') });
     sent.sms = Boolean(r.ok && !r.dryRun);
+    if (r.dryRun) smsProblem = 'texting is in test mode on this server (SMS_LIVE is not on), so nothing actually goes out';
+    else if (!r.ok) smsProblem = `the text failed: ${r.error || 'send failed'}`;
   }
   if (p.contact_email && !p.email_opt_out) {
     const html = `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;color:#111827">
@@ -6693,7 +6700,7 @@ route('POST', '/api/subcontractors/:id/login', ADMIN, async ({ params, body, use
     sent.email = true;
   }
   logEvent('user.signin_link_sent', `OFFICER APP SIGN-IN LINK FOR SUBCONTRACTOR ${p.name} (${u.username}) BY ${user.username} (sms: ${sent.sms ? 'yes' : 'no'}, email: ${sent.email ? 'yes' : 'no'})`, { user_id: u.id, personnel_id: p.id });
-  return { username: u.username, created, link, sms: sent.sms, email: sent.email };
+  return { username: u.username, created, link, sms: sent.sms, email: sent.email, sms_problem: sent.sms ? null : smsProblem, email_problem: sent.email ? null : (!p.contact_email ? 'there is no email address on their record' : 'they have opted out of email') };
 });
 
 /* Branches — see the comment on BRANCH_SCOPED_ROLES for what this does and
