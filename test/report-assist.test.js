@@ -11,7 +11,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 
-process.env.PORT = '4091';
+process.env.PORT = '4092';
 process.env.AUTH_SECRET = 'report-assist-test-secret';
 process.env.SIMULATION = 'off';
 process.env.PERSISTENCE = 'off';
