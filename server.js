@@ -6003,6 +6003,11 @@ require('./routes-payroll.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, attendance, flushNow: () => store.flushNow(),
 });
 
+// "Write it up for me" on report forms: a local AI (Ollama on our own
+// Proxmox) or, as a fallback, a template drafter. Suggest-only. See
+// report-assist.js.
+require('./report-assist.js').register({ route, db, ALL, httpError, logEvent, assertJobAccess, assertVisitAccess });
+
 // Reports — cross-cutting admin views (staffing cost vs revenue). See
 // routes-reports.js.
 require('./routes-reports.js')({ route, httpError, ADMIN, db });

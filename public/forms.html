@@ -226,7 +226,7 @@ async function startFiling(preKey, preType, preId) {
     ['#nDef', '#nSubject', '#nNext'].forEach((q) => (el(q).disabled = true));
     const extra = d.key === 'vehicle-inspection' && subject.type === 'VEHICLE' ? await CCCSForms.vehicleKitExtra(subject.id) : null;
     CCCSForms.fill(el('#nFill'), d, subject, {
-      extra, signerName: me.display_name,
+      extra, signerName: me.display_name, assist: true,
       onCancel: () => startFiling(),
       onDone: async (sub) => { await refresh(); openReport(sub.id); },
     });

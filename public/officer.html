@@ -1586,7 +1586,7 @@ el('#bFileReport').onclick = async () => {
       if (!subject) return;
       ['#rDef', '#rSubject', '#rNext'].forEach((q) => (el(q).disabled = true));
       CCCSForms.fill(el('#rFill'), d, subject, {
-        signerName: (person && person.name) || me.display_name,
+        signerName: (person && person.name) || me.display_name, assist: true,
         onDone: (sub) => { closeModal(); toast(sub.queued ? 'Saved — will send automatically when you have signal.' : `Report ${sub.reference} filed.`); refreshReports(); },
       });
     };
@@ -1716,7 +1716,7 @@ async function openIncident() {
   const subjects = (await reportSubjects()).filter((s) => def.subject_types.includes(s.type));
   if (!subjects.length) { host.innerHTML = '<p class="dim">There is no site to file this against yet.</p>'; return; }
   const fill = (s) => CCCSForms.fill(host, def, s, {
-    signerName: signer(), onCancel: () => go(''),
+    signerName: signer(), onCancel: () => go(''), assist: true,
     onDone: (sub) => { toast(sub.queued ? 'Saved — will send automatically when you have signal.' : `Incident report ${sub.reference} filed.`); refreshReports(); go(''); },
   });
   // Already on a job or visit: that is what it is about — no need to ask.
