@@ -431,6 +431,35 @@ module.exports = function registerInvoices({
     return { lines, checks };
   }
 
+  /** Clock records at a contract's site in the period that no line
+   * billed — an ad-hoc clock-in, a shift still in draft, a shift type the
+   * contract has no hourly line for — so hours worked never drop off an
+   * invoice silently. Each gets a check saying why and how to fix it. */
+  const billedElsewhere = (s, from, to) => (db.agreements || []).some((c) => running(c, from, to) && c.site_id === s.site_id
+    && (c.lines || []).some((l) => l.kind === 'HOURLY' && (!l.shift_type_id || l.shift_type_id === s.shift_type_id)));
+  function unbilledChecks(contracts, from, to, taken) {
+    const t0 = dayStart(from), t1 = dayStart(to) + 86400000;
+    const sites = new Set(contracts.map((c) => c.site_id));
+    const out = [];
+    for (const a of db.shift_assignments) {
+      if (!a.clocked_in_at || a.status === 'REMOVED' || taken.assignments.has(a.id)) continue;
+      const s = db.shifts.find((x) => x.id === a.shift_id);
+      if (!s || !sites.has(s.site_id) || !(Date.parse(s.starts_at) >= t0 && Date.parse(s.starts_at) < t1)) continue;
+      const p = db.personnel.find((x) => x.id === a.personnel_id);
+      const who = `${p ? p.name : '—'} on ${s.starts_at.slice(0, 10)}`;
+      const type = (db.shift_types || []).find((x) => x.id === s.shift_type_id);
+      let why;
+      if (s.ad_hoc) why = 'clocked in ad hoc, and ad-hoc shifts are not billed. If they were on the rota, use Move to rota in Timeclock → Timesheet, then void this draft and make it again';
+      else if (s.status === 'DRAFT') why = 'the rota shift is still a draft. Publish it, then void this draft and make it again';
+      else if (s.status === 'CANCELLED') why = 'the rota shift is cancelled but has clock times';
+      else if (!['ASSIGNED', 'CONFIRMED'].includes(a.status)) why = `their place on the shift is ${String(a.status || 'unknown').toLowerCase()}, not assigned or confirmed`;
+      else if (billedElsewhere(s, from, to)) continue; // another contract at this site bills it
+      else why = `the contract has no hourly line for ${type ? type.name : 'this shift type'} shifts`;
+      out.push(`${who}: clocked hours not billed — ${why}`);
+    }
+    return out;
+  }
+
   /** Like lines together, so a contract (or a client's contracts) with the
    * same charge entered more than once reads as one line: identical
    * fixed/one-off charges at the same site and price become one line with
@@ -454,8 +483,9 @@ module.exports = function registerInvoices({
   function build(c, from, to, user) {
     const client = (db.clients || []).find((x) => x.id === c.client_id);
     const site = db.sites.find((s) => s.id === c.site_id);
-    const r = linesForContract(c, from, to);
-    const lines = groupLines(r.lines), checks = r.checks;
+    const taken = newTaken();
+    const r = linesForContract(c, from, to, taken);
+    const lines = groupLines(r.lines), checks = r.checks.concat(unbilledChecks([c], from, to, taken));
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
     const inv = {
       id, reference: `${c.reference}/${String(id).padStart(4, '0')}`, status: 'DRAFT', contract_id: c.id, contract_reference: c.reference, contract_ids: [c.id],
@@ -487,6 +517,7 @@ module.exports = function registerInvoices({
       lines = lines.concat(r.lines);
       checks = checks.concat(r.checks);
     }
+    checks = checks.concat(unbilledChecks(contracts, from, to, taken));
     lines = groupLines(lines);
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
     const inv = {

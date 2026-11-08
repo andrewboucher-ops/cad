@@ -1003,3 +1003,38 @@ test('an Alarm Response line bills the jobs attended at the site by the hour or 
   assert.equal(pdf.status, 200);
   assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
 });
+
+test('clock times at the site that no line bills are named in the checks, not dropped silently', async () => {
+  const guard = { id: 9101, key: 'STATIC_GUARD_T', name: 'Static Guard', active: true };
+  const other = { id: 9102, key: 'MOBILE_T', name: 'Mobile Patrol', active: true };
+  let adHocType = app.db.shift_types.find((t) => t.key === 'AD_HOC');
+  if (!adHocType) app.db.shift_types.push(adHocType = { id: 9103, key: 'AD_HOC', name: 'Ad hoc', active: false });
+  app.db.shift_types.push(guard, other);
+  const site = (await call('POST', '/api/sites', { name: 'Unbilled Checks Park' }, adminT)).body;
+  await call('POST', '/api/clients', { name: 'Unbilled Checks Ltd', contact_email: 'u@example.test', site_ids: [site.id] }, adminT);
+  const c = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: site.id, start_date: '2026-03-01', lines: [
+    { description: 'Static Guards on Site', kind: 'HOURLY', rate: 24.3, shift_type_id: guard.id },
+  ] }, adminT)).body;
+  await call('POST', `/api/agreements/${c.id}/mark-signed`, { name: 'Test' }, adminT);
+  const pid = app.db.personnel[0].id;
+  const add = (day, extra) => {
+    const id = app.seq.shifts = (app.seq.shifts || 0) + 1;
+    app.db.shifts.push({ id, site_id: site.id, shift_type_id: guard.id, status: 'PUBLISHED', starts_at: `2026-03-${day}T08:00:00.000Z`, ends_at: `2026-03-${day}T12:00:00.000Z`, break_minutes: 0, ...extra });
+    const aid = app.seq.shift_assignments = (app.seq.shift_assignments || 0) + 1;
+    app.db.shift_assignments.push({ id: aid, shift_id: id, personnel_id: pid, status: 'CONFIRMED', clocked_in_at: `2026-03-${day}T08:00:00Z`, clocked_out_at: `2026-03-${day}T12:00:00Z`, breaks: [] });
+  };
+  add('02', {});
+  add('03', { ad_hoc: true, shift_type_id: adHocType.id });
+  add('04', { status: 'DRAFT' });
+  add('05', { shift_type_id: other.id });
+
+  const g = await call('POST', '/api/invoices/generate', { from: '2026-03-01', to: '2026-03-08', contract_id: c.id }, adminT);
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const inv = g.body.made[0];
+  assert.equal(inv.lines[0].quantity, 4, 'only the published static guard shift bills');
+  const checks = JSON.stringify(inv.checks);
+  assert.ok(inv.checks.some((x) => /on 2026-03-03: clocked hours not billed — clocked in ad hoc.*Move to rota/.test(x)), checks);
+  assert.ok(inv.checks.some((x) => /on 2026-03-04: clocked hours not billed — the rota shift is still a draft/.test(x)), checks);
+  assert.ok(inv.checks.some((x) => /on 2026-03-05: clocked hours not billed — the contract has no hourly line for Mobile Patrol/.test(x)), checks);
+  assert.ok(!inv.checks.some((x) => /2026-03-02/.test(x)), checks);
+});
