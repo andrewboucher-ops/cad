@@ -303,7 +303,8 @@ module.exports = function registerInvoices({
    * hour or part thereof: arrived to cleared, rounded up to whole hours,
    * at least one. A job is counted once per invoice, so two alarm response
    * lines (or two contracts on the same site) don't bill the same
-   * attendance twice — `taken` carries the ids already used. */
+   * attendance twice — `taken` carries the ids already used.
+   * A job control marked not attended is never billed. */
   const isAlarmResponseType = (id) => {
     const t = id ? (db.shift_types || []).find((x) => x.id === id) : null;
     return Boolean(t && (t.key === 'ALARM_RESPONSE' || /alarm\s*response/i.test(t.name || '')));
@@ -312,7 +313,7 @@ module.exports = function registerInvoices({
     const t0 = dayStart(from), t1 = dayStart(to) + 86400000;
     const rows = [];
     for (const j of db.jobs || []) {
-      if (j.site_id !== contract.site_id || j.status === 'CANCELLED' || taken.has(j.id)) continue;
+      if (j.site_id !== contract.site_id || j.status === 'CANCELLED' || j.not_attended || taken.has(j.id)) continue;
       const at = Date.parse(j.on_scene_at || j.created_at);
       if (!(at >= t0 && at < t1)) continue;
       taken.add(j.id);

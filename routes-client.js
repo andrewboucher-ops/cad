@@ -115,6 +115,12 @@ module.exports = function registerClientRoutes({
       id: j.id, reference: j.reference, priority: j.priority, status: j.status, incident_type: j.incident_type,
       site_id: j.site_id, site_name: site ? site.name : null,
       created_at: j.created_at, dispatched_at: j.dispatched_at, on_scene_at: j.on_scene_at, completed_at: j.completed_at,
+      closed_at: j.closed_at || null,
+      // Dealt with without anyone attending (POST /api/jobs/:id/not-attended):
+      // the reason, and only the notes control marked for the client —
+      // never who wrote them, never the internal notes.
+      not_attended: Boolean(j.not_attended), not_attended_reason: j.not_attended ? (j.not_attended_reason || '') : null,
+      client_notes: (j.note_entries || []).filter((n) => n.client_visible).map((n) => ({ at: n.at, text: n.text })),
     };
   };
   const clientVisit = (v) => {
@@ -607,7 +613,8 @@ module.exports = function registerClientRoutes({
     return {
       site: clientSite(site), from: from.toISOString(), to: to.toISOString(),
       jobs: {
-        total: jobs.length, completed: jobs.filter((j) => j.status === 'COMPLETED').length, cancelled: jobs.filter((j) => j.status === 'CANCELLED').length,
+        total: jobs.length, completed: jobs.filter((j) => j.status === 'COMPLETED').length, cancelled: jobs.filter((j) => j.status === 'CANCELLED' && !j.not_attended).length,
+        not_attended: jobs.filter((j) => j.not_attended).length,
         avg_response_minutes: avgResponseMinutes, sla_minutes: site.response_sla_minutes || null,
         within_sla: site.response_sla_minutes ? responseMinutes.filter((m) => m <= site.response_sla_minutes).length : null,
       },

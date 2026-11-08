@@ -46,6 +46,11 @@
   .list-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
   .list-row:last-child { border-bottom: none; }
   .list-row .t { color: var(--ink-dim); font-family: var(--mono); font-size: 11px; min-width: 78px; }
+  details.job-notes > summary { cursor: pointer; list-style: none; }
+  details.job-notes > summary::-webkit-details-marker { display: none; }
+  details.job-notes > summary::after { content: '▸'; color: var(--ink-dim); margin-left: 6px; }
+  details.job-notes[open] > summary::after { content: '▾'; }
+  details.job-notes > :not(summary) { padding-left: 4px; }
   .empty-note { color: var(--ink-dim); padding: 14px 0; text-align: center; font-size: 13px; }
   .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; background: var(--panel-3); color: var(--ink-dim); }
   .pill.open { background: rgba(234,179,8,.15); color: #eab308; }
@@ -140,7 +145,7 @@
   </div>
 
   <div class="section-card" id="sec-open">
-    <header><span class="h-icon" style="background:rgba(249,115,22,.15);color:var(--priority)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" stroke-linecap="round"/></svg></span>Open jobs &amp; patrol visits</header>
+    <header><span class="h-icon" style="background:rgba(249,115,22,.15);color:var(--priority)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l9 16H3z" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" stroke-linecap="round"/></svg></span>Jobs &amp; patrol visits</header>
     <div class="body" id="activityBody"><p class="empty-note">Loading…</p></div>
   </div>
 
@@ -234,9 +239,26 @@ async function paintActivity() {
     ...openJobs.map((j) => ({ t: fmtDateTime(j.created_at), label: `${j.incident_type || 'Job'} — ${j.reference}`, status: j.status })),
     ...openVisits.map((v) => ({ t: fmtDateTime(v.scheduled_for), label: `Patrol visit — ${v.reference}`, status: v.status })),
   ];
-  el('#activityBody').innerHTML = rows.length
+  const openHtml = rows.length
     ? rows.map((r) => `<div class="list-row"><span class="t">${esc(r.t)}</span><span style="flex:1">${esc(r.label)}</span>${statusPill(r.status)}</div>`).join('')
     : '<p class="empty-note">Nothing open right now.</p>';
+  // Jobs closed in the last 30 days: attended ones, and ones control dealt
+  // with without sending anyone (not attended, never charged), with the
+  // reason and any notes control shared. A plain cancelled job (raised in
+  // error) isn't shown.
+  const since = Date.now() - 30 * 86400000;
+  const recent = jobs.filter((j) => (j.status === 'COMPLETED' || j.not_attended) && Date.parse(j.closed_at || j.completed_at || j.created_at) >= since);
+  const recentHtml = recent.map((j) => {
+    const pill = j.not_attended ? '<span class="pill" title="Dealt with without attending — not charged">Not attended</span>' : statusPill(j.status);
+    const notes = j.client_notes || [];
+    const head = `<span class="t">${esc(fmtDateTime(j.created_at))}</span><span style="flex:1">${esc(`${j.incident_type || 'Job'} — ${j.reference}`)}</span>${pill}`;
+    if (!notes.length && !j.not_attended) return `<div class="list-row">${head}</div>`;
+    return `<details class="job-notes"><summary class="list-row">${head}</summary>
+      ${j.not_attended ? '<p class="dim" style="font-size:12.5px;margin:4px 0 6px">Handled by our control room without an officer attending. This job is not charged.</p>' : ''}
+      ${notes.map((n) => `<div style="font-size:13px;margin:0 0 8px"><span class="dim" style="font-size:12px">${esc(fmtDateTime(n.at))}</span><div style="white-space:pre-wrap">${esc(n.text)}</div></div>`).join('')}
+    </details>`;
+  }).join('');
+  el('#activityBody').innerHTML = openHtml + (recent.length ? `<div class="dim" style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin:14px 0 4px">Recent jobs (last 30 days)</div>${recentHtml}` : '');
 }
 
 /** A report only ever appears here once an admin has explicitly released a
@@ -318,7 +340,7 @@ async function paintIncidents() {
 function renderReport(r) {
   el('#reportBody').innerHTML = `
     <div class="stat-row">
-      <div class="stat-tile"><div class="label">Alarm jobs</div><div class="num">${r.jobs.total}</div><div class="dim" style="font-size:12px">${r.jobs.completed} completed${r.jobs.cancelled ? `, ${r.jobs.cancelled} cancelled` : ''}</div></div>
+      <div class="stat-tile"><div class="label">Alarm jobs</div><div class="num">${r.jobs.total}</div><div class="dim" style="font-size:12px">${r.jobs.completed} completed${r.jobs.not_attended ? `, ${r.jobs.not_attended} handled without attending` : ''}${r.jobs.cancelled ? `, ${r.jobs.cancelled} cancelled` : ''}</div></div>
       <div class="stat-tile"><div class="label">Avg response</div><div class="num">${r.jobs.avg_response_minutes != null ? r.jobs.avg_response_minutes + ' min' : '—'}</div><div class="dim" style="font-size:12px">${r.jobs.sla_minutes ? `SLA ${r.jobs.sla_minutes} min — ${r.jobs.within_sla}/${r.jobs.total} within` : 'no SLA set on this site'}</div></div>
       <div class="stat-tile"><div class="label">Patrol visits</div><div class="num">${r.visits.total}</div><div class="dim" style="font-size:12px">${r.visits.completed} completed${r.visits.missed ? `, ${r.visits.missed} missed` : ''}</div></div>
       <div class="stat-tile"><div class="label">Reports shared</div><div class="num">${r.incidents.total}</div><div class="dim" style="font-size:12px">see Incident &amp; site reports below</div></div>

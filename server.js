@@ -3842,6 +3842,54 @@ route('POST', '/api/jobs/:id/close', CONTROL, ({ params, body, user }) => {
   return publicJob(j);
 });
 
+/* Not attended: control raised the job and dealt with it without sending
+ * anyone — a remote CCTV check, the keyholder confirmed a false alarm, the
+ * client cancelled. The job closes as CANCELLED (so it's off every live
+ * list and never billed, see routes-invoices.js attendancesFor) but keeps
+ * a reason the client sees in their portal, with any notes control marks
+ * as client-visible, so they can see action was taken. A job someone
+ * actually arrived at is attended: close that one as completed instead. */
+route('POST', '/api/jobs/:id/not-attended', CONTROL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  if (j.not_attended) throw httpError(409, 'job is already marked not attended');
+  if (j.status === 'COMPLETED') throw httpError(409, 'this job was completed — it was attended');
+  if (j.on_scene_at) throw httpError(409, 'an officer arrived at this job — close it as completed instead');
+  const reason = String(body.reason || '').trim().slice(0, 2000);
+  if (reason.length < 3) throw httpError(400, 'give a reason it was not attended');
+  const clientNote = String(body.client_note || '').trim().slice(0, 2000);
+  const at = new Date().toISOString();
+  j.status = 'CANCELLED';
+  stampJobStatus(j, 'CANCELLED');
+  for (const a of db.job_assignments.filter((x) => x.job_id === j.id)) {
+    if (a.mdt_id) { const m = db.mdts.find((x) => x.id === a.mdt_id); if (m) m.job_id = null; }
+  }
+  j.not_attended = true;
+  j.not_attended_reason = reason;
+  j.not_attended_at = at; j.not_attended_by = user.id; j.not_attended_by_name = user.display_name;
+  j.note_entries = j.note_entries || [];
+  j.note_entries.push({ id: crypto.randomUUID(), at, by: user.id, by_name: user.display_name, text: `Not attended: ${reason}`, closing: true, client_visible: true });
+  if (clientNote) j.note_entries.push({ id: crypto.randomUUID(), at, by: user.id, by_name: user.display_name, text: clientNote, client_visible: true });
+  j.awaiting_close = false;
+  j.closed_at = at; j.closed_by = user.id; j.closed_by_name = user.display_name;
+  j.updated_at = at;
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.not_attended', `JOB ${j.reference} MARKED NOT ATTENDED BY ${user.display_name}: ${reason}`, { job_id: j.id, by: user.id });
+  return publicJob(j);
+});
+
+/* Show or hide one note in the client portal. Only control decides what a
+ * client reads; notes are hidden from them unless marked. */
+route('PATCH', '/api/jobs/:id/notes/:noteId', CONTROL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  const n = (j.note_entries || []).find((x) => x.id === params.noteId); if (!n) throw httpError(404, 'note not found');
+  if (body.client_visible === undefined) throw httpError(400, 'client_visible required');
+  n.client_visible = Boolean(body.client_visible);
+  j.updated_at = new Date().toISOString();
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.note_visibility', `NOTE ON JOB ${j.reference} ${n.client_visible ? 'SHOWN TO' : 'HIDDEN FROM'} THE CLIENT BY ${user.display_name}`, { job_id: j.id, note_id: n.id });
+  return publicJob(j);
+});
+
 /* Resend a closed job's report to wherever control chooses — a client who
  * lost it, or a non-client site's report forwarded from info@. Rebuilt from
  * the job as it stands, so later notes and photos are in it. */
@@ -3873,6 +3921,8 @@ route('POST', '/api/jobs/:id/notes', ALL, ({ params, body, user }) => {
   const text = String(body.text || '').trim().slice(0, 2000);
   if (!text) throw httpError(400, 'note text required');
   const note = { id: crypto.randomUUID(), at: new Date().toISOString(), by: user.id, by_name: user.display_name, text };
+  // Only control can put a note in front of the client (see the client portal's clientJob).
+  if (body.client_visible && isControlRole(user.role)) note.client_visible = true;
   j.note_entries = j.note_entries || [];
   j.note_entries.push(note);
   if (j.status === 'COMPLETED') j.resolution_report_html = jobReportHtml(j);
