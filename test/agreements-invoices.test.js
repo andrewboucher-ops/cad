@@ -405,8 +405,12 @@ test('a draft is checked and edited, approved, sent to Xero, and its payment rea
   assert.equal(st.tenant_name, 'Echelon Test Ltd');
   assert.equal(JSON.stringify(st).includes('rt-'), false, 'tokens never leave the server');
 
+  // An old error stays on the banner only until Xero next works.
+  Object.assign(app.db.ui_settings.find((r) => r.key === 'xero'), { last_error: 'Invoice not of valid status for modification', last_error_at: '2026-11-01T10:00:00.000Z' });
+  assert.equal((await call('GET', '/api/xero/status', undefined, finT)).body.last_error_at, '2026-11-01T10:00:00.000Z');
   const sent = await call('POST', `/api/invoices/${inv.id}/xero`, {}, finT);
   assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal((await call('GET', '/api/xero/status', undefined, finT)).body.last_error, null, 'cleared once a call works');
   assert.equal(sent.body.status, 'IN_XERO');
   assert.equal(sent.body.xero.number, 'INV-0001');
   const x = X.invoices[0];
