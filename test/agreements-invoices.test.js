@@ -838,6 +838,16 @@ test('switching a client to PER_CLIENT combines every running contract into one 
   assert.deepEqual([...inv.contract_ids].sort((a, b) => a - b), [gc1.id, gc2.id].sort((a, b) => a - b));
   const siteNames = [...new Set(inv.lines.map((l) => l.site_name))].sort();
   assert.deepEqual(siteNames, ['Grouping Site One', 'Grouping Site Two'].sort());
+
+  // A line added by hand has no site, but is in the total, so the PDF must print it.
+  const lines = inv.lines.map((l) => ({ id: l.id, description: l.description, quantity: l.quantity, unit_amount: l.unit_amount }))
+    .concat([{ description: 'Replacement radio', quantity: 1, unit_amount: 250 }]);
+  const ed = await call('PATCH', `/api/invoices/${inv.id}`, { lines }, adminT);
+  assert.equal(ed.status, 200, JSON.stringify(ed.body));
+  const pdf = await call('GET', `/api/invoices/${inv.id}/pdf`, undefined, adminT, true);
+  const text = Buffer.from(await pdf.arrayBuffer()).toString('latin1');
+  assert.ok(text.includes('Replacement radio'), 'the added line is printed');
+  assert.ok(text.includes('Other charges'));
 });
 
 test('a PER_CLIENT consolidation still skips a contract that already clashes, and bills the rest', async () => {

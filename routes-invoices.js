@@ -176,9 +176,18 @@ module.exports = function registerInvoices({
     ]);
     const lineCols = [{ title: 'Description', width: 0.55 }, { title: 'Qty', width: 0.13, align: 'right' }, { title: 'Unit price', width: 0.16, align: 'right' }, { title: 'Amount', width: 0.16, align: 'right' }];
     if (multi) {
+      // A line added by hand on the draft has no site. With one site it
+      // goes in that site's table; otherwise under "Other charges". It
+      // must always be printed, since it's already in the total.
+      const siteless = inv.lines.filter((l) => !l.site_name || !siteNames.includes(l.site_name));
       for (const siteName of siteNames) {
         doc.heading(siteName, 11);
-        doc.table(lineCols, inv.lines.filter((l) => l.site_name === siteName).map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
+        const rows = inv.lines.filter((l) => l.site_name === siteName).concat(siteNames.length === 1 ? siteless : []);
+        doc.table(lineCols, rows.map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
+      }
+      if (siteless.length && siteNames.length !== 1) {
+        doc.heading('Other charges', 11);
+        doc.table(lineCols, siteless.map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
       }
     } else {
       doc.table(lineCols, inv.lines.map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
