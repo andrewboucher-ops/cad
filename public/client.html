@@ -341,7 +341,7 @@ function renderReport(r) {
   el('#reportBody').innerHTML = `
     <div class="stat-row">
       <div class="stat-tile"><div class="label">Alarm jobs</div><div class="num">${r.jobs.total}</div><div class="dim" style="font-size:12px">${r.jobs.completed} completed${r.jobs.not_attended ? `, ${r.jobs.not_attended} handled without attending` : ''}${r.jobs.cancelled ? `, ${r.jobs.cancelled} cancelled` : ''}</div></div>
-      <div class="stat-tile"><div class="label">Avg response</div><div class="num">${r.jobs.avg_response_minutes != null ? r.jobs.avg_response_minutes + ' min' : '—'}</div><div class="dim" style="font-size:12px">${r.jobs.sla_minutes ? `SLA ${r.jobs.sla_minutes} min — ${r.jobs.within_sla}/${r.jobs.total} within` : 'no SLA set on this site'}</div></div>
+      <div class="stat-tile"><div class="label">Avg response</div><div class="num">${r.jobs.avg_response_minutes != null ? r.jobs.avg_response_minutes + ' min' : '—'}</div><div class="dim" style="font-size:12px">${r.jobs.sla_minutes ? `SLA ${r.jobs.sla_minutes} min — ${r.jobs.within_sla}/${r.jobs.responded ?? r.jobs.total} attended within` : 'no SLA set on this site'}</div></div>
       <div class="stat-tile"><div class="label">Patrol visits</div><div class="num">${r.visits.total}</div><div class="dim" style="font-size:12px">${r.visits.completed} completed${r.visits.missed ? `, ${r.visits.missed} missed` : ''}</div></div>
       <div class="stat-tile"><div class="label">Reports shared</div><div class="num">${r.incidents.total}</div><div class="dim" style="font-size:12px">see Incident &amp; site reports below</div></div>
     </div>`;

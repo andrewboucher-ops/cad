@@ -6186,7 +6186,11 @@ route('GET', '/api/sites/:id/report', CONTROL, ({ params, query, user }) => {
   const jobs = db.jobs.filter((j) => j.site_id === site.id && inRange(j.created_at));
   const visits = db.site_visits.filter((v) => v.site_id === site.id && inRange(v.scheduled_for));
 
-  const responseMinutes = jobs.filter((j) => j.on_scene_at).map((j) => (Date.parse(j.on_scene_at) - Date.parse(j.created_at)) / 60000);
+  // Arrived before the call was logged means the job was typed in after
+  // the event (before "Already happened" existed) with a later received
+  // time: not a real response time, so it is left out rather than
+  // dragging the average below zero or counting as within the SLA.
+  const responseMinutes = jobs.filter((j) => j.on_scene_at).map((j) => (Date.parse(j.on_scene_at) - Date.parse(j.created_at)) / 60000).filter((m) => Number.isFinite(m) && m >= 0);
   const avgResponseMinutes = responseMinutes.length ? Math.round((responseMinutes.reduce((a, b) => a + b, 0) / responseMinutes.length) * 10) / 10 : null;
 
   const jobIds = new Set(jobs.map((j) => j.id));
@@ -6214,6 +6218,7 @@ route('GET', '/api/sites/:id/report', CONTROL, ({ params, query, user }) => {
       avg_response_minutes: avgResponseMinutes,
       sla_minutes: site.response_sla_minutes || null,
       within_sla: site.response_sla_minutes ? responseMinutes.filter((m) => m <= site.response_sla_minutes).length : null,
+      responded: responseMinutes.length,
     },
     visits: {
       total: visits.length,

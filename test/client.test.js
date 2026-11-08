@@ -366,3 +366,21 @@ test('a RESTRICTED report can still be shared once redacted, and a VEHICLE/PERSO
   assert.equal(vehicleReport.status, 201, JSON.stringify(vehicleReport.body));
   assert.equal((await call('POST', `/api/form-submissions/${vehicleReport.body.id}/share`, { values: {} }, adminT)).status, 400);
 });
+
+test('the service report leaves out a job that arrived before it was logged (typed in afterwards), so the average is never negative', async () => {
+  const site = (await call('POST', '/api/sites', { name: 'Response Time Site' }, adminT)).body;
+  app.db.sites.find((s) => s.id === site.id).response_sla_minutes = 15;
+  const client = (await call('POST', '/api/clients', { name: 'Response Time Co', site_ids: [site.id] }, adminT)).body;
+  await call('POST', '/api/users', { username: 'respclient', password: 'realpassword1', role: 'CLIENT', client_id: client.id }, adminT);
+  const clientT = await login('respclient', 'realpassword1');
+  const mk = (created, onScene) => app.db.jobs.push({ id: 900000 + app.db.jobs.length, reference: `INC-RT-${app.db.jobs.length}`, site_id: site.id, status: 'COMPLETED',
+    created_at: created, on_scene_at: onScene, completed_at: onScene });
+  mk('2026-10-11T20:52:00.000Z', '2026-10-11T12:18:00.000Z'); // logged 8½ hours after arriving
+  mk('2026-10-23T16:05:00.000Z', '2026-10-23T16:22:00.000Z'); // 17 min
+  mk('2026-11-07T12:32:00.000Z', '2026-11-07T12:45:00.000Z'); // 13 min
+  const r = await call('GET', `/api/client/sites/${site.id}/report?from=2026-10-01&to=2026-11-08`, undefined, clientT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.jobs.avg_response_minutes, 15);
+  assert.equal(r.body.jobs.responded, 2);
+  assert.equal(r.body.jobs.within_sla, 1, 'the bad one is not counted as within the SLA');
+});
