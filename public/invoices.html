@@ -79,7 +79,7 @@ function paintXero() {
   } else if (!xs.connected) {
     html = `<span class="grow"><strong>Not connected to Xero.</strong>${xs.last_error ? ` <span class="err">${esc(xs.last_error)}</span>` : ''}</span>${isAdmin ? '<button class="btn primary" id="xConnect">Connect to Xero</button>' : '<span class="dim">An admin needs to connect it.</span>'}`;
   } else {
-    html = `<span class="grow">Xero: <strong>${esc(xs.tenant_name)}</strong> <span class="dim">— connected by ${esc(xs.connected_by || '—')} ${esc(date(xs.connected_at))}. Invoices go in as ${xs.settings.invoice_status === 'AUTHORISED' ? '<strong>approved</strong>' : '<strong>drafts</strong>'}, account ${esc(xs.settings.account_code)}.</span>${xs.last_error ? ` <span class="err">Last error: ${esc(xs.last_error)}</span>` : ''}</span>
+    html = `<span class="grow">Xero: <strong>${esc(xs.tenant_name)}</strong> <span class="dim">— connected by ${esc(xs.connected_by || '—')} ${esc(date(xs.connected_at))}. Invoices go in as ${xs.settings.invoice_status === 'AUTHORISED' ? '<strong>approved</strong>' : '<strong>drafts</strong>'}, account ${esc(xs.settings.account_code)}.</span>${xs.last_error ? ` <span class="err">Last error${xs.last_error_at ? ` (${esc(new Date(xs.last_error_at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))})` : ''}: ${esc(xs.last_error)}</span>` : ''}</span>
       <button class="btn" id="xSync" title="Payments are also checked automatically every 30 minutes">Check payments now</button>
       ${isAdmin ? '<button class="btn" id="xSettings">Settings</button><button class="btn" id="xOff">Disconnect</button>' : ''}`;
   }

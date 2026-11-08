@@ -85,9 +85,12 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const detail = data && data.Elements && data.Elements[0] && data.Elements[0].ValidationErrors ? data.Elements[0].ValidationErrors.map((v) => v.Message).join('; ') : (data.Message || data.Detail || res.status);
-      row().last_error = String(detail); flushNow();
+      Object.assign(row(), { last_error: String(detail), last_error_at: new Date().toISOString() }); flushNow();
       throw new Error(`Xero: ${detail}`);
     }
+    // A call that works clears an old error, so the banner never shows
+    // a problem that has since been fixed.
+    if (row().last_error) { Object.assign(row(), { last_error: null, last_error_at: null }); flushNow(); }
     return data;
   }
   /** The client as a Xero contact: found by name, or created. Remembered on the client. */
@@ -172,7 +175,7 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
   }
   function status() {
     const r = row();
-    return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, settings: r.settings, redirect_uri: redirectUri };
+    return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, last_error_at: r.last_error_at || null, settings: r.settings, redirect_uri: redirectUri };
   }
   return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, status, row };
 };
