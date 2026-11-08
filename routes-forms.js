@@ -616,6 +616,46 @@ module.exports = function registerFormRoutes({
     risk_rating: (sub.risk_assessment && sub.risk_assessment.risk_rating) || null,
   });
 
+  /* ---- Search ---------------------------------------------------------- */
+  const fold = (t) => String(t).toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+  function searchTerms(q) {
+    return fold(q || '').split(/\s+/).map((t) => t.trim()).filter(Boolean).slice(0, 8);
+  }
+  /** Text answers on a report, as [label, text] pairs. Photos and
+   * signatures (file objects) and tick boxes carry no searchable words. */
+  function textAnswers(sub) {
+    const out = [];
+    for (const f of sub.fields || []) {
+      const v = (sub.values || {})[f.id];
+      if (v == null || typeof v === 'boolean' || (typeof v === 'object' && !Array.isArray(v))) continue;
+      const text = Array.isArray(v) ? v.filter((x) => typeof x === 'string' || typeof x === 'number').join(', ') : String(v);
+      if (text.trim()) out.push([f.label || f.id, text]);
+    }
+    return out;
+  }
+  /** null when some search word is missing from the report; otherwise where
+   * the first answer that matched is, with a short snippet around it, so a
+   * list row can show why it came up ("People involved: …John Smith…"). */
+  function searchHit(sub, terms) {
+    const head = [
+      ['Reference', sub.reference], ['Report', sub.definition_name], ['About', sub.subject_label],
+      ['Filed by', sub.submitted_by_name], ['Feedback', sub.feedback],
+    ].filter(([, t]) => t);
+    const answers = textAnswers(sub);
+    const all = [...head, ...answers].map(([label, text]) => [label, String(text), fold(text)]);
+    if (!terms.every((t) => all.some(([, , f]) => f.includes(t)))) return null;
+    // Prefer an answer (that's where names live) over the header fields.
+    const pick = all.slice(head.length).find(([, , f]) => terms.some((t) => f.includes(t))) || all.find(([, , f]) => terms.some((t) => f.includes(t)));
+    if (!pick) return { match: null };
+    const [label, text, f] = pick;
+    const t = terms.find((x) => f.includes(x));
+    const at = f.indexOf(t);
+    // fold() can change length for accented text; clamp to be safe.
+    const start = Math.max(0, Math.min(text.length, at - 40)), end = Math.min(text.length, at + t.length + 60);
+    const snippet = `${start > 0 ? '…' : ''}${text.slice(start, end).replace(/\s+/g, ' ').trim()}${end < text.length ? '…' : ''}`;
+    return { match: { label, text: snippet } };
+  }
+
   function publicDefinition(d, user) {
     const out = {
       id: d.id, key: d.key, name: d.name, description: d.description, version: d.version,
@@ -1165,6 +1205,28 @@ module.exports = function registerFormRoutes({
     // (job/visit detail, an officer's own list) unchanged; the review queue
     // asks for OPEN.
     const status = String(query.get('status') || 'ALL').toUpperCase();
+    // ?q= searches everything a reader can already see on the report: its
+    // reference, form, what it's about, who filed it, and every typed answer
+    // (so a name written in "people involved" or a use-of-force subject's
+    // description is findable). Every word must appear somewhere. Only runs
+    // after canRead(), so it can never surface a report the reader couldn't
+    // open anyway. Investigation notes are not searched: their readers are
+    // narrower than the report's.
+    const terms = searchTerms(query.get('q'));
+    if (terms.length) {
+      return db.form_submissions
+        .filter((s) => canRead(s, user))
+        .filter((s) => status === 'ALL' || (s.status || 'OPEN') === status
+          || (status === 'INVESTIGATING' && ['UNDER_INVESTIGATION', 'RETURNED_FOR_CORRECTION'].includes(s.status)))
+        .filter((s) => (!subjectType || s.subject_type === subjectType.toUpperCase())
+          && (!subjectId || s.subject_id === Number(subjectId))
+          && (!defId || s.definition_id === Number(defId)))
+        .map((s) => ({ s, hit: searchHit(s, terms) }))
+        .filter((x) => x.hit)
+        .sort((a, b) => (a.s.submitted_at < b.s.submitted_at ? 1 : -1))
+        .slice(0, limit)
+        .map((x) => ({ ...submissionSummary(x.s), match: x.hit.match }));
+    }
     return db.form_submissions
       .filter((s) => canRead(s, user))
       .filter((s) => status === 'ALL' || (s.status || 'OPEN') === status

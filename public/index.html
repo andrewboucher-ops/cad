@@ -119,6 +119,10 @@
   <div class="login-form-side">
     <div class="login-form">
       <div id="operatorFields">
+        <div id="stillIn" hidden style="margin:0 0 18px">
+          <button class="login-btn" id="continueBtn" type="button">Continue</button>
+          <p class="login-notice" style="margin-top:8px">You are still signed in on this device. <a href="#" id="notMe">Sign in as someone else</a></p>
+        </div>
         <span class="eyebrow">Sign in</span>
         <h2>Sign in</h2>
 
@@ -183,6 +187,20 @@ if (ssoCode) {
   CCCS.api('GET', `/api/auth/microsoft/session?code=${encodeURIComponent(ssoCode)}`)
     .then((s) => { CCCS.setSession(s); location.href = landingFor(s.user.role, el('#dest').value); })
     .catch((e) => { el('#err').textContent = e.message; el('#go').disabled = false; });
+}
+
+// Already signed in on this device (the phone's back button out of the app
+// lands here): offer one tap back in rather than the password again. The
+// session is checked with the server first, so an expired one never shows it.
+if (!ssoCode && CCCS.getSession()) {
+  CCCS.refreshSession({ force: true }).then((ok) => {
+    const s = CCCS.getSession();
+    if (!ok || !s || !s.user) return;
+    el('#continueBtn').textContent = `Continue as ${s.user.display_name || s.user.username}`;
+    el('#stillIn').hidden = false;
+    el('#continueBtn').onclick = () => { location.href = landingFor(s.user.role, el('#dest').value); };
+    el('#notMe').onclick = (e) => { e.preventDefault(); CCCS.clearSession(); el('#stillIn').hidden = true; el('#u').focus(); };
+  });
 }
 
 // Only offer the Microsoft button when the server has SSO configured.

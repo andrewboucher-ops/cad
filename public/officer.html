@@ -276,8 +276,11 @@
   <section class="screen" data-screen="reports"><div class="narrow">
     <div class="card">
       <div class="btn-row" style="margin:0 0 10px"><button class="btn primary" id="bFileReport">File a report</button></div>
-      <h3>My reports</h3>
+      <h3 id="reportsHeading">My reports</h3>
+      <input id="reportSearch" type="search" placeholder="Search names, places, references…" autocomplete="off" enterkeyhint="search" style="width:100%;box-sizing:border-box;margin:0 0 6px">
+      <p class="dim" id="reportSearchNote" style="font-size:12px;margin:0 0 6px">Searches every answer in the reports you can open, including people's names and descriptions.</p>
       <div id="myReports"><p class="dim">Loading…</p></div>
+      <div class="btn-row hide" id="reportsMoreRow" style="margin-top:8px"><button class="btn" id="reportsMore">Show more</button></div>
     </div>
   </div></section>
 
@@ -344,11 +347,31 @@ el('#clock').textContent = CCCS.hhmmss().slice(0, 5);
 
 let person = null, job = null, visit = null, pendingPhotoItemId = null, pendingPhotoKind = 'job', pendingRecentJobId = null, recentJobs = [];
 
+/* A modal is one step in the phone's history: the back button or gesture
+ * closes it instead of leaving the app (which used to land on the sign-in
+ * page). It also closes from the ✕ in its title bar, which stays in view
+ * however long it is, from Close at the bottom, or by tapping outside it. */
+let modalEntry = false; // our history entry for the open modal is on top
 function modal(title, html, onMount) {
-  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal"><h2>${esc(title)}</h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
-  el('#mClose').onclick = closeModal; onMount && onMount();
+  el('#modalHost').innerHTML = `<div class="modal-back"><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><h2><span>${esc(title)}</span><button class="m-x" id="mX" aria-label="Close">✕</button></h2><div class="content">${html}</div><div class="foot"><button class="btn" id="mClose">Close</button></div></div></div>`;
+  el('#mClose').onclick = closeModal; el('#mX').onclick = closeModal;
+  el('#modalHost .modal-back').onclick = (e) => { if (e.target.classList.contains('modal-back')) closeModal(); };
+  if (!modalEntry) { try { history.pushState({ cccsModal: true }, '', location.href); modalEntry = true; } catch {} }
+  onMount && onMount();
 }
-const closeModal = () => (el('#modalHost').innerHTML = '');
+let ignoreNextPop = false;
+function closeModal() {
+  el('#modalHost').innerHTML = '';
+  // Take our history entry back off, so the next back press does what it
+  // would have done with no modal ever opened.
+  if (modalEntry && history.state && history.state.cccsModal) { modalEntry = false; ignoreNextPop = true; history.back(); }
+  modalEntry = false;
+}
+window.addEventListener('popstate', () => {
+  if (ignoreNextPop) { ignoreNextPop = false; return; }
+  if (modalEntry) { modalEntry = false; el('#modalHost').innerHTML = ''; }
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && el('#modalHost').innerHTML) closeModal(); });
 function toast(text) {
   const t = document.createElement('div'); t.className = 'toast'; t.textContent = text;
   document.body.appendChild(t); setTimeout(() => t.remove(), 3500);
@@ -1644,12 +1667,28 @@ el('#bRequestLeave').onclick = () => {
   });
 };
 
+/* Reports: newest first, with a search over every answer (a name in
+ * "people involved", a place, a reference). Control roles see every report
+ * their role can read, not just their own, so the list is longer and has
+ * Show more. */
+const REPORTS_PAGE = ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role) ? 30 : 15;
+let reportsLimit = REPORTS_PAGE, reportsSeq = 0, reportSearchTimer = null;
 async function refreshReports() {
+  const q = el('#reportSearch').value.trim();
+  const seq = ++reportsSeq;
+  el('#reportsHeading').textContent = q ? 'Search results' : ['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'].includes(me.role) ? 'Reports' : 'My reports';
   try {
-    const mine = await api('GET', '/api/form-submissions?limit=10');
-    CCCSForms.list(el('#myReports'), mine, openReport, 'You have not filed any reports yet.');
-  } catch (e) { el('#myReports').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+    const params = new URLSearchParams({ limit: String(reportsLimit + 1) });
+    if (q) params.set('q', q);
+    const rows = await api('GET', `/api/form-submissions?${params}`);
+    if (seq !== reportsSeq) return; // a newer search has started
+    CCCSForms.list(el('#myReports'), rows.slice(0, reportsLimit), openReport, q ? `No reports mention "${q}".` : 'You have not filed any reports yet.');
+    el('#reportsMoreRow').classList.toggle('hide', rows.length <= reportsLimit);
+  } catch (e) { if (seq === reportsSeq) el('#myReports').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
+el('#reportSearch').oninput = () => { clearTimeout(reportSearchTimer); reportSearchTimer = setTimeout(() => { reportsLimit = REPORTS_PAGE; refreshReports(); }, 300); };
+el('#reportSearch').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(reportSearchTimer); reportsLimit = REPORTS_PAGE; refreshReports(); e.target.blur(); } };
+el('#reportsMore').onclick = () => { reportsLimit += REPORTS_PAGE; refreshReports(); };
 async function openReport(id) {
   modal('Report', '<div id="rView"><p class="dim">Loading…</p></div>', async () => {
     try { CCCSForms.view(el('#rView'), await api('GET', `/api/form-submissions/${id}`), { onChanged: () => { refreshReports(); vehicles = null; } }); }

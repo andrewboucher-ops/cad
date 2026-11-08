@@ -588,3 +588,44 @@ test('investigation and risk assessment on a RESTRICTED form respect the same gr
   assert.equal(edited.status, 200, JSON.stringify(edited.body));
   assert.equal(edited.body.status, 'UNDER_INVESTIGATION');
 });
+
+/* ---------------- search ---------------- */
+test('?q= finds a report by a name written in its answers, every word must match, and never surfaces what the reader cannot open', async () => {
+  const uof = await call('POST', '/api/form-submissions', {
+    definition_id: def('use-of-force').id, subject_type: 'JOB', subject_id: job.id,
+    values: {
+      occurred_at: new Date().toISOString(), severity: 'LOW',
+      reason: 'Self-defence', force_type: 'Physical restraint or control', location: 'Side door', officer_sia_licence: '1234567890123456',
+      threat: 'Zebedee Quillfeather swung at the officer.', de_escalation: 'Warned.', why_proportionate: 'Brief hold.', aftercare: 'Checked over.', statement_true: true,
+      narrative: 'Held briefly.', officer_signature: sig('Dan Whitfield'),
+    },
+  }, danT);
+  assert.equal(uof.status, 201, JSON.stringify(uof.body));
+  const tres = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'Ömar Quillfeather, 40s', advised_at: new Date().toISOString(), left_site: true, narrative: 'Advised.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(tres.status, 201, JSON.stringify(tres.body));
+
+  // The filer finds their own restricted report by the person's name, with where it matched.
+  const mine = await call('GET', '/api/form-submissions?q=zebedee', undefined, danT);
+  assert.deepEqual(mine.body.map((s) => s.id), [uof.body.id]);
+  assert.match(mine.body[0].match.text, /Zebedee Quillfeather/);
+  assert.ok(mine.body[0].match.label);
+  assert.equal(mine.body[0].values, undefined, 'still a summary, not the report');
+
+  // Every word must appear; case and accents don't matter.
+  const both = await call('GET', '/api/form-submissions?q=QUILLFEATHER', undefined, danT);
+  assert.deepEqual(both.body.map((s) => s.id).sort(), [uof.body.id, tres.body.id].sort());
+  assert.deepEqual((await call('GET', '/api/form-submissions?q=omar%20quillfeather', undefined, danT)).body.map((s) => s.id), [tres.body.id]);
+  assert.deepEqual((await call('GET', '/api/form-submissions?q=zebedee%20nobody', undefined, danT)).body, []);
+  // By reference too.
+  assert.deepEqual((await call('GET', `/api/form-submissions?q=${tres.body.reference}`, undefined, danT)).body.map((s) => s.id), [tres.body.id]);
+
+  // Control sees the standard report but not the restricted one it has no grant for.
+  const ctl = await call('GET', '/api/form-submissions?q=quillfeather', undefined, dispT);
+  assert.deepEqual(ctl.body.map((s) => s.id), [tres.body.id]);
+  assert.ok(!ctl.raw.includes('Zebedee'), 'restricted content never appears in a search result');
+  // Another officer sees neither.
+  assert.deepEqual((await call('GET', '/api/form-submissions?q=quillfeather', undefined, ellieT)).body, []);
+});
