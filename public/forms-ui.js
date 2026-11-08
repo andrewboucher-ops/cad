@@ -542,16 +542,20 @@ const CCCSForms = (() => {
   /** A compact list of submission summaries; onOpen(id) when one is clicked. */
   function list(host, rows, onOpen, empty = 'No reports.') {
     host.innerHTML = rows.length ? rows.map((s) => `
-      <div class="row clickable" data-ff-open="${s.id}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line-soft);cursor:pointer">
+      <div class="row clickable" data-ff-open="${s.id}" role="button" tabindex="0" style="display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line-soft);cursor:pointer">
         <span class="mono" style="font-size:12px">${esc(s.reference)}</span>
-        <span style="flex:1">${esc(s.definition_name)} <span class="dim">— ${esc(s.subject_label)}</span></span>
+        <span style="flex:1 1 180px;min-width:0">${esc(s.definition_name)} <span class="dim">— ${esc(s.subject_label)}</span></span>
         ${s.severity ? `<span class="pri pri-${SEVERITY_PRI[s.severity] || 'ROUTINE'}" style="font-size:10px">${esc(s.severity)}</span>` : ''}
         ${s.visibility === 'RESTRICTED' ? '<span class="pri pri-RED" style="font-size:10px">R</span>' : ''}
         ${s.status === 'ACTIONED' ? `<span style="font-size:10px;font-weight:700;color:${OUTCOME_COLOUR[s.outcome] || 'inherit'}">${esc(OUTCOME_LABEL[s.outcome] || s.outcome)}</span>` : ''}
         ${s.status === 'UNDER_INVESTIGATION' || s.status === 'RETURNED_FOR_CORRECTION' ? `<span style="font-size:10px;font-weight:700;color:var(--on-task)" title="${esc(s.investigator ? `Investigator: ${s.investigator}` : '')}">${s.status === 'RETURNED_FOR_CORRECTION' ? 'RETURNED' : 'INVESTIGATING'}${s.open_actions ? ` · ${s.open_actions} action${s.open_actions === 1 ? '' : 's'}` : ''}</span>` : ''}
         <span class="dim" style="font-size:11px">${esc(fmt(s.submitted_at))}</span>
+        ${s.match ? `<span class="dim" style="flex:1 0 100%;font-size:12px;overflow-wrap:anywhere">${esc(s.match.label)}: ${esc(s.match.text)}</span>` : ''}
       </div>`).join('') : `<p class="dim">${esc(empty)}</p>`;
-    host.querySelectorAll('[data-ff-open]').forEach((r) => (r.onclick = () => onOpen(Number(r.dataset.ffOpen))));
+    host.querySelectorAll('[data-ff-open]').forEach((r) => {
+      r.onclick = () => onOpen(Number(r.dataset.ffOpen));
+      r.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(Number(r.dataset.ffOpen)); } };
+    });
   }
 
   /* ---------------- kit on a vehicle ---------------- */
