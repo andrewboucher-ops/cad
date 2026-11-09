@@ -600,6 +600,7 @@ module.exports = function registerFormRoutes({
       kit_check: sub.kit_check || null,
       client_shareable: CLIENT_SHAREABLE_SUBJECT_TYPES.includes(sub.subject_type),
       client_share: sub.client_share || null,
+      evidence_links: sub.evidence_links || [],
     };
   }
 
@@ -1973,7 +1974,43 @@ module.exports = function registerFormRoutes({
   const severityTimer = setInterval(() => { try { severityEscalationTick(); } catch (e) { console.warn('[forms] severity escalation tick failed:', e.message); } }, 60000);
   if (severityTimer.unref) severityTimer.unref();
 
+  /* ---- DEMS evidence links ---------------------------------------------
+   * An incident during a shift is often written up on a report form with no
+   * separate job, and the body-worn footage of it is filed in a DEMS case.
+   * DEMS can look the report up by its FORM- reference and record the link,
+   * which shows on the report like it does on a job. RESTRICTED reports are
+   * never offered: DEMS has no grant to read them. */
+  const demsForm = (ref) => {
+    const r = String(ref || '').trim().toUpperCase();
+    const sub = db.form_submissions.find((s) => String(s.reference).toUpperCase() === r);
+    return sub && effectiveVisibility(sub) !== 'RESTRICTED' ? sub : null;
+  };
+  function demsFormSummary(sub) {
+    return {
+      reference: sub.reference, kind: 'form', incident_type: sub.definition_name, priority: severityOf(sub),
+      status: sub.status || 'OPEN', location: sub.subject_label || null,
+      site: sub.subject_type === 'SITE' ? sub.subject_label : null,
+      created_at: sub.submitted_at, completed_at: sub.actioned_at || null,
+      resources: [{ callsign: null, personnel: sub.submitted_by_name, employee_no: null }],
+      evidence_links: sub.evidence_links || [],
+    };
+  }
+  function linkDemsEvidence(sub, { caseRef, caseUrl, by, linked }) {
+    sub.evidence_links = (sub.evidence_links || []).filter((l) => l.case_ref !== caseRef);
+    if (linked) sub.evidence_links.push({ case_ref: caseRef, case_url: caseUrl, linked_by: by, linked_at: new Date().toISOString() });
+    const entry = appendTrail(sub, {
+      action: linked ? 'evidence_linked' : 'evidence_unlinked',
+      summary: `${linked ? 'Linked to' : 'Unlinked from'} DEMS case ${caseRef}${by ? ' by ' + by : ''}`, by: by || 'DEMS', by_user_id: null,
+    });
+    logEvent(linked ? 'form.evidence_linked' : 'form.evidence_unlinked',
+      `${sub.definition_name.toUpperCase()} ${sub.reference} ${linked ? 'LINKED TO' : 'UNLINKED FROM'} DEMS CASE ${caseRef}${by ? ' BY ' + by : ''}`,
+      { submission_id: sub.id, case_ref: caseRef, trail_hash: entry.hash });
+    flushNow();
+    return demsFormSummary(sub);
+  }
+
   return {
+    demsForm, demsFormSummary, linkDemsEvidence,
     installDefaults, ensureApplicationForm, ensureVehicleForms, ensureIncidentSeverity, ensureStatementCompliance, activeApplicationForm,
     validateValues, IMAGE_EXT, canRead, effectiveVisibility, clientVisibleSubmissions, severityEscalationTick,
   };

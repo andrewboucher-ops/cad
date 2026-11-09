@@ -6372,8 +6372,11 @@ route('GET', '/api/integrations/dems/jobs/:ref', null, ({ params, req }) => {
   assertDemsSecret(req);
   const ref = decodeURIComponent(params.ref).trim().toUpperCase();
   const j = db.jobs.find((x) => String(x.reference).toUpperCase() === ref);
-  if (!j) throw httpError(404, 'no job with that reference');
-  return demsJob(j);
+  if (j) return demsJob(j);
+  // A report form (FORM-...) written up for an incident on shift, with no job.
+  const f = forms.demsForm(ref);
+  if (f) return forms.demsFormSummary(f);
+  throw httpError(404, 'no job or report with that reference');
 });
 // Jobs a person was assigned to (directly, or through their call sign) whose
 // life overlaps [from, to]: the incidents a body camera on them might have caught.
@@ -6441,12 +6444,14 @@ route('POST', '/api/integrations/dems/links', null, ({ body, req }) => {
   assertDemsSecret(req);
   const ref = String(body.job_ref || '').trim().toUpperCase();
   const j = db.jobs.find((x) => String(x.reference).toUpperCase() === ref);
-  if (!j) throw httpError(404, 'no job with that reference');
+  const f = j ? null : forms.demsForm(ref);
+  if (!j && !f) throw httpError(404, 'no job or report with that reference');
   const caseRef = String(body.case_ref || '').trim().slice(0, 64);
   const caseUrl = String(body.case_url || '').trim().slice(0, 500);
   if (!caseRef) throw httpError(400, 'case_ref required');
   if (caseUrl && !/^https?:\/\//i.test(caseUrl)) throw httpError(400, 'case_url must be http(s)');
   const by = String(body.by || '').slice(0, 120);
+  if (f) return forms.linkDemsEvidence(f, { caseRef, caseUrl, by, linked: body.linked !== false });
   j.evidence_links = (j.evidence_links || []).filter((l) => l.case_ref !== caseRef);
   if (body.linked !== false) {
     j.evidence_links.push({ case_ref: caseRef, case_url: caseUrl, linked_by: by, linked_at: new Date().toISOString() });
