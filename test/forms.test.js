@@ -655,9 +655,22 @@ test('DEMS can link a case to a report form, which then shows it; restricted rep
   await dems('POST', '/api/integrations/dems/links', { job_ref: filed.reference, case_ref: 'EV-2026-0007', linked: false });
   assert.equal((await call('GET', `/api/form-submissions/${filed.id}`, undefined, dispT)).body.evidence_links.length, 0);
 
+  // A restricted report can be linked, but DEMS learns nothing of its content.
   const restricted = app.db.form_submissions.find((s) => s.visibility === 'RESTRICTED');
   assert.ok(restricted, 'an earlier test filed a restricted report');
-  assert.equal((await dems('GET', `/api/integrations/dems/jobs/${restricted.reference}`)).status, 404);
-  assert.equal((await dems('POST', '/api/integrations/dems/links', { job_ref: restricted.reference, case_ref: 'EV-1' })).status, 404);
+  const r = await dems('GET', `/api/integrations/dems/jobs/${restricted.reference}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.restricted, true);
+  assert.equal(r.body.incident_type, 'Restricted report');
+  for (const leak of [restricted.definition_name, restricted.subject_label, restricted.submitted_by_name]) {
+    assert.ok(!JSON.stringify(r.body).includes(leak), `DEMS must not see ${leak}`);
+  }
+  const rl = await dems('POST', '/api/integrations/dems/links', { job_ref: restricted.reference, case_ref: 'EV-2026-0042', by: 'Andy' });
+  assert.equal(rl.status, 200);
+  assert.ok(!JSON.stringify(rl.body).includes(restricted.definition_name));
+  assert.equal((await call('GET', `/api/form-submissions/${restricted.id}`, undefined, dispT)).status, 404, 'still unreadable without a grant');
+  const logged = app.db.audit_logs.filter((e) => e.type === 'form.evidence_linked_restricted').pop();
+  assert.ok(logged && !logged.summary.includes('EV-2026-0042'), 'the global log does not name the case');
+  assert.ok(restricted.evidence_links.some((l) => l.case_ref === 'EV-2026-0042'));
   delete process.env.DEMS_SECRET;
 });
