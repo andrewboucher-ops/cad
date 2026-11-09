@@ -6413,6 +6413,26 @@ route('GET', '/api/integrations/dems/wearer', null, ({ query, req }) => {
   return { tag: a.tag, wearer: p ? { name: p.name, employee_no: p.employee_no } : null,
     checked_out_at: co ? co.checked_out_at : null, returned_at: co ? co.returned_at : null };
 });
+// A body camera docked at a DEMS offload station has had all its footage
+// taken into DEMS: book it back in. DEMS only calls this once every clip on
+// the camera is safely in DEMS, so the checkout ends when the evidence is in.
+route('POST', '/api/integrations/dems/return', null, ({ body, req }) => {
+  assertDemsSecret(req);
+  const tag = String(body.tag || '').trim().toLowerCase();
+  if (!tag) throw httpError(400, 'tag required');
+  const a = db.assets.find((x) => x.tag && x.tag.toLowerCase() === tag);
+  if (!a) throw httpError(404, 'no asset with that tag');
+  const co = db.asset_checkouts.find((c) => c.asset_id === a.id && !c.returned_at);
+  if (!co) return { tag: a.tag, returned: false, wearer: null };
+  const p = db.personnel.find((x) => x.id === co.personnel_id);
+  const station = String(body.station || '').slice(0, 120);
+  co.returned_at = new Date().toISOString(); co.returned_by = null;
+  co.return_notes = `Docked at DEMS offload station${station ? ' ' + station : ''}; footage in DEMS`.slice(0, 500);
+  a.assigned_to = null; a.status = 'IN_STORE'; a.last_checked_at = co.returned_at;
+  logEvent('asset.returned', `ASSET ${a.tag} RETURNED BY DEMS AFTER OFFLOAD${p ? ' (WAS WITH ' + p.name + ')' : ''}`,
+    { asset_id: a.id, checkout_id: co.id });
+  return { tag: a.tag, returned: true, wearer: p ? { name: p.name, employee_no: p.employee_no } : null };
+});
 // Whether someone holds an in-date SIA CCTV (Public Space Surveillance) licence.
 // DEMS asks before showing footage. Matched on a sign-in email (a CCCS user's,
 // or the staff file's contact email), then employee number or exact name. The
