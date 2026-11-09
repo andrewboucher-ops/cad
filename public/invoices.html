@@ -159,6 +159,7 @@ el('#bGen').onclick = async () => {
     <div class="btn-row" style="margin-bottom:10px"><button type="button" class="btn" id="gM">Last month</button><button type="button" class="btn" id="gW">Last week</button></div>
     <div class="k-form"><div><label>From</label><input id="gF" type="date" value="${f}"></div><div><label>To</label><input id="gT" type="date" value="${t}"></div></div>
     ${!lockedToContract ? `<div style="margin-top:10px"><label>Site</label><select id="gSite"><option value="">All sites</option>${sites.slice().sort((a, b) => a.name.localeCompare(b.name)).map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>` : ''}
+    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;font-size:13px"><input type="checkbox" id="gX" style="width:auto;margin-top:2px"><span><strong>Additional invoice</strong> — an empty draft for you to add manual lines to, even if this period has already been invoiced.${!lockedToContract ? ' Choose the site.' : ''}</span></label>
     <div id="gOut"></div>${foot('Make draft invoices')}`, (root) => {
     root.querySelector('#gM').onclick = () => { const [a, b] = lastMonth(); root.querySelector('#gF').value = a; root.querySelector('#gT').value = b; };
     root.querySelector('#gW').onclick = () => { const [a, b] = lastWeek(); root.querySelector('#gF').value = a; root.querySelector('#gT').value = b; };
@@ -166,8 +167,10 @@ el('#bGen').onclick = async () => {
       const r = await api('POST', '/api/invoices/generate', {
         from: v(root, '#gF'), to: v(root, '#gT'), contract_id: lockedToContract || undefined,
         site_id: root.querySelector('#gSite') ? (v(root, '#gSite') || undefined) : undefined,
+        additional: root.querySelector('#gX').checked || undefined,
       });
       await load();
+      if (root.querySelector('#gX').checked && r.made.length === 1) { close(); view(r.made[0].id); return; }
       root.querySelector('#gOut').innerHTML = `<p style="font-size:13.5px"><strong>${r.made.length} draft invoice${r.made.length === 1 ? '' : 's'} made.</strong></p>${r.skipped.length ? `<ul class="dim" style="font-size:12.5px">${r.skipped.map((s) => `<li>${esc(s.contract)}: ${esc(s.reason)}</li>`).join('')}</ul>` : ''}`;
       if (!r.skipped.length && r.made.length) close();
     });
@@ -196,7 +199,7 @@ async function view(id) {
   const siteLabel = multiC ? `${[...new Set(i.lines.map((l) => l.site_name))].join(', ')}` : i.site_name;
   modal(i.number ? `Invoice ${i.number}` : 'Draft invoice', `
     <p style="margin-top:0"><span class="pill ${sc}">${sl}</span> <strong>${esc(i.client_name)}</strong> — ${esc(siteLabel)}</p>
-    <p class="dim" style="font-size:12.5px;margin:0 0 6px">${multiC ? `${i.contract_ids.length} contracts` : `Contract ${esc(i.contract_reference)}`} · ${esc(date(i.period_from))} to ${esc(date(i.period_to))} · hours ${i.billing_basis === 'ROSTERED' ? 'rostered' : 'worked'} · issued ${esc(date(i.issue_date))}${i.xero && i.xero.number ? ` · Xero ${esc(i.xero.number)} (${esc(i.xero.status)})` : ''}${i.gocardless && i.gocardless.payment_id ? ` · Direct Debit ${esc(i.gocardless.status)}${i.gocardless.last_error ? ` — ${esc(i.gocardless.last_error)}` : ''}` : ''}</p>
+    <p class="dim" style="font-size:12.5px;margin:0 0 6px">${multiC ? `${i.contract_ids.length} contracts` : `Contract ${esc(i.contract_reference)}`}${i.additional ? " · <strong>additional invoice</strong>" : ""} · ${esc(date(i.period_from))} to ${esc(date(i.period_to))} · hours ${i.billing_basis === 'ROSTERED' ? 'rostered' : 'worked'} · issued ${esc(date(i.issue_date))}${i.xero && i.xero.number ? ` · Xero ${esc(i.xero.number)} (${esc(i.xero.status)})` : ''}${i.gocardless && i.gocardless.payment_id ? ` · Direct Debit ${esc(i.gocardless.status)}${i.gocardless.last_error ? ` — ${esc(i.gocardless.last_error)}` : ''}` : ''}</p>
     ${i.checks && i.checks.length ? `<div class="checks"><strong>Check before approving:</strong><ul>${i.checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul><span class="dim">Fix the clock times on the rota, then void this draft and make it again — or change the hours below.</span></div>` : ''}
     <div style="overflow-x:auto"><table class="k lines"><thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Amount</th>${draft ? '<th></th>' : ''}</tr></thead>
     <tbody id="iLines">${i.lines.map((l) => `<tr data-line="${l.id}">
