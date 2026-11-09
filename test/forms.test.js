@@ -629,3 +629,35 @@ test('?q= finds a report by a name written in its answers, every word must match
   // Another officer sees neither.
   assert.deepEqual((await call('GET', '/api/form-submissions?q=quillfeather', undefined, ellieT)).body, []);
 });
+
+/* ---------------- DEMS evidence links on a report ---------------- */
+test('DEMS can link a case to a report form, which then shows it; restricted reports are not offered', async () => {
+  process.env.DEMS_SECRET = 'test-dems-secret';
+  const dems = async (method, path, body) => {
+    const res = await fetch(BASE + path, { method, headers: { 'content-type': 'application/json', 'x-dems-secret': 'test-dems-secret' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: res.status, body: await res.json() };
+  };
+  const filed = (await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'x', advised_at: new Date().toISOString(), narrative: 'x', officer_signature: sig('Dan Whitfield') },
+  }, danT)).body;
+  const found = await dems('GET', `/api/integrations/dems/jobs/${filed.reference.toLowerCase()}`);
+  assert.equal(found.status, 200);
+  assert.equal(found.body.kind, 'form');
+  assert.equal(found.body.incident_type, def('trespass-advisal').name);
+  assert.equal(found.body.values, undefined, 'the report\'s answers are not shared');
+
+  const linked = await dems('POST', '/api/integrations/dems/links', { job_ref: filed.reference, case_ref: 'EV-2026-0007', case_url: 'https://dems.example/cases/7', by: 'Andy' });
+  assert.equal(linked.status, 200);
+  const seen = (await call('GET', `/api/form-submissions/${filed.id}`, undefined, dispT)).body;
+  assert.deepEqual(seen.evidence_links.map((l) => l.case_ref), ['EV-2026-0007']);
+  assert.ok(app.db.form_submissions.find((s) => s.id === filed.id).audit_trail.some((e) => e.action === 'evidence_linked'));
+  await dems('POST', '/api/integrations/dems/links', { job_ref: filed.reference, case_ref: 'EV-2026-0007', linked: false });
+  assert.equal((await call('GET', `/api/form-submissions/${filed.id}`, undefined, dispT)).body.evidence_links.length, 0);
+
+  const restricted = app.db.form_submissions.find((s) => s.visibility === 'RESTRICTED');
+  assert.ok(restricted, 'an earlier test filed a restricted report');
+  assert.equal((await dems('GET', `/api/integrations/dems/jobs/${restricted.reference}`)).status, 404);
+  assert.equal((await dems('POST', '/api/integrations/dems/links', { job_ref: restricted.reference, case_ref: 'EV-1' })).status, 404);
+  delete process.env.DEMS_SECRET;
+});

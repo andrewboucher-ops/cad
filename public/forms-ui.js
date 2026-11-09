@@ -356,6 +356,9 @@ const CCCSForms = (() => {
         </div>
         <p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[sub.subject_type] || sub.subject_type)} ${esc(sub.subject_label)} · filed by ${esc(sub.submitted_by)} · ${esc(fmt(sub.submitted_at))} · form v${sub.definition_version}</p>
         ${sub.geo ? `<p class="dim" style="margin:0;font-size:12px">Filed near <a href="https://www.openstreetmap.org/?mlat=${sub.geo.lat}&mlon=${sub.geo.lon}#map=17/${sub.geo.lat}/${sub.geo.lon}" target="_blank" rel="noopener">${sub.geo.lat.toFixed(5)}, ${sub.geo.lon.toFixed(5)}</a>${sub.geo.accuracy ? ` (±${sub.geo.accuracy}m)` : ''}</p>` : ''}
+        ${(sub.evidence_links || []).length ? `<div style="border:1px solid var(--line);border-left:4px solid var(--accent, #3b82f6);border-radius:8px;padding:8px 10px">
+          <div style="font-weight:700">Evidential footage held in DEMS</div>
+          ${sub.evidence_links.map((l) => `<div style="font-size:12.5px;margin-top:2px">${/^https?:\/\//i.test(l.case_url || '') ? `<a href="${esc(l.case_url)}" target="_blank" rel="noopener noreferrer">${esc(l.case_ref)}</a>` : esc(l.case_ref)} <span class="dim">linked ${esc(fmt(l.linked_at))}${l.linked_by ? ' by ' + esc(l.linked_by) : ''}</span></div>`).join('')}</div>` : ''}
         ${sub.client_share ? `<p class="dim" style="margin:0;font-size:12px;color:var(--available)">Shared with the client ${esc(fmt(sub.client_share.shared_at))} by ${esc(sub.client_share.shared_by)}</p>` : ''}
         ${sub.status === 'ACTIONED' ? `<div style="border:1px solid var(--line);border-left:4px solid ${OUTCOME_COLOUR[sub.outcome] || 'var(--line)'};border-radius:8px;padding:8px 10px">
           <div style="font-weight:700">${esc(OUTCOME_LABEL[sub.outcome] || sub.outcome)} <span class="dim" style="font-weight:400;font-size:12px">by ${esc(sub.actioned_by)} · ${esc(fmt(sub.actioned_at))}</span></div>
