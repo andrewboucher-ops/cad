@@ -1978,14 +1978,25 @@ module.exports = function registerFormRoutes({
    * An incident during a shift is often written up on a report form with no
    * separate job, and the body-worn footage of it is filed in a DEMS case.
    * DEMS can look the report up by its FORM- reference and record the link,
-   * which shows on the report like it does on a job. RESTRICTED reports are
-   * never offered: DEMS has no grant to read them. */
+   * which shows on the report like it does on a job. RESTRICTED reports
+   * (safeguarding, patient care) can be linked too, since that footage matters
+   * most, but DEMS learns only that a restricted report with that reference
+   * exists and when it was filed: not its form, subject, author or answers.
+   * The link shows on the report only to those with a grant to read it, and
+   * the global log says only that evidence was linked, not to which case. */
   const demsForm = (ref) => {
     const r = String(ref || '').trim().toUpperCase();
-    const sub = db.form_submissions.find((s) => String(s.reference).toUpperCase() === r);
-    return sub && effectiveVisibility(sub) !== 'RESTRICTED' ? sub : null;
+    return db.form_submissions.find((s) => String(s.reference).toUpperCase() === r) || null;
   };
   function demsFormSummary(sub) {
+    if (effectiveVisibility(sub) === 'RESTRICTED') {
+      return {
+        reference: sub.reference, kind: 'form', restricted: true, incident_type: 'Restricted report',
+        priority: null, status: null, location: null, site: null,
+        created_at: sub.submitted_at, completed_at: null, resources: [],
+        evidence_links: (sub.evidence_links || []).map((l) => ({ case_ref: l.case_ref, case_url: l.case_url, linked_at: l.linked_at })),
+      };
+    }
     return {
       reference: sub.reference, kind: 'form', incident_type: sub.definition_name, priority: severityOf(sub),
       status: sub.status || 'OPEN', location: sub.subject_label || null,
@@ -2002,9 +2013,15 @@ module.exports = function registerFormRoutes({
       action: linked ? 'evidence_linked' : 'evidence_unlinked',
       summary: `${linked ? 'Linked to' : 'Unlinked from'} DEMS case ${caseRef}${by ? ' by ' + by : ''}`, by: by || 'DEMS', by_user_id: null,
     });
-    logEvent(linked ? 'form.evidence_linked' : 'form.evidence_unlinked',
-      `${sub.definition_name.toUpperCase()} ${sub.reference} ${linked ? 'LINKED TO' : 'UNLINKED FROM'} DEMS CASE ${caseRef}${by ? ' BY ' + by : ''}`,
-      { submission_id: sub.id, case_ref: caseRef, trail_hash: entry.hash });
+    if (effectiveVisibility(sub) === 'RESTRICTED') {
+      logEvent(linked ? 'form.evidence_linked_restricted' : 'form.evidence_unlinked_restricted',
+        `RESTRICTED REPORT ${sub.reference}: DEMS EVIDENCE ${linked ? 'LINKED' : 'UNLINKED'}`,
+        { submission_id: sub.id, trail_hash: entry.hash }, { broadcast: false });
+    } else {
+      logEvent(linked ? 'form.evidence_linked' : 'form.evidence_unlinked',
+        `${sub.definition_name.toUpperCase()} ${sub.reference} ${linked ? 'LINKED TO' : 'UNLINKED FROM'} DEMS CASE ${caseRef}${by ? ' BY ' + by : ''}`,
+        { submission_id: sub.id, case_ref: caseRef, trail_hash: entry.hash });
+    }
     flushNow();
     return demsFormSummary(sub);
   }
