@@ -347,7 +347,9 @@ module.exports = function registerInvoices({
     return rows;
   }
   const running = (c, from, to) => c.kind === 'CONTRACT' && ['SIGNED', 'ENDED'].includes(c.status) && c.start_date <= to && (!c.end_date || c.end_date >= from);
-  const overlaps = (i, from, to) => i.status !== 'VOID' && i.period_from <= to && i.period_to >= from;
+  // An additional invoice (manual lines only, raised for a period that
+  // was already invoiced) never blocks the period's normal invoice.
+  const overlaps = (i, from, to) => i.status !== 'VOID' && !i.additional && i.period_from <= to && i.period_to >= from;
   function totals(inv) {
     for (const l of inv.lines) l.amount = r2(l.quantity * l.unit_amount);
     inv.subtotal = r2(inv.lines.reduce((n, l) => n + l.amount, 0));
@@ -366,7 +368,7 @@ module.exports = function registerInvoices({
   function linesForContract(c, from, to, taken = newTaken()) {
     const site = db.sites.find((s) => s.id === c.site_id);
     const siteName = site ? site.name : '—';
-    const first = !db.invoices.some((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && i.status !== 'VOID');
+    const first = !db.invoices.some((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && i.status !== 'VOID' && !i.additional);
     const lines = [], checks = [];
     for (const l of c.lines) {
       if (l.kind === 'HOURLY') {
@@ -498,20 +500,20 @@ module.exports = function registerInvoices({
     return out;
   }
 
-  function build(c, from, to, user) {
+  function build(c, from, to, user, blank = false) {
     const client = (db.clients || []).find((x) => x.id === c.client_id);
     const site = db.sites.find((s) => s.id === c.site_id);
     const taken = newTaken();
-    const r = linesForContract(c, from, to, taken);
-    const lines = groupLines(r.lines), checks = r.checks.concat(unbilledChecks([c], from, to, taken));
+    const r = blank ? { lines: [], checks: [] } : linesForContract(c, from, to, taken);
+    const lines = groupLines(r.lines), checks = blank ? [] : r.checks.concat(unbilledChecks([c], from, to, taken));
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
     const inv = {
       id, reference: `${c.reference}/${String(id).padStart(4, '0')}`, status: 'DRAFT', contract_id: c.id, contract_reference: c.reference, contract_ids: [c.id],
       client_id: c.client_id, client_name: client ? client.name : '—', site_id: c.site_id, site_name: site ? site.name : '—',
       period_from: from, period_to: to, issue_date: issue, due_date: new Date(Date.parse(issue) + (c.payment_terms_days || 30) * 86400000).toISOString().slice(0, 10),
       vat_rate: c.vat_rate, billing_basis: c.billing_basis, lines, checks, notes: '',
-      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: 'generated from the contract' }],
-      xero: null,
+      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: blank ? 'additional invoice started (manual lines only)' : 'generated from the contract' }],
+      xero: null, ...(blank ? { additional: true } : {}),
     };
     totals(inv);
     return inv;
@@ -524,18 +526,20 @@ module.exports = function registerInvoices({
    * across their own contracts, and this mirrors contract_id/
    * contract_reference also defaulting to the first contract for
    * anything that still only knows about a single contract. */
-  function buildForClient(contracts, from, to, user) {
+  function buildForClient(contracts, from, to, user, blank = false) {
     const first = contracts[0];
     const client = (db.clients || []).find((x) => x.id === first.client_id);
     const site = db.sites.find((s) => s.id === first.site_id);
     let lines = [], checks = [];
     const taken = newTaken();
-    for (const c of contracts) {
-      const r = linesForContract(c, from, to, taken);
-      lines = lines.concat(r.lines);
-      checks = checks.concat(r.checks);
+    if (!blank) {
+      for (const c of contracts) {
+        const r = linesForContract(c, from, to, taken);
+        lines = lines.concat(r.lines);
+        checks = checks.concat(r.checks);
+      }
+      checks = checks.concat(unbilledChecks(contracts, from, to, taken));
     }
-    checks = checks.concat(unbilledChecks(contracts, from, to, taken));
     lines = groupLines(lines);
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
     const inv = {
@@ -543,8 +547,8 @@ module.exports = function registerInvoices({
       client_id: first.client_id, client_name: client ? client.name : '—', site_id: first.site_id, site_name: site ? site.name : '—',
       period_from: from, period_to: to, issue_date: issue, due_date: new Date(Date.parse(issue) + (first.payment_terms_days || 30) * 86400000).toISOString().slice(0, 10),
       vat_rate: first.vat_rate, billing_basis: first.billing_basis, lines, checks, notes: '',
-      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: `generated from ${contracts.length} contracts` }],
-      xero: null,
+      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: blank ? `additional invoice started for ${contracts.length} contracts (manual lines only)` : `generated from ${contracts.length} contracts` }],
+      xero: null, ...(blank ? { additional: true } : {}),
     };
     totals(inv);
     return inv;
@@ -558,8 +562,14 @@ module.exports = function registerInvoices({
       && (!body.site_id || c.site_id === Number(body.site_id)));
     if (body.contract_id && !contracts.length) throw httpError(400, 'that contract is not signed or was not running in this period');
     if (body.site_id && !body.contract_id && !contracts.length) throw httpError(400, 'that site has no signed contract running in this period');
+    // "Additional invoice": an empty draft (no lines from the contract) for
+    // a period that may already be invoiced, to carry manual lines only.
+    // It needs a contract or a site, so it never makes one for everyone.
+    const extra = Boolean(body.additional);
+    if (extra && !body.contract_id && !body.site_id) throw httpError(400, 'an additional invoice needs a site or a contract');
     const made = [], skipped = [];
     const notClashing = (c) => {
+      if (extra) return true;
       const clash = db.invoices.find((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && overlaps(i, from, to));
       if (clash) { skipped.push({ contract: c.reference, reason: `already invoiced (${clash.reference}, ${clash.period_from} to ${clash.period_to})` }); return false; }
       return true;
@@ -580,18 +590,19 @@ module.exports = function registerInvoices({
     }
     for (const c of singly) {
       if (!notClashing(c)) continue;
-      const inv = build(c, from, to, user);
-      if (!inv.lines.length) { skipped.push({ contract: c.reference, reason: 'nothing to charge in this period' }); continue; }
+      const inv = build(c, from, to, user, extra);
+      if (!extra && !inv.lines.length) { skipped.push({ contract: c.reference, reason: 'nothing to charge in this period' }); continue; }
       db.invoices.push(inv); made.push(inv);
     }
     for (const group of byClient.values()) {
       const ok = group.filter(notClashing);
       if (!ok.length) continue;
-      const inv = buildForClient(ok, from, to, user);
-      if (!inv.lines.length) { skipped.push({ contract: ok.map((c) => c.reference).join(', '), reason: 'nothing to charge in this period' }); continue; }
+      const inv = buildForClient(ok, from, to, user, extra);
+      if (!extra && !inv.lines.length) { skipped.push({ contract: ok.map((c) => c.reference).join(', '), reason: 'nothing to charge in this period' }); continue; }
       db.invoices.push(inv); made.push(inv);
     }
-    if (made.length) logEvent('invoice.generated', `${made.length} INVOICE(S) GENERATED FOR ${from} TO ${to} BY ${user.display_name}`, {});
+    if (made.length && extra) logEvent('invoice.generated', `${made.length} ADDITIONAL INVOICE(S) STARTED FOR ${from} TO ${to} BY ${user.display_name}`, {});
+    else if (made.length) logEvent('invoice.generated', `${made.length} INVOICE(S) GENERATED FOR ${from} TO ${to} BY ${user.display_name}`, {});
     flushNow();
     return { made, skipped };
   });

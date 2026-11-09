@@ -265,6 +265,21 @@ test('invoices come from the signed contract and the hours worked at its site', 
   assert.equal(again.body.made.length, 0);
   assert.match(again.body.skipped[0].reason, /already invoiced/);
 
+  // An additional invoice for the same, already invoiced period: an empty
+  // draft that takes manual lines, and does not block anything else.
+  assert.equal((await call('POST', '/api/invoices/generate', { from: '2026-08-01', to: '2026-08-31', additional: true }, finT)).status, 400, 'needs a site or a contract');
+  const ex = await call('POST', '/api/invoices/generate', { from: '2026-08-01', to: '2026-08-31', contract_id: inv.contract_id, additional: true }, finT);
+  assert.equal(ex.status, 200, JSON.stringify(ex.body));
+  assert.equal(ex.body.made.length, 1);
+  const xi = ex.body.made[0];
+  assert.equal(xi.additional, true);
+  assert.equal(xi.lines.length, 0, 'nothing from the contract');
+  const ed = await call('PATCH', `/api/invoices/${xi.id}`, { lines: [{ description: 'Extra key holding call-out', quantity: 1, unit_amount: 75 }] }, finT);
+  assert.equal(ed.status, 200, JSON.stringify(ed.body));
+  assert.equal(ed.body.lines[0].kind, 'MANUAL');
+  assert.equal(ed.body.subtotal, 75);
+  await call('POST', `/api/invoices/${xi.id}/void`, {}, adminT);
+
   const sept = await call('POST', '/api/invoices/generate', { from: '2026-09-01', to: '2026-09-30' }, adminT);
   assert.equal(sept.body.made.length, 1);
   assert.ok(!sept.body.made[0].lines.some((l) => l.kind === 'ONE_OFF'), 'the one-off is charged once only');
