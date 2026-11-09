@@ -322,10 +322,19 @@ module.exports = function registerInvoices({
     const t0 = dayStart(from), t1 = dayStart(to) + 86400000;
     const rows = [];
     for (const j of db.jobs || []) {
-      if (j.site_id !== contract.site_id || j.status === 'CANCELLED' || j.not_attended || taken.has(j.id)) continue;
+      if (j.site_id !== contract.site_id || (j.status === 'CANCELLED' && !j.not_attended) || taken.has(j.id)) continue;
       const at = Date.parse(j.on_scene_at || j.created_at);
       if (!(at >= t0 && at < t1)) continue;
       taken.add(j.id);
+      // Not attended: listed so the client sees the call and why nobody
+      // went, but never charged.
+      if (j.not_attended) {
+        const why = String(j.not_attended_reason || '').trim();
+        const starts = new Date(at).toISOString();
+        rows.push({ job_id: j.id, reference: j.reference, clocked_in_at: null, clocked_out_at: null, break_min: 0, date: starts.slice(0, 10), starts_at: starts, ends_at: starts,
+          person: `Not attended (${j.reference})`, hours: 0, source: `not attended${why ? `: ${why.length > 80 ? `${why.slice(0, 77)}…` : why}` : ''} — not charged`, not_attended: true, pay_override: null });
+        continue;
+      }
       const names = (db.job_assignments || []).filter((a) => a.job_id === j.id)
         .map((a) => (db.personnel.find((p) => p.id === a.personnel_id) || {}).name).filter(Boolean);
       let hours = 0, source;

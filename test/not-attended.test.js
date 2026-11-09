@@ -94,7 +94,7 @@ test('a job an officer arrived at, or that was completed, cannot be marked not a
   assert.equal((await call('POST', `/api/jobs/${job.id}/not-attended`, { reason: 'test reason' }, dispT)).status, 409);
 });
 
-test('a not-attended job is never billed on an Alarm Response invoice', async () => {
+test('a not-attended job is listed on an Alarm Response invoice with its reason, but never charged', async () => {
   let type = app.db.shift_types.find((t) => t.key === 'ALARM_RESPONSE');
   if (!type) { type = { id: 9101, key: 'ALARM_RESPONSE', name: 'Alarm Response', active: true }; app.db.shift_types.push(type); }
   const site = (await call('POST', '/api/sites', { name: 'NA Billing Site' }, adminT)).body;
@@ -115,7 +115,11 @@ test('a not-attended job is never billed on an Alarm Response invoice', async ()
   const g = await call('POST', '/api/invoices/generate', { from: '2026-02-01', to: '2026-02-28', contract_id: c.id }, adminT);
   assert.equal(g.status, 200, JSON.stringify(g.body));
   const line = g.body.made[0].lines.find((l) => l.kind === 'HOURLY');
-  assert.equal(line.shifts.length, 1, 'only the attended job is on the invoice');
-  assert.ok(!line.shifts.some((x) => x.job_id === na.id));
-  assert.equal(line.quantity, 1);
+  assert.equal(line.shifts.length, 2, 'the not-attended call is listed too');
+  const row = line.shifts.find((x) => x.job_id === na.id);
+  assert.equal(row.hours, 0, 'but never charged');
+  assert.match(row.source, /not attended: CCTV check, all clear — not charged/);
+  assert.equal(line.quantity, 1, 'only the attended job is charged');
+  const pdf = await call('GET', `/api/invoices/${g.body.made[0].id}/pdf`, undefined, adminT, true);
+  assert.equal(pdf.status, 200);
 });
