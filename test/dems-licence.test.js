@@ -51,3 +51,30 @@ test('DEMS needs its secret to ask about licences', async () => {
   assert.equal((await fetch(BASE + '/api/integrations/dems/licence?person=x')).status, 401);
   delete process.env.DEMS_SECRET;
 });
+
+test('DEMS books a body camera back in once its footage is in DEMS', async () => {
+  process.env.DEMS_SECRET = 'test-dems-secret';
+  const hdr = { 'content-type': 'application/json', 'x-dems-secret': 'test-dems-secret' };
+  const back = async (tag) => {
+    const res = await fetch(BASE + '/api/integrations/dems/return', { method: 'POST', headers: hdr, body: JSON.stringify({ tag, station: 'LAPTOP' }) });
+    return { status: res.status, body: await res.json() };
+  };
+  const cam = (await call('POST', '/api/assets', { tag: 'BWC-77', description: 'Body camera', category: 'DEVICE' }, adminT)).body;
+  assert.ok(cam && cam.id, JSON.stringify(cam));
+  assert.equal((await call('POST', `/api/assets/${cam.id}/checkout`, { personnel_id: ellie.id }, adminT)).status, 201);
+  const wearer = await (await fetch(BASE + `/api/integrations/dems/wearer?tag=bwc-77&at=${new Date().toISOString()}`, { headers: hdr })).json();
+  assert.equal(wearer.wearer.name, 'Ellie Marsh');
+  const r = await back('bwc-77');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.returned, true);
+  assert.equal(r.body.wearer.name, 'Ellie Marsh');
+  const a = app.db.assets.find((x) => x.id === cam.id);
+  assert.equal(a.status, 'IN_STORE');
+  assert.equal(a.assigned_to, null);
+  assert.ok(app.db.asset_checkouts.find((c) => c.asset_id === cam.id).returned_at);
+  assert.equal((await back('BWC-77')).body.returned, false, 'returning twice is harmless');
+  assert.equal((await back('NOPE')).status, 404);
+  const noSecret = await fetch(BASE + '/api/integrations/dems/return', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"tag":"BWC-77"}' });
+  assert.equal(noSecret.status, 401);
+  delete process.env.DEMS_SECRET;
+});
