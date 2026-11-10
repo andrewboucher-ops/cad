@@ -1033,6 +1033,54 @@ test('an Alarm Response line bills the jobs attended at the site by the hour or 
   assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
 });
 
+test('a client who asks for them gets the attendance reports for the period attached to the invoice email', async () => {
+  await call('PUT', '/api/invoices/settings', { send_via: 'CCCS' }, adminT);
+  const site = (await call('POST', '/api/sites', { name: 'Reports Site' }, adminT)).body;
+  const cl = (await call('POST', '/api/clients', { name: 'Reports Ltd', contact_email: 'reports@example.test', site_ids: [site.id] }, adminT)).body;
+  assert.equal(cl.invoice_attach_reports, false, 'off unless asked for');
+  const c = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: site.id, start_date: '2026-03-01', lines: [
+    { description: 'Keyholding', kind: 'FIXED_PERIOD', rate: 50 },
+  ] }, adminT)).body;
+  await call('POST', `/api/agreements/${c.id}/mark-signed`, { name: 'Test' }, adminT);
+  const officer = app.db.personnel[0];
+  const mk = async (on, off) => {
+    const r = await call('POST', '/api/jobs', { site: site.id, incident_type: 'ALARM', retrospective: true, reason: 'radio only', description: 'Alarm activation, building checked',
+      created_at: on, on_scene_at: on, completed_at: off, resources: [officer.id] }, adminT);
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    const j = app.db.jobs.find((x) => x.id === r.body.id); j.status = 'COMPLETED';
+    return j;
+  };
+  const a = await mk('2026-03-05T22:00:00Z', '2026-03-05T22:40:00Z');
+  const b = await mk('2026-03-09T03:00:00Z', '2026-03-09T03:30:00Z');
+  const outside = await mk('2026-04-02T03:00:00Z', '2026-04-02T03:30:00Z');
+
+  const send = async () => {
+    const inv = (await call('POST', '/api/invoices/generate', { from: '2026-03-01', to: '2026-03-31', contract_id: c.id }, adminT)).body.made[0];
+    const reports = await call('GET', `/api/invoices/${inv.id}/reports.pdf`, undefined, finT, true);
+    assert.equal(reports.status, 200);
+    assert.equal(Buffer.from(await reports.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+    const before = mails.length;
+    const ap = (await call('POST', `/api/invoices/${inv.id}/approve`, {}, adminT)).body;
+    await settle();
+    return { inv: ap, m: mails.slice(before).find((x) => x.subject.includes(ap.number)) };
+  };
+  // Off: just the invoice.
+  let r = await send();
+  assert.equal(r.m.attachments.length, 1);
+  await call('POST', `/api/invoices/${r.inv.id}/void`, { reason: 'test' }, adminT);
+
+  assert.equal((await call('PATCH', `/api/clients/${cl.id}`, { invoice_attach_reports: true }, adminT)).body.invoice_attach_reports, true);
+  r = await send();
+  assert.equal(r.m.attachments.length, 2, 'the invoice and the reports');
+  assert.ok(isPdf(r.m.attachments[1]));
+  assert.equal(r.m.attachments[1].name, `${r.inv.number}-attendance-reports.pdf`);
+  assert.match(r.m.html, /2 attendances in this period are attached/);
+  const text = r.m.attachments[1].content.toString('latin1');
+  assert.ok(text.includes(a.reference) && text.includes(b.reference), 'both March attendances');
+  assert.ok(!text.includes(`(${outside.reference})`) && !text.includes(`- ${outside.reference}`), 'not April\'s');
+  assert.ok(app.db.invoices.find((i) => i.id === r.inv.id).history.some((h) => /with 2 attendance reports/.test(h.what)));
+});
+
 test('clock times at the site that no line bills are named in the checks, not dropped silently', async () => {
   const guard = { id: 9101, key: 'STATIC_GUARD_T', name: 'Static Guard', active: true };
   const other = { id: 9102, key: 'MOBILE_T', name: 'Mobile Patrol', active: true };

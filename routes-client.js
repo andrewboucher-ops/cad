@@ -175,6 +175,7 @@ module.exports = function registerClientRoutes({
     const c = {
       id: nextId('clients'), name, contact_email: body.contact_email || '', billing_email: String(body.billing_email || '').trim(), billing_address: String(body.billing_address || '').trim().slice(0, 500), site_ids: siteIds, weekly_report_enabled: body.weekly_report_enabled !== false,
       invoice_grouping: body.invoice_grouping === 'PER_CLIENT' ? 'PER_CLIENT' : 'PER_CONTRACT',
+      invoice_attach_reports: Boolean(body.invoice_attach_reports),
       created_at: new Date().toISOString(),
     };
     db.clients.push(c);
@@ -200,6 +201,8 @@ module.exports = function registerClientRoutes({
     }
     if ('weekly_report_enabled' in body) c.weekly_report_enabled = Boolean(body.weekly_report_enabled);
     if ('invoice_grouping' in body) c.invoice_grouping = body.invoice_grouping === 'PER_CLIENT' ? 'PER_CLIENT' : 'PER_CONTRACT';
+    // Attach the attendance reports for the period to each invoice email.
+    if ('invoice_attach_reports' in body) c.invoice_attach_reports = Boolean(body.invoice_attach_reports);
     logEvent('client.updated', `CLIENT ${c.name} UPDATED`, { client_id: c.id });
     return c;
   });
