@@ -107,18 +107,23 @@
   async function lateCharges(key) {
     let d;
     try { d = await api('GET', `/api/late-charges/${encodeURIComponent(key)}`); } catch (e) { alert(e.message); return; }
-    const st = d.settings, noRate = st.base_rate == null;
-    const rate = noRate ? null : (Number(st.base_rate) + d.margin).toFixed(2);
+    const st = d.settings, auto = st.base_rate_mode !== 'MANUAL';
+    const b = st.boe || {};
+    const noRate = d.items.some((x) => x.interest.rate == null);
     const rows = d.items.map((x) => `<tr data-item="${esc(x.key)}">
       <td class="mono">${esc(x.number)}<div class="dim" style="font-size:11px">due ${esc(sd(x.due_date))}, ${x.days_overdue} days</div></td>
       <td class="num">${money(x.principal)}</td>
-      <td><label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400"><input type="checkbox" data-k="interest" style="width:auto" ${noRate || !x.interest.amount ? 'disabled' : 'checked'}> ${noRate ? '<span class="dim">set the base rate</span>' : `${money(x.interest.amount)} <span class="dim" style="font-size:11px">${x.interest.days} days from ${esc(sd(x.interest.from))}</span>`}</label></td>
+      <td><label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400"><input type="checkbox" data-k="interest" style="width:auto" ${x.interest.rate == null || !x.interest.amount ? 'disabled' : 'checked'}> ${x.interest.rate == null ? '<span class="dim">no base rate yet</span>' : `${money(x.interest.amount)} <span class="dim" style="font-size:11px">${x.interest.days} days from ${esc(sd(x.interest.from))} at ${x.interest.rate.toFixed(2)}% (base ${x.interest.base.toFixed(2)}% on ${esc(sd(x.interest.reference_date))})</span>`}</label></td>
       <td><label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400"><input type="checkbox" data-k="compensation" style="width:auto" ${x.compensation.claimed ? 'disabled' : 'checked'}> ${x.compensation.claimed ? '<span class="dim">already claimed</span>' : money(x.compensation.amount)}</label></td></tr>`).join('');
     const hist = d.history.length ? `<details style="margin-top:8px"><summary class="dim" style="font-size:12.5px">Charged before (${d.history.length})</summary><ul class="tl">${d.history.map((c) => `<li><span class="when">${esc(when(c.at))}</span> — ${money(c.total)} ${c.target === 'xero' ? `draft in Xero${c.number ? ` ${esc(c.number)}` : ''}` : 'draft invoice in CCCS'} <span class="dim">(${esc(c.by)})</span>${admin() ? ` <button class="btn" data-forget="${c.id}" style="padding:2px 8px;font-size:11.5px" title="If that draft was deleted, so these can be claimed again">Forget</button>` : ''}</li>`).join('')}</ul></details>` : '';
     modal(`Late payment charges — ${d.name}`, `
-      <p style="margin-top:0;font-size:13px">Under the Late Payment of Commercial Debts (Interest) Act 1998 you can charge a <strong>business</strong> customer interest at the Bank of England base rate + 8% (${noRate ? '<span class="err">base rate not set</span>' : `<strong>${rate}%</strong> a year, base rate ${Number(st.base_rate).toFixed(2)}%`}), and fixed compensation of £40, £70 or £100 per invoice depending on its size. Not for private individuals.</p>
-      ${admin() ? `<div class="k-form" style="margin-bottom:8px"><div><label>Bank of England base rate (%)</label><input id="lcRate" type="number" step="0.01" min="0" value="${noRate ? '' : st.base_rate}" placeholder="e.g. 4.00"></div><div style="align-self:end"><button type="button" class="btn" id="lcRateSave">Save rate</button></div>
-        <p class="dim full" style="font-size:12px;margin:0">Use the rate on 31 December for charges in January to June, and on 30 June for July to December (bankofengland.co.uk).${st.base_rate_set_at ? ` Set by ${esc(st.base_rate_by)} ${esc(when(st.base_rate_set_at))}.` : ''}</p></div>` : ''}
+      <p style="margin-top:0;font-size:13px">Under the Late Payment of Commercial Debts (Interest) Act 1998 you can charge a <strong>business</strong> customer interest at the Bank of England base rate + 8% a year, and fixed compensation of £40, £70 or £100 per invoice depending on its size. Not for private individuals.</p>
+      <p class="dim" style="font-size:12.5px;margin:0 0 8px">${auto ? `Base rate: <strong>from the Bank of England</strong>${b.fetched_at ? `, checked ${esc(when(b.fetched_at))}` : ''}.` : 'Base rate: <strong>entered by hand</strong>.'} Each invoice uses the rate on the 30 June or 31 December before it became overdue, as the Act sets, and keeps it while unpaid.${auto && b.error ? ` <span class="err">Last check failed: ${esc(b.error)}${b.rates && b.rates.length ? ' (using the rates from the last good check)' : st.base_rate != null ? ' (using the rate entered by hand)' : ''}</span>` : ''}
+        <button type="button" class="btn" id="lcRefresh" style="padding:2px 8px;font-size:11.5px">Check now</button></p>
+      ${admin() ? `<details style="margin-bottom:8px"${noRate ? ' open' : ''}><summary class="dim" style="font-size:12.5px">Base rate settings</summary><div class="k-form" style="margin-top:6px">
+        <div><label>Where the base rate comes from</label><select id="lcMode"><option value="AUTO" ${auto ? 'selected' : ''}>Bank of England, automatically</option><option value="MANUAL" ${!auto ? 'selected' : ''}>The rate below</option></select></div>
+        <div><label>Rate by hand (%)${auto ? ' — used only if the Bank can\'t be reached' : ''}</label><input id="lcRate" type="number" step="0.01" min="0" value="${st.base_rate == null ? '' : st.base_rate}" placeholder="e.g. 4.00"></div>
+        <div style="align-self:end"><button type="button" class="btn" id="lcRateSave">Save</button></div></div></details>` : ''}
       <div style="overflow-x:auto"><table class="k"><thead><tr><th>Invoice</th><th class="num">Owed</th><th>Interest to today</th><th>Compensation</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="dim">Nothing to charge.</td></tr>'}</tbody></table></div>
       <p style="font-size:13.5px"><strong>Total to charge: <span id="lcTot"></span></strong> <span class="dim">(no VAT: statutory interest and compensation are outside its scope)</span></p>
       <p class="dim" style="font-size:12.5px">This makes a <strong>draft</strong> invoice ${d.target === 'xero' ? 'in Xero, to check and send from there' : 'here in CCCS, to check, approve and send as normal'}. Nothing goes to the customer yet.</p>
@@ -134,7 +139,12 @@
       };
       root.addEventListener('change', tot); tot();
       const rs = root.querySelector('#lcRateSave');
-      if (rs) rs.onclick = async () => { try { await api('PUT', '/api/late-charges/settings', { base_rate: root.querySelector('#lcRate').value }); lateCharges(key); } catch (e) { alert(e.message); } };
+      if (rs) rs.onclick = async () => {
+        const rateVal = root.querySelector('#lcRate').value;
+        try { await api('PUT', '/api/late-charges/settings', { base_rate_mode: root.querySelector('#lcMode').value, ...(rateVal !== '' ? { base_rate: rateVal } : {}) }); lateCharges(key); } catch (e) { alert(e.message); }
+      };
+      const rf = root.querySelector('#lcRefresh');
+      if (rf) rf.onclick = async () => { rf.disabled = true; try { await api('POST', '/api/late-charges/refresh-rate'); lateCharges(key); } catch (e) { alert(e.message); rf.disabled = false; } };
       root.querySelectorAll('[data-forget]').forEach((b) => (b.onclick = async () => { if (!confirm('Forget this charge? Only do this if its draft invoice was deleted, so the same amounts can be claimed again.')) return; try { await api('DELETE', `/api/late-charges/records/${b.dataset.forget}`); lateCharges(key); } catch (e) { alert(e.message); } }));
       wire(root, async () => {
         const include = [...root.querySelectorAll('[data-item]')].map((tr) => ({ key: tr.dataset.item, interest: tr.querySelector('[data-k="interest"]').checked, compensation: tr.querySelector('[data-k="compensation"]').checked }));
