@@ -96,11 +96,15 @@ module.exports = function registerInvoices({
   const today = () => new Date().toISOString().slice(0, 10);
 
   /* ---- invoice settings (ui_settings key "invoice") ---- */
+  const LATE_PAYMENT_TERMS = 'Payment terms: payment is due by the due date shown. If an invoice is paid late we reserve the right to charge interest at 8% a year above the Bank of England base rate, and fixed-sum compensation for the cost of recovering the debt (£40 to £100 per invoice, depending on its value), under the Late Payment of Commercial Debts (Interest) Act 1998.';
   const DEFAULTS = {
     prefix: 'INV-', next_number: 1, digits: 4, send_via: 'CCCS', // CCCS | XERO | NONE
     bank_name: '', account_name: '', sort_code: '', account_number: '', vat_number: '', company_number: '',
     footer: 'Thank you for your business.', include_timesheet: true,
     copy_to: '', // address(es) BCC'd on every invoice CCCS emails
+    // Printed on every invoice (and statement), so the right to charge for
+    // late payment is on record before it's needed. Blank turns it off.
+    late_payment_terms: LATE_PAYMENT_TERMS,
   };
   function settingsRow() {
     if (!Array.isArray(db.ui_settings)) db.ui_settings = [];
@@ -222,6 +226,7 @@ module.exports = function registerInvoices({
       doc.y = top - rowH - 6;
     }
     if (st.footer) doc.para(st.footer, { size: 9.5, color: grey, gap: 4 });
+    if (st.late_payment_terms && inv.status !== 'PAID') doc.para(st.late_payment_terms, { size: 8.5, color: grey, gap: 4 });
     if (st.company_number) doc.para(`Registered in England and Wales, company number ${st.company_number}.`, { size: 8.5, color: grey });
     const hourly = inv.lines.filter((l) => l.shifts && l.shifts.length);
     if (st.include_timesheet && hourly.length) {
@@ -691,6 +696,7 @@ module.exports = function registerInvoices({
     const str = (k, max = 120) => { if (k in body) st[k] = String(body[k] ?? '').trim().slice(0, max); };
     ['bank_name', 'account_name', 'vat_number', 'company_number'].forEach((k) => str(k));
     str('footer', 500);
+    str('late_payment_terms', 1000);
     if ('sort_code' in body) { const v = String(body.sort_code || '').replace(/\s/g, ''); if (v && !/^\d{2}-?\d{2}-?\d{2}$/.test(v)) throw httpError(400, 'sort code should be 6 digits, e.g. 12-34-56'); st.sort_code = v; }
     if ('account_number' in body) { const v = String(body.account_number || '').replace(/\s/g, ''); if (v && !/^\d{6,10}$/.test(v)) throw httpError(400, 'account number should be 8 digits'); st.account_number = v; }
     if ('prefix' in body) { const v = String(body.prefix ?? '').trim(); if (!/^[A-Za-z0-9/-]{0,12}$/.test(v)) throw httpError(400, 'number prefix: letters, digits, - or / only'); st.prefix = v; }
@@ -1027,5 +1033,5 @@ module.exports = function registerInvoices({
     return xero.status();
   });
 
-  return { hoursFor, invoicePdf, syncAll };
+  return { hoursFor, invoicePdf, syncAll, settings: settingsRow, company };
 };

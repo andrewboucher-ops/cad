@@ -210,10 +210,47 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const x = out.Invoices && out.Invoices[0];
     return x ? { status: x.Status, number: x.InvoiceNumber, amount_due: x.AmountDue, amount_paid: x.AmountPaid, total: x.Total } : null;
   }
+  /** Every approved sales invoice with money still owed on it, whoever
+   * raised it (CCCS or straight in Xero) — for payment reminders and
+   * statements. Partly paid invoices stay AUTHORISED with a smaller
+   * AmountDue, so they are included at what is left. */
+  async function outstandingInvoices() {
+    const where = encodeURIComponent('Type=="ACCREC" AND Status=="AUTHORISED" AND AmountDue>0');
+    const out = [];
+    for (let page = 1; page <= 20; page++) {
+      const r = await call('GET', `/Invoices?where=${where}&summaryOnly=true&page=${page}&pageSize=100`);
+      const list = r.Invoices || [];
+      for (const x of list) {
+        if (!(Number(x.AmountDue) > 0)) continue;
+        out.push({
+          invoice_id: x.InvoiceID, number: x.InvoiceNumber || '', reference: x.Reference || '',
+          contact_id: x.Contact && x.Contact.ContactID, contact_name: (x.Contact && x.Contact.Name) || '—',
+          date: xeroDate(x.DateString || x.Date), due_date: xeroDate(x.DueDateString || x.DueDate),
+          total: Number(x.Total) || 0, amount_paid: Number(x.AmountPaid) || 0, amount_due: Number(x.AmountDue) || 0,
+        });
+      }
+      if (list.length < 100) break;
+    }
+    return out;
+  }
+  /** Where Xero sends a contact's invoices: its main address plus any
+   * contact people ticked "include in emails". Keyed by ContactID. */
+  async function contactEmails(ids) {
+    const out = {};
+    const uniq = [...new Set(ids.filter(Boolean))];
+    for (let i = 0; i < uniq.length; i += 40) {
+      const r = await call('GET', `/Contacts?IDs=${uniq.slice(i, i + 40).map(encodeURIComponent).join(',')}`);
+      for (const c of r.Contacts || []) {
+        const list = [c.EmailAddress, ...(c.ContactPersons || []).filter((p) => p.IncludeInEmails).map((p) => p.EmailAddress)];
+        out[c.ContactID] = [...new Set(list.map((e) => String(e || '').trim()).filter((e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)))];
+      }
+    }
+    return out;
+  }
   function status() {
     const r = row();
     return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, last_error_at: r.last_error_at || null, settings: r.settings, redirect_uri: redirectUri };
   }
-  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, unpaidBills, status, row };
+  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, unpaidBills, outstandingInvoices, contactEmails, status, row };
 };
 module.exports.xeroDate = xeroDate;
