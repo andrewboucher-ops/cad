@@ -6036,9 +6036,10 @@ const attendance = require('./routes-attendance.js')({
 // Admin → Text staff: one SMS to everyone in chosen roles — see routes-staff-sms.js.
 require('./routes-staff-sms.js')({ route, httpError, ADMIN, db, logEvent, sms, notifyLog: writeNotifyLog, flushNow: () => store.flushNow() });
 // Rota → "Text staff about open shifts" — see routes-open-shift-sms.js.
-require('./routes-open-shift-sms.js')({
-  route, httpError, CONTROL, db, logEvent, sms, notifyLog: writeNotifyLog, siteVisibleTo, assignedPersonnelIds,
-  publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+// Also chases unfilled shifts by itself: staff at 48h, managers at 24h.
+const openShiftSms = require('./routes-open-shift-sms.js')({
+  route, httpError, CONTROL, ADMIN, db, logEvent, sms, notifyLog: writeNotifyLog, siteVisibleTo, assignedPersonnelIds,
+  pushToRoles, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
 
 // Staff numbers, ID photos and the ID card's QR check — see routes-staff-id.js.
@@ -7038,6 +7039,10 @@ function start() {
   }
   complianceTick();
   setInterval(complianceTick, COMPLIANCE_TICK_MS).unref?.();
+  // Unfilled shifts: first pass two minutes after start, then every 15 minutes.
+  const unfilledTick = () => openShiftSms.escalationTick().catch((e) => console.warn('[unfilled-shifts] tick failed:', e.message));
+  setTimeout(unfilledTick, 2 * 60000).unref?.();
+  setInterval(unfilledTick, Number(process.env.UNFILLED_SHIFT_TICK_MS || 15 * 60000)).unref?.();
   if (rotaCalendar.enabled) {
     setTimeout(() => rotaCalendar.reconcile(db).catch((e) => console.warn('[rota-calendar] reconcile failed:', e.message)), 30000).unref?.();
     setInterval(rotaCalendarTick, 10 * 60000).unref?.();
@@ -7066,4 +7071,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, openShiftSms, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };
