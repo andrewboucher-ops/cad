@@ -185,6 +185,7 @@ async function view(id) {
   const act = (k, label, cls = '') => `<button class="btn ${cls}" data-a="${k}">${label}</button>`;
   const acts = [];
   acts.push(`<a class="btn" target="_blank" href="/api/invoices/${i.id}/pdf">${draft ? 'Preview PDF' : 'PDF'}</a>`);
+  acts.push(`<a class="btn" target="_blank" href="/api/invoices/${i.id}/reports.pdf">Attendance reports</a>`);
   if (draft) acts.push(act('void', 'Void'), act('save', 'Save changes'), act('approve', 'Approve', 'primary'));
   if (i.number && i.status !== 'VOID') acts.push(act('email', i.emails && i.emails.some((e) => e.ok) ? 'Email again' : 'Email to client'));
   if (i.status === 'APPROVED' && isAdmin) acts.push(act('renumber', 'Change number'));

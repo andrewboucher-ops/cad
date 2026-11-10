@@ -2574,6 +2574,10 @@ function clientForm(c) {
         <option value="PER_CONTRACT" ${isNew || c.invoice_grouping !== 'PER_CLIENT' ? 'selected' : ''}>One invoice per contract (default)</option>
         <option value="PER_CLIENT" ${!isNew && c.invoice_grouping === 'PER_CLIENT' ? 'selected' : ''}>One combined invoice per client</option>
       </select>
+      <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-weight:400">
+        <input type="checkbox" id="nclAttachReports" style="width:auto" ${!isNew && c.invoice_attach_reports ? 'checked' : ''}>
+        Attach the attendance reports for the period to each invoice email
+      </label>
       <label>Sites this client can see</label>
       <div id="nclSites" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:10px">
         ${allSites.map((s) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;text-transform:none;letter-spacing:0;font-weight:400">
@@ -2606,7 +2610,7 @@ function clientModal(c) {
       const name = el('#nclName').value.trim();
       if (!name) { el('#clError').textContent = 'name is required'; return; }
       const site_ids = els('#nclSites [data-siteid]:checked').map((cb) => Number(cb.dataset.siteid));
-      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), weekly_report_enabled: el('#nclWeekly').checked, invoice_grouping: el('#nclInvoiceGrouping').value, site_ids };
+      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), weekly_report_enabled: el('#nclWeekly').checked, invoice_grouping: el('#nclInvoiceGrouping').value, invoice_attach_reports: el('#nclAttachReports').checked, site_ids };
       try {
         if (c) await api('PATCH', `/api/clients/${c.id}`, body);
         else await api('POST', '/api/clients', body);

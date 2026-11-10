@@ -235,6 +235,74 @@ module.exports = function registerInvoices({
     }
     return doc.toBuffer();
   }
+  /* ---- attendance reports, for clients who want them with the invoice ----
+   * A client with "attach attendance reports" ticked (Admin → Clients) gets
+   * one extra PDF with their invoice email: the report of every completed
+   * job the invoice covers. That is every job billed on one of its lines,
+   * plus any other completed job at one of its sites in its period (a
+   * fixed-price contract bills no jobs, but the client still wants to see
+   * the call-outs it paid for). Not-attended and cancelled jobs have no
+   * report, so they are left out. Text only: photos stay in the portal,
+   * because a dozen photos would take the email past Graph's size limit. */
+  function attendanceJobsFor(inv) {
+    const billed = new Set((inv.lines || []).flatMap((l) => (l.shifts || []).map((x) => x.job_id)).filter(Boolean));
+    const siteIds = new Set((inv.lines || []).map((l) => l.site_id).filter(Boolean));
+    if (inv.site_id) siteIds.add(inv.site_id);
+    const t0 = inv.period_from ? dayStart(inv.period_from) : -Infinity;
+    const t1 = inv.period_to ? dayStart(inv.period_to) + 86400000 : Infinity;
+    return (db.jobs || []).filter((j) => {
+      if (j.status !== 'COMPLETED' || j.not_attended) return false;
+      if (billed.has(j.id)) return true;
+      if (!siteIds.has(j.site_id)) return false;
+      const at = Date.parse(j.on_scene_at || j.created_at);
+      return at >= t0 && at < t1;
+    }).sort((a, b) => Date.parse(a.on_scene_at || a.created_at) - Date.parse(b.on_scene_at || b.created_at));
+  }
+  const ukTime = (iso) => (iso ? new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
+  const jobNotes = (j) => [j.notes, ...(j.note_entries || []).map((n) => `[${ukTime(n.at)} ${n.by_name || ''}${n.closing ? ', closing note' : ''}] ${n.text}`)].filter(Boolean).join('\n');
+  function attendanceReportsPdf(inv, jobs = attendanceJobsFor(inv)) {
+    const c = company(), client = clientOf(inv) || {};
+    const grey = [0.35, 0.38, 0.42];
+    const doc = new Doc({ footer: `${c.company_name} — attendance reports for invoice ${inv.number || '(draft)'}` });
+    doc.para(c.company_name, { size: 10, bold: true, color: grey, gap: 2 });
+    doc.para('Attendance reports', { size: 18, bold: true, gap: 2 });
+    doc.para(`For invoice ${inv.number || '(draft)'}${client.name ? `, ${client.name}` : ''}, ${span(inv.period_from, inv.period_to)}`, { size: 10, color: grey, gap: 8 });
+    if (!jobs.length) doc.para('No attendances in this period.', { size: 10 });
+    else {
+      doc.table([{ title: 'Reference', width: 0.2 }, { title: 'Arrived', width: 0.22 }, { title: 'Site', width: 0.3 }, { title: 'Type', width: 0.28 }],
+        jobs.map((j) => { const s = db.sites.find((x) => x.id === j.site_id); return [j.reference, ukTime(j.on_scene_at || j.created_at), s ? s.name : (j.location || '—'), j.incident_type || '—']; }), { size: 8.5 });
+    }
+    jobs.forEach((j) => {
+      doc.newPage();
+      const site = db.sites.find((x) => x.id === j.site_id);
+      const officers = (db.job_assignments || []).filter((a) => a.job_id === j.id)
+        .map((a) => (db.personnel.find((p) => p.id === a.personnel_id) || {}).name).filter(Boolean);
+      doc.para(`Attendance report — ${j.reference}`, { size: 15, bold: true, gap: 2 });
+      doc.para([j.incident_type, j.location].filter(Boolean).join(' · ') || '—', { size: 10, color: grey, gap: 8 });
+      doc.pairs([
+        ['Site', site ? site.name : '—'], ['Priority', j.priority || '—'], ['Officer', officers.join(', ') || '—'],
+        ['Description', j.description || '—'], ['Notes', jobNotes(j) || '—'],
+      ], { size: 9.5, labelWidth: 100 });
+      const timeline = [['Job created', j.created_at], ['Dispatched', j.dispatched_at], ['Acknowledged', j.acknowledged_at], ['En route', j.en_route_at], ['On scene', j.on_scene_at], ['Completed', j.completed_at]].filter(([, t]) => t);
+      doc.heading('Timeline', 11);
+      doc.pairs(timeline.map(([l, t]) => [l, ukTime(t)]), { size: 9.5, labelWidth: 100 });
+      if (j.on_scene_at && j.completed_at) {
+        const mins = Math.max(0, Math.round((Date.parse(j.completed_at) - Date.parse(j.on_scene_at)) / 60000));
+        doc.para(`Time on site: ${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`, { size: 9.5, bold: true, gap: 6 });
+      }
+      const items = j.checklist || [];
+      if (items.length) {
+        doc.heading('Checklist', 11);
+        doc.table([{ title: 'Item', width: 0.42 }, { title: 'Status', width: 0.25 }, { title: 'Notes', width: 0.33 }],
+          items.map((it) => [it.title || '', it.status === 'COMPLETE' ? `Complete${it.completed_at ? ` ${ukTime(it.completed_at)}` : ''}` : 'Not completed', it.notes || '—']), { size: 8.5 });
+      }
+      const photos = (j.media || []).length;
+      if (photos) doc.para(`${photos} photo${photos === 1 ? '' : 's'} taken — they are in the client portal with this report.`, { size: 9, color: grey });
+    });
+    return doc.toBuffer();
+  }
+  const wantsReports = (inv) => Boolean((clientOf(inv) || {}).invoice_attach_reports);
+
   const pdfOut = (inv) => ({ __body: invoicePdf(inv), __headers: { 'content-type': 'application/pdf', 'content-disposition': `inline; filename="${inv.number || 'draft-invoice'}.pdf"`, 'cache-control': 'private, no-store' } });
 
   /* ---- email to the client, PDF attached ---- */
@@ -252,11 +320,18 @@ module.exports = function registerInvoices({
     if (!siteIds.size && inv.site_id) siteIds.add(inv.site_id);
     const cc = [...new Set([...siteIds].map((id) => { const s = db.sites.find((x) => x.id === id); return s ? s.accounts_email : ''; }).filter(Boolean))];
     const pay = st.account_number ? `<p>Please pay by bank transfer to ${st.account_name || c.company_name}, sort code ${st.sort_code}, account ${st.account_number}, quoting <strong>${inv.number}</strong>.</p>` : '';
-    const html = `<p>Hello,</p><p>Please find attached invoice <strong>${inv.number}</strong> for ${inv.site_name}, ${span(inv.period_from, inv.period_to)}: <strong>${money(inv.total)}</strong> including VAT, due by ${longDate(inv.due_date)}.</p>${pay}
+    const baseHtml = `<p>Hello,</p><p>Please find attached invoice <strong>${inv.number}</strong> for ${inv.site_name}, ${span(inv.period_from, inv.period_to)}: <strong>${money(inv.total)}</strong> including VAT, due by ${longDate(inv.due_date)}.</p>${pay}
       <p>Your invoices are also in your client portal: <a href="${publicBaseUrl}/client.html">${publicBaseUrl}/client.html</a></p><p>Kind regards,<br>${c.company_name}</p>`;
     const bcc = st.copy_to || '';
-    Promise.resolve(sendEmail(to, `Invoice ${inv.number} from ${c.company_name}`, html, { cc, bcc, attachments: [{ name: `${inv.number}.pdf`, contentType: 'application/pdf', content: invoicePdf(inv) }] }))
-      .then((r) => { log({ to, cc, bcc, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); if (r && r.ok) inv.history.push({ at: new Date().toISOString(), by, what: `emailed to ${to}${cc.length ? ` (cc ${cc.join(', ')})` : ''}` }); flushNow(); })
+    const attachments = [{ name: `${inv.number}.pdf`, contentType: 'application/pdf', content: invoicePdf(inv) }];
+    // Attendance reports go along when the client asked for them (Admin →
+    // Clients) and there is at least one; an empty reports PDF is noise.
+    const jobs = wantsReports(inv) ? attendanceJobsFor(inv) : [];
+    if (jobs.length) attachments.push({ name: `${inv.number}-attendance-reports.pdf`, contentType: 'application/pdf', content: attendanceReportsPdf(inv, jobs) });
+    const withReports = jobs.length ? `, with ${jobs.length} attendance report${jobs.length === 1 ? '' : 's'}` : '';
+    const html = jobs.length ? baseHtml.replace(`${longDate(inv.due_date)}.</p>`, `${longDate(inv.due_date)}.</p><p>The reports for the ${jobs.length} attendance${jobs.length === 1 ? '' : 's'} in this period are attached as well.</p>`) : baseHtml;
+    Promise.resolve(sendEmail(to, `Invoice ${inv.number} from ${c.company_name}`, html, { cc, bcc, attachments }))
+      .then((r) => { log({ to, cc, bcc, reports: jobs.length, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); if (r && r.ok) inv.history.push({ at: new Date().toISOString(), by, what: `emailed to ${to}${cc.length ? ` (cc ${cc.join(', ')})` : ''}${withReports}` }); flushNow(); })
       .catch((e) => log({ to, ok: false, error: e.message }));
   }
 
@@ -632,6 +707,12 @@ module.exports = function registerInvoices({
     return { ...st, company: company() };
   });
   route('GET', '/api/invoices/:id/pdf', MONEY, ({ params }) => pdfOut(findInv(params.id)));
+  // The attendance reports PDF on its own: to check before approving, or to
+  // send by hand when Xero emails the invoice (Xero can't carry it).
+  route('GET', '/api/invoices/:id/reports.pdf', MONEY, ({ params }) => {
+    const inv = findInv(params.id);
+    return { __body: attendanceReportsPdf(inv), __headers: { 'content-type': 'application/pdf', 'content-disposition': `inline; filename="${inv.number || 'draft-invoice'}-attendance-reports.pdf"`, 'cache-control': 'private, no-store' } };
+  });
   route('POST', '/api/invoices/:id/email', MONEY, ({ params, user }) => {
     const inv = findInv(params.id);
     if (!inv.number || inv.status === 'VOID') throw httpError(409, 'approve it first');
