@@ -146,6 +146,7 @@
       <button class="btn" id="btnDuplicateWeek">Duplicate week forward</button>
       <button class="btn" id="btnCalSync">Calendar sync</button>
       <button class="btn" id="btnTextOpen" title="Text officers a list of open shifts with a link to claim them">Text staff about open shifts</button>
+      <button class="btn" id="btnAutoChase" title="CCCS texts staff about short shifts by itself, then alerts you">Automatic chasing</button>
     </div>
     <p class="dim" id="coverageSummary" style="margin:0 0 10px;font-size:12.5px"></p>
     <div id="gridWrap"></div>
@@ -1081,6 +1082,44 @@ async function openShiftTextModal(selected) {
         closeModal();
         alert(`${r.dry_run ? 'Test mode — would have texted' : 'Texted'} ${r.sent} officer${r.sent === 1 ? '' : 's'}${r.failed ? `; ${r.failed} failed` : ''}.`);
       } catch (e) { el('#osErr').textContent = e.message; el('#osSend').disabled = false; el('#osSend').textContent = 'Send'; }
+    };
+  });
+}
+
+/* Automatic chasing of unfilled shifts — CCCS texts staff by itself when a
+ * published shift is still short N hours before it starts, then alerts the
+ * managers nearer the time. See escalationTick in routes-open-shift-sms.js. */
+el('#btnAutoChase').onclick = () => autoChaseModal();
+async function autoChaseModal() {
+  let c;
+  try { c = await api('GET', '/api/shifts/escalation/settings'); } catch (e) { alert(e.message); return; }
+  const hh = (h) => `${String(h).padStart(2, '0')}:00`;
+  const dis = isAdmin ? '' : 'disabled';
+  modal('Automatic chasing of unfilled shifts', `
+    <p class="dim" style="margin-top:0">When a published shift is still short of staff, CCCS chases it by itself. Each step happens once per shift; if the shift fills and someone later drops out, it starts again.
+      Staff are only texted ${hh(c.staff_window[0])}–${hh(c.staff_window[1])} and managers ${hh(c.alert_window[0])}–${hh(c.alert_window[1])} — anything due overnight goes out in the morning.</p>
+    ${c.server_off ? '<p class="err">Switched off on this server (UNFILLED_SHIFT_ESCALATION=off).</p>' : ''}
+    ${c.live ? '' : '<p class="err" style="margin:6px 0"><strong>Test mode:</strong> texting is not switched on for this server (SMS_LIVE), so texts are logged but not sent.</p>'}
+    <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:600;font-size:14px">
+      <input type="checkbox" id="acOn" ${c.enabled ? 'checked' : ''} ${dis} style="width:auto;flex:none;margin:0"> Chase unfilled shifts automatically</label>
+    <label style="margin-top:10px">Text staff who could take it when it is this many hours away</label>
+    <input type="number" id="acStaff" min="1" max="168" value="${c.staff_hours}" ${dis}>
+    <label style="margin-top:10px">Alert managers when it is this many hours away</label>
+    <input type="number" id="acAlert" min="1" max="168" value="${c.alert_hours}" ${dis}>
+    <label style="margin-top:10px">Managers' mobiles to text (comma between numbers)</label>
+    <input type="text" id="acTo" value="${esc(c.alert_to || '')}" placeholder="07…" ${dis}>
+    <p class="dim" style="margin:4px 0 0;font-size:12.5px">Admins also get a push notification. ${c.alert_to ? '' : 'With no mobile here, the push is the only alert.'}</p>
+    ${isAdmin ? '' : '<p class="dim">Only a system admin can change these.</p>'}
+    <p class="err" id="acErr" style="margin:6px 0 0"></p>`, () => {
+    const foot = el('#modalHost .foot');
+    foot.innerHTML = `<button class="btn" id="acCancel">${isAdmin ? 'Cancel' : 'Close'}</button>${isAdmin ? '<button class="btn primary" id="acSave">Save</button>' : ''}`;
+    el('#acCancel').onclick = closeModal;
+    if (!isAdmin) return;
+    el('#acSave').onclick = async () => {
+      try {
+        await api('PUT', '/api/shifts/escalation/settings', { enabled: el('#acOn').checked, staff_hours: Number(el('#acStaff').value), alert_hours: Number(el('#acAlert').value), alert_to: el('#acTo').value });
+        closeModal();
+      } catch (e) { el('#acErr').textContent = e.message; }
     };
   });
 }
