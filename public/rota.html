@@ -145,6 +145,7 @@
       <button class="btn" id="btnPublishDrafts">Publish drafts</button>
       <button class="btn" id="btnDuplicateWeek">Duplicate week forward</button>
       <button class="btn" id="btnCalSync">Calendar sync</button>
+      <button class="btn" id="btnTextOpen" title="Text officers a list of open shifts with a link to claim them">Text staff about open shifts</button>
     </div>
     <p class="dim" id="coverageSummary" style="margin:0 0 10px;font-size:12.5px"></p>
     <div id="gridWrap"></div>
@@ -1040,6 +1041,49 @@ if (isAdmin) {
 }
 
 el('#btnCalSync').onclick = () => CCCS.calendarSync();
+
+/* Text staff about open shifts — preview who gets what, then send. Each
+ * officer's text lists only the shifts they could apply for, with a link to
+ * the Rota screen of the officer app. See routes-open-shift-sms.js. */
+el('#btnTextOpen').onclick = () => openShiftTextModal();
+async function openShiftTextModal(selected) {
+  let p;
+  try { p = await api('GET', `/api/shifts/available/notify/preview${selected ? `?shifts=${selected.join(',')}` : ''}`); }
+  catch (e) { alert(e.message); return; }
+  if (!p.open_shifts.length) { alert('There are no open shifts to advertise — publish a shift that still needs staff first.'); return; }
+  const chosen = new Set(p.selected);
+  const missed = p.recipients.filter((r) => r.status !== 'ok');
+  modal('Text staff about open shifts', `
+    <p class="dim" style="margin-top:0">${p.live ? '' : '<strong>Test mode:</strong> texting is not switched on for this server (SMS_LIVE), so nothing will actually be sent. '}Each officer gets one text with the shifts they can apply for and a link to claim them in the officer app.</p>
+    ${p.last_sent && p.last_sent.recent ? `<p class="err" style="margin:6px 0">${esc(p.last_sent.by || 'Someone')} already texted ${p.last_sent.sent} staff about open shifts at ${esc(new Date(p.last_sent.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}.</p>` : ''}
+    <label>Shifts to include</label>
+    <div id="osList" style="max-height:200px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:6px 8px">
+      ${p.open_shifts.map((s) => `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px;margin:3px 0">
+        <input type="checkbox" value="${s.id}" ${chosen.has(s.id) ? 'checked' : ''} style="width:auto;flex:none;margin:0"><span style="flex:1">${esc(s.description)} <span class="dim">— ${s.places} place${s.places === 1 ? '' : 's'}</span></span></label>`).join('')}
+    </div>
+    <label style="margin-top:10px">Text (example — each person's lists only their shifts)</label>
+    <pre style="white-space:pre-wrap;background:var(--panel-2,rgba(127,127,127,.08));border-radius:6px;padding:8px;font-size:12.5px;margin:0">${esc(p.sample_message || '')}</pre>
+    <p style="margin:10px 0 4px"><strong>${p.sending_to}</strong> officer${p.sending_to === 1 ? '' : 's'} will get a text.</p>
+    ${missed.length ? `<details><summary class="dim" style="cursor:pointer">${missed.length} won't — see why</summary>
+      <ul style="margin:6px 0 0 18px;padding:0;font-size:12.5px">${missed.map((r) => `<li>${esc(r.name)} — ${esc(r.status)}</li>`).join('')}</ul></details>` : ''}
+    <p class="err" id="osErr" style="margin:6px 0 0"></p>`, () => {
+    const foot = el('#modalHost .foot');
+    foot.innerHTML = `<button class="btn" id="osCancel">Cancel</button><button class="btn primary" id="osSend" ${p.sending_to ? '' : 'disabled'}>Send ${p.sending_to} text${p.sending_to === 1 ? '' : 's'}</button>`;
+    el('#osCancel').onclick = closeModal;
+    const picked = () => [...document.querySelectorAll('#osList input:checked')].map((i) => Number(i.value));
+    document.querySelectorAll('#osList input').forEach((i) => (i.onchange = () => { const ids = picked(); if (ids.length) openShiftTextModal(ids); }));
+    el('#osSend').onclick = async () => {
+      const ids = picked();
+      if (!ids.length) { el('#osErr').textContent = 'Tick at least one shift.'; return; }
+      el('#osSend').disabled = true; el('#osSend').textContent = 'Sending…';
+      try {
+        const r = await api('POST', '/api/shifts/available/notify', { shifts: ids });
+        closeModal();
+        alert(`${r.dry_run ? 'Test mode — would have texted' : 'Texted'} ${r.sent} officer${r.sent === 1 ? '' : 's'}${r.failed ? `; ${r.failed} failed` : ''}.`);
+      } catch (e) { el('#osErr').textContent = e.message; el('#osSend').disabled = false; el('#osSend').textContent = 'Send'; }
+    };
+  });
+}
 
 CCCS.bus((up) => {
   const n = el('#net');

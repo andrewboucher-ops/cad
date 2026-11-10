@@ -6035,6 +6035,11 @@ const attendance = require('./routes-attendance.js')({
 
 // Admin → Text staff: one SMS to everyone in chosen roles — see routes-staff-sms.js.
 require('./routes-staff-sms.js')({ route, httpError, ADMIN, db, logEvent, sms, notifyLog: writeNotifyLog, flushNow: () => store.flushNow() });
+// Rota → "Text staff about open shifts" — see routes-open-shift-sms.js.
+require('./routes-open-shift-sms.js')({
+  route, httpError, CONTROL, db, logEvent, sms, notifyLog: writeNotifyLog, siteVisibleTo, assignedPersonnelIds,
+  publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+});
 
 // Staff numbers, ID photos and the ID card's QR check — see routes-staff-id.js.
 const staffId = require('./routes-staff-id.js')({
