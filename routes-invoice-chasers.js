@@ -56,12 +56,13 @@ module.exports = function registerInvoiceChasers({
 
   /* ---- settings (ui_settings key "invoice_chasers") ---- */
   const WORDING = {
-    7: 'Just a friendly reminder that the invoices below are now past their due date. If you have already paid, thank you, and please ignore this email.',
+    1: 'Just a friendly reminder that the invoices below are now past their due date. If you have already paid, thank you, and please ignore this email.',
+    7: 'We have not yet received payment for the invoices below, and the oldest is now more than a week overdue. Please could you arrange payment, or let us know if there is a problem with any of them.',
     14: 'We have not yet received payment for the invoices below, and the oldest is now more than two weeks overdue. Please could you arrange payment, or let us know if there is a problem with any of them.',
     30: 'We still have not received payment for the invoices below, and the oldest is now more than 30 days overdue. Please arrange payment within the next 7 days, or reply to this email if there is a query so that we can sort it out.',
   };
   const DEFAULTS = {
-    enabled: false, stages: [7, 14, 30], send_hour: 9, weekdays_only: true, min_gap_days: 5, repeat_days: 0,
+    enabled: false, stages: [1, 7, 14, 30], send_hour: 9, weekdays_only: true, min_gap_days: 5, repeat_days: 0,
     copy_to: '', wording: { ...WORDING },
     statement_wording: 'Please find attached a statement of your account with us. The invoices listed are still open on our records. If you have already paid any of them, thank you, and please let us know so we can match the payment.',
     paused: {}, // group key -> { until: 'YYYY-MM-DD' | null, by, at, note }
@@ -79,9 +80,10 @@ module.exports = function registerInvoiceChasers({
   const stageName = (s, st) => {
     const stages = st.stages;
     if (s === 'statement') return 'Statement';
-    if (s === stages[stages.length - 1]) return 'Final reminder';
-    if (s === stages[0]) return 'Reminder';
-    return 'Second reminder';
+    const i = stages.indexOf(s);
+    if (i === stages.length - 1 && stages.length > 1) return 'Final reminder';
+    if (i <= 0) return 'Reminder';
+    return `${['Second', 'Third', 'Fourth', 'Fifth'][i - 1] || 'Further'} reminder`;
   };
 
   /* ---- what is owed, per customer ---- */
@@ -262,7 +264,7 @@ module.exports = function registerInvoiceChasers({
       <table style="border-collapse:collapse;font-size:14px"><thead><tr style="text-align:left;color:#666"><th style="padding:4px 10px 4px 0">Invoice</th><th style="padding:4px 10px">Due</th><th style="padding:4px 10px"></th><th style="padding:4px 0 4px 10px;text-align:right">Owed</th></tr></thead><tbody>${rows}</tbody>
       <tfoot><tr><td colspan="3" style="padding:6px 10px 4px 0"><strong>${isStatement ? 'Balance owed' : 'Overdue'}</strong></td><td style="padding:6px 0 4px 10px;text-align:right"><strong>${esc(money(isStatement ? g.total_due : g.overdue_total))}</strong></td></tr></tfoot></table>
       ${!isStatement && g.total_due > g.overdue_total ? `<p style="color:#666">Your full balance is ${esc(money(g.total_due))}, including invoices not yet due.</p>` : ''}
-      ${pay}<p>A statement of your account is attached.</p><p>Kind regards,<br>${esc(c.company_name)}${c.company_phone ? `<br>${esc(c.company_phone)}` : ''}</p>`;
+      ${pay}<p>A statement of your account is attached.</p>${ist.late_payment_terms ? `<p style="color:#555;font-size:13px">${esc(ist.late_payment_terms)}</p>` : ''}<p>Kind regards,<br>${esc(c.company_name)}${c.company_phone ? `<br>${esc(c.company_phone)}` : ''}</p>`;
     return { to: g.emails.join(', '), subject, html };
   }
 

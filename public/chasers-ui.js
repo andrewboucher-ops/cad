@@ -103,7 +103,7 @@
 
   function settings() {
     const st = data.settings;
-    const stageBoxes = st.stages.map((s, i) => `<div class="full"><label>${i === st.stages.length - 1 ? 'Final reminder' : i === 0 ? 'First reminder' : 'Second reminder'} (${s} days)</label><textarea data-w="${s}" rows="2">${esc(st.wording[s] || '')}</textarea></div>`).join('');
+    const stageBoxes = st.stages.map((s, i) => `<div class="full"><label>${i === st.stages.length - 1 && i > 0 ? 'Final reminder' : `${['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth'][i]} reminder`} (${s} day${s === 1 ? '' : 's'} overdue)</label><textarea data-w="${s}" rows="2">${esc(st.wording[s] || '')}</textarea></div>`).join('');
     modal('Reminder settings', `<div class="k-form">
       <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13.5px"><input type="checkbox" id="cOn" ${st.enabled ? 'checked' : ''} style="width:auto"> <strong>Send reminders automatically</strong></label></div>
       <div><label>Days overdue to remind at</label><input id="cStages" value="${esc(st.stages.join(', '))}"></div>
@@ -113,7 +113,7 @@
       <div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px"><input type="checkbox" id="cWk" ${st.weekdays_only ? 'checked' : ''} style="width:auto"> Weekdays only</label></div>
       <div class="full"><label>Send me a copy (BCC)</label><input id="cCopy" value="${esc(st.copy_to || '')}" placeholder="accounts@… — separate several with commas"></div>
       <div class="k-section">Wording</div>
-      <p class="dim full" style="font-size:12.5px;margin:0">The overdue invoices, the total and how to pay are added below this text. You can use {name}, {overdue_total}, {total} and {count}. If you change the days above, save, then reopen to word any new stage.</p>
+      <p class="dim full" style="font-size:12.5px;margin:0">The overdue invoices, the total, how to pay and your late payment terms (Invoice settings) are added below this text. You can use {name}, {overdue_total}, {total} and {count}. If you change the days above, save, then reopen to word any new stage.</p>
       ${stageBoxes}
       <div class="full"><label>Statement (sent by hand)</label><textarea id="cStmt" rows="2">${esc(st.statement_wording || '')}</textarea></div>
     </div>

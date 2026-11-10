@@ -46,6 +46,7 @@ test('off by default, lists what is owed, nothing sent by itself', async () => {
   const r = await call('GET', '/api/invoice-chasers', undefined, T);
   assert.strictEqual(r.status, 200);
   assert.strictEqual(r.body.settings.enabled, false);
+  assert.deepStrictEqual(r.body.settings.stages, [1, 7, 14, 30]);
   const g = r.body.groups.find((x) => x.key === key());
   assert.ok(g);
   assert.strictEqual(g.total_due, 700);
@@ -69,25 +70,37 @@ test('the statement PDF lists every open invoice and the late payment terms', as
   assert.match(text, /Late Payment of Commercial Debts/);
 });
 
+test('one day overdue gets the first reminder', async () => {
+  const st = app.invoiceChasers.settings();
+  const g = (await app.invoiceChasers.collect()).find((x) => x.key === key());
+  const one = { ...g, overdue: [{ key: 'c-test', number: 'INV-1', due_date: daysAgo(1), days_overdue: 1, amount_due: 10 }] };
+  assert.strictEqual(app.invoiceChasers.plan(one, st).stage, 1);
+  const mail = app.invoiceChasers.emailFor(one, 1, st);
+  assert.match(mail.subject, /^Reminder: invoice INV-1 is overdue/);
+  assert.match(mail.html, /the invoice below is now past its due date/);
+  assert.match(mail.html, /Late Payment of Commercial Debts/);
+});
+
 test('a reminder run sends one email at the latest stage reached, then not again', async () => {
-  assert.strictEqual((await call('PUT', '/api/invoice-chasers/settings', { enabled: true, stages: '7, 14, 30', copy_to: 'me@echelon.example' }, T)).status, 200);
+  assert.strictEqual((await call('PUT', '/api/invoice-chasers/settings', { enabled: true, stages: '1, 7, 14, 30', copy_to: 'me@echelon.example' }, T)).status, 200);
   const r = await call('POST', '/api/invoice-chasers/run', {}, T);
   assert.strictEqual(r.status, 200);
   assert.strictEqual(r.body.sent.length, 1);
   assert.strictEqual(sent.length, 1);
   const m = sent[0];
   assert.strictEqual(m.to, 'accounts@slow.example');
-  assert.match(m.subject, /^Second reminder: invoice INV-9001 is overdue/);
+  assert.match(m.subject, /^Third reminder: invoice INV-9001 is overdue/);
   assert.strictEqual(m.opts.bcc, 'me@echelon.example');
   assert.strictEqual(m.opts.attachments.length, 1);
   assert.match(m.opts.attachments[0].name, /^Statement - Slow Payers Ltd/);
   assert.match(m.html, /INV-9001/);
   assert.doesNotMatch(m.html, /INV-9002/); // reminders list only the overdue ones
-  // 7 and 14 both marked, so the same reminders never go again.
+  assert.match(m.html, /Late Payment of Commercial Debts/); // terms in every reminder
+  // 1, 7 and 14 all marked, so the same reminders never go again.
   const again = await call('POST', '/api/invoice-chasers/run', {}, T);
   assert.strictEqual(again.body.sent.length, 0);
   assert.strictEqual(sent.length, 1);
-  assert.ok(app.db.invoices.find((i) => i.number === 'INV-9001').history.some((h) => /second reminder emailed/.test(h.what)));
+  assert.ok(app.db.invoices.find((i) => i.number === 'INV-9001').history.some((h) => /third reminder emailed/.test(h.what)));
 });
 
 test('the gap between emails holds a new reminder back, then it goes', async () => {
@@ -120,6 +133,7 @@ test('paused customers are not chased; statements can be sent by hand', async ()
   // The statement counts for the gap, so the 7-day reminder for INV-9004 waits.
   const g2 = (await call('GET', '/api/invoice-chasers', undefined, T)).body.groups.find((x) => x.key === key());
   assert.strictEqual(g2.plan.stage, 7);
+  assert.match(sent[before].html, /Late Payment of Commercial Debts/);
   assert.match(g2.plan.reason, /waiting/);
 });
 
