@@ -25,8 +25,12 @@ const API = (process.env.XERO_API_BASE || 'https://api.xero.com').replace(/\/+$/
 // the old broad accounting.transactions (Xero answers "invalid_scope"), and
 // older apps must move by September 2027. CCCS creates, emails and reads
 // invoices (accounting.invoices) and finds or creates contacts
-// (accounting.contacts) — nothing else. XERO_SCOPES overrides the list.
-const SCOPES = process.env.XERO_SCOPES || 'openid profile email offline_access accounting.invoices accounting.contacts';
+// (accounting.contacts). Expenses (routes-expenses.js) add a staff claim as
+// a bill (ACCPAY, also accounting.invoices), a company-paid one as Spend
+// Money (accounting.banktransactions), and attach the receipt to either
+// (accounting.attachments). A new scope only takes effect when an admin
+// presses Connect to Xero again. XERO_SCOPES overrides the list.
+const SCOPES = process.env.XERO_SCOPES || 'openid profile email offline_access accounting.invoices accounting.contacts accounting.banktransactions accounting.attachments';
 
 /** A Xero date as YYYY-MM-DD: "2026-11-10T00:00:00" (the *String fields)
  * or the older "/Date(<ms since 1970>+0000)/". Null when absent. */
@@ -64,6 +68,9 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const r = row();
     r.access_token = data.access_token; r.refresh_token = data.refresh_token || r.refresh_token;
     r.expires_at = Date.now() + (Number(data.expires_in) || 1800) * 1000 - 60000;
+    // What this connection was granted, so a page can say "reconnect to
+    // allow receipts" rather than fail on the first upload.
+    if (data.scope) r.scopes = String(data.scope).split(/\s+/).filter(Boolean);
     flushNow();
     return r;
   }
@@ -80,17 +87,17 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
   }
   function disconnect() {
     const r = row();
-    for (const k of ['access_token', 'refresh_token', 'expires_at', 'tenant_id', 'tenant_name', 'connected_at', 'connected_by']) delete r[k];
+    for (const k of ['access_token', 'refresh_token', 'expires_at', 'tenant_id', 'tenant_name', 'connected_at', 'connected_by', 'scopes']) delete r[k];
     flushNow();
   }
-  async function call(method, path, body) {
+  async function call(method, path, body, raw = null) {
     if (!configured()) throw new Error('Xero is not set up on this server (XERO_CLIENT_ID / XERO_CLIENT_SECRET)');
     if (!connected()) throw new Error('not connected to Xero — press "Connect to Xero" on the Invoices page');
     let r = row();
     if (!r.access_token || Date.now() >= r.expires_at) r = await token({ grant_type: 'refresh_token', refresh_token: r.refresh_token });
     const res = await fetch(`${API}/api.xro/2.0${path}`, {
-      method, headers: { authorization: `Bearer ${r.access_token}`, 'xero-tenant-id': r.tenant_id, accept: 'application/json', 'content-type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
+      method, headers: { authorization: `Bearer ${r.access_token}`, 'xero-tenant-id': r.tenant_id, accept: 'application/json', 'content-type': raw ? raw.contentType : 'application/json' },
+      body: raw ? raw.bytes : (body ? JSON.stringify(body) : undefined),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -102,6 +109,37 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     // a problem that has since been fixed.
     if (row().last_error) { Object.assign(row(), { last_error: null, last_error_at: null }); flushNow(); }
     return data;
+  }
+  /** A supplier or staff member as a Xero contact: found by name, or created. */
+  async function contactNamed(name) {
+    const n = String(name || '').replace(/"/g, '').trim().slice(0, 255);
+    if (!n) throw new Error('a Xero contact needs a name');
+    const found = await call('GET', `/Contacts?where=${encodeURIComponent(`Name=="${n}"`)}`);
+    let c = found.Contacts && found.Contacts[0];
+    if (!c) { const made = await call('POST', '/Contacts', { Contacts: [{ Name: n }] }); c = made.Contacts && made.Contacts[0]; }
+    if (!c || !c.ContactID) throw new Error('Xero did not return a contact');
+    return c.ContactID;
+  }
+  /** A bill (ACCPAY invoice) — what a staff member is owed back. */
+  async function createBill(bill) {
+    const out = await call('POST', '/Invoices', { Invoices: [{ Type: 'ACCPAY', CurrencyCode: 'GBP', ...bill }] });
+    const x = out.Invoices && out.Invoices[0];
+    if (!x || !x.InvoiceID) throw new Error('Xero did not return the bill');
+    return { id: x.InvoiceID, status: x.Status, total: x.Total };
+  }
+  /** Spend Money from a bank account — paid on a company card. */
+  async function createSpend(spend) {
+    const out = await call('POST', '/BankTransactions', { BankTransactions: [{ Type: 'SPEND', CurrencyCode: 'GBP', ...spend }] });
+    const x = out.BankTransactions && out.BankTransactions[0];
+    if (!x || !x.BankTransactionID) throw new Error('Xero did not return the spend money transaction');
+    return { id: x.BankTransactionID, status: x.Status, total: x.Total };
+  }
+  /** A file (the receipt) attached to a bill or a spend money transaction. */
+  async function attach(kind, id, filename, bytes, contentType) {
+    const endpoint = kind === 'SPEND' ? 'BankTransactions' : 'Invoices';
+    const out = await call('POST', `/${endpoint}/${encodeURIComponent(id)}/Attachments/${encodeURIComponent(filename)}`, null, { bytes, contentType });
+    const a = out.Attachments && out.Attachments[0];
+    return a ? a.AttachmentID : null;
   }
   /** The client as a Xero contact: found by name, or created. Remembered on the client. */
   async function contactFor(client) {
@@ -249,8 +287,11 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
   }
   function status() {
     const r = row();
-    return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, last_error_at: r.last_error_at || null, settings: r.settings, redirect_uri: redirectUri };
+    return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, last_error_at: r.last_error_at || null, scopes: r.scopes || null, settings: r.settings, redirect_uri: redirectUri };
   }
-  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, unpaidBills, outstandingInvoices, contactEmails, status, row };
+  /** Whether the connection is known to lack a scope (null = not known:
+   * a connection made before CCCS kept the granted list). */
+  const lacksScope = (scope) => { const g = row().scopes; return Array.isArray(g) ? !g.includes(scope) : null; };
+  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, contactNamed, createBill, createSpend, attach, lacksScope, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, unpaidBills, outstandingInvoices, contactEmails, status, row };
 };
 module.exports.xeroDate = xeroDate;

@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — expenses</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .xbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px; }
+  .xbar .grow { flex: 1; min-width: 200px; }
+  .banner { padding: 10px 12px; border-radius: 10px; margin-bottom: 12px; font-size: 13.5px; }
+  .banner.ok { background: rgba(34,197,94,.14); } .banner.bad { background: rgba(239,68,68,.14); } .banner.warn { background: rgba(234,179,8,.14); }
+  .rcpt { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .rcpt img { max-height: 120px; max-width: 160px; border-radius: 8px; border: 1px solid var(--line); }
+  .rcpt .pdf { padding: 18px 14px; border: 1px dashed var(--line); border-radius: 8px; font-size: 13px; }
+  .snap { display: block; text-align: center; padding: 18px 12px; border: 1px dashed var(--line); border-radius: 10px; cursor: pointer; font-size: 14px; }
+  .snap input { display: none; }
+  .paid-by { display: flex; gap: 8px; flex-wrap: wrap; }
+  .paid-by label { flex: 1; min-width: 140px; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; cursor: pointer; font-size: 13px; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--ink); }
+  .paid-by input { width: auto; margin-right: 6px; }
+  .cards { display: grid; gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+  .card .top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .card .top strong { flex: 1; min-width: 140px; }
+  .card .amt { font-variant-numeric: tabular-nums; font-weight: 700; }
+  .card .sub { color: var(--ink-dim); font-size: 12.5px; margin-top: 3px; }
+  .card .acts { margin-top: 8px; }
+  .warnline { color: var(--busy); font-size: 12.5px; margin-top: 4px; }
+  .badline { color: var(--emergency); font-size: 12.5px; margin-top: 4px; }
+  .cats input { font-size: 13px; padding: 5px 7px; }
+  @media (min-width: 900px) { .cards { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>Expenses</h1>
+  <button class="btn primary" id="bNew">+ Add expense</button>
+  <button class="btn money-only" id="bExport">Export CSV</button>
+  <button class="btn admin-only" id="bSettings">Expense settings</button>
+</div>
+<div class="k-body">
+  <div id="banner"></div>
+  <div class="xbar money-only" id="xbar">Checking Xero…</div>
+  <div class="tiles money-only" id="tiles"></div>
+  <div class="bar"><span id="chips"></span><input id="q" placeholder="Search supplier, reference or name"></div>
+  <div id="main"><p class="dim">Loading…</p></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['SYSTEM_ADMIN', 'DISPATCHER', 'SUPERVISOR', 'FIELD_USER', 'FINANCE'])) throw new Error('auth');
+const { modal, close, foot, wire, v, money, date, options } = KIT;
+const me = CCCS.getSession().user;
+let meta = null, rows = [], filter = null;
+const STATUS = { SUBMITTED: ['Waiting for approval', 'warn'], APPROVED: ['Approved', 'info'], IN_XERO: ['In Xero', 'ok'], REJECTED: ['Sent back', 'bad'] };
+const today = () => new Date().toISOString().slice(0, 10);
+
+/** A phone photo is 3–12 MB; the receipt only needs to be legible. Shrink
+ * it to 2000px on the long side as a JPEG (also turns HEIC/WebP into
+ * something Xero takes). A PDF goes as it is. */
+async function readReceipt(file) {
+  const asB64 = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(blob); });
+  if (file.type === 'application/pdf') {
+    if (file.size > 8e6) throw new Error('That PDF is over 8 MB.');
+    return { mimetype: 'application/pdf', filename: file.name, data: await asB64(file), preview: null };
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('That photo could not be opened — try taking it again, or send a PDF.')); i.src = url; });
+    const k = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+    const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.85));
+    return { mimetype: 'image/jpeg', filename: (file.name || 'receipt').replace(/\.[^.]+$/, '') + '.jpg', data: await asB64(blob), preview: URL.createObjectURL(blob) };
+  } finally { URL.revokeObjectURL(url); }
+}
+
+async function load() {
+  try { [meta, rows] = await Promise.all([api('GET', '/api/expenses/meta'), api('GET', '/api/expenses')]); }
+  catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  if (!meta.can_approve) els('.money-only').forEach((x) => x.remove());
+  if (!meta.is_admin) els('.admin-only').forEach((x) => x.remove());
+  if (filter == null) filter = meta.can_approve ? 'todo' : 'mine';
+  paintXero(); paint();
+}
+
+function paintXero() {
+  if (!meta.can_approve) return;
+  const x = meta.xero, s = meta.settings;
+  const vat = s.vat_registered ? `VAT registered${s.vat_registered_from ? ` from ${date(s.vat_registered_from)}` : ''}: VAT on receipts is claimed in Xero.` : 'Not VAT registered: VAT on receipts is recorded here, and goes to Xero as part of the cost.';
+  let xs;
+  if (!x.configured) xs = 'Xero is not set up on this server (see the Invoices page).';
+  else if (!x.connected) xs = `Not connected to Xero. <a href="/invoices.html">Connect on the Invoices page</a>.`;
+  else if (x.missing_scopes && x.missing_scopes.length) xs = `Connected to <strong>${esc(x.tenant_name)}</strong>, but Xero has not allowed ${x.missing_scopes.includes('accounting.attachments') ? 'receipts' : ''}${x.missing_scopes.length === 2 ? ' or ' : ''}${x.missing_scopes.includes('accounting.banktransactions') ? 'spend money' : ''} yet. <a href="/invoices.html">Press Connect to Xero again</a> on the Invoices page.`;
+  else xs = `Connected to <strong>${esc(x.tenant_name)}</strong>.${x.missing_scopes === null ? ' If receipts don\'t attach, press Connect to Xero again on the Invoices page.' : ''}`;
+  el('#xbar').innerHTML = `<span class="grow">${xs}<br><span class="dim">${esc(vat)}${!s.bank_account ? ' Company-card spending needs its bank account set in Expense settings.' : ''}</span></span>`;
+}
+
+function filters() {
+  const mine = (e) => e.claimant_user_id === me.id || e.created_by === me.id;
+  const F = meta.can_approve
+    ? { todo: ['To approve', (e) => e.status === 'SUBMITTED'], send: ['To send to Xero', (e) => e.status === 'APPROVED'], xero: ['In Xero', (e) => e.status === 'IN_XERO'], back: ['Sent back', (e) => e.status === 'REJECTED'], mine: ['Mine', mine], all: ['All', () => true] }
+    : { mine: ['Mine', () => true], open: ['Waiting', (e) => e.status === 'SUBMITTED'], back: ['Sent back', (e) => e.status === 'REJECTED'] };
+  return F;
+}
+
+function paint() {
+  const F = filters();
+  if (!F[filter]) filter = Object.keys(F)[0];
+  if (meta.can_approve) {
+    const sum = (f) => rows.filter(f).reduce((n, e) => n + e.gross, 0);
+    const owed = rows.filter((e) => e.paid_by === 'STAFF' && e.status !== 'REJECTED' && e.status !== 'IN_XERO');
+    el('#tiles').innerHTML = [
+      ['todo', rows.filter(F.todo[1]).length, 'To approve', 'warn'],
+      ['send', rows.filter(F.send[1]).length, 'To send to Xero', ''],
+      [null, money(sum((e) => owed.includes(e))), 'Staff owed (not in Xero)', ''],
+      [null, money(sum((e) => e.status !== 'REJECTED' && e.date >= today().slice(0, 8) + '01')), 'This month', ''],
+      [null, money(rows.filter((e) => e.status !== 'REJECTED').reduce((n, e) => n + e.vat, 0)), 'VAT on receipts', 'good'],
+    ].map(([k, n, l, c]) => `<button class="tile ${c}" ${k ? `data-f="${k}"` : 'disabled'}><div class="n">${esc(String(n))}</div><div class="l">${esc(l)}</div></button>`).join('');
+    els('#tiles [data-f]').forEach((b) => { b.onclick = () => { filter = b.dataset.f; paint(); }; });
+  }
+  el('#chips').innerHTML = Object.entries(F).map(([k, [l, f]]) => `<button class="chip ${k === filter ? 'on' : ''}" data-chip="${k}">${esc(l)} <span class="dim">${rows.filter(f).length}</span></button>`).join(' ');
+  els('[data-chip]').forEach((b) => { b.onclick = () => { filter = b.dataset.chip; paint(); }; });
+  const q = el('#q').value.trim().toLowerCase();
+  const list = rows.filter(F[filter][1]).filter((e) => !q || `${e.ref} ${e.supplier} ${e.description} ${e.claimant_name} ${e.category_label}`.toLowerCase().includes(q));
+  el('#main').innerHTML = list.length ? `<div class="cards">${list.map(card).join('')}</div>` : `<p class="dim">${rows.length ? 'Nothing here.' : 'No expenses yet. Press <strong>+ Add expense</strong> and take a photo of the receipt.'}</p>`;
+  els('[data-act]').forEach((b) => { b.onclick = () => act(b.dataset.act, rows.find((e) => e.id === Number(b.dataset.id)), b); });
+}
+
+function card(e) {
+  const [st, cls] = STATUS[e.status] || [e.status, 'off'];
+  const a = (k, label, c = '') => `<button class="btn ${c}" data-act="${k}" data-id="${e.id}">${esc(label)}</button>`;
+  const acts = [];
+  if (e.receipt) acts.push(`<a class="btn" href="${esc(e.receipt.url)}" target="_blank" rel="noopener">Receipt</a>`);
+  if (e.can_edit) acts.push(a('edit', e.status === 'REJECTED' && !meta.can_approve ? 'Fix and resend' : 'Edit'));
+  if (meta.can_approve) {
+    if (e.status === 'SUBMITTED') acts.push(a('reject', 'Send back', 'danger'), a('approve', 'Approve'), a('approve-send', 'Approve & send to Xero', 'primary'));
+    if (e.status === 'APPROVED') acts.push(a('reject', 'Send back', 'danger'), a('xero', 'Send to Xero', 'primary'));
+    if (e.status === 'IN_XERO' && e.xero && e.xero.attachment_error) acts.push(a('retry', 'Retry receipt', 'primary'));
+  }
+  if (e.can_edit && ['SUBMITTED', 'REJECTED'].includes(e.status)) acts.push(a('delete', 'Delete', 'danger'));
+  const vatTxt = e.vat > 0 ? `VAT ${money(e.vat)}` : (meta.vat_rates.find((r) => r.key === e.vat_rate) || {}).label;
+  return `<div class="card">
+    <div class="top"><strong>${esc(e.supplier)}</strong><span class="amt">${money(e.gross)}</span><span class="pill ${cls}">${esc(st)}</span></div>
+    <div class="sub">${esc(e.ref)} · ${esc(date(e.date))} · ${esc(e.category_label)} · ${esc(vatTxt || '')} · ${e.paid_by === 'STAFF' ? `paid by ${esc(e.claimant_name)}` : 'company card'}</div>
+    ${e.description ? `<div class="sub">${esc(e.description)}</div>` : ''}
+    ${!e.receipt ? `<div class="warnline">No receipt: ${esc(e.no_receipt_reason || '')}</div>` : ''}
+    ${e.duplicate_of ? `<div class="warnline">Same receipt as ${esc(e.duplicate_of)} — check it isn't claimed twice.</div>` : ''}
+    ${e.status === 'REJECTED' && e.reject_reason ? `<div class="badline">Sent back: ${esc(e.reject_reason)}</div>` : ''}
+    ${e.xero ? `<div class="sub">In Xero as ${e.xero.kind === 'BILL' ? `a bill to ${esc(e.claimant_name)}` : 'spend money'} on ${esc(date(e.xero.sent_at))}${e.xero.attachment_id ? ', receipt attached' : ''}</div>` : ''}
+    ${e.xero && e.xero.attachment_error ? `<div class="badline">${esc(e.xero.attachment_error)}</div>` : ''}
+    <div class="acts">${acts.join('')}</div>
+  </div>`;
+}
+
+async function act(k, e, btn) {
+  try {
+    if (k === 'edit') return form(e);
+    if (k === 'reject') {
+      return modal(`Send back ${e.ref}`, `<div class="k-form"><div class="full"><label>Why? (they'll see this)</label><input id="rWhy" placeholder="e.g. the receipt is unreadable — please retake it"></div></div>${foot('Send back')}`, (root) => wire(root, async () => {
+        await api('POST', `/api/expenses/${e.id}/reject`, { reason: v(root, '#rWhy') }); close(); load();
+      }));
+    }
+    if (k === 'delete') { if (!confirm(`Delete ${e.ref} (${e.supplier}, ${money(e.gross)})?`)) return; await api('DELETE', `/api/expenses/${e.id}`); return load(); }
+    btn.disabled = true;
+    if (k === 'approve' || k === 'approve-send') { btn.textContent = 'Approving…'; await api('POST', `/api/expenses/${e.id}/approve`); }
+    if (k === 'xero' || k === 'approve-send') { btn.textContent = 'Sending…'; const r = await api('POST', `/api/expenses/${e.id}/xero`); if (r.xero && r.xero.attachment_error) alert(`${r.ref} is in Xero, but the receipt didn't attach:\n${r.xero.attachment_error}`); }
+    if (k === 'retry') { btn.textContent = 'Attaching…'; await api('POST', `/api/expenses/${e.id}/xero-receipt`); }
+  } catch (err) { alert(err.message); }
+  load();
+}
+
+function form(e = null) {
+  const cats = meta.categories.map((c) => [c.key, c.label]);
+  const rates = meta.vat_rates.map((r) => [r.key, r.label]);
+  let receipt = null;
+  const html = `<div class="k-form">
+    <div class="full">
+      <label>Receipt</label>
+      <div class="rcpt" id="fRc">${e && e.receipt ? (e.receipt.mimetype === 'application/pdf' ? '<span class="pdf">PDF on file</span>' : `<img src="${esc(e.receipt.url)}" alt="receipt">`) : ''}
+        <label class="snap" style="flex:1"><input type="file" id="fFile" accept="image/*,application/pdf">${e && e.receipt ? 'Replace the receipt' : 'Take a photo of the receipt, or choose a PDF'}</label></div>
+    </div>
+    <div><label>Date on the receipt</label><input type="date" id="fDate" value="${esc(e ? e.date : today())}" max="${today()}"></div>
+    <div><label>Who you paid</label><input id="fSup" value="${esc(e ? e.supplier : '')}" placeholder="e.g. Shell, Trainline, Amazon"></div>
+    <div class="full"><label>What it was for</label><input id="fDesc" value="${esc(e ? e.description : '')}" placeholder="e.g. Fuel for patrol van, Meridian Point"></div>
+    <div><label>Category</label><select id="fCat">${options(cats, e ? e.category : '', 'Pick one…')}</select></div>
+    <div><label>Total paid (£)</label><input id="fGross" type="number" step="0.01" min="0" inputmode="decimal" value="${e ? e.gross.toFixed(2) : ''}"></div>
+    <div><label>VAT on the receipt</label><select id="fRate">${options(rates, e ? e.vat_rate : 'STANDARD')}</select></div>
+    <div><label>VAT amount (£)</label><input id="fVat" type="number" step="0.01" min="0" inputmode="decimal" value="${e ? e.vat.toFixed(2) : ''}" placeholder="worked out for you"></div>
+    <div class="full" id="fVnoRow"><label>Supplier's VAT number (if on the receipt)</label><input id="fVno" value="${esc(e ? e.vat_number || '' : '')}" placeholder="GB123456789"></div>
+    <div class="full"><label>Who paid</label><div class="paid-by">
+      <label><input type="radio" name="fPaid" value="STAFF" ${!e || e.paid_by === 'STAFF' ? 'checked' : ''}>I paid — pay me back</label>
+      <label><input type="radio" name="fPaid" value="COMPANY" ${e && e.paid_by === 'COMPANY' ? 'checked' : ''}>Company card</label>
+    </div></div>
+    <div class="full"><label><input type="checkbox" id="fNoR" style="width:auto" ${e && !e.receipt && e.no_receipt_reason ? 'checked' : ''}> No receipt</label>
+      <input id="fNoWhy" class="${e && !e.receipt && e.no_receipt_reason ? '' : 'hide'}" value="${esc(e ? e.no_receipt_reason || '' : '')}" placeholder="Why not? e.g. parking meter gave no ticket"></div>
+  </div>${foot(e ? 'Save' : 'Send for approval')}`;
+  modal(e ? `Edit ${e.ref}` : 'Add an expense', html, (root) => {
+    const $ = (s) => root.querySelector(s);
+    let vatTouched = Boolean(e);
+    const calc = () => {
+      if (vatTouched) return;
+      const g = Number($('#fGross').value), r = (meta.vat_rates.find((x) => x.key === $('#fRate').value) || {}).rate || 0;
+      $('#fVat').value = g > 0 ? (g - g / (1 + r)).toFixed(2) : '';
+    };
+    $('#fVat').oninput = () => { vatTouched = $('#fVat').value !== ''; };
+    $('#fGross').oninput = calc;
+    $('#fRate').onchange = () => { vatTouched = false; calc(); };
+    $('#fNoR').onchange = () => $('#fNoWhy').classList.toggle('hide', !$('#fNoR').checked);
+    $('#fFile').onchange = async () => {
+      const f = $('#fFile').files[0]; if (!f) return;
+      try {
+        receipt = await readReceipt(f);
+        $('#fRc').querySelectorAll('img,.pdf').forEach((x) => x.remove());
+        $('#fRc').insertAdjacentHTML('afterbegin', receipt.preview ? `<img src="${receipt.preview}" alt="receipt">` : `<span class="pdf">${esc(f.name)}</span>`);
+      } catch (err) { root.querySelector('[data-k-err]').textContent = err.message; }
+    };
+    wire(root, async () => {
+      const body = {
+        date: v(root, '#fDate'), supplier: v(root, '#fSup'), description: v(root, '#fDesc'), category: v(root, '#fCat'),
+        gross: Number(v(root, '#fGross')), vat_rate: v(root, '#fRate'), vat: v(root, '#fVat'), vat_number: v(root, '#fVno'),
+        paid_by: root.querySelector('[name=fPaid]:checked').value,
+        no_receipt_reason: $('#fNoR').checked ? v(root, '#fNoWhy') : '',
+      };
+      if (!receipt && !(e && e.receipt) && !body.no_receipt_reason) throw new Error('Add a photo of the receipt, or tick "No receipt" and say why.');
+      if (receipt) body.receipt = { mimetype: receipt.mimetype, filename: receipt.filename, data: receipt.data };
+      if (e) await api('PATCH', `/api/expenses/${e.id}`, body); else await api('POST', '/api/expenses', body);
+      close();
+      el('#banner').innerHTML = `<div class="banner ok">${e ? 'Saved.' : 'Sent for approval. Keep the paper receipt until it shows “In Xero”.'}</div>`;
+      setTimeout(() => { el('#banner').innerHTML = ''; }, 6000);
+      load();
+    });
+  }, { wide: false });
+}
+
+function settingsForm() {
+  const s = meta.settings;
+  const catRow = (c = {}) => `<tr><td><input data-c="label" value="${esc(c.label || '')}"></td><td><input data-c="account_code" value="${esc(c.account_code || '')}" style="width:80px"></td><td style="text-align:center"><input type="checkbox" data-c="no_vat_reclaim" ${c.no_vat_reclaim ? 'checked' : ''} style="width:auto"></td><td><input type="hidden" data-c="key" value="${esc(c.key || '')}"><button type="button" class="btn danger" data-del style="padding:3px 8px">✕</button></td></tr>`;
+  modal('Expense settings', `<div class="k-form">
+    <div class="k-section">VAT</div>
+    <div><label>VAT registered?</label><select id="sVat">${options([['no', 'Not yet'], ['yes', 'Yes']], s.vat_registered ? 'yes' : 'no')}</select></div>
+    <div><label>Registered from (effective date)</label><input type="date" id="sVatFrom" value="${esc(s.vat_registered_from || '')}"></div>
+    <p class="dim full" style="font-size:12.5px;margin:0">Until you're registered, expenses go to Xero with no VAT (the whole amount is the cost) and the VAT on each receipt is kept here. Once registered, set the date from your VAT certificate and VAT on later receipts is claimed in Xero. Export CSV gives your accountant the VAT on earlier purchases, some of which can be reclaimed on the first return.</p>
+    <div class="k-section">Xero</div>
+    <div class="full"><label>Bank account company-card spending comes from (Xero account code, or its AccountID)</label><input id="sBank" value="${esc(s.bank_account || '')}" placeholder="e.g. 090, or 96fd9e23-…"></div>
+    <div><label>Staff claims go into Xero as</label><select id="sBill">${options([['AUTHORISED', 'Approved bills (to pay)'], ['DRAFT', 'Draft bills (check in Xero)']], s.bill_status)}</select></div>
+    <div><label>Pay staff back within (days)</label><input id="sDays" type="number" min="0" max="90" value="${esc(String(s.pay_within_days))}"></div>
+    <div class="k-section">Categories</div>
+    <div class="full"><table class="k cats"><thead><tr><th>Name</th><th>Xero account</th><th>No VAT reclaim</th><th></th></tr></thead><tbody id="sCats">${s.categories.map(catRow).join('')}</tbody></table>
+      <button type="button" class="btn" id="sAdd" style="margin-top:6px">+ Category</button></div>
+  </div>${foot('Save')}`, (root) => {
+    const bindDel = () => root.querySelectorAll('[data-del]').forEach((b) => { b.onclick = () => b.closest('tr').remove(); });
+    bindDel();
+    root.querySelector('#sAdd').onclick = () => { root.querySelector('#sCats').insertAdjacentHTML('beforeend', catRow()); bindDel(); };
+    wire(root, async () => {
+      const categories = [...root.querySelectorAll('#sCats tr')].map((tr) => {
+        const g = (k) => tr.querySelector(`[data-c="${k}"]`);
+        return { key: g('key').value, label: g('label').value.trim(), account_code: g('account_code').value.trim(), no_vat_reclaim: g('no_vat_reclaim').checked };
+      }).filter((c) => c.label || c.account_code);
+      await api('PUT', '/api/expenses/settings', {
+        vat_registered: v(root, '#sVat') === 'yes', vat_registered_from: v(root, '#sVatFrom') || null,
+        bank_account: v(root, '#sBank'), bill_status: v(root, '#sBill'), pay_within_days: Number(v(root, '#sDays')), categories,
+      });
+      close(); load();
+    });
+  }, { wide: true });
+}
+
+function exportForm() {
+  const d = new Date(), first = new Date(d.getFullYear(), d.getMonth() - 2, 1).toISOString().slice(0, 10);
+  modal('Export expenses', `<div class="k-form">
+    <div><label>From</label><input type="date" id="eFrom" value="${first}"></div>
+    <div><label>To</label><input type="date" id="eTo" value="${today()}"></div>
+    <p class="dim full" style="font-size:12.5px;margin:0">One row per expense (not sent back), with net, VAT and total split out — for your accountant or a VAT return.</p>
+  </div>${foot('Download')}`, (root) => wire(root, async () => {
+    const qs = new URLSearchParams(); if (v(root, '#eFrom')) qs.set('from', v(root, '#eFrom')); if (v(root, '#eTo')) qs.set('to', v(root, '#eTo'));
+    const a = document.createElement('a'); a.href = `/api/expenses/export.csv?${qs}`; document.body.appendChild(a); a.click(); a.remove();
+    close();
+  }));
+}
+
+el('#bNew').onclick = () => form();
+el('#q').oninput = paint;
+const bx = el('#bExport'); if (bx) bx.onclick = exportForm;
+const bs = el('#bSettings'); if (bs) bs.onclick = settingsForm;
+load();
+</script>
+</body>
+</html>
