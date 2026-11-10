@@ -198,6 +198,9 @@ fi
 # never was): database and uploads, encrypted. Never fails a deploy.
 if [ -n "$DRY_RUN" ]; then echo "   (dry run) bash deploy/install-backup.sh"
 else bash "$SRC_DIR/deploy/install-backup.sh" || echo "   WARNING: could not install the nightly backup — run deploy/install-backup.sh by hand" >&2; fi
+# Same for the watchdog that texts/emails when CCCS goes down or backups stop.
+if [ -n "$DRY_RUN" ]; then echo "   (dry run) bash deploy/install-watchdog.sh"
+else bash "$SRC_DIR/deploy/install-watchdog.sh" || echo "   WARNING: could not install the watchdog — run deploy/install-watchdog.sh by hand" >&2; fi
 
 say "5/6  Restarting $SERVICE"
 run systemctl restart "$SERVICE"

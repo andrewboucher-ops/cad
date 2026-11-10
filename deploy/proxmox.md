@@ -115,13 +115,27 @@ Two things only you can do:
 1. **Save the key somewhere other than this server** (a password manager).
    `cat /etc/cccs/backup.key` inside the container shows it. Without it no
    archive can be opened.
-2. **Copy the archives off this server.** Either set
-   `BACKUP_RCLONE_REMOTE=onedrive:cccs-backups` in `/etc/cccs/cccs.env` after
-   `apt install rclone && rclone config`, or have the Proxmox host pull them:
-```bash
-# on the host, in cron
-rsync -a root@192.168.7.54:/var/backups/cccs/ /mnt/backups/cccs/
-```
+2. **Copy the archives off this server.** The CCCS container, its backups
+   and the Proxmox host all live on one machine, so a dead disk, theft or a
+   fire takes every copy at once. The easy way is OneDrive, through the
+   Microsoft app CCCS already signs people in and sends email with:
+   - In the Entra admin centre (entra.microsoft.com): **App registrations →
+     the CCCS app → API permissions → Add a permission → Microsoft Graph →
+     Application permissions → `Files.ReadWrite.All` → Add**, then **Grant
+     admin consent**. (This lets the app write to OneDrive in your tenant;
+     the archives are encrypted before they leave, so Microsoft only ever
+     holds scrambled files.)
+   - Add to `/etc/cccs/cccs.env`:
+     `BACKUP_ONEDRIVE_USER=you@echeloncic.com` (whose OneDrive gets them).
+     Optional: `BACKUP_ONEDRIVE_FOLDER` (default `CCCS backups`) and
+     `BACKUP_REMOTE_KEEP` (copies kept there, default 30).
+   - Test it: `systemctl start cccs-backup && journalctl -u cccs-backup -n 20`
+     should end with `Copied off this server to OneDrive`.
+
+   Or use rclone to anywhere else (a NAS, Backblaze):
+   `BACKUP_RCLONE_REMOTE=nas:cccs-backups` after `apt install rclone && rclone config`.
+   If an off-server copy fails the backup exits 2, `last-backup.json` in
+   `/var/backups/cccs` says why, and the watchdog (§4a) tells you.
 
 Restore (service stopped):
 ```bash
@@ -131,6 +145,46 @@ openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:/etc/cccs/backup.key
 
 Then restore one for real, onto a spare container. An untested backup is a
 hope, not a backup.
+
+## 4a. Down alerts (cccs-watchdog)
+
+`cccs-watchdog` (deploy/watchdog.js, installed by deploy/install-watchdog.sh,
+which install.sh and update.sh both run) checks every 2 minutes and texts
+**and** emails you when:
+
+- CCCS stops answering for two checks in a row (a restart or an auto-deploy
+  doesn't count), and again when it's back;
+- the nightly backup is over a day old or failed;
+- a backup wasn't copied off the server (or no off-server copy is set up,
+  weekly);
+- the disk has under 10% free.
+
+A problem that carries on is repeated every 6 hours. Texts go through
+Twilio, emails through the Microsoft 365 app, both from cccs.env, so one
+failing doesn't silence it. Add to `/etc/cccs/cccs.env`:
+
+```
+ALERT_EMAIL=you@echeloncic.com
+ALERT_SMS=07700900123
+```
+
+Then `cccs-watchdog --test` sends a test of each and prints how each went.
+`cccs-watchdog --status` shows what it last saw; its log is
+`journalctl -u cccs-watchdog`.
+
+**Something on this server can't tell you the server is off.** For a power
+cut, a dead host or the broadband going, sign up for a free check at
+healthchecks.io (period 5 minutes, grace 10 minutes, add your email and
+phone app as integrations), and put its ping URL in cccs.env:
+
+```
+WATCHDOG_PING_URL=https://hc-ping.com/your-check-id
+```
+
+The watchdog pings it every 2 minutes while CCCS is healthy (and `/fail`
+when it's down), so Healthchecks.io alerts you itself when the pings stop.
+A second free check in `BACKUP_PING_URL` does the same for the nightly
+backup (period 1 day, grace 2 hours).
 
 ## 5. Snapshots are not backups either
 

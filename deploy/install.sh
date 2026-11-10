@@ -84,6 +84,7 @@ systemctl reload caddy || systemctl restart caddy
 
 echo "==> Installing nightly backup"
 bash deploy/install-backup.sh
+bash deploy/install-watchdog.sh
 
 cat <<DONE
 
