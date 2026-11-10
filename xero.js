@@ -210,6 +210,19 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const x = out.Invoices && out.Invoices[0];
     return x ? { status: x.Status, number: x.InvoiceNumber, amount_due: x.AmountDue, amount_paid: x.AmountPaid, total: x.Total } : null;
   }
+  /** A draft sales invoice straight in Xero for a contact CCCS may not
+   * know as a client (e.g. late payment charges on invoices raised in
+   * Xero). Left as a draft for checking and sending from Xero. */
+  async function createDraftInvoice({ contactId, date, dueDate, reference, lines }) {
+    const s = row().settings;
+    const out = await call('POST', '/Invoices', { Invoices: [{
+      Type: 'ACCREC', Contact: { ContactID: contactId }, Date: date, DueDate: dueDate, Reference: reference, LineAmountTypes: 'Exclusive', Status: 'DRAFT', CurrencyCode: 'GBP',
+      LineItems: lines.map((l) => ({ Description: l.description, Quantity: 1, UnitAmount: l.amount, AccountCode: s.account_code, TaxType: 'NONE' })),
+    }] });
+    const x = out.Invoices && out.Invoices[0];
+    if (!x || !x.InvoiceID) throw new Error('Xero did not return the invoice');
+    return { invoice_id: x.InvoiceID, number: x.InvoiceNumber || null, status: x.Status, total: x.Total };
+  }
   /** Every approved sales invoice with money still owed on it, whoever
    * raised it (CCCS or straight in Xero) — for payment reminders and
    * statements. Partly paid invoices stay AUTHORISED with a smaller
@@ -251,6 +264,6 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const r = row();
     return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, last_error_at: r.last_error_at || null, settings: r.settings, redirect_uri: redirectUri };
   }
-  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, unpaidBills, outstandingInvoices, contactEmails, status, row };
+  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, unpaidBills, outstandingInvoices, contactEmails, createDraftInvoice, status, row };
 };
 module.exports.xeroDate = xeroDate;

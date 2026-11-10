@@ -6106,6 +6106,10 @@ const invoicesApi = require('./routes-invoices.js')({
 const invoiceChasers = require('./routes-invoice-chasers.js')({
   route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, invoices: invoicesApi, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
+// Statutory late payment interest and compensation — see routes-late-charges.js.
+require('./routes-late-charges.js')({
+  route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, chasers: invoiceChasers, flushNow: () => store.flushNow(),
+});
 
 // Which roles see which section of the menus — see ui-sections.js.
 const sections = require('./ui-sections.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });
