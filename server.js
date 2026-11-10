@@ -974,6 +974,7 @@ function publicSiteVisit(v) {
   return {
     ...v,
     site_name: site ? site.name : null, site_address: site ? site.address : null,
+    site_postcode: site ? site.postcode || '' : '', site_access: site ? site.access_instructions || '' : '',
     beat_name: beat ? beat.name : null, waypoints: beat ? beat.waypoints : [],
     checkpoint_scans: v.checkpoint_scans || [],
     lat: site ? site.lat : null, lon: site ? site.lon : null,

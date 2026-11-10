@@ -298,6 +298,58 @@ module.exports = function registerSites({ route, httpError, ALL, CONTROL, ADMIN,
     logEvent('site_visit.created', `VISIT ${v.reference} CREATED FOR ${site.name}`, { site_visit_id: v.id });
     return { __status: 201, __body: publicSiteVisit(v) };
   });
+
+  /* One-off visits for a client at an address that isn't one of their
+   * sites — e.g. AURA passing on a patrol at their own customer's premises.
+   * Control types the address; this makes (or reuses) a one-off site under
+   * that client, so the visit runs like any other (officer app, checklist,
+   * photos, report), the report goes to the client's contact email and
+   * shows in their portal. Not billed in CCCS (Andy invoices these in
+   * Xero himself, 2026-11-10); client_ref holds the client's own job
+   * reference to match them up. One-off sites are flagged one_off so lists
+   * can keep them apart from sites under contract. */
+  route('POST', '/api/site-visits/one-off', CONTROL, ({ body, user }) => {
+    const client = (db.clients || []).find((c) => c.id === Number(body.client_id));
+    if (!client) throw httpError(400, 'choose the client this visit is for');
+    const address = String(body.address || '').trim().slice(0, 300);
+    if (!address) throw httpError(400, 'type the address of the site');
+    const postcode = String(body.postcode || '').trim().toUpperCase().slice(0, 12);
+    const customer = String(body.customer_name || '').trim().slice(0, 120);
+    const when = body.scheduled_for ? new Date(body.scheduled_for) : new Date();
+    if (Number.isNaN(when.getTime())) throw httpError(400, 'the visit time is not a valid date and time');
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    let site = db.sites.find((s) => s.one_off && s.client_id === client.id && norm(s.address) === norm(address) && norm(s.postcode) === norm(postcode));
+    if (!site) {
+      const first = customer || address.split(/[,\n]/)[0].trim();
+      let name = `${client.name} — ${first}${postcode ? ` (${postcode})` : ''}`.slice(0, 160), n = 2;
+      while (db.sites.some((x) => x.name.toLowerCase() === name.toLowerCase())) name = `${client.name} — ${first} ${n++}`;
+      site = {
+        id: nextId('sites'), name, address, lat: Number(body.lat) || null, lon: Number(body.lon) || null,
+        keyholder: '', contact_email: client.contact_email || '', accounts_email: '', contract: 'ONE_OFF', checklist: [],
+        response_sla_minutes: null, geofence_m: null, branch_id: null, code: '', postcode, aura_location_id: '', timezone: 'Europe/London',
+        risk_level: null, access_instructions: String(body.access_instructions || '').trim().slice(0, 2000), is_control_room: false,
+        one_off: true, client_id: client.id, end_customer: customer, created_at: new Date().toISOString(), created_by: user.display_name,
+      };
+      db.sites.push(site);
+      logEvent('site.created', `ONE-OFF SITE ${site.name} ADDED FOR ${client.name}`, { site_id: site.id });
+    } else if (body.access_instructions) site.access_instructions = String(body.access_instructions).trim().slice(0, 2000);
+    client.site_ids = client.site_ids || [];
+    if (!client.site_ids.includes(site.id)) client.site_ids.push(site.id);
+    const v = {
+      id: nextId('site_visits'), reference: nextVisitReference(), site_id: site.id, schedule_id: null, beat_id: null,
+      personnel_id: null, additional_personnel: [], status: 'SCHEDULED', scheduled_for: when.toISOString(),
+      dispatched_at: null, acknowledged_at: null, en_route_at: null, on_scene_at: null, completed_at: null, cancelled_at: null, missed_at: null,
+      notes: String(body.notes || '').slice(0, 2000), checklist: instantiateChecklist(site), media: [], report_html: null, checkpoint_scans: [],
+      one_off: true, client_id: client.id, client_ref: String(body.client_ref || '').trim().slice(0, 60),
+      created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    };
+    db.site_visits.push(v);
+    broadcast('site_visit.created', publicSiteVisit(v));
+    logEvent('site_visit.created', `ONE-OFF VISIT ${v.reference} FOR ${client.name} AT ${address}${v.client_ref ? ` (REF ${v.client_ref})` : ''}`, { site_visit_id: v.id });
+    const warnings = [];
+    if (!client.contact_email) warnings.push(`${client.name} has no contact email, so the visit report will go to the control room inbox to forward`);
+    return { __status: 201, __body: { ...publicSiteVisit(v), warnings } };
+  });
   route('POST', '/api/site-visits/:id/assign', CONTROL, ({ params, body }) => {
     const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
     const p = findPersonnel(body.personnel); if (!p) throw httpError(400, 'personnel required');
@@ -370,7 +422,7 @@ module.exports = function registerSites({ route, httpError, ALL, CONTROL, ADMIN,
             ['En route', v.en_route_at], ['On scene', v.on_scene_at], ['Completed', v.completed_at],
           ].filter(([, t]) => t),
           checklist: v.checklist, media: v.media,
-          extraRows: waypoints.length ? [['Checkpoints', `${waypoints.filter((w) => scannedIds.has(w.id)).length} / ${waypoints.length} scanned` + (waypoints.some((w) => !scannedIds.has(w.id)) ? ` (missing: ${waypoints.filter((w) => !scannedIds.has(w.id)).map((w) => w.title).join(', ')})` : '')]] : [],
+          extraRows: (v.one_off ? [['Address', [site && site.address, site && site.postcode].filter(Boolean).join(' ')], ...(v.client_ref ? [['Your reference', v.client_ref]] : [])] : []).concat(waypoints.length ? [['Checkpoints', `${waypoints.filter((w) => scannedIds.has(w.id)).length} / ${waypoints.length} scanned` + (waypoints.some((w) => !scannedIds.has(w.id)) ? ` (missing: ${waypoints.filter((w) => !scannedIds.has(w.id)).map((w) => w.title).join(', ')})` : '')]] : []),
         });
         // An hourly shift patrol would mean a dozen emails a shift — those are
         // in the client portal (routes-shift-patrols.js) instead.

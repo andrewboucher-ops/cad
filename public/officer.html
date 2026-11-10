@@ -1152,7 +1152,8 @@ function paintVisit() {
       ${siteDocsButton(visit.site_id)}
     </div>
     <div class="field"><span>Site</span><div>${esc(visit.site_name || '—')}${visit.beat_name ? ` — ${esc(visit.beat_name)}` : ''}</div></div>
-    <div class="field"><span>Address</span><div>${esc(visit.site_address || '—')}</div></div>
+    <div class="field"><span>Address</span><div>${esc(visit.site_address || '—')}${visit.site_postcode ? ` ${esc(visit.site_postcode)}` : ''}</div></div>
+    ${visit.site_access ? `<div class="field"><span>Access</span><div>${esc(visit.site_access)}</div></div>` : ''}
     <div class="field"><span>Scheduled for</span><div>${new Date(visit.scheduled_for).toLocaleString()}</div></div>
     <div class="field"><span>Notes</span><div>${esc(visit.notes || '—')}</div></div>
     <div class="btn-row" style="margin:12px 0">
