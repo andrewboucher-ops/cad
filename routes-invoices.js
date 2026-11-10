@@ -947,6 +947,54 @@ module.exports = function registerInvoices({
     } catch (e) { throw httpError(502, e.message); }
   });
 
+  /* ---- Bills to pay (dashboard) ----
+   * Supplier bills in Xero with money still owing, sorted overdue first,
+   * so a bill sitting unpaid (or unapproved in Xero's bills inbox) is seen
+   * before the supplier stops the account. Read-only. Cached for
+   * XERO_BILLS_CACHE_MIN minutes (default 10) so opening the dashboard
+   * doesn't call Xero every time; ?refresh=1 reads it again now. */
+  const londonToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const dayDiff = (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86400000);
+  let billsCache = null; // { at, bills }
+  route('GET', '/api/xero/bills', MONEY, async ({ query }) => {
+    const st = xero.status();
+    const base = { configured: st.configured, connected: st.connected, tenant_name: st.tenant_name };
+    if (!st.configured || !st.connected) return { ...base, bills: [], totals: null };
+    const maxAge = Number(process.env.XERO_BILLS_CACHE_MIN || 10) * 60000;
+    if (query.get('refresh') === '1' || !billsCache || Date.now() - billsCache.at > maxAge) {
+      try { billsCache = { at: Date.now(), bills: await xero.unpaidBills() }; }
+      catch (e) { return { ...base, error: e.message, bills: [], totals: null }; }
+    }
+    const today = londonToday();
+    const soonDays = 7;
+    const bills = billsCache.bills.map((b) => {
+      const days = b.due_date ? dayDiff(today, b.due_date) : null; // >0 overdue, 0 due today, <0 not yet due
+      const state = b.status !== 'AUTHORISED' ? 'NOT_APPROVED'
+        : days === null ? 'NO_DUE_DATE' : days > 0 ? 'OVERDUE' : -days <= soonDays ? 'DUE_SOON' : 'LATER';
+      return { ...b, days_overdue: days, state, xero_url: `https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${encodeURIComponent(b.id)}` };
+    });
+    // Overdue (oldest first), then due soon, then drafts / awaiting approval
+    // (a bill that came into the inbox but nobody approved — overdue ones
+    // of those still sort as overdue by date), then later.
+    const rank = { OVERDUE: 0, DUE_SOON: 1, NOT_APPROVED: 2, NO_DUE_DATE: 3, LATER: 4 };
+    const overdueish = (b) => b.days_overdue !== null && b.days_overdue > 0;
+    bills.sort((a, b) => {
+      const ra = overdueish(a) ? 0 : rank[a.state], rb = overdueish(b) ? 0 : rank[b.state];
+      if (ra !== rb) return ra - rb;
+      return String(a.due_date || '9999').localeCompare(String(b.due_date || '9999'));
+    });
+    const sum = (list) => ({ count: list.length, amount: r2(list.reduce((n, b) => n + b.amount_due, 0)) });
+    return {
+      ...base, as_of: new Date(billsCache.at).toISOString(), today, soon_days: soonDays, bills,
+      totals: {
+        overdue: sum(bills.filter(overdueish)),
+        due_soon: sum(bills.filter((b) => b.days_overdue !== null && b.days_overdue <= 0 && -b.days_overdue <= soonDays)),
+        not_approved: sum(bills.filter((b) => b.state === 'NOT_APPROVED')),
+        all: sum(bills),
+      },
+    };
+  });
+
   /* ---- Xero connection ---- */
   const states = new Map(); // state → { user, at }
   route('GET', '/api/xero/status', MONEY, () => xero.status());

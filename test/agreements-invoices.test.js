@@ -23,7 +23,7 @@ process.env.GOCARDLESS_WEBHOOK_SECRET = 'test-gc-webhook-secret';
 process.env.GOCARDLESS_API_BASE = GCBASE;
 
 /* ---- a fake Xero: just the endpoints xero.js uses ---- */
-const X = { tokens: [], contacts: [], invoices: [], calls: [], emailed: [] };
+const X = { tokens: [], contacts: [], invoices: [], bills: [], calls: [], emailed: [] };
 const fake = http.createServer((req, res) => {
   let raw = '';
   req.on('data', (c) => (raw += c));
@@ -60,6 +60,12 @@ const fake = http.createServer((req, res) => {
     if (u.pathname === '/api.xro/2.0/Invoices' && req.method === 'GET') {
       const where = u.searchParams.get('where') || '';
       const sw = where.match(/InvoiceNumber\.StartsWith\("(.*)"\)/);
+      if (/Type=="ACCPAY"/.test(where)) {
+        const statuses = (u.searchParams.get('Statuses') || '').split(',').filter(Boolean);
+        const page = Number(u.searchParams.get('page') || 1);
+        const list = X.bills.filter((b) => b.AmountDue > 0 && (!statuses.length || statuses.includes(b.Status)));
+        return send(200, { Invoices: list.slice((page - 1) * 100, page * 100) });
+      }
       if (where) {
         const list = X.invoices.filter((i) => !sw || String(i.InvoiceNumber).startsWith(sw[1]));
         if (u.searchParams.get('order') === 'InvoiceNumber DESC') list.sort((a, b) => (a.InvoiceNumber < b.InvoiceNumber ? 1 : -1));
@@ -1114,4 +1120,35 @@ test('clock times at the site that no line bills are named in the checks, not dr
   assert.ok(inv.checks.some((x) => /on 2026-03-04: clocked hours not billed — the rota shift is still a draft/.test(x)), checks);
   assert.ok(inv.checks.some((x) => /on 2026-03-05: clocked hours not billed — the contract has no hourly line for Mobile Patrol/.test(x)), checks);
   assert.ok(!inv.checks.some((x) => /2026-03-02/.test(x)), checks);
+});
+
+test('bills to pay: unpaid supplier bills from Xero, overdue first, for admins only', async () => {
+  const day = (n) => { const d = new Date(Date.now() + n * 86400000); return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(d); };
+  const bill = (o) => ({ Type: 'ACCPAY', InvoiceID: `bill-${X.bills.length + 1}`, Contact: { Name: o.who }, InvoiceNumber: o.num || '', Reference: '', Status: o.status || 'AUTHORISED', DateString: `${day(-40)}T00:00:00`, DueDateString: o.due === null ? undefined : `${o.due}T00:00:00`, AmountDue: o.due_amt, Total: o.due_amt, CurrencyCode: 'GBP' });
+  X.bills.push(
+    bill({ who: 'Culligan', num: 'CUL-881', due: day(-21), due_amt: 84.5 }),
+    bill({ who: 'BP Fuel Cards', num: 'BP-1', due: day(-3), due_amt: 612.4 }),
+    bill({ who: 'Later Ltd', due: day(30), due_amt: 50 }),
+    bill({ who: 'Soon Ltd', due: day(2), due_amt: 100 }),
+    bill({ who: 'Inbox Draft Co', status: 'DRAFT', due: null, due_amt: 40 }),
+    bill({ who: 'Paid Ltd', due: day(-5), due_amt: 0 }),
+  );
+  X.bills.push({ ...bill({ who: 'Voided', due: day(-9), due_amt: 10 }), Status: 'VOIDED' });
+  assert.equal((await call('GET', '/api/xero/bills', undefined, dispT)).status, 403, 'dispatchers do not see money');
+  const r = await call('GET', '/api/xero/bills', undefined, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.bills.map((b) => b.supplier), ['Culligan', 'BP Fuel Cards', 'Soon Ltd', 'Inbox Draft Co', 'Later Ltd'], 'overdue oldest first; paid and voided left out');
+  assert.equal(r.body.bills[0].days_overdue, 21);
+  assert.equal(r.body.bills[0].state, 'OVERDUE');
+  assert.equal(r.body.bills[3].state, 'NOT_APPROVED');
+  assert.equal(r.body.bills[4].state, 'LATER');
+  assert.deepEqual(r.body.totals.overdue, { count: 2, amount: 696.9 });
+  assert.deepEqual(r.body.totals.due_soon, { count: 1, amount: 100 });
+  assert.equal(r.body.totals.not_approved.count, 1);
+  assert.match(r.body.bills[0].xero_url, /^https:\/\/go\.xero\.com\/AccountsPayable\/View\.aspx\?InvoiceID=bill-1$/);
+
+  // Cached: a new bill shows on the next refresh, not on every page load.
+  X.bills.push(bill({ who: 'New Supplier', due: day(-1), due_amt: 5 }));
+  assert.equal((await call('GET', '/api/xero/bills', undefined, finT)).body.bills.length, 5);
+  assert.equal((await call('GET', '/api/xero/bills?refresh=1', undefined, finT)).body.bills.length, 6);
 });

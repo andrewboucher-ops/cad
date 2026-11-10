@@ -52,6 +52,14 @@
   .list-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
   .list-row:last-child { border-bottom: none; }
   .list-row .t { color: var(--ink-dim); font-family: var(--mono); font-size: 11px; min-width: 52px; }
+  .bill-sum { display: flex; gap: 18px; flex-wrap: wrap; padding: 10px 0 8px; border-bottom: 1px solid var(--line-soft); font-size: 12px; color: var(--ink-dim); }
+  .bill-sum b { display: block; font-size: 17px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .bill-sum .crit b { color: var(--emergency); }
+  .bill-sum .warn b { color: var(--priority); }
+  .bill-row .who { flex: 1; min-width: 0; }
+  .bill-row .who small { display: block; color: var(--ink-dim); font-size: 11px; }
+  .bill-row .amt { font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+  .bill-row .when { font-size: 11px; font-weight: 700; white-space: nowrap; min-width: 92px; text-align: right; }
   .empty-note { color: var(--ink-dim); padding: 20px 0; text-align: center; font-size: 13px; }
 </style>
 </head>
@@ -86,6 +94,10 @@
 
     <div class="cols">
       <div>
+        <div class="section-card" id="billsCard" style="display:none">
+          <header style="display:flex;align-items:center;gap:8px"><span style="flex:1">Bills to pay</span><button class="btn" id="billsRefresh" style="padding:3px 9px;font-size:10.5px;letter-spacing:0;text-transform:none">Check Xero now</button></header>
+          <div class="body" id="billsBody"><p class="empty-note">Reading Xero…</p></div>
+        </div>
         <div class="section-card">
           <header>Fleet &amp; coverage</header>
           <div class="body" id="fleetBody"></div>
@@ -257,6 +269,49 @@ async function load() {
     }
   }
 }
+/* ---- Bills to pay: supplier bills in Xero still owing (admins only). ----
+ * Loaded on its own so a slow Xero never holds up the rest of the page. */
+const money = (n, cur = 'GBP') => new Intl.NumberFormat('en-GB', { style: 'currency', currency: cur || 'GBP' }).format(n);
+function billWhen(b) {
+  if (b.days_overdue !== null && b.days_overdue > 0) return { text: `${b.days_overdue} day${b.days_overdue === 1 ? '' : 's'} overdue`, color: 'var(--emergency)' };
+  if (b.state === 'NOT_APPROVED') return { text: b.status === 'DRAFT' ? 'draft — not approved' : 'awaiting approval', color: 'var(--priority)' };
+  if (b.days_overdue === 0) return { text: 'due today', color: 'var(--priority)' };
+  if (b.days_overdue === null) return { text: 'no due date', color: 'var(--ink-dim)' };
+  const d = new Date(`${b.due_date}T12:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  return { text: `due ${d}`, color: b.state === 'DUE_SOON' ? 'var(--priority)' : 'var(--ink-dim)' };
+}
+async function loadBills(refresh) {
+  if (!isAdmin) return;
+  el('#billsCard').style.display = '';
+  const body = el('#billsBody');
+  let r;
+  try { r = await api('GET', `/api/xero/bills${refresh ? '?refresh=1' : ''}`); }
+  catch (e) { body.innerHTML = `<p class="empty-note">${esc(e.message)}</p>`; return; }
+  if (!r.configured || !r.connected) {
+    el('#billsRefresh').style.display = 'none';
+    body.innerHTML = '<p class="empty-note">Connect Xero on the <a href="/invoices.html">Invoices</a> page to see supplier bills due and overdue here.</p>';
+    return;
+  }
+  if (r.error) { body.innerHTML = `<p class="empty-note" style="color:var(--emergency)">Couldn't read bills from Xero: ${esc(r.error)}</p>`; return; }
+  const t = r.totals;
+  const show = r.bills.filter((b) => b.state !== 'LATER').slice(0, 12);
+  const hidden = r.bills.length - show.length;
+  const asOf = new Date(r.as_of).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  body.innerHTML = `
+    <div class="bill-sum">
+      <span class="${t.overdue.count ? 'crit' : ''}"><b>${money(t.overdue.amount)}</b>${t.overdue.count} overdue</span>
+      <span class="${t.due_soon.count ? 'warn' : ''}"><b>${money(t.due_soon.amount)}</b>${t.due_soon.count} due in ${r.soon_days} days</span>
+      <span class="${t.not_approved.count ? 'warn' : ''}"><b>${t.not_approved.count}</b>not approved in Xero</span>
+    </div>
+    ${show.length ? show.map((b) => { const w = billWhen(b); return `<a class="list-row bill-row" href="${esc(b.xero_url)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">
+        <span class="who">${esc(b.supplier)}<small>${esc([b.number, b.reference].filter(Boolean).join(' · ') || 'no reference')}</small></span>
+        <span class="amt">${money(b.amount_due, b.currency)}</span>
+        <span class="when" style="color:${w.color}">${esc(w.text)}</span>
+      </a>`; }).join('') : '<p class="empty-note">Nothing due in the next week and nothing overdue.</p>'}
+    <div class="list-row" style="color:var(--ink-dim);font-size:11px"><span style="flex:1">${hidden > 0 ? `${hidden} more not due yet · ` : ''}${t.all.count} unpaid, ${money(t.all.amount)} in all · checked ${esc(asOf)}</span><a href="https://go.xero.com/AccountsPayable/" target="_blank" rel="noopener">Open in Xero</a></div>`;
+}
+el('#billsRefresh').onclick = async () => { const b = el('#billsRefresh'); b.disabled = true; b.textContent = 'Checking…'; await loadBills(true); b.disabled = false; b.textContent = 'Check Xero now'; };
+loadBills(false);
 load().catch((e) => { el('#activityBody').innerHTML = `<p class="empty-note">${esc(e.message)}</p>`; });
 
 CCCS.bus((up) => {
