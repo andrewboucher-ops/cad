@@ -24,8 +24,9 @@
 'use strict';
 
 const crypto = require('crypto');
+const boe = require('./boe-rate.js');
 
-module.exports = function registerLateCharges({ route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, chasers, flushNow = () => {}, now = () => Date.now() }) {
+module.exports = function registerLateCharges({ route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, chasers, flushNow = () => {}, now = () => Date.now(), fetchImpl = (...a) => fetch(...a) }) {
   if (!Array.isArray(db.late_charges)) db.late_charges = [];
   const MONEY = [...ADMIN, ...FINANCE];
   const STATUTORY_MARGIN = 8;
@@ -40,16 +41,48 @@ module.exports = function registerLateCharges({ route, httpError, ADMIN, FINANCE
     if (!Array.isArray(db.ui_settings)) db.ui_settings = [];
     let r = db.ui_settings.find((x) => x.key === 'late_charges');
     if (!r) { r = { key: 'late_charges', settings: {} }; db.ui_settings.push(r); }
-    r.settings = { base_rate: null, base_rate_set_at: null, base_rate_by: null, pay_within_days: 14, ...(r.settings || {}) };
+    // base_rate_mode AUTO: the reference rate for each invoice comes from
+    // the Bank of England (boe-rate.js), fetched daily; base_rate is then
+    // only used if the Bank can't be reached and nothing was fetched before.
+    r.settings = { base_rate_mode: 'AUTO', base_rate: null, base_rate_set_at: null, base_rate_by: null, pay_within_days: 14, boe: { rates: [], fetched_at: null, error: null }, ...(r.settings || {}) };
     return r.settings;
   }
   const compensationFor = (debt) => (debt < 1000 ? 40 : debt < 10000 ? 70 : 100);
   /** Item keys of invoices that are themselves late charges: no interest on interest. */
   const chargeKeys = () => new Set(db.late_charges.map((c) => c.charge_item_key).filter(Boolean));
 
+  /** Refreshes the Bank of England rates if they are more than 12 hours old. */
+  async function ensureRates({ force = false } = {}) {
+    const st = settings();
+    const b = st.boe;
+    if (!force && b.fetched_at && now() - Date.parse(b.fetched_at) < 12 * 3600000) return b;
+    if (!force && b.error_at && now() - Date.parse(b.error_at) < 3600000) return b; // don't hammer it while it's down
+    try {
+      const rates = await boe.fetchRates({ fetchImpl });
+      st.boe = { rates, fetched_at: new Date(now()).toISOString(), error: null, error_at: null };
+    } catch (e) {
+      st.boe = { ...b, error: e.message, error_at: new Date(now()).toISOString() };
+    }
+    flushNow();
+    return st.boe;
+  }
+  const refreshTimer = setInterval(() => { if (settings().base_rate_mode === 'AUTO') ensureRates().catch(() => {}); }, 6 * 3600000);
+  if (refreshTimer.unref) refreshTimer.unref();
+  /** The base rate that applies to a debt that fell due on dueDate: the
+   * statutory reference rate, fixed for that debt from the day it became
+   * late. Manual mode (or no rates fetched yet) uses the rate typed in. */
+  function baseFor(dueDate, st = settings()) {
+    const late = addDays(dueDate, 1), ref = boe.referenceDate(late);
+    if (st.base_rate_mode === 'AUTO' && st.boe && st.boe.rates && st.boe.rates.length) {
+      const r = boe.rateOn(st.boe.rates, ref);
+      if (r != null) return { base: r, reference_date: ref, source: 'Bank of England' };
+    }
+    return st.base_rate == null ? { base: null, reference_date: ref, source: null } : { base: Number(st.base_rate), reference_date: ref, source: 'entered by hand' };
+  }
+
   /** What could be claimed on each of a customer's overdue invoices today. */
   function workOut(g, st = settings()) {
-    const t = today(), rate = st.base_rate == null ? null : r2(Number(st.base_rate) + STATUTORY_MARGIN);
+    const t = today();
     const skip = chargeKeys();
     const items = [];
     for (const it of g.overdue) {
@@ -59,10 +92,12 @@ module.exports = function registerLateCharges({ route, httpError, ADMIN, FINANCE
       const interestTo = lines.filter((l) => l.kind === 'interest').map((l) => l.to).sort().pop();
       const from = interestTo && interestTo > it.due_date ? interestTo : it.due_date;
       const days = Math.max(0, daysBetween(from, t));
+      const b = baseFor(it.due_date, st);
+      const rate = b.base == null ? null : r2(b.base + STATUTORY_MARGIN);
       const interest = rate == null ? null : r2(it.amount_due * rate / 100 * days / 365);
       const claimed = lines.some((l) => l.kind === 'compensation');
       items.push({ key: it.key, number: it.number, due_date: it.due_date, days_overdue: it.days_overdue, principal: it.amount_due,
-        interest: { from, to: t, days, rate, amount: interest }, compensation: { amount: compensationFor(it.amount_due), claimed } });
+        interest: { from, to: t, days, rate, base: b.base, reference_date: b.reference_date, source: b.source, amount: interest }, compensation: { amount: compensationFor(it.amount_due), claimed } });
     }
     return items;
   }
@@ -75,7 +110,15 @@ module.exports = function registerLateCharges({ route, httpError, ADMIN, FINANCE
   }
   const wrap = (fn) => async (ctx) => { try { return await fn(ctx); } catch (e) { if (e.status) throw e; throw httpError(502, e.message); } };
 
+  // Before the /:key routes, which would otherwise take "refresh-rate" as a key.
+  route('POST', '/api/late-charges/refresh-rate', MONEY, wrap(async () => {
+    const b = await ensureRates({ force: true });
+    if (b.error && !b.rates.length) throw httpError(502, `could not read the Bank of England rate: ${b.error}`);
+    return settings();
+  }));
+
   route('GET', '/api/late-charges/:key', MONEY, wrap(async ({ params }) => {
+    if (settings().base_rate_mode === 'AUTO') await ensureRates();
     const g = await group(params.key), st = settings();
     return { name: g.name, key: g.key, target: target(g), settings: st, margin: STATUTORY_MARGIN, items: workOut(g, st), history: db.late_charges.filter((c) => c.group_key === g.key).slice().reverse() };
   }));
@@ -86,12 +129,14 @@ module.exports = function registerLateCharges({ route, httpError, ADMIN, FINANCE
       if (body.base_rate === '' || body.base_rate === null || !Number.isFinite(v) || v < 0 || v > 25) throw httpError(400, 'Bank of England base rate: a percentage, e.g. 4.25');
       st.base_rate = r2(v); st.base_rate_set_at = new Date(now()).toISOString(); st.base_rate_by = user.display_name;
     }
+    if ('base_rate_mode' in body) st.base_rate_mode = body.base_rate_mode === 'MANUAL' ? 'MANUAL' : 'AUTO';
     if ('pay_within_days' in body) { const n = Number(body.pay_within_days); if (!Number.isInteger(n) || n < 0 || n > 90) throw httpError(400, 'pay within: 0 to 90 days'); st.pay_within_days = n; }
     flushNow();
     return st;
   });
   /** body.include: [{ key, interest: bool, compensation: bool }] */
   route('POST', '/api/late-charges/:key', MONEY, wrap(async ({ params, body, user }) => {
+    if (settings().base_rate_mode === 'AUTO') await ensureRates();
     const g = await group(params.key), st = settings();
     const where = target(g);
     if (!where) throw httpError(409, 'this customer is not a CCCS client and Xero is not connected, so there is nowhere to raise the invoice');
@@ -103,7 +148,7 @@ module.exports = function registerLateCharges({ route, httpError, ADMIN, FINANCE
       if (w.interest) {
         if (it.interest.amount == null) throw httpError(409, 'set the Bank of England base rate first');
         if (it.interest.amount > 0) lines.push({ item_key: it.key, number: it.number, kind: 'interest', from: it.interest.from, to: it.interest.to, days: it.interest.days, rate: it.interest.rate, principal: it.principal, amount: it.interest.amount,
-          description: `Statutory interest on invoice ${it.number}: ${money(it.principal)} at ${it.interest.rate.toFixed(2)}% a year (Bank of England base rate ${Number(st.base_rate).toFixed(2)}% + 8%), ${sd(it.interest.from)} to ${sd(it.interest.to)}, ${it.interest.days} days. Late Payment of Commercial Debts (Interest) Act 1998.` });
+          description: `Statutory interest on invoice ${it.number}: ${money(it.principal)} at ${it.interest.rate.toFixed(2)}% a year (Bank of England base rate ${it.interest.base.toFixed(2)}% on ${sd(it.interest.reference_date)} + 8%), ${sd(it.interest.from)} to ${sd(it.interest.to)}, ${it.interest.days} days. Late Payment of Commercial Debts (Interest) Act 1998.` });
       }
       if (w.compensation && !it.compensation.claimed) lines.push({ item_key: it.key, number: it.number, kind: 'compensation', principal: it.principal, amount: it.compensation.amount,
         description: `Fixed-sum compensation for late payment of invoice ${it.number} (debt of ${money(it.principal)}). Late Payment of Commercial Debts (Interest) Act 1998, section 5A.` });
@@ -144,5 +189,5 @@ module.exports = function registerLateCharges({ route, httpError, ADMIN, FINANCE
     return { ok: true };
   });
 
-  return { workOut, settings, compensationFor };
+  return { workOut, settings, compensationFor, ensureRates, baseFor };
 };
