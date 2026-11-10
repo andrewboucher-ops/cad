@@ -124,7 +124,7 @@ const db = {
   leave_requests: [],
   ui_settings: [],
   stock_locations: [], stock_subcategories: [], gas_cylinders: [], cylinder_events: [], medicines: [], med_movements: [], asset_events: [], stocktakes: [], rentals: [],
-  agreements: [], invoices: [],
+  agreements: [], invoices: [], expenses: [],
   payroll_runs: [], payslips: [],
   checkcall_commands: [],
   broadnet_terminals: [],
@@ -6110,6 +6110,8 @@ const invoiceChasers = require('./routes-invoice-chasers.js')({
 require('./routes-late-charges.js')({
   route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, chasers: invoiceChasers, flushNow: () => store.flushNow(),
 });
+// Expenses with receipts, sent to Xero as bills or spend money — see routes-expenses.js.
+require('./routes-expenses.js')({ route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, UPLOADS_DIR, flushNow: () => store.flushNow() });
 
 // Which roles see which section of the menus — see ui-sections.js.
 const sections = require('./ui-sections.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });

@@ -80,6 +80,8 @@ const TABLES = [
   // Statutory late payment charges raised (routes-late-charges.js): what
   // has been claimed, so interest and compensation are never claimed twice.
   'late_charges',
+  // Expense claims and receipts (routes-expenses.js) — HMRC records.
+  'expenses',
   // Payroll runs and the payslips they produce — an issued payslip is a
   // legal record, same evidentiary weight as a filed form submission.
   'payroll_runs', 'payslips',

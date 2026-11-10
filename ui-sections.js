@@ -72,6 +72,9 @@ const SECTIONS = [
   // Finance
   { key: 'contracts', label: 'Quotes & contracts', group: 'Finance', icon: 'contract', desktop: '/contracts.html', mobile: '/contracts.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'invoices', label: 'Invoices', group: 'Finance', icon: 'invoice', desktop: '/invoices.html', mobile: '/invoices.html', allowed: ['SYSTEM_ADMIN', 'FINANCE'], default: ['SYSTEM_ADMIN', 'FINANCE'] },
+  // Expenses: everyone on staff can claim (photo the receipt on a phone);
+  // admins and FINANCE approve and send to Xero.
+  { key: 'expenses', label: 'Expenses', group: 'Finance', icon: 'receipt', desktop: '/expenses.html', mobile: '/expenses.html', allowed: [...STAFF, 'FINANCE'], default: [...STAFF, 'FINANCE'] },
   { key: 'finance', label: 'Finance', group: 'Finance', icon: 'finance', desktop: '/finance.html', mobile: '/finance.html', allowed: [...CONTROL, 'FINANCE'], default: [...CONTROL, 'FINANCE'] },
   { key: 'staffing_cost', label: 'Staffing cost', group: 'Finance', icon: 'finance', desktop: '/reports.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   // HR — one-click shortcuts straight into the matching tab of admin.html
