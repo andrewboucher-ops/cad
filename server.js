@@ -6099,8 +6099,12 @@ const agreements = require('./routes-agreements.js')({
 });
 const xero = require('./xero.js')({ db, flushNow: () => store.flushNow(), redirectUri: `${PUBLIC_BASE_URL}/api/xero/callback` });
 const gocardless = require('./gocardless.js');
-require('./routes-invoices.js')({
+const invoicesApi = require('./routes-invoices.js')({
   route, httpError, ADMIN, FINANCE, CLIENT, db, nextId, logEvent, attendance, agreements, xero, gocardless, sendEmail: (...a) => mailer.send(...a), UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+});
+// Payment reminders (7/14/30 days overdue) and statements — see routes-invoice-chasers.js.
+const invoiceChasers = require('./routes-invoice-chasers.js')({
+  route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, invoices: invoicesApi, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
 
 // Which roles see which section of the menus — see ui-sections.js.
@@ -7071,4 +7075,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, start, openShiftSms, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, start, openShiftSms, broadcast, seed, backfillLastLogins, forms, attendance, mailer, invoiceChasers, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };

@@ -34,6 +34,7 @@
   <a class="btn admin-only" href="/contracts.html">Quotes &amp; contracts</a>
   <button class="btn admin-only" id="bSettings">Invoice settings</button>
   <button class="btn admin-only" id="bChargeDays">Bank holiday charges</button>
+  <button class="btn" id="bChasers">Reminders &amp; statements</button>
   <button class="btn" id="bExport">Export CSV</button>
 </div>
 <div class="k-body">
@@ -47,6 +48,7 @@
 <script src="/app.js"></script>
 <script src="/nav.js"></script>
 <script src="/kit-ui.js"></script>
+<script src="/chasers-ui.js"></script>
 <script>
 'use strict';
 const { api, el, els, esc } = CCCS;
@@ -271,6 +273,8 @@ if (bs) bs.onclick = () => modal('Invoice settings', `<div class="k-form">
     <div><label>VAT number</label><input id="sVat" value="${esc(ist.vat_number)}"></div>
     <div><label>Company number</label><input id="sCo" value="${esc(ist.company_number)}"></div>
     <div class="full"><label>Footer</label><input id="sFoot" value="${esc(ist.footer)}"></div>
+    <div class="full"><label>Late payment terms (printed on every unpaid invoice and statement)</label><textarea id="sLate" rows="3">${esc(ist.late_payment_terms || '')}</textarea></div>
+    <p class="dim full" style="font-size:12.5px;margin:0">Statutory interest and compensation apply to business customers only, not private individuals. Leave blank to leave it off.</p>
   </div><p class="dim" style="font-size:12.5px">Company name, address, phone and email come from Rentals → Terms &amp; company details (${esc(ist.company.company_name)}).</p>${foot('Save')}`, (root) => {
   const eg = () => { root.querySelector('#sEg').textContent = `${root.querySelector('#sPre').value.trim()}${String(root.querySelector('#sNext').value || 1).padStart(ist.digits, '0')}`; };
   root.addEventListener('input', eg); eg();
@@ -278,7 +282,7 @@ if (bs) bs.onclick = () => modal('Invoice settings', `<div class="k-form">
     ist = await api('PUT', '/api/invoices/settings', {
       prefix: v(root, '#sPre'), next_number: Number(v(root, '#sNext')), send_via: v(root, '#sVia'), include_timesheet: root.querySelector('#sTs').checked, copy_to: v(root, '#sCopy'),
       bank_name: v(root, '#sBank'), account_name: v(root, '#sAccName'), sort_code: v(root, '#sSort'), account_number: v(root, '#sAcc'),
-      vat_number: v(root, '#sVat'), company_number: v(root, '#sCo'), footer: v(root, '#sFoot'),
+      vat_number: v(root, '#sVat'), company_number: v(root, '#sCo'), footer: v(root, '#sFoot'), late_payment_terms: root.querySelector('#sLate').value,
     });
     close(); paint();
   });
