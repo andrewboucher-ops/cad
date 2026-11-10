@@ -1264,19 +1264,79 @@ function renderNewJob(body) {
 }
 
 function renderNewVisit(body) {
-  body.innerHTML = `
-    <label style="margin-top:0">Site</label>
-    <select id="vsSite">${state.sites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
-    <label>Assign now (optional)</label>
-    <select id="vsWho"><option value="">— assign later —</option>${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}${isAvailable(p) ? '' : ' (busy)'}</option>`).join('')}</select>
+  // "One-off for a client": a patrol a client passes on at an address that
+  // isn't one of their sites (AURA's own customers). CCCS makes a one-off
+  // site under that client; the report goes to the client, not billed here.
+  const oneOff = state.newVisitOneOff === true;
+  const whoSel = `<label>Assign now (optional)</label>
+    <select id="vsWho"><option value="">— assign later —</option>${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}${isAvailable(p) ? '' : ' (busy)'}</option>`).join('')}</select>`;
+  const tabs = `<div class="btn-row" style="margin-top:0"><button class="btn${oneOff ? '' : ' primary'}" id="vsTabSite">Our site</button><button class="btn${oneOff ? ' primary' : ''}" id="vsTabOne">One-off for a client</button></div>`;
+  if (!oneOff) {
+    body.innerHTML = `${tabs}
+    <label>Site</label>
+    <select id="vsSite">${state.sites.filter((x) => !x.one_off).map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
+    ${whoSel}
     <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="vsGo">Create visit</button><button class="btn" id="vsBack">Cancel</button></div>
     <p class="err" id="detailErr"></p>`;
+  } else {
+    const now = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    body.innerHTML = `${tabs}
+    <p class="dim" style="margin:8px 0 0">For a patrol a client asks for at an address that isn't one of their sites. The report goes to the client and shows in their portal. It isn't put on an invoice.</p>
+    <label>Client</label>
+    <select id="voClient"><option value="">Loading…</option></select>
+    <label>Client's job reference (optional)</label>
+    <input id="voRef" maxlength="60" placeholder="e.g. their callout or job number">
+    <label>End customer / premises name (optional)</label>
+    <input id="voCust" maxlength="120">
+    <label>Address</label>
+    <textarea id="voAddr" rows="2" maxlength="300"></textarea>
+    <label>Postcode</label>
+    <input id="voPc" maxlength="12" style="text-transform:uppercase">
+    <label>When</label>
+    <input id="voWhen" type="datetime-local" value="${now}">
+    <label>Access / instructions for the officer (optional)</label>
+    <textarea id="voAccess" rows="2" maxlength="2000"></textarea>
+    <label>Notes (optional)</label>
+    <textarea id="voNotes" rows="2" maxlength="2000"></textarea>
+    ${whoSel}
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="vsGo">Book visit</button><button class="btn" id="vsBack">Cancel</button></div>
+    <p class="err" id="detailErr"></p>`;
+    api('GET', '/api/clients').then((clients) => {
+      const sel = el('#voClient'); if (!sel) return;
+      const list = (clients || []).filter((c) => c.status !== 'ARCHIVED').sort((a, b) => a.name.localeCompare(b.name));
+      const pick = state.newVisitClient || (list.find((c) => /aura/i.test(c.name)) || {}).id;
+      sel.innerHTML = `<option value="">— choose the client —</option>${list.map((c) => `<option value="${c.id}"${c.id === pick ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}`;
+    }).catch((e) => showErr(e));
+  }
+  el('#vsTabSite').onclick = () => { state.newVisitOneOff = false; renderNewVisit(body); };
+  el('#vsTabOne').onclick = () => { state.newVisitOneOff = true; renderNewVisit(body); };
   el('#vsBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
   el('#vsGo').onclick = async () => {
     try {
-      const v = await api('POST', '/api/site-visits', { site_id: Number(el('#vsSite').value) });
-      if (el('#vsWho').value) await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vsWho').value) });
+      let v, warn = '';
+      if (!oneOff) v = await api('POST', '/api/site-visits', { site_id: Number(el('#vsSite').value) });
+      else {
+        if (!el('#voClient').value) throw new Error('Choose the client this visit is for');
+        const pc = el('#voPc').value.trim();
+        let lat = null, lon = null;
+        // UK postcode → map position via postcodes.io (free, no key), as Admin → Sites does.
+        if (pc) {
+          try { const r = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(pc)}`).then((x) => x.json()); if (r && r.result) { lat = r.result.latitude; lon = r.result.longitude; } } catch { /* no map pin, still bookable */ }
+        }
+        state.newVisitClient = Number(el('#voClient').value);
+        v = await api('POST', '/api/site-visits/one-off', {
+          client_id: Number(el('#voClient').value), client_ref: el('#voRef').value, customer_name: el('#voCust').value,
+          address: el('#voAddr').value, postcode: pc, lat, lon,
+          scheduled_for: el('#voWhen').value ? new Date(el('#voWhen').value).toISOString() : undefined,
+          access_instructions: el('#voAccess').value, notes: el('#voNotes').value,
+        });
+        warn = (v.warnings || []).join('. ');
+        api('GET', '/api/sites').then((sites) => { state.sites = sites; }).catch(() => {});
+      }
+      if (el('#vsWho').value) v = await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vsWho').value) });
+      delete v.warnings;
       upsert(state.site_visits, v); select('v', v.id, { pan: true });
+      if (warn) setTimeout(() => showErr(new Error(warn)), 0);
     } catch (e) { showErr(e); }
   };
 }
