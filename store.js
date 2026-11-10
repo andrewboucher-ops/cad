@@ -77,6 +77,9 @@ const TABLES = [
   // what stops an invoice being chased twice at the same stage, so it must
   // survive a restart.
   'invoice_chases',
+  // Statutory late payment charges raised (routes-late-charges.js): what
+  // has been claimed, so interest and compensation are never claimed twice.
+  'late_charges',
   // Expense claims and receipts (routes-expenses.js) — HMRC records.
   'expenses',
   // Payroll runs and the payslips they produce — an issued payslip is a

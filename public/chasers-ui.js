@@ -43,6 +43,7 @@
           <a class="btn" target="_blank" href="/api/invoice-chasers/${encodeURIComponent(g.key)}/statement" title="The statement PDF">PDF</a>
           <button class="btn" data-send="${esc(g.key)}" data-stage="statement">Send statement</button>
           ${g.overdue.length ? `<button class="btn" data-send="${esc(g.key)}" data-stage="${p.stage || st.stages.filter((s) => s <= oldest).pop() || st.stages[0]}">Send reminder</button>` : ''}
+          ${g.overdue.length ? `<button class="btn" data-late="${esc(g.key)}">Late charges</button>` : ''}
           <button class="btn" data-pause="${esc(g.key)}" data-name="${esc(g.name)}" data-on="${paused ? 1 : 0}">${paused ? 'Resume' : 'Pause'}</button></div></td></tr>`;
     };
     const log = data.log.length ? `<details style="margin-top:10px"><summary class="dim" style="font-size:12.5px">Sent (${data.log.length})</summary><ul class="tl">${data.log.map((e) => `<li><span class="when">${esc(when(e.at))}</span> — ${e.ok ? '✓' : '<span class="err">✕</span>'} ${esc(e.stage === 'statement' ? 'Statement' : `${e.stage}-day reminder`)} to <strong>${esc(e.name)}</strong> (${esc(e.to)}), ${money(e.stage === 'statement' ? e.total_due : e.overdue_total)} <span class="dim">(${esc(e.auto ? 'automatic' : e.by)})</span>${e.ok ? '' : ` <span class="err">${esc(e.error || '')}</span>`}</li>`).join('')}</ul></details>` : '';
@@ -59,6 +60,7 @@
         <button class="btn" onclick="KIT.close()">Close</button></div>`, (root) => {
       const err = root.querySelector('#chErr');
       root.querySelectorAll('[data-send]').forEach((b) => (b.onclick = () => preview(b.dataset.send, b.dataset.stage)));
+      root.querySelectorAll('[data-late]').forEach((b) => (b.onclick = () => lateCharges(b.dataset.late)));
       root.querySelectorAll('[data-pause]').forEach((b) => (b.onclick = async () => {
         try {
           if (b.dataset.on === '1') await api('POST', `/api/invoice-chasers/${encodeURIComponent(b.dataset.pause)}/pause`, { resume: true });
@@ -99,6 +101,49 @@
       await api('POST', `/api/invoice-chasers/${encodeURIComponent(key)}/send`, { stage: m.stage });
       await open();
     }), { wide: true });
+  }
+
+  /* Statutory late payment charges (routes-late-charges.js). */
+  async function lateCharges(key) {
+    let d;
+    try { d = await api('GET', `/api/late-charges/${encodeURIComponent(key)}`); } catch (e) { alert(e.message); return; }
+    const st = d.settings, noRate = st.base_rate == null;
+    const rate = noRate ? null : (Number(st.base_rate) + d.margin).toFixed(2);
+    const rows = d.items.map((x) => `<tr data-item="${esc(x.key)}">
+      <td class="mono">${esc(x.number)}<div class="dim" style="font-size:11px">due ${esc(sd(x.due_date))}, ${x.days_overdue} days</div></td>
+      <td class="num">${money(x.principal)}</td>
+      <td><label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400"><input type="checkbox" data-k="interest" style="width:auto" ${noRate || !x.interest.amount ? 'disabled' : 'checked'}> ${noRate ? '<span class="dim">set the base rate</span>' : `${money(x.interest.amount)} <span class="dim" style="font-size:11px">${x.interest.days} days from ${esc(sd(x.interest.from))}</span>`}</label></td>
+      <td><label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400"><input type="checkbox" data-k="compensation" style="width:auto" ${x.compensation.claimed ? 'disabled' : 'checked'}> ${x.compensation.claimed ? '<span class="dim">already claimed</span>' : money(x.compensation.amount)}</label></td></tr>`).join('');
+    const hist = d.history.length ? `<details style="margin-top:8px"><summary class="dim" style="font-size:12.5px">Charged before (${d.history.length})</summary><ul class="tl">${d.history.map((c) => `<li><span class="when">${esc(when(c.at))}</span> — ${money(c.total)} ${c.target === 'xero' ? `draft in Xero${c.number ? ` ${esc(c.number)}` : ''}` : 'draft invoice in CCCS'} <span class="dim">(${esc(c.by)})</span>${admin() ? ` <button class="btn" data-forget="${c.id}" style="padding:2px 8px;font-size:11.5px" title="If that draft was deleted, so these can be claimed again">Forget</button>` : ''}</li>`).join('')}</ul></details>` : '';
+    modal(`Late payment charges — ${d.name}`, `
+      <p style="margin-top:0;font-size:13px">Under the Late Payment of Commercial Debts (Interest) Act 1998 you can charge a <strong>business</strong> customer interest at the Bank of England base rate + 8% (${noRate ? '<span class="err">base rate not set</span>' : `<strong>${rate}%</strong> a year, base rate ${Number(st.base_rate).toFixed(2)}%`}), and fixed compensation of £40, £70 or £100 per invoice depending on its size. Not for private individuals.</p>
+      ${admin() ? `<div class="k-form" style="margin-bottom:8px"><div><label>Bank of England base rate (%)</label><input id="lcRate" type="number" step="0.01" min="0" value="${noRate ? '' : st.base_rate}" placeholder="e.g. 4.00"></div><div style="align-self:end"><button type="button" class="btn" id="lcRateSave">Save rate</button></div>
+        <p class="dim full" style="font-size:12px;margin:0">Use the rate on 31 December for charges in January to June, and on 30 June for July to December (bankofengland.co.uk).${st.base_rate_set_at ? ` Set by ${esc(st.base_rate_by)} ${esc(when(st.base_rate_set_at))}.` : ''}</p></div>` : ''}
+      <div style="overflow-x:auto"><table class="k"><thead><tr><th>Invoice</th><th class="num">Owed</th><th>Interest to today</th><th>Compensation</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="dim">Nothing to charge.</td></tr>'}</tbody></table></div>
+      <p style="font-size:13.5px"><strong>Total to charge: <span id="lcTot"></span></strong> <span class="dim">(no VAT: statutory interest and compensation are outside its scope)</span></p>
+      <p class="dim" style="font-size:12.5px">This makes a <strong>draft</strong> invoice ${d.target === 'xero' ? 'in Xero, to check and send from there' : 'here in CCCS, to check, approve and send as normal'}. Nothing goes to the customer yet.</p>
+      ${hist}${foot('Raise draft charge invoice')}`, (root) => {
+      const tot = () => {
+        let n = 0;
+        root.querySelectorAll('[data-item]').forEach((tr) => {
+          const x = d.items.find((i) => i.key === tr.dataset.item);
+          if (tr.querySelector('[data-k="interest"]').checked) n += x.interest.amount || 0;
+          if (tr.querySelector('[data-k="compensation"]').checked) n += x.compensation.amount;
+        });
+        root.querySelector('#lcTot').textContent = money(n);
+      };
+      root.addEventListener('change', tot); tot();
+      const rs = root.querySelector('#lcRateSave');
+      if (rs) rs.onclick = async () => { try { await api('PUT', '/api/late-charges/settings', { base_rate: root.querySelector('#lcRate').value }); lateCharges(key); } catch (e) { alert(e.message); } };
+      root.querySelectorAll('[data-forget]').forEach((b) => (b.onclick = async () => { if (!confirm('Forget this charge? Only do this if its draft invoice was deleted, so the same amounts can be claimed again.')) return; try { await api('DELETE', `/api/late-charges/records/${b.dataset.forget}`); lateCharges(key); } catch (e) { alert(e.message); } }));
+      wire(root, async () => {
+        const include = [...root.querySelectorAll('[data-item]')].map((tr) => ({ key: tr.dataset.item, interest: tr.querySelector('[data-k="interest"]').checked, compensation: tr.querySelector('[data-k="compensation"]').checked }));
+        const r = await api('POST', `/api/late-charges/${encodeURIComponent(key)}`, { include });
+        alert(`Draft charge invoice for ${money(r.total)} made ${r.target === 'xero' ? `in Xero${r.number ? ` (${r.number})` : ''}. Check and send it from Xero.` : 'in CCCS. Find it under Drafts on the Invoices page.'}`);
+        if (r.target === 'cccs' && typeof window.load === 'function') window.load();
+        open();
+      });
+    }, { wide: true });
   }
 
   function settings() {

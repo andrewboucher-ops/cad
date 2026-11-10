@@ -6106,6 +6106,10 @@ const invoicesApi = require('./routes-invoices.js')({
 const invoiceChasers = require('./routes-invoice-chasers.js')({
   route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, invoices: invoicesApi, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
+// Statutory late payment interest and compensation — see routes-late-charges.js.
+require('./routes-late-charges.js')({
+  route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, chasers: invoiceChasers, flushNow: () => store.flushNow(),
+});
 // Expenses with receipts, sent to Xero as bills or spend money — see routes-expenses.js.
 require('./routes-expenses.js')({ route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, UPLOADS_DIR, flushNow: () => store.flushNow() });
 
