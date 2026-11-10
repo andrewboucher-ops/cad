@@ -28,6 +28,16 @@ const API = (process.env.XERO_API_BASE || 'https://api.xero.com').replace(/\/+$/
 // (accounting.contacts) — nothing else. XERO_SCOPES overrides the list.
 const SCOPES = process.env.XERO_SCOPES || 'openid profile email offline_access accounting.invoices accounting.contacts';
 
+/** A Xero date as YYYY-MM-DD: "2026-11-10T00:00:00" (the *String fields)
+ * or the older "/Date(<ms since 1970>+0000)/". Null when absent. */
+function xeroDate(v) {
+  if (!v) return null;
+  const m = String(v).match(/^\/Date\((-?\d+)/);
+  if (m) return new Date(Number(m[1])).toISOString().slice(0, 10);
+  const d = String(v).match(/^(\d{4}-\d{2}-\d{2})/);
+  return d ? d[1] : null;
+}
+
 module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
   const configured = () => Boolean(CLIENT_ID && CLIENT_SECRET);
   const row = () => {
@@ -157,6 +167,33 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     }
     return max;
   }
+  /** Supplier bills still to pay (Xero "ACCPAY" invoices with money owing):
+   * drafts (e.g. ones sent to Xero's bills inbox and not yet approved),
+   * awaiting approval and approved-awaiting-payment. Read through the same
+   * Invoices endpoint and accounting.invoices scope CCCS already has, so no
+   * reconnect is needed. Up to 1,000 bills (10 pages of 100). */
+  async function unpaidBills() {
+    const where = 'Type=="ACCPAY" AND AmountDue>0';
+    const out = [];
+    for (let page = 1; page <= 10; page++) {
+      const r = await call('GET', `/Invoices?where=${encodeURIComponent(where)}&Statuses=DRAFT,SUBMITTED,AUTHORISED&summaryOnly=true&page=${page}`);
+      const list = r.Invoices || [];
+      for (const x of list) {
+        if (x.Type && x.Type !== 'ACCPAY') continue;
+        if (!['DRAFT', 'SUBMITTED', 'AUTHORISED'].includes(x.Status)) continue;
+        const due = Number(x.AmountDue);
+        if (!(due > 0)) continue;
+        out.push({
+          id: x.InvoiceID, supplier: (x.Contact && x.Contact.Name) || 'Unknown supplier',
+          number: x.InvoiceNumber || '', reference: x.Reference || '', status: x.Status,
+          date: xeroDate(x.DateString || x.Date), due_date: xeroDate(x.DueDateString || x.DueDate),
+          amount_due: due, total: Number(x.Total) || due, currency: x.CurrencyCode || 'GBP',
+        });
+      }
+      if (list.length < 100) break;
+    }
+    return out;
+  }
   /** Xero emails an approved invoice to the contact itself. */
   async function emailInvoice(xeroId) { await call('POST', `/Invoices/${encodeURIComponent(xeroId)}/Email`, {}); }
   /** Several at once (Xero takes a list of IDs), keyed by Xero invoice ID. */
@@ -177,5 +214,6 @@ module.exports = function makeXero({ db, flushNow = () => {}, redirectUri }) {
     const r = row();
     return { configured: configured(), connected: connected(), tenant_name: r.tenant_name || null, connected_at: r.connected_at || null, connected_by: r.connected_by || null, last_error: r.last_error || null, last_error_at: r.last_error_at || null, settings: r.settings, redirect_uri: redirectUri };
   }
-  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, status, row };
+  return { configured, connected, authorizeUrl, connect, disconnect, pushInvoice, numbersTaken, highestNumber, emailInvoice, invoiceStatus, invoiceStatuses, unpaidBills, status, row };
 };
+module.exports.xeroDate = xeroDate;
