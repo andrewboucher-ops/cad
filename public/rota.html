@@ -297,10 +297,32 @@ function visitsForPersonOnDay(personId, d) {
 function visitsForSiteOnDay(siteId, d) {
   return allSiteVisits.filter((v) => v.status !== 'CANCELLED' && sameDay(new Date(v.scheduled_for), d) && v.site_id === siteId);
 }
-function visitOverlapsAny(v, shiftsThatDay) {
+/** Shift types whose whole job is moving between sites, so any patrol
+ * the officer does while on one is that shift's work, wherever it is. */
+const ROAMING_SHIFT_TYPES = new Set(['MOBILE_PATROL', 'ALARM_RESPONSE']);
+/** A patrol only clashes when someone on it is, at that moment, rostered
+ * on a shift the patrol isn't part of — e.g. a static guard shift at
+ * another site. Patrols inside the officer's own shift are that shift's
+ * work, not a double booking: the ones the shift's own patrol setting
+ * generated (shift_id), any at the shift's own site, and any during a
+ * mobile patrol / alarm response shift. Checked against every loaded
+ * shift for the people on the patrol, not just shifts starting that day,
+ * so an overnight shift still covers its after-midnight patrols.
+ * Returns the clashing shift, or null. */
+function visitClash(v) {
   const vStart = Date.parse(v.scheduled_for);
   const vEnd = vStart + (v.duration_expected_min || 30) * 60000;
-  return shiftsThatDay.some((s) => s.status !== 'CANCELLED' && Date.parse(s.starts_at) < vEnd && vStart < Date.parse(s.ends_at));
+  const people = new Set(v.resources.map((r) => r.personnel_id).filter(Boolean));
+  if (!people.size) return null;
+  const overlapping = allShifts.filter((s) => s.status !== 'CANCELLED'
+    && Date.parse(s.starts_at) < vEnd && vStart < Date.parse(s.ends_at)
+    && s.assignments.some((a) => a.status !== 'REMOVED' && people.has(a.personnel_id)));
+  const partOf = (s) => (v.shift_id != null && v.shift_id === s.id)
+    || (s.site_id != null && s.site_id === v.site_id)
+    || ROAMING_SHIFT_TYPES.has(s.shift_type_key);
+  // On a shift this patrol belongs to, the officer is where they should be.
+  if (overlapping.some(partOf)) return null;
+  return overlapping[0] || null;
 }
 /** Leave covering this day for this person — APPROVED is booked, PENDING
  * is shown faded so a dispatcher knows a request is waiting. Rejected and
@@ -398,10 +420,13 @@ function leavePopup(r) {
     el('#lvpClose').onclick = closeModal;
   });
 }
-function visitChipHtml(v, overlap) {
+function visitChipHtml(v) {
   const start = new Date(v.scheduled_for);
   const who = v.resources.map((r) => r.personnel).filter(Boolean).join(', ');
-  return `<div class="visit-chip${overlap ? ' dbl-booked' : ''}" data-visit="${v.id}">
+  const clash = visitClash(v);
+  const overlap = !!clash;
+  const clashTitle = clash ? `Clashes with ${hm(clash.starts_at)}–${hm(clash.ends_at)} ${clash.site_name || clash.shift_type_name || 'shift'}` : '';
+  return `<div class="visit-chip${overlap ? ' dbl-booked' : ''}" data-visit="${v.id}"${clash ? ` title="${esc(clashTitle)}"` : ''}>
     <div class="times">${start.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} patrol${overlap ? ' <span class="dbl-flag">⚠ clash</span>' : ''}</div>
     <div>${esc(v.site_name || '')}${who ? ' · ' + esc(who) : ''}${v.status !== 'SCHEDULED' ? ' · ' + esc(v.status.toLowerCase()) : ''}</div>
   </div>`;
@@ -482,7 +507,7 @@ function paintGridByStaff() {
           <div>${esc(s.site_name || s.shift_type_name || '')}</div>
         </div>`;
         }).join('')}
-        ${visitsForPersonOnDay(p.id, d).map((v) => visitChipHtml(v, visitOverlapsAny(v, dayShifts))).join('')}
+        ${visitsForPersonOnDay(p.id, d).map((v) => visitChipHtml(v)).join('')}
         ${isAdmin ? '<span class="add-hint">+ add shift</span>' : ''}
       </div>`;
     }
@@ -528,7 +553,7 @@ function paintGridBySite() {
           <div>${esc(names)}</div>
         </div>`;
         }).join('')}
-        ${site.id != null ? visitsForSiteOnDay(site.id, d).map((v) => visitChipHtml(v, visitOverlapsAny(v, dayShifts))).join('') : ''}
+        ${site.id != null ? visitsForSiteOnDay(site.id, d).map((v) => visitChipHtml(v)).join('') : ''}
         ${isAdmin ? '<span class="add-hint">+ add shift</span>' : ''}
       </div>`;
     }
