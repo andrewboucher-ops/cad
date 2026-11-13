@@ -145,6 +145,8 @@
       <button class="btn" id="btnPublishDrafts">Publish drafts</button>
       <button class="btn" id="btnDuplicateWeek">Duplicate week forward</button>
       <button class="btn" id="btnCalSync">Calendar sync</button>
+      <button class="btn" id="btnTextOpen" title="Text officers a list of open shifts with a link to claim them">Text staff about open shifts</button>
+      <button class="btn" id="btnAutoChase" title="CCCS texts staff about short shifts by itself, then alerts you">Automatic chasing</button>
     </div>
     <p class="dim" id="coverageSummary" style="margin:0 0 10px;font-size:12.5px"></p>
     <div id="gridWrap"></div>
@@ -295,10 +297,32 @@ function visitsForPersonOnDay(personId, d) {
 function visitsForSiteOnDay(siteId, d) {
   return allSiteVisits.filter((v) => v.status !== 'CANCELLED' && sameDay(new Date(v.scheduled_for), d) && v.site_id === siteId);
 }
-function visitOverlapsAny(v, shiftsThatDay) {
+/** Shift types whose whole job is moving between sites, so any patrol
+ * the officer does while on one is that shift's work, wherever it is. */
+const ROAMING_SHIFT_TYPES = new Set(['MOBILE_PATROL', 'ALARM_RESPONSE']);
+/** A patrol only clashes when someone on it is, at that moment, rostered
+ * on a shift the patrol isn't part of — e.g. a static guard shift at
+ * another site. Patrols inside the officer's own shift are that shift's
+ * work, not a double booking: the ones the shift's own patrol setting
+ * generated (shift_id), any at the shift's own site, and any during a
+ * mobile patrol / alarm response shift. Checked against every loaded
+ * shift for the people on the patrol, not just shifts starting that day,
+ * so an overnight shift still covers its after-midnight patrols.
+ * Returns the clashing shift, or null. */
+function visitClash(v) {
   const vStart = Date.parse(v.scheduled_for);
   const vEnd = vStart + (v.duration_expected_min || 30) * 60000;
-  return shiftsThatDay.some((s) => s.status !== 'CANCELLED' && Date.parse(s.starts_at) < vEnd && vStart < Date.parse(s.ends_at));
+  const people = new Set(v.resources.map((r) => r.personnel_id).filter(Boolean));
+  if (!people.size) return null;
+  const overlapping = allShifts.filter((s) => s.status !== 'CANCELLED'
+    && Date.parse(s.starts_at) < vEnd && vStart < Date.parse(s.ends_at)
+    && s.assignments.some((a) => a.status !== 'REMOVED' && people.has(a.personnel_id)));
+  const partOf = (s) => (v.shift_id != null && v.shift_id === s.id)
+    || (s.site_id != null && s.site_id === v.site_id)
+    || ROAMING_SHIFT_TYPES.has(s.shift_type_key);
+  // On a shift this patrol belongs to, the officer is where they should be.
+  if (overlapping.some(partOf)) return null;
+  return overlapping[0] || null;
 }
 /** Leave covering this day for this person — APPROVED is booked, PENDING
  * is shown faded so a dispatcher knows a request is waiting. Rejected and
@@ -311,6 +335,48 @@ function leaveForPersonOnDay(personId, d) {
 /** Asks before putting someone on a shift that falls on their booked or
  * requested leave. A warning, not a hard block: control sometimes does
  * need to call someone in, but it should never happen by accident. */
+/** How a person reads in a picker: a quick-added subcontractor carries
+ * their company so two "John"s from different firms can be told apart. */
+function personLabel(p) {
+  if (!p.external_sub) return p.name;
+  return `${p.name} (${p.company ? `${p.company} · ` : ''}subcontractor)`;
+}
+/** The few fields needed to put a subcontractor with no personnel file on
+ * a shift. `pre` keeps two copies (new-shift form, add-to-shift) apart. */
+function subFormHtml(pre, hidden) {
+  const f = (id, label, type = 'text', ph = '') => `<div><label for="${pre}${id}" style="font-size:11px">${label}</label><input id="${pre}${id}" type="${type}" placeholder="${ph}" style="width:100%"></div>`;
+  return `<div id="${pre}Box" class="${hidden ? 'hide' : ''}" style="border:1px dashed var(--line);border-radius:6px;padding:10px;margin-top:8px">
+    <p class="dim" style="margin:0 0 8px;font-size:12px">For a subcontractor with no personnel file. Only the name is required; they won't get a staff number, onboarding or screening. Without an officer app sign-in, clock them in and out from here.</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      ${f('Name', 'Name *')}${f('Company', 'Company')}
+      ${f('Sia', 'SIA licence number', 'text', '16 digits, if known')}${f('SiaExpiry', 'SIA licence expiry', 'date')}
+      ${f('Phone', 'Phone', 'tel')}${f('Email', 'Email', 'email')}
+    </div>
+    <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:12px;margin-top:8px"><input type="checkbox" id="${pre}Login"> Send them an officer app sign-in link (by text, and email if given)</label>
+  </div>`;
+}
+/** Creates the subcontractor from subFormHtml(pre) and returns them. */
+async function createSubFromForm(pre) {
+  const v = (id) => el(`#${pre}${id}`).value.trim();
+  if (!v('Name')) throw new Error('Enter the subcontractor\'s name');
+  const p = await api('POST', '/api/subcontractors', {
+    name: v('Name'), company: v('Company'), sia_licence_no: v('Sia'),
+    sia_licence_expiry: v('SiaExpiry') || null, contact_phone: v('Phone'), contact_email: v('Email'),
+  });
+  allPersonnel.push(p);
+  if (el(`#${pre}Login`).checked) await sendSubLogin(p);
+  return p;
+}
+/** Makes (or re-sends) a subcontractor's officer app sign-in, and tells
+ * control how it went, with the link to pass on if nothing was sent. */
+async function sendSubLogin(p) {
+  try {
+    const r = await api('POST', `/api/subcontractors/${p.id}/login`, {});
+    const how = [r.sms ? 'text' : '', r.email ? 'email' : ''].filter(Boolean).join(' and ');
+    if (how) alert(`Sign-in link sent to ${p.name} by ${how}. Their username is ${r.username}.`);
+    else prompt(`Nothing was sent to ${p.name}. ${r.sms_problem ? `No text: ${r.sms_problem}. ` : ''}Their username is ${r.username}. Copy this link and send it to them yourself:`, r.link);
+  } catch (e) { alert(`${p.name} was added, but the sign-in link failed: ${e.message}`); }
+}
 /** An expired SIA licence or right to work blocks rostering and clock-in;
  * an admin can still go ahead by giving a reason, which the server logs. */
 async function withLicenceOverride(call) {
@@ -354,10 +420,13 @@ function leavePopup(r) {
     el('#lvpClose').onclick = closeModal;
   });
 }
-function visitChipHtml(v, overlap) {
+function visitChipHtml(v) {
   const start = new Date(v.scheduled_for);
   const who = v.resources.map((r) => r.personnel).filter(Boolean).join(', ');
-  return `<div class="visit-chip${overlap ? ' dbl-booked' : ''}" data-visit="${v.id}">
+  const clash = visitClash(v);
+  const overlap = !!clash;
+  const clashTitle = clash ? `Clashes with ${hm(clash.starts_at)}–${hm(clash.ends_at)} ${clash.site_name || clash.shift_type_name || 'shift'}` : '';
+  return `<div class="visit-chip${overlap ? ' dbl-booked' : ''}" data-visit="${v.id}"${clash ? ` title="${esc(clashTitle)}"` : ''}>
     <div class="times">${start.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} patrol${overlap ? ' <span class="dbl-flag">⚠ clash</span>' : ''}</div>
     <div>${esc(v.site_name || '')}${who ? ' · ' + esc(who) : ''}${v.status !== 'SCHEDULED' ? ' · ' + esc(v.status.toLowerCase()) : ''}</div>
   </div>`;
@@ -412,12 +481,15 @@ function paintGridByStaff() {
   const days = weekDays();
   const today = new Date();
   const shifts = visibleShifts();
-  const rows = allPersonnel.filter((p) => p.employment_status !== 'TERMINATED').sort((a, b) => a.name.localeCompare(b.name));
+  // A quick-added subcontractor only gets a row in a week they're working,
+  // so a one-off cover doesn't sit on every future week's rota.
+  const rows = allPersonnel.filter((p) => p.employment_status !== 'TERMINATED' && (!p.external_sub || shifts.some((s) => s.assignments.some((a) => a.personnel_id === p.id && a.status !== 'REMOVED'))))
+    .sort((a, b) => a.name.localeCompare(b.name));
   let html = `<div class="rota-grid">`;
   html += `<div class="hdr"></div>`;
   for (const d of days) html += `<div class="hdr ${sameDay(d, today) ? 'today' : ''}">${DAY_NAMES[d.getDay()].slice(0, 3)} ${d.getDate()}</div>`;
   for (const p of rows) {
-    html += `<div class="person-name" title="${esc(p.name)}"><span class="main">${esc(p.name)}</span><span class="sub">${esc(p.callsign || p.rank || '')}</span></div>`;
+    html += `<div class="person-name" title="${esc(p.name)}"><span class="main">${esc(p.name)}</span><span class="sub">${esc(p.external_sub ? `${p.company || 'Subcontractor'} · sub` : (p.callsign || p.rank || ''))}</span></div>`;
     for (const d of days) {
       const dayShifts = shifts.filter((s) => sameDay(new Date(s.starts_at), d) && s.assignments.some((a) => a.personnel_id === p.id));
       html += `<div class="rota-cell" data-personnel="${p.id}" data-date="${fmtDate(d)}">
@@ -435,7 +507,7 @@ function paintGridByStaff() {
           <div>${esc(s.site_name || s.shift_type_name || '')}</div>
         </div>`;
         }).join('')}
-        ${visitsForPersonOnDay(p.id, d).map((v) => visitChipHtml(v, visitOverlapsAny(v, dayShifts))).join('')}
+        ${visitsForPersonOnDay(p.id, d).map((v) => visitChipHtml(v)).join('')}
         ${isAdmin ? '<span class="add-hint">+ add shift</span>' : ''}
       </div>`;
     }
@@ -481,7 +553,7 @@ function paintGridBySite() {
           <div>${esc(names)}</div>
         </div>`;
         }).join('')}
-        ${site.id != null ? visitsForSiteOnDay(site.id, d).map((v) => visitChipHtml(v, visitOverlapsAny(v, dayShifts))).join('') : ''}
+        ${site.id != null ? visitsForSiteOnDay(site.id, d).map((v) => visitChipHtml(v)).join('') : ''}
         ${isAdmin ? '<span class="add-hint">+ add shift</span>' : ''}
       </div>`;
     }
@@ -549,7 +621,9 @@ function shiftForm(s, defaults) {
   return `
     <form class="stack" id="shForm">
       ${isNew ? `<label>Personnel</label>
-      <select id="shPersonnel" ${dis}>${allPersonnel.map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
+      <select id="shPersonnel" ${dis}>${allPersonnel.filter((p) => p.employment_status !== 'TERMINATED' || d.personnelId === p.id).map((p) => `<option value="${p.id}" ${d.personnelId === p.id ? 'selected' : ''}>${esc(personLabel(p))}</option>`).join('')}
+        ${isAdmin ? '<option value="new-sub">+ New subcontractor (no personnel file)…</option>' : ''}</select>
+      ${isAdmin ? subFormHtml('nsSub', true) : ''}` : ''}
       <label>Shift type</label>
       <select id="shType" ${dis}>${allShiftTypes.map((t) => `<option value="${t.id}" ${Number(typeIdSel) === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
         ${!isNew && !allShiftTypes.some((t) => t.id === s.shift_type_id) ? `<option value="${s.shift_type_id}" ${Number(typeIdSel) === s.shift_type_id ? 'selected' : ''}>${esc(s.shift_type_name)} (retired)</option>` : ''}</select>
@@ -588,7 +662,7 @@ function shiftForm(s, defaults) {
 function assignmentsSection(s) {
   const active = s.assignments.filter((a) => a.status !== 'REMOVED');
   const onShiftIds = active.map((a) => a.personnel_id);
-  const available = allPersonnel.filter((p) => !onShiftIds.includes(p.id));
+  const available = allPersonnel.filter((p) => !onShiftIds.includes(p.id) && p.employment_status !== 'TERMINATED');
   return `
     <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
       <label style="display:flex;justify-content:space-between;align-items:center">
@@ -636,9 +710,12 @@ function assignmentsSection(s) {
           </div>` : ''}`).join('') || '<p class="dim" style="font-size:13px">Nobody assigned yet.</p>'}
       </div>
       ${isAdmin && available.length ? `<div style="display:flex;gap:8px;margin-top:10px">
-        <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+        <select id="shAddPersonnel" style="flex:1">${available.map((p) => `<option value="${p.id}">${esc(personLabel(p))}</option>`).join('')}</select>
         <button type="button" class="btn" id="shAddPerson" style="padding:6px 12px;font-size:12px">Add</button>
       </div>` : ''}
+      ${isAdmin ? `<button type="button" class="btn" id="shSubToggle" style="padding:4px 10px;font-size:11px;margin-top:8px">+ Subcontractor with no personnel file</button>
+      ${subFormHtml('asSub', true)}
+      <div id="asSubActions" class="hide" style="margin-top:8px"><button type="button" class="btn primary" id="shAddSub" style="padding:6px 12px;font-size:12px">Add subcontractor to shift</button></div>` : ''}
       <label style="margin-top:14px">Applications for this shift</label>
       <div id="shApplications" class="dim" style="font-size:13px">Loading…</div>
     </div>`;
@@ -839,6 +916,14 @@ function shiftModal(s, defaults) {
       try { await withLicenceOverride((o) => api('POST', `/api/shifts/${s.id}/assignments`, { personnel: Number(el('#shAddPersonnel').value), ...o })); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     };
+    if (el('#shSubToggle')) el('#shSubToggle').onclick = () => { el('#asSubBox').classList.toggle('hide'); el('#asSubActions').classList.toggle('hide'); };
+    if (el('#shAddSub')) el('#shAddSub').onclick = async () => {
+      try {
+        const p = await createSubFromForm('asSub');
+        await withLicenceOverride((o) => api('POST', `/api/shifts/${s.id}/assignments`, { personnel: p.id, ...o }));
+        await reopen();
+      } catch (e) { el('#shError').textContent = e.message; }
+    };
     if (el('#shApplications')) {
       api('GET', `/api/shift-applications?shift_id=${s.id}`).then((apps) => {
         const open = apps.filter((a) => ['APPLIED', 'SHORTLISTED'].includes(a.status));
@@ -891,6 +976,7 @@ function shiftModal(s, defaults) {
       try { await api('PATCH', `/api/shift-asset-allocations/${b.dataset.returnasset}`, {}); await reopen(); }
       catch (e) { el('#shError').textContent = e.message; }
     }));
+    if (el('#shPersonnel') && el('#nsSubBox')) el('#shPersonnel').onchange = () => el('#nsSubBox').classList.toggle('hide', el('#shPersonnel').value !== 'new-sub');
     if (el('#shSave')) el('#shSave').onclick = async () => {
       let scope = 'one';
       if (s && (s.recurrence || s.recurrence_root_id)) {
@@ -917,7 +1003,7 @@ function shiftModal(s, defaults) {
             });
           }
         } else {
-          body.personnel = Number(el('#shPersonnel').value);
+          body.personnel = el('#shPersonnel').value === 'new-sub' ? (await createSubFromForm('nsSub')).id : Number(el('#shPersonnel').value);
           if (!confirmLeaveClash(body.personnel, body.starts_at, body.ends_at)) return;
           if (el('#shDraft') && el('#shDraft').checked) body.status = 'DRAFT';
           await withLicenceOverride((o) => api('POST', '/api/shifts', { ...body, ...o }));
@@ -981,6 +1067,87 @@ if (isAdmin) {
 }
 
 el('#btnCalSync').onclick = () => CCCS.calendarSync();
+
+/* Text staff about open shifts — preview who gets what, then send. Each
+ * officer's text lists only the shifts they could apply for, with a link to
+ * the Rota screen of the officer app. See routes-open-shift-sms.js. */
+el('#btnTextOpen').onclick = () => openShiftTextModal();
+async function openShiftTextModal(selected) {
+  let p;
+  try { p = await api('GET', `/api/shifts/available/notify/preview${selected ? `?shifts=${selected.join(',')}` : ''}`); }
+  catch (e) { alert(e.message); return; }
+  if (!p.open_shifts.length) { alert('There are no open shifts to advertise — publish a shift that still needs staff first.'); return; }
+  const chosen = new Set(p.selected);
+  const missed = p.recipients.filter((r) => r.status !== 'ok');
+  modal('Text staff about open shifts', `
+    <p class="dim" style="margin-top:0">${p.live ? '' : '<strong>Test mode:</strong> texting is not switched on for this server (SMS_LIVE), so nothing will actually be sent. '}Each officer gets one text with the shifts they can apply for and a link to claim them in the officer app.</p>
+    ${p.last_sent && p.last_sent.recent ? `<p class="err" style="margin:6px 0">${esc(p.last_sent.by || 'Someone')} already texted ${p.last_sent.sent} staff about open shifts at ${esc(new Date(p.last_sent.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }))}.</p>` : ''}
+    <label>Shifts to include</label>
+    <div id="osList" style="max-height:200px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:6px 8px">
+      ${p.open_shifts.map((s) => `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:400;font-size:13px;margin:3px 0">
+        <input type="checkbox" value="${s.id}" ${chosen.has(s.id) ? 'checked' : ''} style="width:auto;flex:none;margin:0"><span style="flex:1">${esc(s.description)} <span class="dim">— ${s.places} place${s.places === 1 ? '' : 's'}</span></span></label>`).join('')}
+    </div>
+    <label style="margin-top:10px">Text (example — each person's lists only their shifts)</label>
+    <pre style="white-space:pre-wrap;background:var(--panel-2,rgba(127,127,127,.08));border-radius:6px;padding:8px;font-size:12.5px;margin:0">${esc(p.sample_message || '')}</pre>
+    <p style="margin:10px 0 4px"><strong>${p.sending_to}</strong> officer${p.sending_to === 1 ? '' : 's'} will get a text.</p>
+    ${missed.length ? `<details><summary class="dim" style="cursor:pointer">${missed.length} won't — see why</summary>
+      <ul style="margin:6px 0 0 18px;padding:0;font-size:12.5px">${missed.map((r) => `<li>${esc(r.name)} — ${esc(r.status)}</li>`).join('')}</ul></details>` : ''}
+    <p class="err" id="osErr" style="margin:6px 0 0"></p>`, () => {
+    const foot = el('#modalHost .foot');
+    foot.innerHTML = `<button class="btn" id="osCancel">Cancel</button><button class="btn primary" id="osSend" ${p.sending_to ? '' : 'disabled'}>Send ${p.sending_to} text${p.sending_to === 1 ? '' : 's'}</button>`;
+    el('#osCancel').onclick = closeModal;
+    const picked = () => [...document.querySelectorAll('#osList input:checked')].map((i) => Number(i.value));
+    document.querySelectorAll('#osList input').forEach((i) => (i.onchange = () => { const ids = picked(); if (ids.length) openShiftTextModal(ids); }));
+    el('#osSend').onclick = async () => {
+      const ids = picked();
+      if (!ids.length) { el('#osErr').textContent = 'Tick at least one shift.'; return; }
+      el('#osSend').disabled = true; el('#osSend').textContent = 'Sending…';
+      try {
+        const r = await api('POST', '/api/shifts/available/notify', { shifts: ids });
+        closeModal();
+        alert(`${r.dry_run ? 'Test mode — would have texted' : 'Texted'} ${r.sent} officer${r.sent === 1 ? '' : 's'}${r.failed ? `; ${r.failed} failed` : ''}.`);
+      } catch (e) { el('#osErr').textContent = e.message; el('#osSend').disabled = false; el('#osSend').textContent = 'Send'; }
+    };
+  });
+}
+
+/* Automatic chasing of unfilled shifts — CCCS texts staff by itself when a
+ * published shift is still short N hours before it starts, then alerts the
+ * managers nearer the time. See escalationTick in routes-open-shift-sms.js. */
+el('#btnAutoChase').onclick = () => autoChaseModal();
+async function autoChaseModal() {
+  let c;
+  try { c = await api('GET', '/api/shifts/escalation/settings'); } catch (e) { alert(e.message); return; }
+  const hh = (h) => `${String(h).padStart(2, '0')}:00`;
+  const dis = isAdmin ? '' : 'disabled';
+  modal('Automatic chasing of unfilled shifts', `
+    <p class="dim" style="margin-top:0">When a published shift is still short of staff, CCCS chases it by itself. Each step happens once per shift; if the shift fills and someone later drops out, it starts again.
+      Staff are only texted ${hh(c.staff_window[0])}–${hh(c.staff_window[1])} and managers ${hh(c.alert_window[0])}–${hh(c.alert_window[1])} — anything due overnight goes out in the morning.</p>
+    ${c.server_off ? '<p class="err">Switched off on this server (UNFILLED_SHIFT_ESCALATION=off).</p>' : ''}
+    ${c.live ? '' : '<p class="err" style="margin:6px 0"><strong>Test mode:</strong> texting is not switched on for this server (SMS_LIVE), so texts are logged but not sent.</p>'}
+    <label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-weight:600;font-size:14px">
+      <input type="checkbox" id="acOn" ${c.enabled ? 'checked' : ''} ${dis} style="width:auto;flex:none;margin:0"> Chase unfilled shifts automatically</label>
+    <label style="margin-top:10px">Text staff who could take it when it is this many hours away</label>
+    <input type="number" id="acStaff" min="1" max="168" value="${c.staff_hours}" ${dis}>
+    <label style="margin-top:10px">Alert managers when it is this many hours away</label>
+    <input type="number" id="acAlert" min="1" max="168" value="${c.alert_hours}" ${dis}>
+    <label style="margin-top:10px">Managers' mobiles to text (comma between numbers)</label>
+    <input type="text" id="acTo" value="${esc(c.alert_to || '')}" placeholder="07…" ${dis}>
+    <p class="dim" style="margin:4px 0 0;font-size:12.5px">Admins also get a push notification. ${c.alert_to ? '' : 'With no mobile here, the push is the only alert.'}</p>
+    ${isAdmin ? '' : '<p class="dim">Only a system admin can change these.</p>'}
+    <p class="err" id="acErr" style="margin:6px 0 0"></p>`, () => {
+    const foot = el('#modalHost .foot');
+    foot.innerHTML = `<button class="btn" id="acCancel">${isAdmin ? 'Cancel' : 'Close'}</button>${isAdmin ? '<button class="btn primary" id="acSave">Save</button>' : ''}`;
+    el('#acCancel').onclick = closeModal;
+    if (!isAdmin) return;
+    el('#acSave').onclick = async () => {
+      try {
+        await api('PUT', '/api/shifts/escalation/settings', { enabled: el('#acOn').checked, staff_hours: Number(el('#acStaff').value), alert_hours: Number(el('#acAlert').value), alert_to: el('#acTo').value });
+        closeModal();
+      } catch (e) { el('#acErr').textContent = e.message; }
+    };
+  });
+}
 
 CCCS.bus((up) => {
   const n = el('#net');

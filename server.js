@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
+const offlineTime = require('./offline-time.js');
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -22,6 +23,13 @@ const TOKEN_TTL_MS = Number(process.env.TOKEN_TTL_MS || 8 * 60 * 60 * 1000);
 // Vehicle terminals stay signed in for the shift (or longer) — crew sign in
 // and out of the vehicle separately, without touching this session at all.
 const MDT_TOKEN_TTL_MS = Number(process.env.MDT_TOKEN_TTL_MS || 24 * 60 * 60 * 1000);
+// A page that is open renews its token (POST /api/auth/refresh) well before
+// it runs out, so an officer on a 12-hour shift is never quietly signed out
+// at hour 8 — which used to leave the live link refused on every reconnect
+// ("link down" with signal) and every write failing. Renewal stops this long
+// after the original sign-in, so a lost or stolen phone can't keep a
+// session going forever.
+const SESSION_MAX_MS = Number(process.env.SESSION_MAX_MS || 7 * 24 * 60 * 60 * 1000);
 const DIAL_RINGS_OPERATOR_FIRST = process.env.DIAL_RINGS_OPERATOR_FIRST !== 'off';
 
 const SIMULATION = process.env.SIMULATION !== 'off';
@@ -118,7 +126,7 @@ const db = {
   // Patient report forms and their own hash-chained audit trail — see prf.js.
   prfs: [], prf_audit: [],
   stock_locations: [], stock_subcategories: [], gas_cylinders: [], cylinder_events: [], medicines: [], med_movements: [], asset_events: [], stocktakes: [], rentals: [],
-  agreements: [], invoices: [],
+  agreements: [], invoices: [], expenses: [],
   payroll_runs: [], payslips: [],
   checkcall_commands: [],
   broadnet_terminals: [],
@@ -273,7 +281,10 @@ const findMdt = (v) =>
 const findPersonnel = (v) =>
   db.personnel.find((p) => p.id === Number(v) || (p.employee_no && p.employee_no === String(v))) || null;
 
-function logEvent(type, summary, data = {}) {
+/** opts.broadcast false: written to the trail but not pushed to the live
+ * event feed — for "who opened this report" rows, which are a record, not
+ * news, and would bury the control room's feed in noise. */
+function logEvent(type, summary, data = {}, opts = {}) {
   const ev = { id: nextId('audit_logs'), type, summary, data, at: new Date().toISOString() };
   db.audit_logs.push(ev);
   // Memory keeps the recent window the live screens use; the full trail is
@@ -282,7 +293,7 @@ function logEvent(type, summary, data = {}) {
   try { store.appendAudit(ev); } catch (e) { console.error('[cccs] audit write failed:', e.message); }
   // Control only: the log carries failed-login usernames, sickness leave,
   // applicant names and raw alarm payloads — not for every officer's phone.
-  broadcast('event.logged', ev, { controlOnly: true });
+  if (opts.broadcast !== false) broadcast('event.logged', ev, { controlOnly: true });
   return ev;
 }
 
@@ -906,6 +917,9 @@ function publicPersonnel(p, user) {
     has_photo: Boolean(p.id_photo), photo_updated_at: p.id_photo ? p.id_photo.uploaded_at : null, id_card_issued_at: p.id_card_issued_at || null,
     branch_id: p.branch_id || null,
     employment_type: p.employment_type || 'EMPLOYED',
+    // A subcontractor quick-added from the rota (POST /api/subcontractors):
+    // just enough to put them on a shift, with no personnel file behind it.
+    external_sub: p.external_sub === true, company: p.company || '',
     ...(canSeeStaffRecord ? {
       welfare_interval_s: p.welfare_interval_s || null, welfare_due_at: p.welfare_due_at || null,
       welfare_note: p.welfare_note || null,
@@ -924,7 +938,7 @@ function publicPersonnel(p, user) {
     // Same audience as emergency_contact/bank_details above: onboarding
     // status is an HR-chasing concern, not something a colleague needs to
     // see about another officer, even as a boolean checklist with no detail.
-    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, date_of_birth: p.date_of_birth || null, onboarding: onboardingStatusForPerson(p) } : {}),
+    ...(canSeeSensitive ? { emergency_contact: p.emergency_contact || null, bank_details: p.bank_details || null, date_of_birth: p.date_of_birth || null, onboarding: p.external_sub ? null : onboardingStatusForPerson(p) } : {}),
     ...(canSeePayroll ? { payroll: p.payroll || null } : {}),
   };
 }
@@ -962,6 +976,7 @@ function publicSiteVisit(v) {
   return {
     ...v,
     site_name: site ? site.name : null, site_address: site ? site.address : null,
+    site_postcode: site ? site.postcode || '' : '', site_access: site ? site.access_instructions || '' : '',
     beat_name: beat ? beat.name : null, waypoints: beat ? beat.waypoints : [],
     checkpoint_scans: v.checkpoint_scans || [],
     lat: site ? site.lat : null, lon: site ? site.lon : null,
@@ -1609,7 +1624,7 @@ route('POST', '/api/auth/login', null, ({ body, req }) => {
     throw e;
   }
   const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
-  const token = sign({ sub: user.id, role: user.role, iat: Date.now(), exp: Date.now() + ttl });
+  const token = sign({ sub: user.id, role: user.role, iat: Date.now(), auth_at: Date.now(), exp: Date.now() + ttl });
   recordLogin(user, `${user.username} signed in (${user.role})`);
   return { __body: { token, user: publicUser(user) }, __headers: { 'set-cookie': sessionCookie(req, token) } };
 });
@@ -1620,6 +1635,21 @@ route('POST', '/api/auth/session-cookie', [], ({ req }) => {
   const header = req.headers.authorization || '';
   if (!header.startsWith('Bearer ')) throw httpError(400, 'send the session as a Bearer header');
   return { __body: { ok: true }, __headers: { 'set-cookie': sessionCookie(req, header.slice(7)) } };
+});
+/** Swaps a still-valid session for a fresh one, so a page left open all
+ * shift stays signed in. Same user, same role as now (a role change made
+ * since sign-in is picked up), and the original sign-in time carries over:
+ * renewal stops SESSION_MAX_MS after it. A token from before a password
+ * change is already refused by authFrom(). */
+route('POST', '/api/auth/refresh', [], ({ user, req }) => {
+  const header = req.headers.authorization || '';
+  const old = verifyToken(header.startsWith('Bearer ') ? header.slice(7) : readCookie(req, SESSION_COOKIE));
+  if (!old) throw httpError(401, 'authentication required');
+  const authAt = old.auth_at || old.iat || Date.now();
+  if (Date.now() - authAt > SESSION_MAX_MS) throw httpError(401, 'please sign in again');
+  const ttl = user.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS;
+  const token = sign({ sub: user.id, role: user.role, iat: Date.now(), auth_at: authAt, exp: Date.now() + ttl });
+  return { __body: { token, user: publicUser(user), expires_at: new Date(Date.now() + ttl).toISOString() }, __headers: { 'set-cookie': sessionCookie(req, token) } };
 });
 route('POST', '/api/auth/logout', null, ({ req }) => ({ __body: { ok: true }, __headers: { 'set-cookie': clearSessionCookie(req) } }));
 /** A "create your password" link — reuses the existing sign()/verifyToken()
@@ -1733,7 +1763,7 @@ route('GET', '/api/auth/microsoft/callback', null, async ({ query }) => {
     return { __status: 302, __headers: { location: `/index.html?sso_error=${msg}` }, __body: '' };
   }
 
-  const token = sign({ sub: localUser.id, role: localUser.role, iat: Date.now(), exp: Date.now() + TOKEN_TTL_MS });
+  const token = sign({ sub: localUser.id, role: localUser.role, iat: Date.now(), auth_at: Date.now(), exp: Date.now() + (localUser.role === 'MDT_USER' ? MDT_TOKEN_TTL_MS : TOKEN_TTL_MS) });
   const oneTime = crypto.randomBytes(16).toString('hex');
   ssoExchange.set(oneTime, { token, user: publicUser(localUser), created: Date.now() });
   recordLogin(localUser, `${localUser.username} signed in via Microsoft (${localUser.role})`);
@@ -2398,7 +2428,13 @@ route('POST', '/api/assets/:id/return', ALL, ({ params, body, user }) => {
   logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
   return publicAsset(a);
 });
-route('GET', '/api/personnel', ALL, ({ user }) => db.personnel.filter((p) => visibleToUser(p, user)).map((p) => publicPersonnel(p, user)));
+route('GET', '/api/personnel', ALL, ({ user }) => {
+  // A subcontractor signed in to the officer app sees themselves, not our
+  // whole staff list with phone numbers: they work for another company.
+  const me = user.personnel_id ? db.personnel.find((p) => p.id === user.personnel_id) : null;
+  if (me && me.external_sub) return [publicPersonnel(me, user)];
+  return db.personnel.filter((p) => visibleToUser(p, user)).map((p) => publicPersonnel(p, user));
+});
 /** One screen listing everyone with an expired, expiring or overdue SIA/
  * DBS/RTW check — the same personnelCompliance() flag already shown
  * inline on the personnel list, just gathered into one place instead of
@@ -2453,6 +2489,43 @@ route('POST', '/api/personnel', ADMIN, ({ body, user }) => {
   staffId.assignNumber(p); // left blank → the next staff number (routes-staff-id.js)
   db.personnel.push(p);
   logEvent('personnel.created', `PERSONNEL ${name} ADDED`, { personnel_id: p.id });
+  return { __status: 201, __body: publicPersonnel(p, user) };
+});
+/** A subcontractor put on a shift with only what control needs on the night
+ * (name, company, SIA licence if known, phone) — no personnel file, staff
+ * number, onboarding checklist or BS 7858 screening, all of which belong to
+ * our own staff. It is still a personnel row underneath, so the shift
+ * assignment, clock times, timesheet, invoice and incident log all work
+ * exactly as for anyone else; payroll and leave already skip SUBCONTRACTOR.
+ * An expired SIA licence still blocks rostering (assertDeployable), same as
+ * for staff. "Give them a full personnel file" later is PATCH
+ * /api/personnel/:id { external_sub: false }. */
+route('POST', '/api/subcontractors', ADMIN, ({ body, user }) => {
+  const name = String(body.name || '').trim().slice(0, 120);
+  if (!name) throw httpError(400, 'name required');
+  const company = String(body.company || '').trim().slice(0, 120);
+  const licenceNo = String(body.sia_licence_no || '').replace(/[\s-]/g, '').slice(0, 40);
+  const expiry = body.sia_licence_expiry ? String(body.sia_licence_expiry).slice(0, 10) : null;
+  if (expiry && isNaN(Date.parse(expiry))) throw httpError(400, 'invalid SIA licence expiry');
+  const licenceType = String(body.sia_licence_type || '').trim().slice(0, 80) || 'Door Supervision';
+  const p = {
+    id: nextId('personnel'), employee_no: null, name, rank: '',
+    contact_phone: String(body.contact_phone || '').trim().slice(0, 40), contact_email: String(body.contact_email || '').trim().slice(0, 160),
+    sms_opt_out: false, email_opt_out: false,
+    employment_status: 'ACTIVE', employment_type: 'SUBCONTRACTOR',
+    external_sub: true, company,
+    annual_leave_allowance_days: null, payroll: null,
+    sia_licences: licenceNo ? [{ id: 1, licence_type: licenceType, licence_no: licenceNo, expiry }] : [],
+    start_date: new Date().toISOString().slice(0, 10),
+    onboarding_completed_at: null, onboarding_completed_by: null,
+    callsign_id: null, user_id: null, vehicle_id: null,
+    welfare_interval_s: null, welfare_due_at: null, welfare_warned: false, welfare_note: null,
+    notes: String(body.notes || '').slice(0, 2000), branch_id: normalizedBranchId(body.branch_id),
+    lat: null, lon: null, location_at: null,
+    created_by: user.id, created_at: new Date().toISOString(),
+  };
+  db.personnel.push(p);
+  logEvent('personnel.subcontractor_added', `SUBCONTRACTOR ${name}${company ? ` (${company})` : ''} ADDED BY ${user.username} — NO PERSONNEL FILE`, { personnel_id: p.id });
   return { __status: 201, __body: publicPersonnel(p, user) };
 });
 route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
@@ -2563,6 +2636,15 @@ route('PATCH', '/api/personnel/:id', ADMIN, ({ params, body, user }) => {
     p.date_of_birth = body.date_of_birth ? String(body.date_of_birth).slice(0, 10) : null;
   }
   if ('notes' in body) p.notes = body.notes || '';
+  if ('company' in body) p.company = String(body.company || '').trim().slice(0, 120);
+  // Giving a quick-added subcontractor a full personnel file: from here on
+  // they are on the onboarding checklist, screening and staff numbering like
+  // anyone else. One way only — a file, once started, is not hidden again.
+  if (body.external_sub === false && p.external_sub) {
+    p.external_sub = false;
+    staffId.assignNumber(p);
+    logEvent('personnel.subcontractor_promoted', `SUBCONTRACTOR ${p.name} GIVEN A FULL PERSONNEL FILE BY ${user.username}`, { personnel_id: p.id });
+  }
   // Both fields are validated against the FULL intended result before either
   // is written — a request that sets both at once (e.g. SUBCONTRACTOR + an
   // allowance) must be rejected without mutating employment_type first and
@@ -2807,267 +2889,8 @@ function createRetrospectiveJob(j, body, user) {
   return { __status: 201, __body: payload };
 }
 
-/* ---- External alarm-source integrations --------------------------------
- * GuardM8 (Echelon's separate guarding/alarm-receiving product) and AURA
- * (the separate alarm receiving centre CCCS also pushes emergency-button
- * alerts out to — see cccs-bridge-spec.html) each push an alarm straight
- * in as a dispatchable job, the same shape a call taker would create by hand.
- * Authenticated with a shared secret rather than a user session — neither
- * is a CCCS operator — same pattern as the PBX inbound route below.
- * external_ref lets the source retry a send (e.g. after a network blip)
- * without creating a duplicate job: resending the same external_ref
- * returns the job already created for it instead of making a second one. */
-const EXTERNAL_ALARM_PRIORITY_MAP = {
-  RED: 'RED', CRITICAL: 'RED', P1: 'RED',
-  AMBER: 'AMBER', HIGH: 'AMBER', P2: 'AMBER',
-  GREEN: 'GREEN', MEDIUM: 'GREEN', P3: 'GREEN',
-  ROUTINE: 'ROUTINE', LOW: 'ROUTINE', P4: 'ROUTINE',
-};
-/** Shared by every external-alarm source once each has mapped its own wire
- * shape into this one: dedupes on (source, external_ref), then creates a
- * dispatchable job the same shape a call taker would make by hand. */
-function createExternalJob({ source, label, external_ref: externalRef, priority: rawPriority, location, site, incident_type, description, caller, keyholder, lat, lon, what3words, notes, required_resources }) {
-  if (externalRef) {
-    const existing = db.jobs.find((x) => x.external_ref === externalRef && x.external_source === source);
-    if (existing) return { __status: 200, __body: publicJob(existing) };
-  }
-  const priority = EXTERNAL_ALARM_PRIORITY_MAP[String(rawPriority || 'GREEN').toUpperCase()] || 'GREEN';
-  if (!location && !site) throw httpError(400, 'location or site required');
-
-  const j = {
-    id: nextId('jobs'), reference: `INC-${new Date().getFullYear()}-${String(nextId('jobref') + 124).padStart(5, '0')}`,
-    incident_type: incident_type || 'ALARM', priority,
-    location: location || `${site.name}, ${site.address}`,
-    site_id: site ? site.id : null, keyholder: site ? site.keyholder : (keyholder || ''),
-    lat: lat != null ? Number(lat) : (site && site.lat != null ? site.lat : null),
-    lon: lon != null ? Number(lon) : (site && site.lon != null ? site.lon : null),
-    description: description || '', caller: caller || label, required_resources: Number(required_resources || 1),
-    what3words: String(what3words || '').replace(/^\/+/, '').trim(),
-    notes: notes || '', status: 'CREATED', created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-    external_source: source, external_ref: externalRef,
-    checklist: instantiateChecklist(site), media: [],
-  };
-  db.jobs.push(j);
-  broadcast('job.created', publicJob(j));
-  pushToRoles(CONTROL, { title: `New job — ${label}`, body: `${j.reference} · ${j.incident_type} · ${j.location}`, url: '/control.html', tag: 'cccs-job' });
-  logEvent('job.created', `JOB ${j.reference} CREATED (${priority}) — via ${label}`, { job_id: j.id, external_ref: externalRef });
-  return { __status: 201, __body: publicJob(j) };
-}
-/** Any inbound payload is logged in full before validation, so a shape we
- * don't yet handle (a new message type, a field integration-testing
- * hasn't seen) leaves a full record to read back instead of vanishing as
- * a silent 400 or 401. Remove once an integration is confirmed stable. */
-function logInboundAlarmPayload(source, label, reqBody) {
-  logEvent('integration.alarm_payload_received', `${label} INBOUND PAYLOAD`, { source, raw: reqBody });
-}
-function checkAlarmSecret(secretHeader, secretEnv, label, req) {
-  const secret = process.env[secretEnv];
-  if (!secretMatches(req.headers[secretHeader], secret)) throw httpError(401, `bad ${label} secret`);
-}
-
-route('POST', '/api/integrations/guardm8/jobs', null, ({ body: b, req }) => {
-  checkAlarmSecret('x-guardm8-secret', 'GUARDM8_SECRET', 'GuardM8', req);
-  logInboundAlarmPayload('guardm8', 'GuardM8', b);
-  const site = b.site ? db.sites.find((x) => x.id === Number(b.site) || x.name === String(b.site)) : null;
-  return createExternalJob({
-    source: 'guardm8', label: 'GuardM8', external_ref: b.external_ref != null ? String(b.external_ref) : null,
-    priority: b.priority, location: b.location, site, incident_type: b.incident_type, description: b.description,
-    caller: b.caller, keyholder: b.keyholder, lat: b.lat, lon: b.lon, what3words: b.what3words, notes: b.notes,
-    required_resources: b.required_resources,
-  });
-});
-
-/* ---- AURA callouts ------------------------------------------------------
- * AURA's webhook (configured in their portal, not a fixed URL per event)
- * posts every subscribed callout event to this one endpoint, discriminated
- * by body.message (NEW_CALLOUT, CALLOUT_EVENTS_CHANGED, RESPONDER_ARRIVED_
- * ON_SCENE, CALLOUT_CLOSED, ...) rather than GuardM8's flat single-purpose
- * shape. Confirmed against a real captured payload (2026-10-06):
- *   { message, callout: { id, incidentInformation: [{ typeOfEmergency,
- *     incidentcategory, calloutCurrentLocation: { formattedAddress, lat,
- *     lon }, predefinedLocationId, calloutClassification, internalTest },
- *     ... ], ... } }
- * callout.id is the natural idempotency key — the same callout resends on
- * every status change, always with the same id.
- *
- * NEW_CALLOUT / NEW_CALLOUT_FOR_INSTANCE create a job. Every other message
- * is a status update against a callout that (should) already have a job:
- * it is appended to that job's notes and broadcast, rather than silently
- * changing the job's status — an officer already en route should not be
- * stood down just because a webhook said so with nobody at CCCS deciding
- * that. A status update for a callout.id with no matching job is logged
- * (logInboundAlarmPayload already did that) and otherwise ignored. Each
- * message is recorded once per job (external_events_seen) so a resent
- * webhook — AURA's delivery is "at most once" but the same event can still
- * be published more than once on their end — doesn't double a notes line.
- *
- * Severity: confirmed by AURA (2026-10-06) that NEW_CALLOUT carries no
- * urgency field at all — their internal P1–P4 medical triage is never
- * copied onto the webhook. AMBER-for-every-new-callout is therefore the
- * permanent default here, not a placeholder pending more information.
- *
- * Site mapping: incidentInformation[].predefinedLocationId is the stable
- * key AURA's side uses for a Fixed Location — set a site's aura_location_id
- * (Admin → Sites) to the same value to have a callout land straight on
- * that site. Address text (calloutCurrentLocation.formattedAddress) is
- * only ever a fallback for a callout with no predefined location.
- *
- * Classification: calloutClassification.value is REAL or TEST (there is no
- * false-alarm classification). Per AURA (2026-10-06), TEST "should be
- * treated as non-live" until a person verifies it — logged in full, no
- * job put in front of a controller.
- *
- * internalTest — corrected 2026-10-06, having first been built backwards.
- * It does NOT mean "a connectivity test"; it means "stays with your
- * supplier, not dispatched onto AURA's open responder network" (AURA's own
- * wording). Echelon's Control Centre callouts are raised as internal —
- * confirmed directly: "it will work as a live internal callout, not to
- * the AURA network, which is correct — I don't want AURA responders
- * turning up to my jobs." So internalTest: true is Echelon's real, live
- * incident path and DOES create a job; internalTest: false would mean
- * AURA's open network already has a responder on it independently of
- * CCCS — not something this supplier setup is expected to raise, so no
- * job is created for it either (dispatching an Echelon officer on top of
- * an AURA-network responder already en route is the exact double-up the
- * quote above is ruling out) — instead control gets a push so a human
- * notices an unexpected one rather than it only existing in the log. */
-const AURA_NEW_CALLOUT_MESSAGES = ['NEW_CALLOUT', 'NEW_CALLOUT_FOR_INSTANCE'];
-function auraCalloutFields(callout) {
-  const info = (callout.incidentInformation || [])[0] || {};
-  const loc = info.calloutCurrentLocation || {};
-  const lat = loc.latitude != null ? Number(loc.latitude) : null;
-  const lon = loc.longitude != null ? Number(loc.longitude) : null;
-  // AURA's own written description of the pair spells it incidentCategory;
-  // the real payload captured 2026-10-06 had it lower-case — accept either
-  // rather than trust one source over the other.
-  const category = info.incidentCategory || info.incidentcategory;
-  const site = info.predefinedLocationId
-    ? db.sites.find((s) => s.aura_location_id && String(s.aura_location_id) === String(info.predefinedLocationId))
-    : null;
-  const location = site ? null
-    : loc.formattedAddress || (info.predefinedLocationId
-      ? `AURA site ref ${info.predefinedLocationId} — no site mapped to this ref yet (set aura_location_id on a site)`
-      : 'Location unknown — add details as received');
-  return {
-    site, location,
-    external_ref: String(callout.id),
-    lat: Number.isFinite(lat) ? lat : null,
-    lon: Number.isFinite(lon) ? lon : null,
-    incident_type: (info.typeOfEmergency && info.typeOfEmergency.description) || 'ALARM',
-    description: [info.responseType && info.responseType.value, category && category.description].filter(Boolean).join(' — '),
-  };
-}
-route('POST', '/api/integrations/aura/jobs', null, ({ body: b, req }) => {
-  checkAlarmSecret('x-aura-secret', 'AURA_SECRET', 'AURA', req);
-  logInboundAlarmPayload('aura', 'AURA', b);
-  const callout = b.callout;
-  if (!callout || !callout.id) return { __status: 200, __body: { ok: true, note: 'no callout in payload — logged only' } };
-  const externalRef = String(callout.id);
-
-  if (AURA_NEW_CALLOUT_MESSAGES.includes(b.message)) {
-    // calloutClassification sits inside incidentInformation[0] on a real
-    // captured payload (2026-10-06), not on callout itself — checked both
-    // places in case AURA's shape varies between callout types.
-    const info0 = (callout.incidentInformation || [])[0] || {};
-    const classification = info0.calloutClassification || callout.calloutClassification;
-    if (classification && classification.value === 'TEST') {
-      return { __status: 200, __body: { ok: true, note: 'TEST classification — not yet verified as a live callout, logged only' } };
-    }
-    // internalTest: false would mean AURA's open network, not Echelon,
-    // already has a responder on this one — see the block comment above.
-    // Not expected from this supplier setup; surfaced rather than silently
-    // dropped, in case it ever is.
-    if (!callout.internalTest) {
-      pushToRoles(CONTROL, { title: 'Unexpected AURA callout', body: `Callout ${callout.id} arrived as internalTest:false — AURA's open network may already be responding. No job created.`, url: '/control.html', tag: `cccs-aura-${callout.id}` });
-      return { __status: 200, __body: { ok: true, note: 'internalTest is false — not Echelon’s own job, flagged to control, no job created' } };
-    }
-    const fields = auraCalloutFields(callout);
-    // AMBER — see the block comment above this route.
-    return createExternalJob({ source: 'aura', label: 'AURA', priority: 'AMBER', ...fields });
-  }
-
-  const existing = db.jobs.find((x) => x.external_source === 'aura' && x.external_ref === externalRef);
-  if (!existing) return { __status: 200, __body: { ok: true, note: 'status update for a callout CCCS has no job for — logged only' } };
-  if (!existing.external_events_seen) existing.external_events_seen = [];
-  if (existing.external_events_seen.includes(b.message)) {
-    return { __status: 200, __body: { ok: true, note: 'duplicate webhook delivery of an already-recorded event — logged only' } };
-  }
-  existing.external_events_seen.push(b.message);
-  const stamp = `[AURA ${b.message || 'update'} — ${new Date().toISOString()}]`;
-  existing.notes = existing.notes ? `${existing.notes}\n${stamp}` : stamp;
-  existing.updated_at = new Date().toISOString();
-  broadcast('job.updated', publicJob(existing));
-  logEvent('job.updated', `JOB ${existing.reference} — AURA ${b.message || 'UPDATE'}`, { job_id: existing.id, external_ref: externalRef });
-  return { __status: 200, __body: publicJob(existing) };
-});
-
-/* ---- BroadNet Dispatch bridge --------------------------------------------
- * Outbound: an operator presses "Push to BroadNet" on a job (not automatic —
- * not every job is BroadNet-relevant, and there's no live channel/terminal
- * data yet to auto-route by). MVP targets one configured default channel;
- * per-resource terminal targeting is a follow-up once a real account exists
- * and actual channel/terminal UUIDs are visible in BroadNet's portal.
- *
- * Inbound: one webhook URL (registered in BroadNet's portal) receives three
- * payload shapes discriminated by which top-level key is present, same
- * spirit as AURA's single endpoint discriminated by body.message. BroadNet
- * documents no webhook signature scheme (unlike GoCardless), so the URL
- * itself carries an unguessable token as the only authenticity check. */
-const BROADNET_GRADE = { RED: 1, AMBER: 2, GREEN: 4, ROUTINE: 5 };
-function publicBroadnetTerminal(t) {
-  return { network_id: t.network_id, username: t.username, lat: t.lat, lon: t.lon, status: t.status, channel: t.channel, ptt_pressed: t.ptt_pressed, updated_at: t.updated_at };
-}
-
-route('POST', '/api/jobs/:id/broadnet-push', CONTROL, async ({ params, user }) => {
-  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
-  if (j.broadnet_incident_uuid) throw httpError(409, 'already pushed to BroadNet');
-  const incident = await broadnet.createIncident({
-    description: `${j.reference} — ${j.incident_type}: ${j.description || j.location}`,
-    grade: BROADNET_GRADE[j.priority] || 3,
-    lat: j.lat, lon: j.lon, label: j.location,
-    channelUuid: process.env.BROADNET_DEFAULT_CHANNEL_UUID || undefined,
-  });
-  j.broadnet_incident_uuid = incident.uuid;
-  j.broadnet_pushed_at = new Date().toISOString();
-  j.updated_at = j.broadnet_pushed_at;
-  broadcast('job.updated', publicJob(j));
-  logEvent('job.updated', `JOB ${j.reference} — pushed to BroadNet (${incident.uuid})`, { job_id: j.id, by: user.display_name });
-  return publicJob(j);
-});
-
-route('POST', '/api/integrations/broadnet/webhook/:token', null, ({ params, body: b }) => {
-  const broadnetToken = process.env.BROADNET_WEBHOOK_TOKEN;
-  const givenToken = Buffer.from(String(params.token || ''));
-  if (!broadnetToken || givenToken.length !== Buffer.byteLength(broadnetToken) || !crypto.timingSafeEqual(givenToken, Buffer.from(broadnetToken))) throw httpError(401, 'bad BroadNet webhook token');
-  logInboundAlarmPayload('broadnet', 'BroadNet', b);
-
-  if (b.terminal) {
-    const t = b.terminal;
-    let rec = db.broadnet_terminals.find((x) => x.network_id === t.network_id);
-    if (!rec) { rec = { network_id: t.network_id }; db.broadnet_terminals.push(rec); }
-    Object.assign(rec, {
-      username: t.username, lat: t.latitude != null ? Number(t.latitude) : null, lon: t.longitude != null ? Number(t.longitude) : null,
-      status: broadnet.canonicalStatus(t.incident_status), channel: t.channel || null, ptt_pressed: Boolean(t.ptt_pressed),
-      updated_at: new Date().toISOString(),
-    });
-    broadcast('broadnet_terminal.location', publicBroadnetTerminal(rec));
-    return { ok: true };
-  }
-
-  if (b.incident || b.allocation) {
-    const incidentUuid = (b.incident && b.incident.uuid) || (b.allocation && b.allocation.incident_uuid);
-    const existing = incidentUuid ? db.jobs.find((x) => x.broadnet_incident_uuid === incidentUuid) : null;
-    if (!existing) return { ok: true, note: 'no job matches this BroadNet incident — logged only' };
-    const stamp = `[BroadNet ${b.reason || 'update'} — ${new Date().toISOString()}]`;
-    existing.notes = existing.notes ? `${existing.notes}\n${stamp}` : stamp;
-    existing.updated_at = new Date().toISOString();
-    broadcast('job.updated', publicJob(existing));
-    logEvent('job.updated', `JOB ${existing.reference} — BroadNet ${b.reason || 'update'}`, { job_id: existing.id, incident_uuid: incidentUuid });
-    return publicJob(existing);
-  }
-
-  return { ok: true, note: 'unrecognised BroadNet payload shape — logged only' };
-});
+/* GuardM8, AURA and BroadNet integrations — see routes-alarm-integrations.js. */
+const { publicBroadnetTerminal } = require('./routes-alarm-integrations.js')({ route, httpError, CONTROL, db, nextId, logEvent, broadcast, pushToRoles, publicJob, instantiateChecklist, secretMatches, broadnet });
 
 route('POST', '/api/jobs/:id/assign', CONTROL, ({ params, body }) => {
   const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
@@ -3496,8 +3319,8 @@ route('POST', '/api/ops/monthly-report/send-test', ADMIN, async ({ user }) => {
  * Unlike the Kayleigh monthly report above, this genuinely needs to land
  * in a specific hour, not just "sometime on the right day" — both the
  * fire-guard and the week-boundary math go through
- * londonParts()/londonToUtc() (defined further down this file, but
- * function declarations hoist) rather than the server process's own
+ * londonParts()/londonToUtc() (in routes-shifts.js, returned to this file
+ * further down and only called once requests or ticks run) rather than the server process's own
  * local clock, which may not even be set to Europe/London. weekBounds()
  * is written to work from any day of the week — it always resolves to
  * the most recently completed Monday-Sunday week — so the same function
@@ -3746,6 +3569,54 @@ route('POST', '/api/jobs/:id/close', CONTROL, ({ params, body, user }) => {
   return publicJob(j);
 });
 
+/* Not attended: control raised the job and dealt with it without sending
+ * anyone — a remote CCTV check, the keyholder confirmed a false alarm, the
+ * client cancelled. The job closes as CANCELLED (so it's off every live
+ * list and never billed, see routes-invoices.js attendancesFor) but keeps
+ * a reason the client sees in their portal, with any notes control marks
+ * as client-visible, so they can see action was taken. A job someone
+ * actually arrived at is attended: close that one as completed instead. */
+route('POST', '/api/jobs/:id/not-attended', CONTROL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  if (j.not_attended) throw httpError(409, 'job is already marked not attended');
+  if (j.status === 'COMPLETED') throw httpError(409, 'this job was completed — it was attended');
+  if (j.on_scene_at) throw httpError(409, 'an officer arrived at this job — close it as completed instead');
+  const reason = String(body.reason || '').trim().slice(0, 2000);
+  if (reason.length < 3) throw httpError(400, 'give a reason it was not attended');
+  const clientNote = String(body.client_note || '').trim().slice(0, 2000);
+  const at = new Date().toISOString();
+  j.status = 'CANCELLED';
+  stampJobStatus(j, 'CANCELLED');
+  for (const a of db.job_assignments.filter((x) => x.job_id === j.id)) {
+    if (a.mdt_id) { const m = db.mdts.find((x) => x.id === a.mdt_id); if (m) m.job_id = null; }
+  }
+  j.not_attended = true;
+  j.not_attended_reason = reason;
+  j.not_attended_at = at; j.not_attended_by = user.id; j.not_attended_by_name = user.display_name;
+  j.note_entries = j.note_entries || [];
+  j.note_entries.push({ id: crypto.randomUUID(), at, by: user.id, by_name: user.display_name, text: `Not attended: ${reason}`, closing: true, client_visible: true });
+  if (clientNote) j.note_entries.push({ id: crypto.randomUUID(), at, by: user.id, by_name: user.display_name, text: clientNote, client_visible: true });
+  j.awaiting_close = false;
+  j.closed_at = at; j.closed_by = user.id; j.closed_by_name = user.display_name;
+  j.updated_at = at;
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.not_attended', `JOB ${j.reference} MARKED NOT ATTENDED BY ${user.display_name}: ${reason}`, { job_id: j.id, by: user.id });
+  return publicJob(j);
+});
+
+/* Show or hide one note in the client portal. Only control decides what a
+ * client reads; notes are hidden from them unless marked. */
+route('PATCH', '/api/jobs/:id/notes/:noteId', CONTROL, ({ params, body, user }) => {
+  const j = db.jobs.find((x) => x.id === Number(params.id)); if (!j) throw httpError(404, 'job not found');
+  const n = (j.note_entries || []).find((x) => x.id === params.noteId); if (!n) throw httpError(404, 'note not found');
+  if (body.client_visible === undefined) throw httpError(400, 'client_visible required');
+  n.client_visible = Boolean(body.client_visible);
+  j.updated_at = new Date().toISOString();
+  broadcast('job.status_changed', publicJob(j));
+  logEvent('job.note_visibility', `NOTE ON JOB ${j.reference} ${n.client_visible ? 'SHOWN TO' : 'HIDDEN FROM'} THE CLIENT BY ${user.display_name}`, { job_id: j.id, note_id: n.id });
+  return publicJob(j);
+});
+
 /* Resend a closed job's report to wherever control chooses — a client who
  * lost it, or a non-client site's report forwarded from info@. Rebuilt from
  * the job as it stands, so later notes and photos are in it. */
@@ -3777,6 +3648,8 @@ route('POST', '/api/jobs/:id/notes', ALL, ({ params, body, user }) => {
   const text = String(body.text || '').trim().slice(0, 2000);
   if (!text) throw httpError(400, 'note text required');
   const note = { id: crypto.randomUUID(), at: new Date().toISOString(), by: user.id, by_name: user.display_name, text };
+  // Only control can put a note in front of the client (see the client portal's clientJob).
+  if (body.client_visible && isControlRole(user.role)) note.client_visible = true;
   j.note_entries = j.note_entries || [];
   j.note_entries.push(note);
   if (j.status === 'COMPLETED') j.resolution_report_html = jobReportHtml(j);
@@ -4299,6 +4172,16 @@ route('POST', '/api/messages/:id/read', ALL, ({ params, user }) => {
 });
 
 // Events / audit
+/* Checks the audit trail's hash chain end to end (store.js verifyAudit):
+ * ok, how many rows, and the head hash — note it down somewhere outside
+ * CCCS from time to time; if it ever stops matching a later check's chain,
+ * the trail was rewritten. The check itself is logged. */
+route('GET', '/api/events/verify', ADMIN, ({ user }) => {
+  if (!store.verifyAudit) return { ok: null, note: 'persistence is off, so there is no stored trail to check' };
+  const result = store.verifyAudit();
+  logEvent('audit.verified', `AUDIT TRAIL CHECKED BY ${user.username}: ${result.ok ? `INTACT (${result.checked} ROWS)` : `BROKEN AT ROW ${result.broken_at.id}`}`, { by: user.id, ok: result.ok });
+  return { ...result, checked_at: new Date().toISOString() };
+});
 route('GET', '/api/events', CONTROL, ({ query }) => {
   // With persistence on, search the whole trail rather than the in-memory window.
   if (store.queryAudit) {
@@ -4660,1200 +4543,12 @@ route('DELETE', '/api/personnel/:id/welfare', ALL, ({ params, user }) => {
   return publicPersonnel(stopWelfare(p, user.role === 'FIELD_USER' ? 'cancelled by officer' : 'cancelled by control', user), user);
 });
 
-/* Sites under contract — what alarm response jobs are attached to. */
-const RISK_LEVELS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
-route('GET', '/api/sites', ALL, ({ user }) => db.sites.filter((s) => siteVisibleTo(s.id, user)));
-route('POST', '/api/sites', CONTROL, ({ body }) => {
-  const name = String(body.name || '').trim();
-  if (!name) throw httpError(400, 'name required');
-  if (db.sites.some((x) => x.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'site already exists');
-  if (body.risk_level && !RISK_LEVELS.includes(body.risk_level)) throw httpError(400, `risk_level must be one of ${RISK_LEVELS.join(', ')}`);
-  const site = {
-    id: nextId('sites'), name, address: body.address || '', lat: Number(body.lat) || null, lon: Number(body.lon) || null,
-    keyholder: body.keyholder || '', contact_email: body.contact_email || '', accounts_email: String(body.accounts_email || '').trim(), contract: 'ACTIVE', checklist: [],
-    response_sla_minutes: body.response_sla_minutes ? Number(body.response_sla_minutes) : null,
-    geofence_m: body.geofence_m === undefined || body.geofence_m === null || body.geofence_m === '' ? null : Math.min(Math.max(Number(body.geofence_m) || 0, 0), 5000),
-    branch_id: normalizedBranchId(body.branch_id),
-    code: String(body.code || '').trim(), postcode: String(body.postcode || '').trim(),
-    // The stable key AURA's callout webhook carries as incidentInformation[].predefinedLocationId
-    // — maps an inbound callout straight to this site without guessing from address text.
-    aura_location_id: String(body.aura_location_id || '').trim(),
-    // Not validated against the IANA database — a typo here shows up as a
-    // visibly wrong time on the rota rather than failing closed, which is
-    // the safer failure mode for a field with no live-consequence default.
-    timezone: String(body.timezone || '').trim() || 'Europe/London',
-    risk_level: body.risk_level || null, access_instructions: body.access_instructions || '',
-    // Informational, not enforced to exactly one — see README.md.
-    is_control_room: body.is_control_room === true,
-  };
-  db.sites.push(site);
-  logEvent('site.created', `SITE ${name} ADDED`);
-  return { __status: 201, __body: site };
-});
-route('PATCH', '/api/sites/:id', ADMIN, ({ params, body }) => {
-  const site = db.sites.find((x) => x.id === Number(params.id));
-  if (!site) throw httpError(404, 'site not found');
-  if ('name' in body) {
-    const name = String(body.name || '').trim();
-    if (!name) throw httpError(400, 'name required');
-    if (db.sites.some((x) => x.id !== site.id && x.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'site already exists');
-    site.name = name;
-  }
-  if ('address' in body) site.address = body.address || '';
-  if ('branch_id' in body) site.branch_id = normalizedBranchId(body.branch_id);
-  if ('lat' in body) site.lat = body.lat === null || body.lat === '' ? null : Number(body.lat);
-  if ('lon' in body) site.lon = body.lon === null || body.lon === '' ? null : Number(body.lon);
-  if ('keyholder' in body) site.keyholder = body.keyholder || '';
-  if ('contact_email' in body) site.contact_email = body.contact_email || '';
-  if ('accounts_email' in body) site.accounts_email = String(body.accounts_email || '').trim();
-  if ('response_sla_minutes' in body) {
-    if (body.response_sla_minutes !== null && (!Number.isFinite(Number(body.response_sla_minutes)) || Number(body.response_sla_minutes) <= 0)) {
-      throw httpError(400, 'response_sla_minutes must be a positive number of minutes, or null');
-    }
-    site.response_sla_minutes = body.response_sla_minutes === null ? null : Number(body.response_sla_minutes);
-  }
-  if ('code' in body) site.code = String(body.code || '').trim();
-  if ('geofence_m' in body) {
-    if (body.geofence_m !== null && body.geofence_m !== '' && (!Number.isFinite(Number(body.geofence_m)) || Number(body.geofence_m) < 0 || Number(body.geofence_m) > 5000)) throw httpError(400, 'geofence must be 0–5000 metres (0 = off)');
-    site.geofence_m = body.geofence_m === null || body.geofence_m === '' ? null : Number(body.geofence_m);
-  }
-  if ('postcode' in body) site.postcode = String(body.postcode || '').trim();
-  if ('aura_location_id' in body) site.aura_location_id = String(body.aura_location_id || '').trim();
-  if ('timezone' in body) site.timezone = String(body.timezone || '').trim() || 'Europe/London';
-  if ('risk_level' in body) {
-    if (body.risk_level && !RISK_LEVELS.includes(body.risk_level)) throw httpError(400, `risk_level must be one of ${RISK_LEVELS.join(', ')}`);
-    site.risk_level = body.risk_level || null;
-  }
-  if ('access_instructions' in body) site.access_instructions = body.access_instructions || '';
-  if ('is_control_room' in body) site.is_control_room = Boolean(body.is_control_room);
-  if ('checklist' in body) {
-    if (!Array.isArray(body.checklist)) throw httpError(400, 'checklist must be an array');
-    site.checklist = body.checklist.map((item) => ({
-      id: item.id || crypto.randomUUID(), title: String(item.title || '').trim(), instructions: String(item.instructions || '').trim(),
-    })).filter((item) => item.title);
-  }
-  logEvent('site.updated', `SITE ${site.name} UPDATED`, { site_id: site.id });
-  return site;
-});
-route('DELETE', '/api/sites/:id', ADMIN, ({ params }) => {
-  const site = db.sites.find((x) => x.id === Number(params.id));
-  if (!site) throw httpError(404, 'site not found');
-  if (db.jobs.some((j) => j.site_id === site.id && !['COMPLETED', 'CANCELLED'].includes(j.status))) {
-    throw httpError(409, 'site has an open job — resolve or cancel it first');
-  }
-  if (db.patrol_schedules.some((s) => s.site_id === site.id)) {
-    throw httpError(409, 'site has patrol schedules — delete them first');
-  }
-  if (db.beats.some((b) => b.site_id === site.id)) {
-    throw httpError(409, 'site has beats — delete them first');
-  }
-  if (db.site_visits.some((v) => v.site_id === site.id && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status))) {
-    throw httpError(409, 'site has an open site visit — resolve or cancel it first');
-  }
-  db.sites = db.sites.filter((x) => x.id !== site.id);
-  logEvent('site.deleted', `SITE ${site.name} DELETED`, { site_id: site.id });
-  return { ok: true };
-});
+/* Sites, passdown logs, beats, patrol schedules and site visits — see routes-sites.js. */
+const { PATROL_SCHEDULE_TICK_MS, assertPassdownAccess, assertVisitAccess, createPatrolVisit, patrolScheduleTick } = require('./routes-sites.js')({ route, httpError, ALL, CONTROL, ADMIN, db, nextId, logEvent, broadcast, pushToRoles, pushToUsers, findPersonnel, isControlRole, siteVisibleTo, normalizedBranchId, MIME, MEDIA_MIME_EXT, SITE_VISIT_STATES, mediaDir, visitMediaDir, instantiateChecklist, stampVisitStatus, buildResolutionReportHtml, sendResolutionReportEmail, publicBeat, publicPassdownLog, publicPatrolSchedule, publicSiteVisit });
 
-/* Passdown logs — per-site shift-handover notes. Control can read/write any
- * site's log; a FIELD_USER can read/write a site's log only if they've
- * actually been assigned there (a current or past shift or site visit) — the
- * same "were you ever posted here" test either row type already answers, so
- * no separate roster is needed. Entries are an append-only log, like the
- * audit trail: no edit route, a DELETE for control to correct a mistake. */
-function assertPassdownAccess(siteId, user) {
-  if (isControlRole(user.role)) {
-    // DISPATCHER/SYSTEM_ADMIN are never branch/site-scoped (see
-    // BRANCH_SCOPED_ROLES), so this only actually constrains a scoped
-    // SUPERVISOR — the same "don't confirm it exists" 404 the rest of
-    // this file uses for an out-of-scope record.
-    if (!siteVisibleTo(siteId, user)) throw httpError(404, 'site not found');
-    return;
-  }
-  if (user.role === 'FIELD_USER' && user.personnel_id) {
-    const hasShift = db.shifts.some((s) => s.site_id === siteId
-      && db.shift_assignments.some((a) => a.shift_id === s.id && a.personnel_id === user.personnel_id && a.status !== 'REMOVED'));
-    const hasVisit = db.site_visits.some((v) => v.site_id === siteId
-      && (v.personnel_id === user.personnel_id || (v.additional_personnel || []).includes(user.personnel_id)));
-    if (hasShift || hasVisit) return;
-  }
-  throw httpError(403, 'not assigned to this site');
-}
-route('GET', '/api/passdown-logs', ALL, ({ query, user }) => {
-  const siteId = Number(query.get('site_id'));
-  if (!siteId) throw httpError(400, 'site_id required');
-  if (!db.sites.some((s) => s.id === siteId)) throw httpError(404, 'site not found');
-  assertPassdownAccess(siteId, user);
-  return db.passdown_logs.filter((l) => l.site_id === siteId)
-    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
-    .map(publicPassdownLog);
-});
-route('POST', '/api/passdown-logs', ALL, ({ body, user }) => {
-  const site = db.sites.find((s) => s.id === Number(body.site_id));
-  if (!site) throw httpError(400, 'site_id must reference an existing site');
-  assertPassdownAccess(site.id, user);
-  const text = String(body.body || '').trim();
-  if (!text) throw httpError(400, 'body required');
-  const author = user.role === 'FIELD_USER' && user.personnel_id ? db.personnel.find((p) => p.id === user.personnel_id) : null;
-  const log = {
-    id: nextId('passdown_logs'), site_id: site.id, body: text.slice(0, 4000),
-    author_personnel_id: author ? author.id : null, author_name: author ? author.name : user.display_name,
-    created_at: new Date().toISOString(),
-  };
-  db.passdown_logs.push(log);
-  broadcast('passdown_log.created', publicPassdownLog(log));
-  logEvent('passdown_log.created', `PASSDOWN NOTE ADDED FOR ${site.name} BY ${log.author_name}`, { site_id: site.id, passdown_log_id: log.id });
-  return { __status: 201, __body: publicPassdownLog(log) };
-});
-route('DELETE', '/api/passdown-logs/:id', ADMIN, ({ params }) => {
-  const l = db.passdown_logs.find((x) => x.id === Number(params.id)); if (!l) throw httpError(404, 'passdown log not found');
-  db.passdown_logs = db.passdown_logs.filter((x) => x.id !== l.id);
-  logEvent('passdown_log.deleted', 'PASSDOWN NOTE DELETED', { passdown_log_id: l.id, site_id: l.site_id });
-  return { ok: true };
-});
-
-/* Beats — a named patrol route within a site (e.g. "Perimeter", "Car park
- * sweep"), for sites where one checklist doesn't describe the work. Purely
- * optional: a patrol schedule or a manually created visit can reference one,
- * but neither requires it — a site with no beats behaves exactly as before. */
-route('GET', '/api/beats', ALL, ({ query }) => {
-  let rows = db.beats.map(publicBeat);
-  if (query.get('site_id')) rows = rows.filter((b) => b.site_id === Number(query.get('site_id')));
-  return rows;
-});
-route('POST', '/api/beats', CONTROL, ({ body }) => {
-  const site = db.sites.find((s) => s.id === Number(body.site_id));
-  if (!site) throw httpError(400, 'site_id must reference an existing site');
-  const name = String(body.name || '').trim();
-  if (!name) throw httpError(400, 'name required');
-  const beat = { id: nextId('beats'), site_id: site.id, name, description: body.description || '', waypoints: [], active: body.active !== false };
-  db.beats.push(beat);
-  logEvent('beat.created', `BEAT "${name}" CREATED FOR ${site.name}`, { beat_id: beat.id });
-  return { __status: 201, __body: publicBeat(beat) };
-});
-route('PATCH', '/api/beats/:id', CONTROL, ({ params, body }) => {
-  const b = db.beats.find((x) => x.id === Number(params.id)); if (!b) throw httpError(404, 'beat not found');
-  if ('name' in body) { const name = String(body.name || '').trim(); if (!name) throw httpError(400, 'name required'); b.name = name; }
-  if ('description' in body) b.description = body.description || '';
-  if ('active' in body) b.active = Boolean(body.active);
-  if ('waypoints' in body) {
-    if (!Array.isArray(body.waypoints)) throw httpError(400, 'waypoints must be an array');
-    b.waypoints = body.waypoints.map((w) => ({
-      id: w.id || crypto.randomUUID(), title: String(w.title || '').trim(), instructions: String(w.instructions || '').trim(),
-    })).filter((w) => w.title);
-  }
-  logEvent('beat.updated', `BEAT "${b.name}" UPDATED`, { beat_id: b.id });
-  return publicBeat(b);
-});
-route('DELETE', '/api/beats/:id', ADMIN, ({ params }) => {
-  const b = db.beats.find((x) => x.id === Number(params.id)); if (!b) throw httpError(404, 'beat not found');
-  if (db.patrol_schedules.some((s) => s.beat_id === b.id)) throw httpError(409, 'beat has patrol schedules — reassign or delete them first');
-  if (db.site_visits.some((v) => v.beat_id === b.id && !['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status))) {
-    throw httpError(409, 'beat has an open site visit — resolve or cancel it first');
-  }
-  db.beats = db.beats.filter((x) => x.id !== b.id);
-  logEvent('beat.deleted', `BEAT "${b.name}" DELETED`, { beat_id: b.id });
-  return { ok: true };
-});
-
-/* ------------------------------------------------------------------ *
- * Patrol schedules and site visits
- *
- * A scheduled, recurring alternative to one-off jobs: a patrol_schedules
- * row describes a recurrence ("every Tuesday/Thursday at 22:00" or "every
- * 4 hours"); patrolScheduleTick() below turns a due occurrence into a
- * site_visits row, which then walks the same DISPATCHED -> ACKNOWLEDGED ->
- * EN_ROUTE -> ON_SCENE -> COMPLETED lifecycle as a job, reusing the same
- * checklist/photo/resolution-report machinery. Deliberately simpler than
- * job_assignments: a visit carries its assignee(s) directly (personnel_id +
- * additional_personnel[]) rather than through a join table, since a visit
- * is never assigned to an MDT — it's foot-patrol work.
- * ------------------------------------------------------------------ */
-route('GET', '/api/patrol-schedules', ALL, ({ query }) => {
-  let rows = db.patrol_schedules.map(publicPatrolSchedule);
-  if (query.get('site_id')) rows = rows.filter((s) => s.site_id === Number(query.get('site_id')));
-  return rows;
-});
-function resolveBeatId(rawBeatId, siteId) {
-  if (!rawBeatId) return null;
-  const beat = db.beats.find((b) => b.id === Number(rawBeatId));
-  if (!beat) throw httpError(400, 'beat_id must reference an existing beat');
-  if (beat.site_id !== siteId) throw httpError(400, 'beat does not belong to this site');
-  return beat.id;
-}
-route('POST', '/api/patrol-schedules', CONTROL, ({ body }) => {
-  const site = db.sites.find((s) => s.id === Number(body.site_id));
-  if (!site) throw httpError(400, 'site_id must reference an existing site');
-  const label = String(body.label || '').trim();
-  if (!label) throw httpError(400, 'label required');
-  const daysOfWeek = Array.isArray(body.days_of_week) ? body.days_of_week.map(Number).filter((d) => d >= 0 && d <= 6) : null;
-  const intervalHours = body.interval_hours != null && body.interval_hours !== '' ? Number(body.interval_hours) : null;
-  if (!(daysOfWeek && daysOfWeek.length) && !intervalHours) throw httpError(400, 'either days_of_week (with time_of_day) or interval_hours is required');
-  const schedule = {
-    id: nextId('patrol_schedules'), site_id: site.id, beat_id: resolveBeatId(body.beat_id, site.id), label,
-    days_of_week: daysOfWeek && daysOfWeek.length ? daysOfWeek : null,
-    time_of_day: body.time_of_day || null,
-    interval_hours: intervalHours || null,
-    duration_expected_min: Number(body.duration_expected_min) || 30,
-    active: body.active !== false,
-  };
-  db.patrol_schedules.push(schedule);
-  logEvent('patrol_schedule.created', `PATROL SCHEDULE "${label}" CREATED FOR ${site.name}`, { patrol_schedule_id: schedule.id });
-  return { __status: 201, __body: publicPatrolSchedule(schedule) };
-});
-route('PATCH', '/api/patrol-schedules/:id', CONTROL, ({ params, body }) => {
-  const s = db.patrol_schedules.find((x) => x.id === Number(params.id)); if (!s) throw httpError(404, 'patrol schedule not found');
-  if ('label' in body) { const label = String(body.label || '').trim(); if (!label) throw httpError(400, 'label required'); s.label = label; }
-  if ('days_of_week' in body) s.days_of_week = Array.isArray(body.days_of_week) && body.days_of_week.length ? body.days_of_week.map(Number) : null;
-  if ('time_of_day' in body) s.time_of_day = body.time_of_day || null;
-  if ('interval_hours' in body) s.interval_hours = body.interval_hours != null && body.interval_hours !== '' ? Number(body.interval_hours) : null;
-  if ('duration_expected_min' in body) s.duration_expected_min = Number(body.duration_expected_min) || 30;
-  if ('active' in body) s.active = Boolean(body.active);
-  if ('beat_id' in body) s.beat_id = resolveBeatId(body.beat_id, s.site_id);
-  logEvent('patrol_schedule.updated', `PATROL SCHEDULE "${s.label}" UPDATED`, { patrol_schedule_id: s.id });
-  return publicPatrolSchedule(s);
-});
-route('DELETE', '/api/patrol-schedules/:id', ADMIN, ({ params }) => {
-  const s = db.patrol_schedules.find((x) => x.id === Number(params.id)); if (!s) throw httpError(404, 'patrol schedule not found');
-  db.patrol_schedules = db.patrol_schedules.filter((x) => x.id !== s.id);
-  logEvent('patrol_schedule.deleted', `PATROL SCHEDULE "${s.label}" DELETED`, { patrol_schedule_id: s.id });
-  return { ok: true };
-});
-
-function nextVisitReference() {
-  return `VISIT-${new Date().getFullYear()}-${String(nextId('visitref') + 40).padStart(5, '0')}`;
-}
-route('GET', '/api/site-visits', ALL, ({ query, user }) => {
-  let rows = db.site_visits.filter((v) => siteVisibleTo(v.site_id, user)).map(publicSiteVisit);
-  if (query.get('status')) rows = rows.filter((v) => v.status === query.get('status').toUpperCase());
-  if (query.get('site_id')) rows = rows.filter((v) => v.site_id === Number(query.get('site_id')));
-  return rows;
-});
-route('POST', '/api/site-visits', CONTROL, ({ body, user }) => {
-  const site = db.sites.find((s) => s.id === Number(body.site_id));
-  if (!site) throw httpError(400, 'site_id must reference an existing site');
-  const v = {
-    id: nextId('site_visits'), reference: nextVisitReference(), site_id: site.id, schedule_id: null, beat_id: resolveBeatId(body.beat_id, site.id),
-    personnel_id: null, additional_personnel: [], status: 'SCHEDULED',
-    scheduled_for: body.scheduled_for || new Date().toISOString(),
-    dispatched_at: null, acknowledged_at: null, en_route_at: null, on_scene_at: null, completed_at: null, cancelled_at: null, missed_at: null,
-    notes: body.notes || '', checklist: instantiateChecklist(site), media: [], report_html: null,
-    checkpoint_scans: [],
-    created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-  };
-  db.site_visits.push(v);
-  broadcast('site_visit.created', publicSiteVisit(v));
-  logEvent('site_visit.created', `VISIT ${v.reference} CREATED FOR ${site.name}`, { site_visit_id: v.id });
-  return { __status: 201, __body: publicSiteVisit(v) };
-});
-route('POST', '/api/site-visits/:id/assign', CONTROL, ({ params, body }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  const p = findPersonnel(body.personnel); if (!p) throw httpError(400, 'personnel required');
-  if (v.personnel_id === p.id || (v.additional_personnel || []).includes(p.id)) throw httpError(409, `${p.name} is already assigned to this visit`);
-  if (!v.personnel_id) v.personnel_id = p.id;
-  else { v.additional_personnel = v.additional_personnel || []; v.additional_personnel.push(p.id); }
-  if (v.status === 'SCHEDULED') v.status = 'DISPATCHED';
-  stampVisitStatus(v, 'DISPATCHED');
-  v.updated_at = new Date().toISOString();
-  const site = db.sites.find((s) => s.id === v.site_id);
-  const payload = publicSiteVisit(v);
-  broadcast('site_visit.dispatched', payload);
-  broadcast('site_visit.assigned_to_you', payload, { personnelIds: [p.id] });
-  pushToUsers(db.users.filter((u) => u.personnel_id === p.id).map((u) => u.id),
-    { title: `Patrol visit ${v.reference}`, body: site ? site.name : 'Site visit', url: '/officer.html', tag: 'cccs-visit' });
-  logEvent('site_visit.dispatched', `VISIT ${v.reference} DISPATCHED → ${p.name}`, { site_visit_id: v.id });
-  return payload;
-});
-function assertVisitAccess(v, user) {
-  if (isControlRole(user.role)) return;
-  const mine = user.role === 'FIELD_USER' && user.personnel_id
-    && (v.personnel_id === user.personnel_id || (v.additional_personnel || []).includes(user.personnel_id));
-  if (!mine) throw httpError(403, 'visit not assigned to you');
-}
-route('POST', '/api/site-visits/:id/ack', ALL, ({ params, user }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  assertVisitAccess(v, user);
-  if (v.status === 'DISPATCHED') v.status = 'ACKNOWLEDGED';
-  stampVisitStatus(v, 'ACKNOWLEDGED');
-  v.updated_at = new Date().toISOString();
-  const who = user.role === 'FIELD_USER' ? (db.personnel.find((p) => p.id === user.personnel_id) || {}).name : user.display_name;
-  broadcast('site_visit.acknowledged', { visit: publicSiteVisit(v), by: who });
-  logEvent('site_visit.acknowledged', `${who} ACKNOWLEDGED VISIT ${v.reference}`, { site_visit_id: v.id });
-  return publicSiteVisit(v);
-});
-const SITE_VISIT_TS_FIELDS = ['dispatched_at', 'acknowledged_at', 'en_route_at', 'on_scene_at', 'completed_at'];
-route('PATCH', '/api/site-visits/:id', ALL, ({ params, body, user }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  // Control can set the actual stepper times directly — for a patrol
-  // confirmed done by radio or in person, rather than through the officer
-  // app's own checkpoint scans, there is otherwise no way to record when
-  // it really happened instead of defaulting every stage to "now" the
-  // moment status flips to COMPLETED. Applied before the status block
-  // below so stampVisitStatus's "only if not already set" guard respects
-  // whatever was explicitly given here.
-  const settingTimes = isControlRole(user.role) && SITE_VISIT_TS_FIELDS.some((f) => f in body);
-  if (settingTimes) {
-    for (const f of SITE_VISIT_TS_FIELDS) {
-      if (!(f in body)) continue;
-      if (body[f] !== null && !Number.isFinite(Date.parse(body[f]))) throw httpError(400, `invalid ${f}`);
-      v[f] = body[f] ? new Date(body[f]).toISOString() : null;
-    }
-  }
-  if (body.status) {
-    const s = String(body.status).toUpperCase();
-    if (!SITE_VISIT_STATES.includes(s)) throw httpError(400, 'invalid visit status');
-    assertVisitAccess(v, user);
-    v.status = s;
-    stampVisitStatus(v, s);
-    if (s === 'COMPLETED') {
-      const site = db.sites.find((x) => x.id === v.site_id);
-      const beat = v.beat_id ? db.beats.find((x) => x.id === v.beat_id) : null;
-      const waypoints = beat ? beat.waypoints || [] : [];
-      const scannedIds = new Set((v.checkpoint_scans || []).map((sc) => sc.waypoint_id));
-      v.report_html = buildResolutionReportHtml({
-        reference: v.reference, kindLabel: 'Patrol visit', locationLabel: site ? site.name : 'Site visit', siteId: v.site_id,
-        description: '', notes: v.notes,
-        timeline: [
-          ['Scheduled', v.scheduled_for], ['Dispatched', v.dispatched_at], ['Acknowledged', v.acknowledged_at],
-          ['En route', v.en_route_at], ['On scene', v.on_scene_at], ['Completed', v.completed_at],
-        ].filter(([, t]) => t),
-        checklist: v.checklist, media: v.media,
-        extraRows: waypoints.length ? [['Checkpoints', `${waypoints.filter((w) => scannedIds.has(w.id)).length} / ${waypoints.length} scanned` + (waypoints.some((w) => !scannedIds.has(w.id)) ? ` (missing: ${waypoints.filter((w) => !scannedIds.has(w.id)).map((w) => w.title).join(', ')})` : '')]] : [],
-      });
-      // An hourly shift patrol would mean a dozen emails a shift — those are
-      // in the client portal (routes-shift-patrols.js) instead.
-      if (!v.shift_id) sendResolutionReportEmail({
-        reference: v.reference, siteId: v.site_id, media: v.media, mediaDir: visitMediaDir(v.id),
-        logType: 'site_visit.report_emailed', logIdKey: 'site_visit_id', logId: v.id,
-      }, v.report_html);
-      logEvent('site_visit.report_generated', `RESOLUTION REPORT GENERATED FOR ${v.reference}`, { site_visit_id: v.id });
-    }
-  }
-  if (body.notes !== undefined) v.notes = String(body.notes).slice(0, 2000);
-  v.updated_at = new Date().toISOString();
-  broadcast('site_visit.status_changed', publicSiteVisit(v));
-  if (settingTimes) {
-    logEvent('site_visit.times_corrected', `VISIT ${v.reference} TIMES SET BY ${user.display_name} (not via the officer app)`, { site_visit_id: v.id, corrected_by: user.id });
-  }
-  logEvent('site_visit.status_changed', `VISIT ${v.reference} → ${v.status}`, { site_visit_id: v.id });
-  return publicSiteVisit(v);
-});
-route('PATCH', '/api/site-visits/:id/checklist/:itemId', ALL, ({ params, body, user }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  assertVisitAccess(v, user);
-  const item = (v.checklist || []).find((x) => x.id === params.itemId); if (!item) throw httpError(404, 'checklist item not found');
-  if (body.status) {
-    const s = String(body.status).toUpperCase();
-    if (!['PENDING', 'COMPLETE'].includes(s)) throw httpError(400, 'invalid checklist status');
-    item.status = s;
-    if (s === 'COMPLETE') { item.completed_at = new Date().toISOString(); item.completed_by = user.display_name; }
-    else { item.completed_at = null; item.completed_by = null; }
-  }
-  if (body.notes !== undefined) item.notes = String(body.notes).slice(0, 2000);
-  v.updated_at = new Date().toISOString();
-  broadcast('site_visit.status_changed', publicSiteVisit(v));
-  logEvent('site_visit.checklist_updated', `${item.status === 'COMPLETE' ? 'COMPLETED' : 'UPDATED'} "${item.title}" on VISIT ${v.reference}`, { site_visit_id: v.id });
-  return publicSiteVisit(v);
-});
-route('POST', '/api/site-visits/:id/media', ALL, ({ params, body, user }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  assertVisitAccess(v, user);
-  const ext = MEDIA_MIME_EXT[body.mimetype];
-  if (!ext) throw httpError(400, 'mimetype must be image/jpeg, image/png or image/webp');
-  if (!body.data) throw httpError(400, 'data (base64) required');
-  if (body.checklist_item_id && !(v.checklist || []).some((x) => x.id === body.checklist_item_id)) throw httpError(404, 'checklist item not found');
-  const bytes = Buffer.from(body.data, 'base64');
-  if (bytes.length > 8e6) throw httpError(413, 'photo too large');
-  const dir = visitMediaDir(v.id);
-  fs.mkdirSync(dir, { recursive: true });
-  const mediaId = crypto.randomUUID();
-  const filename = `${mediaId}${ext}`;
-  fs.writeFileSync(path.join(dir, filename), bytes);
-  const media = {
-    id: mediaId, url: `/api/site-visits/${v.id}/media/${mediaId}`, filename, caption: String(body.caption || '').slice(0, 200),
-    checklist_item_id: body.checklist_item_id || null, taken_by: user.display_name, taken_at: new Date().toISOString(),
-  };
-  v.media = v.media || [];
-  v.media.push(media);
-  v.updated_at = new Date().toISOString();
-  broadcast('site_visit.status_changed', publicSiteVisit(v));
-  logEvent('site_visit.media_added', `PHOTO ADDED TO VISIT ${v.reference}`, { site_visit_id: v.id });
-  return { __status: 201, __body: media };
-});
-route('GET', '/api/site-visits/:id/media/:mediaId', ALL, ({ params, user }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  assertVisitAccess(v, user);
-  const m = (v.media || []).find((x) => x.id === params.mediaId); if (!m) throw httpError(404, 'photo not found');
-  const file = path.join(visitMediaDir(v.id), m.filename);
-  if (!fs.existsSync(file)) throw httpError(404, 'photo file missing');
-  return { __body: fs.readFileSync(file), __headers: { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'private, max-age=86400' } };
-});
-route('GET', '/api/site-visits/:id/report', CONTROL, ({ params }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  if (!v.report_html) throw httpError(404, 'no report yet — the visit has not been completed');
-  return { __body: v.report_html, __headers: { 'content-type': 'text/html; charset=utf-8' } };
-});
-route('POST', '/api/site-visits/:id/stand-down', CONTROL, ({ params, body }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  const p = findPersonnel(body.personnel); if (!p) throw httpError(400, 'personnel required');
-  let removed = false;
-  if (v.personnel_id === p.id) { v.personnel_id = (v.additional_personnel || []).shift() || null; removed = true; }
-  else if ((v.additional_personnel || []).includes(p.id)) { v.additional_personnel = v.additional_personnel.filter((id) => id !== p.id); removed = true; }
-  if (!removed) throw httpError(404, 'that person is not assigned to this visit');
-  if (!v.personnel_id && !(v.additional_personnel || []).length && v.status === 'DISPATCHED') v.status = 'SCHEDULED';
-  v.updated_at = new Date().toISOString();
-  const payload = publicSiteVisit(v);
-  broadcast('site_visit.status_changed', payload);
-  broadcast('site_visit.stood_down', payload, { personnelIds: [p.id] });
-  logEvent('site_visit.stood_down', `${p.name} STOOD DOWN FROM VISIT ${v.reference}`, { site_visit_id: v.id });
-  return payload;
-});
-
-/* Guard tour checkpoint scanning — a beat's waypoints (see the Beats
- * section above) double as checkpoints: each one gets a QR code (just its
- * own id, printed/posted at the physical location — see admin.html's Beats
- * tab), and scanning it here is what proves an officer actually reached
- * that point rather than just clicking through a list from the break room.
- * Re-scanning the same waypoint is allowed — a real tour sometimes revisits
- * a point, and the log is a timeline, not a checklist that needs undoing. */
-route('POST', '/api/site-visits/:id/checkpoint-scan', ALL, ({ params, body, user }) => {
-  const v = db.site_visits.find((x) => x.id === Number(params.id)); if (!v) throw httpError(404, 'site visit not found');
-  assertVisitAccess(v, user);
-  if (['COMPLETED', 'CANCELLED', 'MISSED'].includes(v.status)) throw httpError(409, 'visit is already closed');
-  if (!v.beat_id) throw httpError(400, 'this visit has no beat — nothing to scan against');
-  const beat = db.beats.find((b) => b.id === v.beat_id);
-  const waypoint = beat && (beat.waypoints || []).find((w) => w.id === body.waypoint_id);
-  if (!waypoint) throw httpError(404, 'waypoint not found on this visit\'s beat');
-  const scan = {
-    id: crypto.randomUUID(), waypoint_id: waypoint.id, waypoint_title: waypoint.title,
-    scanned_at: new Date().toISOString(), scanned_by: user.role === 'FIELD_USER' ? user.personnel_id : null,
-    lat: body.lat != null ? Number(body.lat) : null, lon: body.lon != null ? Number(body.lon) : null,
-  };
-  v.checkpoint_scans = v.checkpoint_scans || [];
-  v.checkpoint_scans.push(scan);
-  v.updated_at = new Date().toISOString();
-  const payload = publicSiteVisit(v);
-  broadcast('site_visit.status_changed', payload);
-  const who = user.role === 'FIELD_USER' ? (db.personnel.find((p) => p.id === user.personnel_id) || {}).name : user.display_name;
-  logEvent('site_visit.checkpoint_scanned', `${who} SCANNED "${waypoint.title}" ON VISIT ${v.reference}`, { site_visit_id: v.id, waypoint_id: waypoint.id });
-  return { __status: 201, __body: payload };
-});
-
-/* ---- Patrol scheduling tick ------------------------------------------
- * Turns a due patrol_schedules occurrence into a SCHEDULED site_visits row,
- * and flags a SCHEDULED visit nobody ever dispatched, well past its window,
- * as MISSED — a silent gap in patrol coverage is exactly what this exists
- * to surface, not something to let quietly age out. */
-const PATROL_SCHEDULE_TICK_MS = Number(process.env.PATROL_SCHEDULE_TICK_MS || 60000);
-const VISIT_MISSED_GRACE_MIN = Number(process.env.VISIT_MISSED_GRACE_MIN || 120);
-const OPEN_VISIT_STATES = ['SCHEDULED', 'DISPATCHED', 'ACKNOWLEDGED', 'EN_ROUTE', 'ON_SCENE'];
-function createSiteVisitFromSchedule(schedule, scheduledFor) {
-  const site = db.sites.find((s) => s.id === schedule.site_id);
-  if (!site) return null;
-  const v = {
-    id: nextId('site_visits'), reference: nextVisitReference(), site_id: site.id, schedule_id: schedule.id, beat_id: schedule.beat_id || null,
-    personnel_id: null, additional_personnel: [], status: 'SCHEDULED',
-    scheduled_for: scheduledFor.toISOString(),
-    dispatched_at: null, acknowledged_at: null, en_route_at: null, on_scene_at: null, completed_at: null, cancelled_at: null, missed_at: null,
-    notes: '', checklist: instantiateChecklist(site), media: [], report_html: null,
-    checkpoint_scans: [],
-    created_by: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-  };
-  db.site_visits.push(v);
-  broadcast('site_visit.created', publicSiteVisit(v));
-  logEvent('site_visit.created', `VISIT ${v.reference} SCHEDULED FOR ${site.name} (${schedule.label})`, { site_visit_id: v.id, patrol_schedule_id: schedule.id });
-  return v;
-}
-/** A patrol on a shift (routes-shift-patrols.js). The officers are already
- * on site and clocked in, so it starts ON_SCENE: scan, then complete. */
-function createPatrolVisit({ shift, seq, dueAt, personnelIds }) {
-  const site = db.sites.find((s) => s.id === shift.site_id);
-  const now = new Date().toISOString();
-  const on = personnelIds && personnelIds.length;
-  const v = {
-    id: nextId('site_visits'), reference: nextVisitReference(), site_id: site ? site.id : shift.site_id, schedule_id: null, beat_id: shift.patrol.beat_id || null,
-    shift_id: shift.id, patrol_seq: seq,
-    personnel_id: on ? personnelIds[0] : null, additional_personnel: on ? personnelIds.slice(1) : [], status: on ? 'ON_SCENE' : 'SCHEDULED',
-    scheduled_for: dueAt.toISOString(),
-    dispatched_at: on ? now : null, acknowledged_at: on ? now : null, en_route_at: null, on_scene_at: on ? now : null, completed_at: null, cancelled_at: null, missed_at: null,
-    notes: '', checklist: [], media: [], report_html: null, checkpoint_scans: [],
-    created_by: null, created_at: now, updated_at: now,
-  };
-  db.site_visits.push(v);
-  broadcast('site_visit.created', publicSiteVisit(v));
-  logEvent('site_visit.created', `PATROL ${v.reference} DUE ${dueAt.toISOString()} AT ${site ? site.name : 'SITE'} (SHIFT ${shift.id}, NO. ${seq})`, { site_visit_id: v.id, shift_id: shift.id });
-  return v;
-}
-function patrolScheduleTick() {
-  const now = new Date();
-  for (const schedule of db.patrol_schedules) {
-    if (!schedule.active) continue;
-    const existingForSchedule = db.site_visits.filter((v) => v.schedule_id === schedule.id);
-    const hasOpen = existingForSchedule.some((v) => OPEN_VISIT_STATES.includes(v.status));
-
-    if (schedule.interval_hours) {
-      if (hasOpen) continue;
-      const last = existingForSchedule.slice().sort((a, b) => Date.parse(b.scheduled_for) - Date.parse(a.scheduled_for))[0];
-      const dueAt = last ? Date.parse(last.scheduled_for) + schedule.interval_hours * 3600000 : now.getTime();
-      if (now.getTime() >= dueAt) createSiteVisitFromSchedule(schedule, now);
-    } else if (schedule.days_of_week && schedule.time_of_day) {
-      const todayIdx = now.getDay();
-      if (!schedule.days_of_week.includes(todayIdx)) continue;
-      const [hh, mm] = schedule.time_of_day.split(':').map(Number);
-      const dueToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0);
-      if (now < dueToday) continue;
-      const alreadyToday = existingForSchedule.some((v) => {
-        const d = new Date(v.scheduled_for);
-        return d.getFullYear() === dueToday.getFullYear() && d.getMonth() === dueToday.getMonth() && d.getDate() === dueToday.getDate();
-      });
-      if (!alreadyToday) createSiteVisitFromSchedule(schedule, dueToday);
-    }
-  }
-
-  const graceMs = VISIT_MISSED_GRACE_MIN * 60000;
-  for (const v of db.site_visits) {
-    if (v.status !== 'SCHEDULED') continue;
-    if (now.getTime() - Date.parse(v.scheduled_for) < graceMs) continue;
-    v.status = 'MISSED';
-    stampVisitStatus(v, 'MISSED');
-    v.updated_at = new Date().toISOString();
-    broadcast('site_visit.missed', publicSiteVisit(v));
-    logEvent('site_visit.missed', `VISIT ${v.reference} MISSED — NEVER DISPATCHED`, { site_visit_id: v.id });
-    pushToRoles(CONTROL, { title: 'Missed patrol visit', body: v.reference, url: '/control.html', tag: 'cccs-visit-missed' });
-  }
-}
-
-/* ------------------------------------------------------------------ *
- * HR rota — shift types, shifts (slots) and assignments (who's on them)
- * ------------------------------------------------------------------ */
-route('GET', '/api/shift-types', ALL, ({ query, user }) => {
-  const showAll = query.get('all') === '1' && user.role === 'SYSTEM_ADMIN';
-  return (showAll ? db.shift_types : db.shift_types.filter((t) => t.active)).map(publicShiftType);
-});
-route('POST', '/api/shift-types', ADMIN, ({ body }) => {
-  const name = String(body.name || '').trim();
-  if (!name) throw httpError(400, 'name required');
-  const key = String(body.key || name).toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '');
-  if (!key) throw httpError(400, 'key required');
-  if (db.shift_types.some((t) => t.key === key)) throw httpError(409, 'a shift type with that key already exists');
-  const t = { id: nextId('shift_types'), key, name, color: body.color || '#6b7280', active: true, created_at: new Date().toISOString() };
-  db.shift_types.push(t);
-  logEvent('shift_type.created', `SHIFT TYPE ${name} ADDED`, { shift_type_id: t.id });
-  return { __status: 201, __body: publicShiftType(t) };
-});
-route('PATCH', '/api/shift-types/:id', ADMIN, ({ params, body }) => {
-  const t = db.shift_types.find((x) => x.id === Number(params.id)); if (!t) throw httpError(404, 'shift type not found');
-  if ('name' in body) { const name = String(body.name || '').trim(); if (!name) throw httpError(400, 'name required'); t.name = name; }
-  if ('color' in body) t.color = body.color || '#6b7280';
-  if ('active' in body) t.active = Boolean(body.active);
-  logEvent('shift_type.updated', `SHIFT TYPE ${t.name} UPDATED`, { shift_type_id: t.id });
-  return publicShiftType(t);
-});
-
-function findShift(id) { const s = db.shifts.find((x) => x.id === Number(id)); if (!s) throw httpError(404, 'shift not found'); return s; }
-function findAssignment(id) { const a = db.shift_assignments.find((x) => x.id === Number(id)); if (!a) throw httpError(404, 'assignment not found'); return a; }
-function assignedPersonnelIds(shiftId) { return db.shift_assignments.filter((a) => a.shift_id === shiftId && a.status !== 'REMOVED').map((a) => a.personnel_id); }
-// The root of a recurring shift's own series is itself; a generated
-// instance's root is recurrence_root_id; a plain one-off shift has none.
-function shiftSeriesRootId(s) { return s.recurrence ? s.id : (s.recurrence_root_id || null); }
-// Every member of s's series due on or after s itself — what "this and
-// every future shift" means for both edit and delete.
-function shiftSeriesFromHere(s) {
-  const rootId = shiftSeriesRootId(s);
-  if (!rootId) return [s];
-  return db.shifts.filter((x) => (x.id === rootId || x.recurrence_root_id === rootId) && Date.parse(x.starts_at) >= Date.parse(s.starts_at));
-}
-// Shift fields it makes sense to carry across a whole series — never the
-// schedule (each instance keeps its own date) or status (DRAFT/PUBLISHED/
-// CANCELLED is inherently per-occurrence).
-const SHIFT_SERIES_FIELDS = ['site_id', 'shift_type_id', 'required_headcount', 'break_minutes', 'pay_rate', 'bill_rate', 'uniform_ppe', 'briefing', 'notes'];
-
-route('GET', '/api/shifts', ALL, ({ query, user }) => {
-  let rows = db.shifts.slice();
-  // A draft is "not yet ready to show staff" by definition — only a
-  // control role ever sees one, same as a RESTRICTED form submission only
-  // being visible to those with a reason to see it.
-  if (!isControlRole(user.role)) rows = rows.filter((s) => s.status !== 'DRAFT');
-  // Every other list in the system (jobs, site-visits, shift applications)
-  // already narrows to a branch/site-scoped caller's own patch; the rota
-  // itself had been missed — a scoped SUPERVISOR could otherwise see (and,
-  // via the write routes below, touch) every other branch's shifts too.
-  rows = rows.filter((s) => siteVisibleTo(s.site_id, user));
-  if (query.get('site_id')) rows = rows.filter((s) => s.site_id === Number(query.get('site_id')));
-  if (query.get('shift_type_id')) rows = rows.filter((s) => s.shift_type_id === Number(query.get('shift_type_id')));
-  if (query.get('status')) rows = rows.filter((s) => s.status === query.get('status').toUpperCase());
-  if (query.get('from')) rows = rows.filter((s) => s.ends_at >= query.get('from'));
-  if (query.get('to')) rows = rows.filter((s) => s.starts_at <= query.get('to'));
-  const idx = buildShiftIndex();
-  const personnelId = query.get('personnel_id') ? Number(query.get('personnel_id')) : null;
-  if (personnelId) rows = rows.filter((s) => (idx.assignmentsByShift.get(s.id) || []).some((a) => a.status !== 'REMOVED' && a.personnel_id === personnelId));
-  const out = rows.sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)).map((s) => publicShift(s, idx, user));
-  // Convenience for a single-person view (officer.html): that person's own
-  // assignment on each shift, so the caller doesn't have to search
-  // `assignments` itself for the one row it actually asked about.
-  if (personnelId) for (const s of out) s.my = s.assignments.find((a) => a.personnel_id === personnelId) || null;
-  return out;
-});
-route('POST', '/api/shifts', ADMIN, ({ body, user }) => {
-  const startsAt = body.starts_at ? new Date(body.starts_at) : null;
-  const endsAt = body.ends_at ? new Date(body.ends_at) : null;
-  if (!startsAt || isNaN(startsAt) || !endsAt || isNaN(endsAt)) throw httpError(400, 'starts_at and ends_at (ISO timestamps) required');
-  if (endsAt <= startsAt) throw httpError(400, 'ends_at must be after starts_at');
-  const type = db.shift_types.find((x) => x.id === Number(body.shift_type_id));
-  if (!type) throw httpError(400, 'shift_type_id required and must exist');
-  const site = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null;
-  if (site && !siteVisibleTo(site.id, user)) throw httpError(404, 'site not found');
-  const headcount = body.required_headcount != null && body.required_headcount !== '' ? Number(body.required_headcount) : 1;
-  if (!Number.isFinite(headcount) || headcount < 1) throw httpError(400, 'required_headcount must be a positive number');
-  // Defaults to visible immediately, matching this restructuring's original
-  // behaviour. A caller may ask for DRAFT explicitly (building out a week
-  // before announcing it); IN_PROGRESS/COMPLETED/CANCELLED make no sense on
-  // a shift that doesn't exist yet, so those are refused at creation.
-  if ('status' in body && !['DRAFT', 'PUBLISHED'].includes(body.status)) throw httpError(400, 'a new shift must be DRAFT or PUBLISHED');
-  const s = {
-    id: nextId('shifts'), site_id: site ? site.id : null, shift_type_id: type.id,
-    starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(),
-    break_minutes: body.break_minutes ? Number(body.break_minutes) : 0,
-    required_headcount: headcount,
-    status: body.status === 'DRAFT' ? 'DRAFT' : 'PUBLISHED',
-    pay_rate: body.pay_rate != null && body.pay_rate !== '' ? Number(body.pay_rate) : null,
-    bill_rate: body.bill_rate != null && body.bill_rate !== '' ? Number(body.bill_rate) : null,
-    uniform_ppe: body.uniform_ppe || '', briefing: body.briefing || '', notes: body.notes || '',
-    detail: body.detail && typeof body.detail === 'object' ? body.detail : {},
-    template_id: null, revision: 0,
-    created_by: user.id, created_at: new Date().toISOString(),
-  };
-  db.shifts.push(s);
-  // A `personnel` convenience, the same shape the old single-assignment API
-  // used — the common case (control fills in one person while creating the
-  // shift) shouldn't need a second round trip to /assignments.
-  let firstAssignment = null;
-  if (body.personnel) {
-    const p = findPersonnel(body.personnel);
-    if (!p) throw httpError(400, 'personnel not found');
-    assertDeployable(p, body, user, 'ROSTERING');
-    firstAssignment = {
-      id: nextId('shift_assignments'), shift_id: s.id, personnel_id: p.id, role_on_shift: body.role_on_shift || '',
-      is_duty_supervisor: body.is_duty_supervisor === true, status: 'ASSIGNED', confirmed_at: null,
-      attendance: null, clocked_in_at: null, clocked_out_at: null,
-      created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-    };
-    db.shift_assignments.push(firstAssignment);
-  }
-  // A draft is "not ready to show staff" — the assigned officer doesn't
-  // find out over the socket either, the same boundary GET /api/shifts
-  // enforces on a fetch. The socket payload also reaches DISPATCHER/
-  // SUPERVISOR (isControlRole), not just SYSTEM_ADMIN, so it stays
-  // unredacted (no user passed) — only the HTTP response below goes to
-  // the admin who actually made this request.
-  broadcast('shift.created', publicShift(s), s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: firstAssignment ? [firstAssignment.personnel_id] : [] });
-  if (s.status !== 'DRAFT' && firstAssignment) notifyShiftEvent('ASSIGNED', s, [firstAssignment.personnel_id]);
-  logEvent('shift.created', `SHIFT CREATED (${type.name}) ${s.starts_at} — ${s.ends_at}${firstAssignment ? ` FOR ${findPersonnel(firstAssignment.personnel_id).name}` : ''}`, { shift_id: s.id });
-  return { __status: 201, __body: publicShift(s, undefined, user) };
-});
-route('PATCH', '/api/shifts/:id', ADMIN, ({ params, body, query, user }) => {
-  const s = findShift(params.id);
-  if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
-  if ('site_id' in body && body.site_id && !siteVisibleTo(Number(body.site_id), user)) throw httpError(404, 'site not found');
-  const wasDraft = s.status === 'DRAFT';
-  let scheduleChanged = false;
-  if ('starts_at' in body) { const d = new Date(body.starts_at); if (isNaN(d)) throw httpError(400, 'invalid starts_at'); if (d.toISOString() !== s.starts_at) scheduleChanged = true; s.starts_at = d.toISOString(); }
-  if ('ends_at' in body) { const d = new Date(body.ends_at); if (isNaN(d)) throw httpError(400, 'invalid ends_at'); if (d.toISOString() !== s.ends_at) scheduleChanged = true; s.ends_at = d.toISOString(); }
-  if (Date.parse(s.ends_at) <= Date.parse(s.starts_at)) throw httpError(400, 'ends_at must be after starts_at');
-  if ('site_id' in body) { const site = body.site_id ? db.sites.find((x) => x.id === Number(body.site_id)) : null; const newId = site ? site.id : null; if (newId !== s.site_id) scheduleChanged = true; s.site_id = newId; }
-  if ('shift_type_id' in body) {
-    const type = db.shift_types.find((x) => x.id === Number(body.shift_type_id));
-    if (!type) throw httpError(400, 'shift_type_id must exist');
-    s.shift_type_id = type.id;
-  }
-  if ('required_headcount' in body) {
-    const h = Number(body.required_headcount);
-    if (!Number.isFinite(h) || h < 1) throw httpError(400, 'required_headcount must be a positive number');
-    s.required_headcount = h;
-  }
-  if ('break_minutes' in body) s.break_minutes = Number(body.break_minutes) || 0;
-  if ('pay_rate' in body) s.pay_rate = body.pay_rate === null || body.pay_rate === '' ? null : Number(body.pay_rate);
-  if ('bill_rate' in body) s.bill_rate = body.bill_rate === null || body.bill_rate === '' ? null : Number(body.bill_rate);
-  if ('uniform_ppe' in body) s.uniform_ppe = body.uniform_ppe || '';
-  if ('briefing' in body) s.briefing = body.briefing || '';
-  if ('notes' in body) s.notes = body.notes || '';
-  if ('detail' in body) s.detail = body.detail && typeof body.detail === 'object' ? body.detail : {};
-  let justCancelled = false;
-  if ('status' in body) {
-    if (!SHIFT_STATES.includes(body.status)) throw httpError(400, 'invalid shift status');
-    justCancelled = body.status === 'CANCELLED' && s.status !== 'CANCELLED';
-    s.status = body.status;
-    if (body.status === 'CANCELLED') shiftApplications.expireApplicationsForShift(s.id);
-  }
-  s.revision = (s.revision || 0) + 1;
-  const pub = publicShift(s, undefined, user);
-  // Editing a still-draft shift (e.g. fixing its time before publishing)
-  // must not tip off its assignee any sooner than publishing itself would.
-  // The socket payload also reaches DISPATCHER/SUPERVISOR (isControlRole),
-  // not just SYSTEM_ADMIN, so it's built unredacted (no user) — pub itself,
-  // returned below to the admin who made this request, keeps pay_override.
-  broadcast('shift.updated', publicShift(s), s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: assignedPersonnelIds(s.id) });
-  if (!wasDraft && s.status !== 'DRAFT') {
-    const affected = assignedPersonnelIds(s.id);
-    if (justCancelled) notifyShiftEvent('CANCELLED', s, affected);
-    else if (scheduleChanged) notifyShiftEvent('CHANGED', s, affected);
-  }
-  // "This and future shifts" — every other member of the series due on or
-  // after this one (never the past) picks up the same non-schedule fields.
-  // The root itself is updated too when it isn't `s` directly, so a shift
-  // the recurrence tick generates next week inherits the change as well,
-  // rather than reverting to whatever the root still had on file.
-  let seriesCount = 0;
-  if (query.get('scope') === 'series') {
-    const rootId = shiftSeriesRootId(s);
-    if (rootId) {
-      const touched = new Set([s.id]);
-      for (const m of shiftSeriesFromHere(s)) {
-        if (touched.has(m.id)) continue;
-        touched.add(m.id);
-        for (const f of SHIFT_SERIES_FIELDS) if (f in body) m[f] = s[f];
-        m.revision = (m.revision || 0) + 1;
-        broadcast('shift.updated', publicShift(m), m.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: assignedPersonnelIds(m.id) });
-        seriesCount++;
-      }
-      const root = db.shifts.find((x) => x.id === rootId);
-      if (root && !touched.has(root.id)) for (const f of SHIFT_SERIES_FIELDS) if (f in body) root[f] = s[f];
-    }
-  }
-  logEvent('shift.updated', `SHIFT ${s.id} UPDATED${seriesCount ? ` (AND ${seriesCount} FUTURE SERIES SHIFT${seriesCount === 1 ? '' : 'S'})` : ''}`, { shift_id: s.id });
-  return pub;
-});
-route('DELETE', '/api/shifts/:id', ADMIN, ({ params, query }) => {
-  const s = findShift(params.id);
-  const scope = query.get('scope') === 'series' ? 'series' : 'one';
-  let targets = [s];
-  if (scope === 'series') {
-    const rootId = shiftSeriesRootId(s);
-    if (rootId) {
-      targets = shiftSeriesFromHere(s);
-      // The root survives this delete (it's earlier than s, so it isn't
-      // in targets) — cap its recurrence just before s so the next tick
-      // doesn't simply regenerate what was just deleted.
-      const root = db.shifts.find((x) => x.id === rootId);
-      if (root && !targets.some((t) => t.id === root.id) && root.recurrence) {
-        root.recurrence = { ...root.recurrence, until: new Date(Date.parse(s.starts_at) - 1000).toISOString() };
-      }
-    }
-  }
-  for (const t of targets) {
-    const affected = assignedPersonnelIds(t.id);
-    const wasDraft = t.status === 'DRAFT';
-    shiftApplications.expireApplicationsForShift(t.id);
-    db.shifts = db.shifts.filter((x) => x.id !== t.id);
-    db.shift_assignments = db.shift_assignments.filter((a) => a.shift_id !== t.id);
-    broadcast('shift.deleted', { id: t.id }, { personnelIds: affected });
-    if (!wasDraft) notifyShiftEvent('CANCELLED', t, affected);
-  }
-  logEvent('shift.deleted', `SHIFT ${s.id} DELETED${targets.length > 1 ? ` (AND ${targets.length - 1} FUTURE SERIES SHIFT${targets.length - 1 === 1 ? '' : 'S'})` : ''}`, { shift_id: s.id });
-  return { ok: true, deleted: targets.length };
-});
-
-/* ---- Recurring shifts — "repeat every N days" instead of repeatedly
- * clicking Duplicate week forward. Same shape as shift.patrol in
- * routes-shift-patrols.js: a setting on one shift (the root), a background
- * tick that keeps future instances generated up to a rolling horizon, and
- * nothing invented for the past. The root is the only shift that ever
- * carries `recurrence` — generated instances are plain one-off DRAFT
- * shifts tagged with recurrence_root_id, so turning recurrence off, or
- * deleting the root, just stops future generation; it never retroactively
- * touches what's already been made. ---- */
-const SHIFT_RECURRENCE_HORIZON_MS = 56 * 86400000; // 8 weeks
-route('PUT', '/api/shifts/:id/recurrence', ADMIN, ({ params, body, user }) => {
-  const s = findShift(params.id);
-  if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
-  if (body.every_days == null || body.every_days === '' || Number(body.every_days) === 0) {
-    s.recurrence = null;
-    logEvent('shift.recurrence_set', `RECURRENCE REMOVED FROM SHIFT ${s.id}`, { shift_id: s.id });
-    return publicShift(s);
-  }
-  // A shift already generated by another shift's repeat setting cannot
-  // become a second, independent root nested inside the first — that
-  // produced duplicate future shifts (two overlapping series both
-  // generating the same day/site/time) the one time this wasn't caught.
-  // Turn repeat off on it to detach it from the series first if that is
-  // really what's wanted; otherwise the setting belongs on the original.
-  if (s.recurrence_root_id) throw httpError(400, 'this shift already repeats as part of another shift\'s series — change the repeat setting there instead');
-  const every = Number(body.every_days);
-  if (!Number.isInteger(every) || every < 1 || every > 90) throw httpError(400, 'repeat interval must be 1 to 90 days');
-  let until = null;
-  if (body.until) { const d = new Date(body.until); if (isNaN(d)) throw httpError(400, 'invalid until date'); until = d.toISOString(); }
-  const unchanged = s.recurrence && s.recurrence.every_days === every && s.recurrence.until === until;
-  s.recurrence = { every_days: every, until, set_at: unchanged ? s.recurrence.set_at : new Date().toISOString(), set_by: user.display_name };
-  logEvent('shift.recurrence_set', `SHIFT ${s.id} SET TO REPEAT EVERY ${every} DAY${every === 1 ? '' : 'S'}${until ? ` UNTIL ${until.slice(0, 10)}` : ''}`, { shift_id: s.id });
-  shiftRecurrenceTick(); // top up immediately rather than waiting for the next tick
-  return publicShift(s);
-});
-// A week-later shift means the same clock time on a UK wall, not the same
-// number of UTC milliseconds — the two differ by an hour either side of
-// the last-Sunday-in-March/October clock change. Adding fixed ms (what
-// this did originally) generated a run of shifts an hour out from the
-// moment the clocks changed, every week, forever, until someone noticed.
-const LONDON_FMT = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-function londonParts(utcMs) {
-  const p = Object.fromEntries(LONDON_FMT.formatToParts(new Date(utcMs)).map((x) => [x.type, x.value]));
-  return { y: Number(p.year), mo: Number(p.month) - 1, d: Number(p.day), h: Number(p.hour) % 24, mi: Number(p.minute), s: Number(p.second) };
-}
-function londonToUtc(y, mo, d, h, mi, s) {
-  const guess = Date.UTC(y, mo, d, h, mi, s);
-  const asLondon = londonParts(guess);
-  const offsetMin = Math.round((Date.UTC(asLondon.y, asLondon.mo, asLondon.d, asLondon.h, asLondon.mi, asLondon.s) - guess) / 60000);
-  return guess - offsetMin * 60000;
-}
-function shiftRecurrenceTick(now = Date.now()) {
-  let changed = false;
-  const horizon = now + SHIFT_RECURRENCE_HORIZON_MS;
-  for (const root of db.shifts) {
-    if (!root.recurrence || !root.recurrence.every_days) continue;
-    const untilMs = root.recurrence.until ? Date.parse(root.recurrence.until) : Infinity;
-    const setAtMs = Date.parse(root.recurrence.set_at);
-    const startLocal = londonParts(Date.parse(root.starts_at));
-    const endLocal = londonParts(Date.parse(root.ends_at));
-    // Whole local calendar days between start and end (0 for a day shift,
-    // 1 for one running past midnight) — carried forward unchanged so an
-    // overnight shift stays overnight on every generated instance too.
-    const endDayOffset = Math.round((Date.UTC(endLocal.y, endLocal.mo, endLocal.d) - Date.UTC(startLocal.y, startLocal.mo, startLocal.d)) / 86400000);
-    const startDateUtc = Date.UTC(startLocal.y, startLocal.mo, startLocal.d);
-    for (let k = 1; k < 500; k++) {
-      const d = new Date(startDateUtc + k * root.recurrence.every_days * 86400000);
-      const instStart = londonToUtc(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), startLocal.h, startLocal.mi, startLocal.s);
-      if (instStart > horizon) break;
-      if (instStart > untilMs) break;
-      if (instStart < setAtMs) continue; // never invent instances for before the setting was made
-      if (db.shifts.some((x) => x.recurrence_root_id === root.id && Math.abs(Date.parse(x.starts_at) - instStart) < 60000)) continue;
-      const dEnd = new Date(startDateUtc + k * root.recurrence.every_days * 86400000 + endDayOffset * 86400000);
-      const instEnd = londonToUtc(dEnd.getUTCFullYear(), dEnd.getUTCMonth(), dEnd.getUTCDate(), endLocal.h, endLocal.mi, endLocal.s);
-      const inst = {
-        id: nextId('shifts'), site_id: root.site_id, shift_type_id: root.shift_type_id,
-        starts_at: new Date(instStart).toISOString(), ends_at: new Date(instEnd).toISOString(),
-        break_minutes: root.break_minutes, required_headcount: root.required_headcount, status: 'DRAFT',
-        pay_rate: root.pay_rate, bill_rate: root.bill_rate,
-        uniform_ppe: root.uniform_ppe, briefing: root.briefing, notes: root.notes,
-        detail: { ...(root.detail || {}) }, template_id: null, revision: 0,
-        created_by: root.created_by, created_at: new Date(now).toISOString(),
-        recurrence_root_id: root.id,
-      };
-      db.shifts.push(inst);
-      changed = true;
-      for (const a of db.shift_assignments.filter((x) => x.shift_id === root.id && ['ASSIGNED', 'CONFIRMED'].includes(x.status))) {
-        db.shift_assignments.push({
-          id: nextId('shift_assignments'), shift_id: inst.id, personnel_id: a.personnel_id, role_on_shift: a.role_on_shift,
-          is_duty_supervisor: a.is_duty_supervisor, status: 'ASSIGNED', confirmed_at: null,
-          attendance: null, clocked_in_at: null, clocked_out_at: null,
-          created_by: a.created_by, created_at: new Date(now).toISOString(), updated_at: new Date(now).toISOString(),
-        });
-      }
-      logEvent('shift.recurrence_generated', `SHIFT ${inst.id} GENERATED FROM RECURRING SHIFT ${root.id}`, { shift_id: inst.id, recurrence_root_id: root.id });
-    }
-  }
-  if (changed) store.flushNow();
-}
-
-/* ---- Assignments: who's on a shift, and their attendance ---- */
-function assertAssignmentAccess(a, user) {
-  if (isControlRole(user.role)) return;
-  if (user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id) return;
-  throw httpError(403, 'not your shift');
-}
-route('POST', '/api/shifts/:id/assignments', ADMIN, ({ params, body, user }) => {
-  const s = findShift(params.id);
-  if (!siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
-  const p = findPersonnel(body.personnel); if (!p) throw httpError(400, 'personnel required');
-  if (db.shift_assignments.some((a) => a.shift_id === s.id && a.personnel_id === p.id && a.status !== 'REMOVED')) {
-    throw httpError(409, `${p.name} is already on this shift`);
-  }
-  assertDeployable(p, body, user, 'ROSTERING');
-  const a = {
-    id: nextId('shift_assignments'), shift_id: s.id, personnel_id: p.id, role_on_shift: body.role_on_shift || '',
-    is_duty_supervisor: body.is_duty_supervisor === true, status: 'ASSIGNED', confirmed_at: null,
-    attendance: null, clocked_in_at: null, clocked_out_at: null,
-    created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-  };
-  db.shift_assignments.push(a);
-  s.revision = (s.revision || 0) + 1;
-  const pub = publicShift(s);
-  broadcast('shift.updated', pub, s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [p.id] });
-  if (s.status !== 'DRAFT') notifyShiftEvent('ASSIGNED', s, [p.id]);
-  logEvent('shift_assignment.created', `${p.name} ADDED TO SHIFT ${s.id}`, { shift_id: s.id, personnel_id: p.id });
-  return { __status: 201, __body: pub };
-});
-route('PATCH', '/api/shift-assignments/:id', ALL, ({ params, body, user }) => {
-  const a = findAssignment(params.id);
-  const s = findShift(a.shift_id);
-  const isOwn = user.role === 'FIELD_USER' && user.personnel_id === a.personnel_id;
-  // Editing WHO is on a shift, and how, is admin-only now (dispatchers and
-  // officers are read-only on the rota) — confirming or declining your own
-  // offered shift is a different, self-service action and stays open to
-  // the assignee regardless.
-  const isAdmin = user.role === 'SYSTEM_ADMIN';
-  if (!isOwn && !isAdmin) throw httpError(403, 'not your shift');
-  if (!isOwn && isAdmin && !siteVisibleTo(s.site_id, user)) throw httpError(404, 'shift not found');
-  let justRemoved = false;
-  if ('status' in body) {
-    const status = String(body.status || '').toUpperCase();
-    if (!SHIFT_ASSIGNMENT_STATES.includes(status)) throw httpError(400, 'invalid status');
-    if (isOwn && !['CONFIRMED', 'DECLINED'].includes(status)) throw httpError(403, 'you can only confirm or decline your own assignment');
-    if (status === 'REMOVED' && !isAdmin) throw httpError(403, 'insufficient role');
-    justRemoved = status === 'REMOVED' && a.status !== 'REMOVED';
-    a.status = status;
-    if (status === 'CONFIRMED') a.confirmed_at = new Date().toISOString();
-  }
-  if ('role_on_shift' in body && isAdmin) a.role_on_shift = body.role_on_shift || '';
-  if ('is_duty_supervisor' in body && isAdmin) a.is_duty_supervisor = Boolean(body.is_duty_supervisor);
-  if ('attendance' in body && isAdmin) {
-    if (body.attendance !== null && !ATTENDANCE_STATES.includes(body.attendance)) throw httpError(400, 'invalid attendance');
-    a.attendance = body.attendance;
-  }
-  // A one-off pay rate for this specific person on this specific shift —
-  // a late-notice cover shift, say — distinct from a payroll_rate_days
-  // entry (routes-payroll.js), which applies to whoever works a given
-  // calendar date. An override here always takes precedence over a
-  // rate day for this assignment's hours, never stacks with one.
-  // bill_client is the admin's own choice whether the client is charged
-  // the same uplift, or it stays an internal staffing-cost decision.
-  if ('pay_override' in body && isAdmin) {
-    if (body.pay_override === null) { a.pay_override = null; }
-    else {
-      const o = body.pay_override || {};
-      const kind = o.kind === 'FLAT' ? 'FLAT' : 'MULTIPLIER';
-      let multiplier = null, flat_rate = null;
-      if (kind === 'MULTIPLIER') {
-        multiplier = Number(o.multiplier);
-        if (!Number.isFinite(multiplier) || multiplier <= 1) throw httpError(400, 'multiplier must be a number greater than 1');
-      } else {
-        flat_rate = Math.round(Number(o.flat_rate) * 100) / 100;
-        if (!Number.isFinite(flat_rate) || flat_rate <= 0) throw httpError(400, 'flat_rate must be a positive number');
-      }
-      const reason = String(o.reason || '').trim().slice(0, 200);
-      if (!reason) throw httpError(400, 'a reason is required for a pay override');
-      a.pay_override = { kind, multiplier, flat_rate, bill_client: o.bill_client === true, reason, set_by: user.display_name, set_at: new Date().toISOString() };
-    }
-    logEvent('shift_assignment.pay_override', `${user.username} ${body.pay_override === null ? 'REMOVED' : 'SET'} A PAY OVERRIDE FOR ASSIGNMENT ${a.id}`, { shift_id: s.id, personnel_id: a.personnel_id });
-  }
-  a.updated_at = new Date().toISOString();
-  s.revision = (s.revision || 0) + 1;
-  // broadcast() fans the SAME payload out over the socket to every control
-  // role (DISPATCHER, SUPERVISOR, SYSTEM_ADMIN — see isControlRole) and to
-  // the assignee themselves, not just the admin who made this request — so
-  // it must stay unredacted (no user passed). Only the HTTP response below
-  // goes to the admin who actually asked, and may safely include pay_override.
-  broadcast('shift.updated', publicShift(s), s.status === 'DRAFT' ? { controlOnly: true } : { personnelIds: [a.personnel_id] });
-  // An admin-initiated removal is news to the officer; their own
-  // confirm/decline is something they just did, so it needs no echo back.
-  if (justRemoved && isAdmin && s.status !== 'DRAFT') notifyShiftEvent('REMOVED', s, [a.personnel_id]);
-  const p = db.personnel.find((x) => x.id === a.personnel_id);
-  logEvent('shift_assignment.updated', `${p ? p.name : 'PERSON'} ON SHIFT ${s.id} UPDATED`, { shift_id: s.id, personnel_id: a.personnel_id });
-  return publicShift(s, undefined, user);
-});
-route('POST', '/api/shift-assignments/:id/clock-in', ALL, ({ params, body, user }) => {
-  const a = findAssignment(params.id);
-  assertAssignmentAccess(a, user);
-  const s = findShift(a.shift_id);
-  if (a.clocked_in_at) return publicShift(s);
-  if (a.status === 'REMOVED') throw httpError(409, 'no longer on this shift');
-  const who = db.personnel.find((x) => x.id === a.personnel_id);
-  if (who) assertDeployable(who, body, user, 'CLOCK-IN');
-  // Outside the rostered time needs a reason (routes-timeclock.js), and
-  // the on-site check (routes-attendance.js) — each throws if not met.
-  const pending = timeclock.check(a, s, body || {}, user, 'IN');
-  attendance.checkClockIn(a, s, body || {}, user);
-  a.clocked_in_at = new Date().toISOString(); a.updated_at = a.clocked_in_at;
-  timeclock.record(a, pending, user);
-  if (s.status === 'PUBLISHED') { s.status = 'IN_PROGRESS'; }
-  const p = db.personnel.find((x) => x.id === a.personnel_id);
-  const pub = publicShift(s);
-  broadcast('shift.updated', pub, { personnelIds: [a.personnel_id] });
-  logEvent('shift.clocked_in', `${p ? p.name : 'PERSON'} CLOCKED IN`, { shift_id: s.id, personnel_id: a.personnel_id });
-  return pub;
-});
-route('POST', '/api/shift-assignments/:id/clock-out', ALL, ({ params, body, user }) => {
-  const a = findAssignment(params.id);
-  assertAssignmentAccess(a, user);
-  const s = findShift(a.shift_id);
-  if (!a.clocked_in_at) throw httpError(409, 'not clocked in');
-  if (a.clocked_out_at) throw httpError(409, 'already clocked out');
-  const pending = timeclock.check(a, s, body || {}, user, 'OUT');
-  a.clocked_out_at = new Date().toISOString(); a.updated_at = a.clocked_out_at;
-  attendance.closeBreaks(a, a.clocked_out_at);
-  attendance.finishAdHoc(a, s);
-  timeclock.record(a, pending, user);
-  if (!a.attendance) a.attendance = 'ATTENDED';
-  const p = db.personnel.find((x) => x.id === a.personnel_id);
-  const pub = publicShift(s);
-  broadcast('shift.updated', pub, { personnelIds: [a.personnel_id] });
-  logEvent('shift.clocked_out', `${p ? p.name : 'PERSON'} CLOCKED OUT`, { shift_id: s.id, personnel_id: a.personnel_id });
-  return pub;
-});
-
-/* Ad hoc clock-in — covering work nobody rostered (someone called in sick,
- * a last-minute cover request). Rather than a parallel attendance system,
- * this creates a genuine shift + assignment on the fly (status IN_PROGRESS,
- * detail.adhoc true to flag it apart on the rota) and clocks the caller
- * into it immediately, through the exact same geofence check as a normal
- * clock-in — from here on it IS a normal shift: clock-out, breaks, hours,
- * auto-clock-out-on-leaving-site, all the existing attendance machinery
- * applies untouched. A generous 12h placeholder end time stands in for a
- * real rostered end — the shift is still open until they clock out. */
-// Kept for the officer app's "Not rostered? Clock in anyway" — the same
-// ad-hoc clock-in as POST /api/timeclock/clock-in (a reason, and control
-// approves it; see routes-timeclock.js).
-route('POST', '/api/shifts/adhoc', ['FIELD_USER', ...CONTROL], ({ body, user }) => timeclock.clockInAdHoc(body, user));
-
-/* ---- Personal iCal feed — a long unguessable token stands in for a
- * login, the same trust model as a webhook URL, since a calendar client
- * can't carry a session header. See routes-contact.js's Twilio status
- * callback for the only other route in this codebase registered with
- * `null` roles (the one way to skip authFrom() entirely). ---- */
-function icsEscape(str) { return String(str || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
-function icsDate(iso) { return new Date(iso).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z'); }
-function icsVevent({ uid, stamp, startsAt, endsAt, summary, location, description, status, sequence }) {
-  return [
-    'BEGIN:VEVENT', `UID:${uid}`, `DTSTAMP:${icsDate(stamp)}`,
-    `DTSTART:${icsDate(startsAt)}`, `DTEND:${icsDate(endsAt)}`,
-    `SUMMARY:${icsEscape(summary)}`,
-    location ? `LOCATION:${icsEscape(location)}` : null,
-    description ? `DESCRIPTION:${icsEscape(description)}` : null,
-    `STATUS:${status}`, `SEQUENCE:${sequence || 0}`,
-    'END:VEVENT',
-  ].filter(Boolean).join('\r\n');
-}
-function buildIcsFeed(name, vevents) {
-  return [
-    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CCCS//Rota//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
-    `X-WR-CALNAME:${icsEscape(name)}`, 'X-PUBLISHED-TTL:PT1H',
-    ...vevents, 'END:VCALENDAR',
-  ].join('\r\n');
-}
-function personalVevents(personnelId) {
-  const now = new Date().toISOString();
-  return db.shift_assignments
-    .filter((a) => a.personnel_id === personnelId)
-    .map((a) => ({ a, s: db.shifts.find((x) => x.id === a.shift_id) }))
-    .filter((x) => x.s && x.s.status !== 'DRAFT')
-    .map(({ a, s }) => icsVevent({
-      uid: `shift-${s.id}-assignment-${a.id}@cccs.local`, stamp: now, startsAt: s.starts_at, endsAt: s.ends_at,
-      summary: shiftTitle(s), location: s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).address : null,
-      description: s.briefing || s.notes || '',
-      status: (s.status === 'CANCELLED' || ['DECLINED', 'REMOVED'].includes(a.status)) ? 'CANCELLED' : 'CONFIRMED',
-      sequence: s.revision || 0,
-    }));
-}
-function allOpsVevents() {
-  const now = new Date().toISOString();
-  return db.shifts
-    .filter((s) => s.status !== 'DRAFT')
-    .map((s) => icsVevent({
-      uid: `shift-${s.id}@cccs.local`, stamp: now, startsAt: s.starts_at, endsAt: s.ends_at,
-      summary: shiftTitle(s), location: s.site_id ? (db.sites.find((x) => x.id === s.site_id) || {}).address : null,
-      description: s.briefing || s.notes || '', status: s.status === 'CANCELLED' ? 'CANCELLED' : 'CONFIRMED', sequence: s.revision || 0,
-    }));
-}
-// Two feeds per control-role user: their own shifts (if they personally
-// have any — a duty supervisor still works shifts) and, separately, the
-// whole operation for anyone who wants the oversight view in their own
-// calendar too. Personal is the default; "all" is opt-in. A FIELD_USER
-// only ever gets the personal one — they have no oversight role to see.
-route('GET', '/api/me/ical-feed', ALL, ({ user }) => {
-  const u = db.users.find((x) => x.id === user.id);
-  const out = {};
-  if (u.personnel_id) {
-    if (!u.ical_token) u.ical_token = crypto.randomBytes(24).toString('hex');
-    out.url = `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token}.ics`;
-  }
-  if (isControlRole(u.role)) {
-    if (!u.ical_token_all) u.ical_token_all = crypto.randomBytes(24).toString('hex');
-    out.all_url = `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token_all}.ics`;
-    // No personal shifts at all (most dispatchers/supervisors): fall back
-    // to the whole-ops feed as the one offered, same as before this change.
-    if (!out.url) out.url = out.all_url;
-  }
-  if (!out.url) throw httpError(404, 'no shifts to sync — your login is not linked to a staff record');
-  return out;
-});
-route('POST', '/api/me/ical-feed/regenerate', ALL, ({ body, user }) => {
-  const u = db.users.find((x) => x.id === user.id);
-  if (body && body.which === 'all') {
-    if (!isControlRole(u.role)) throw httpError(403, 'no whole-rota feed to regenerate');
-    u.ical_token_all = crypto.randomBytes(24).toString('hex');
-    logEvent('ical_feed.regenerated', `${u.display_name} REGENERATED THEIR WHOLE-ROTA FEED LINK`, { user_id: u.id });
-    return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token_all}.ics` };
-  }
-  u.ical_token = crypto.randomBytes(24).toString('hex');
-  logEvent('ical_feed.regenerated', `${u.display_name} REGENERATED THEIR ROTA FEED LINK`, { user_id: u.id });
-  return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${u.ical_token}.ics` };
-});
-// Deliberately `null` roles — see the comment above. The token in the URL
-// IS the credential; validation happens here, not in the router.
-route('GET', '/api/rota/ical/:token.ics', null, ({ params }) => {
-  const byAll = db.users.find((x) => x.ical_token_all && x.ical_token_all === params.token);
-  if (byAll) {
-    return {
-      __body: buildIcsFeed('CCCS Rota — All sites', allOpsVevents()),
-      __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
-    };
-  }
-  // An admin-issued link for someone with no CCCS login at all — a shift
-  // officer's emergency contact, typically — to see just their shifts,
-  // the same feed shape as the officer's own, without ever having a
-  // user account or needing one.
-  const p = db.personnel.find((x) => x.ical_token && x.ical_token === params.token);
-  if (p) {
-    return {
-      __body: buildIcsFeed(`${p.name} — Rota`, personalVevents(p.id)),
-      __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
-    };
-  }
-  const u = db.users.find((x) => x.ical_token && x.ical_token === params.token);
-  if (!u || !u.personnel_id) throw httpError(404, 'feed not found');
-  return {
-    __body: buildIcsFeed('My Rota', personalVevents(u.personnel_id)),
-    __headers: { 'content-type': 'text/calendar; charset=utf-8', 'content-disposition': 'inline; filename="rota.ics"', 'cache-control': 'no-store' },
-  };
-});
-route('POST', '/api/personnel/:id/ical-feed', ADMIN, ({ params }) => {
-  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'person not found');
-  if (!p.ical_token) p.ical_token = crypto.randomBytes(24).toString('hex');
-  return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${p.ical_token}.ics` };
-});
-route('POST', '/api/personnel/:id/ical-feed/regenerate', ADMIN, ({ params, user }) => {
-  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'person not found');
-  p.ical_token = crypto.randomBytes(24).toString('hex');
-  logEvent('ical_feed.regenerated', `${user.display_name} REGENERATED ${p.name}'S SHARED ROTA LINK`, { personnel_id: p.id });
-  return { url: `${PUBLIC_BASE_URL}/api/rota/ical/${p.ical_token}.ics` };
-});
-// Texts the shared rota link straight to the emergency contact on file —
-// same send path, dry-run safety and dial_log audit trail as the
-// existing click-to-SMS to an officer themselves (routes-contact.js).
-route('POST', '/api/personnel/:id/ical-feed/sms', ADMIN, async ({ params, user }) => {
-  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'person not found');
-  const ec = p.emergency_contact || {};
-  if (!ec.phone) throw httpError(400, 'no emergency contact phone number on file for this person');
-  if (!p.ical_token) p.ical_token = crypto.randomBytes(24).toString('hex');
-  const url = `${PUBLIC_BASE_URL}/api/rota/ical/${p.ical_token}.ics`;
-  const text = `Hi${ec.name ? ' ' + ec.name.split(/\s+/)[0] : ''}, this link shows ${p.name}'s work shifts in your calendar app and updates itself automatically: ${url}`;
-  const result = await sms.send({ to: ec.phone, body: text, label: ec.name || p.name });
-  const row = {
-    id: nextId('dial_log'), channel: 'SMS', personnel_id: p.id,
-    to_number: sms.normalizeNumber(ec.phone) || String(ec.phone || ''),
-    from_number: null, actor_user_id: user.id, actor_name: user.display_name,
-    job_id: null, site_visit_id: null, body: text,
-    provider: result.dryRun ? 'none' : 'twilio', provider_ref: result.sid || null,
-    outcome: result.ok ? (result.dryRun ? 'ATTEMPTED' : 'QUEUED') : 'FAILED',
-    error_code: result.ok ? null : (result.error || 'send failed'),
-    duration_s: null, attempted_at: new Date().toISOString(), settled_at: null,
-  };
-  db.dial_log.push(row);
-  logEvent('ical_feed.sms_sent', result.ok
-    ? `${user.display_name} SENT ${p.name}'S ROTA LINK TO THEIR EMERGENCY CONTACT${result.dryRun ? ' (dry run — SMS_LIVE is off, nothing sent)' : ` (queued, ${result.sid})`}`
-    : `ROTA LINK SMS TO ${p.name}'S EMERGENCY CONTACT FAILED — ${result.error}`,
-    { dial_log_id: row.id, personnel_id: p.id, sid: result.sid || null });
-  if (!result.ok) throw httpError(502, result.error || 'send failed');
-  return { ok: true, dry_run: Boolean(result.dryRun) };
-});
+/* HR rota: shift types, shifts, assignments, ad hoc clock-in, iCal — see routes-shifts.js. */
+const { assertAssignmentAccess, assignedPersonnelIds, findAssignment, findShift, londonParts, londonToUtc, shiftRecurrenceTick } = require('./routes-shifts.js')({ route, httpError, ALL, CONTROL, ADMIN, sms, shiftTitle, db, nextId, logEvent, broadcast, store, offlineTime, findPersonnel, isControlRole, siteVisibleTo, assertDeployable, buildShiftIndex, notifyShiftEvent, publicShift, publicShiftType, PUBLIC_BASE_URL, SHIFT_STATES, SHIFT_ASSIGNMENT_STATES, ATTENDANCE_STATES,
+  late: { get attendance() { return attendance; }, get timeclock() { return timeclock; }, get shiftApplications() { return shiftApplications; } } });
 require('./routes-contact.js')({ route, httpError, CONTROL, ADMIN, db, nextId, findPersonnel, logEvent, DIAL_RINGS_OPERATOR_FIRST, sms, ami, flushNow: () => store.flushNow() });
 
 // Breaks, hours, geofenced clock-in, reminders — see routes-attendance.js.
@@ -5866,6 +4561,12 @@ const attendance = require('./routes-attendance.js')({
 
 // Admin → Text staff: one SMS to everyone in chosen roles — see routes-staff-sms.js.
 require('./routes-staff-sms.js')({ route, httpError, ADMIN, db, logEvent, sms, notifyLog: writeNotifyLog, flushNow: () => store.flushNow() });
+// Rota → "Text staff about open shifts" — see routes-open-shift-sms.js.
+// Also chases unfilled shifts by itself: staff at 48h, managers at 24h.
+const openShiftSms = require('./routes-open-shift-sms.js')({
+  route, httpError, CONTROL, ADMIN, db, logEvent, sms, notifyLog: writeNotifyLog, siteVisibleTo, assignedPersonnelIds,
+  pushToRoles, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+});
 
 // Staff numbers, ID photos and the ID card's QR check — see routes-staff-id.js.
 const staffId = require('./routes-staff-id.js')({
@@ -5931,9 +4632,19 @@ const agreements = require('./routes-agreements.js')({
 });
 const xero = require('./xero.js')({ db, flushNow: () => store.flushNow(), redirectUri: `${PUBLIC_BASE_URL}/api/xero/callback` });
 const gocardless = require('./gocardless.js');
-require('./routes-invoices.js')({
+const invoicesApi = require('./routes-invoices.js')({
   route, httpError, ADMIN, FINANCE, CLIENT, db, nextId, logEvent, attendance, agreements, xero, gocardless, sendEmail: (...a) => mailer.send(...a), UPLOADS_DIR, publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
 });
+// Payment reminders (7/14/30 days overdue) and statements — see routes-invoice-chasers.js.
+const invoiceChasers = require('./routes-invoice-chasers.js')({
+  route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, invoices: invoicesApi, sendEmail: (...a) => mailer.send(...a), publicBaseUrl: PUBLIC_BASE_URL, flushNow: () => store.flushNow(),
+});
+// Statutory late payment interest and compensation — see routes-late-charges.js.
+require('./routes-late-charges.js')({
+  route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, chasers: invoiceChasers, flushNow: () => store.flushNow(),
+});
+// Expenses with receipts, sent to Xero as bills or spend money — see routes-expenses.js.
+require('./routes-expenses.js')({ route, httpError, ADMIN, FINANCE, db, nextId, logEvent, xero, UPLOADS_DIR, flushNow: () => store.flushNow() });
 
 // Which roles see which section of the menus — see ui-sections.js.
 const sections = require('./ui-sections.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });
@@ -5945,6 +4656,7 @@ const forms = require('./routes-forms.js')({
   assertJobAccess, assertVisitAccess, pushToUsers, pushToRoles, CONTROL, UPLOADS_DIR, MIME, flushNow: () => store.flushNow(),
   applyVehicleReport, reapplyVehicleReport, sendEmail: (to, subject, html) => sendGraphEmail(to, subject, html), publicBaseUrl: PUBLIC_BASE_URL,
   vehicleKit: (id) => inventory.vehicleKit(id), assetEvent: (e) => db.asset_events.push({ id: nextId('asset_events'), ...e }),
+  queryAudit: (o) => (store.queryAudit ? store.queryAudit(o) : db.audit_logs.filter((e) => e.data && e.data.submission_id === Number(o.submissionId))),
 });
 
 // Client portal — see routes-client.js for the trust-boundary invariants.
@@ -5980,6 +4692,11 @@ require('./routes-leave.js')({
 require('./routes-payroll.js')({
   route, httpError, ALL, ADMIN, db, nextId, logEvent, attendance, flushNow: () => store.flushNow(),
 });
+
+// "Write it up for me" on report forms: a local AI (Ollama on our own
+// Proxmox) or, as a fallback, a template drafter. Suggest-only. See
+// report-assist.js.
+require('./report-assist.js').register({ route, db, ALL, httpError, logEvent, assertJobAccess, assertVisitAccess });
 
 // Reports — cross-cutting admin views (staffing cost vs revenue). See
 // routes-reports.js.
@@ -6018,7 +4735,11 @@ route('GET', '/api/sites/:id/report', CONTROL, ({ params, query, user }) => {
   const jobs = db.jobs.filter((j) => j.site_id === site.id && inRange(j.created_at));
   const visits = db.site_visits.filter((v) => v.site_id === site.id && inRange(v.scheduled_for));
 
-  const responseMinutes = jobs.filter((j) => j.on_scene_at).map((j) => (Date.parse(j.on_scene_at) - Date.parse(j.created_at)) / 60000);
+  // Arrived before the call was logged means the job was typed in after
+  // the event (before "Already happened" existed) with a later received
+  // time: not a real response time, so it is left out rather than
+  // dragging the average below zero or counting as within the SLA.
+  const responseMinutes = jobs.filter((j) => j.on_scene_at).map((j) => (Date.parse(j.on_scene_at) - Date.parse(j.created_at)) / 60000).filter((m) => Number.isFinite(m) && m >= 0);
   const avgResponseMinutes = responseMinutes.length ? Math.round((responseMinutes.reduce((a, b) => a + b, 0) / responseMinutes.length) * 10) / 10 : null;
 
   const jobIds = new Set(jobs.map((j) => j.id));
@@ -6046,6 +4767,7 @@ route('GET', '/api/sites/:id/report', CONTROL, ({ params, query, user }) => {
       avg_response_minutes: avgResponseMinutes,
       sla_minutes: site.response_sla_minutes || null,
       within_sla: site.response_sla_minutes ? responseMinutes.filter((m) => m <= site.response_sla_minutes).length : null,
+      responded: responseMinutes.length,
     },
     visits: {
       total: visits.length,
@@ -6199,8 +4921,11 @@ route('GET', '/api/integrations/dems/jobs/:ref', null, ({ params, req }) => {
   assertDemsSecret(req);
   const ref = decodeURIComponent(params.ref).trim().toUpperCase();
   const j = db.jobs.find((x) => String(x.reference).toUpperCase() === ref);
-  if (!j) throw httpError(404, 'no job with that reference');
-  return demsJob(j);
+  if (j) return demsJob(j);
+  // A report form (FORM-...) written up for an incident on shift, with no job.
+  const f = forms.demsForm(ref);
+  if (f) return forms.demsFormSummary(f);
+  throw httpError(404, 'no job or report with that reference');
 });
 // Jobs a person was assigned to (directly, or through their call sign) whose
 // life overlaps [from, to]: the incidents a body camera on them might have caught.
@@ -6237,6 +4962,26 @@ route('GET', '/api/integrations/dems/wearer', null, ({ query, req }) => {
   return { tag: a.tag, wearer: p ? { name: p.name, employee_no: p.employee_no } : null,
     checked_out_at: co ? co.checked_out_at : null, returned_at: co ? co.returned_at : null };
 });
+// A body camera docked at a DEMS offload station has had all its footage
+// taken into DEMS: book it back in. DEMS only calls this once every clip on
+// the camera is safely in DEMS, so the checkout ends when the evidence is in.
+route('POST', '/api/integrations/dems/return', null, ({ body, req }) => {
+  assertDemsSecret(req);
+  const tag = String(body.tag || '').trim().toLowerCase();
+  if (!tag) throw httpError(400, 'tag required');
+  const a = db.assets.find((x) => x.tag && x.tag.toLowerCase() === tag);
+  if (!a) throw httpError(404, 'no asset with that tag');
+  const co = db.asset_checkouts.find((c) => c.asset_id === a.id && !c.returned_at);
+  if (!co) return { tag: a.tag, returned: false, wearer: null };
+  const p = db.personnel.find((x) => x.id === co.personnel_id);
+  const station = String(body.station || '').slice(0, 120);
+  co.returned_at = new Date().toISOString(); co.returned_by = null;
+  co.return_notes = `Docked at DEMS offload station${station ? ' ' + station : ''}; footage in DEMS`.slice(0, 500);
+  a.assigned_to = null; a.status = 'IN_STORE'; a.last_checked_at = co.returned_at;
+  logEvent('asset.returned', `ASSET ${a.tag} RETURNED BY DEMS AFTER OFFLOAD${p ? ' (WAS WITH ' + p.name + ')' : ''}`,
+    { asset_id: a.id, checkout_id: co.id });
+  return { tag: a.tag, returned: true, wearer: p ? { name: p.name, employee_no: p.employee_no } : null };
+});
 // Whether someone holds an in-date SIA CCTV (Public Space Surveillance) licence.
 // DEMS asks before showing footage. Matched on a sign-in email (a CCCS user's,
 // or the staff file's contact email), then employee number or exact name. The
@@ -6268,12 +5013,14 @@ route('POST', '/api/integrations/dems/links', null, ({ body, req }) => {
   assertDemsSecret(req);
   const ref = String(body.job_ref || '').trim().toUpperCase();
   const j = db.jobs.find((x) => String(x.reference).toUpperCase() === ref);
-  if (!j) throw httpError(404, 'no job with that reference');
+  const f = j ? null : forms.demsForm(ref);
+  if (!j && !f) throw httpError(404, 'no job or report with that reference');
   const caseRef = String(body.case_ref || '').trim().slice(0, 64);
   const caseUrl = String(body.case_url || '').trim().slice(0, 500);
   if (!caseRef) throw httpError(400, 'case_ref required');
   if (caseUrl && !/^https?:\/\//i.test(caseUrl)) throw httpError(400, 'case_url must be http(s)');
   const by = String(body.by || '').slice(0, 120);
+  if (f) return forms.linkDemsEvidence(f, { caseRef, caseUrl, by, linked: body.linked !== false });
   j.evidence_links = (j.evidence_links || []).filter((l) => l.case_ref !== caseRef);
   if (body.linked !== false) {
     j.evidence_links.push({ case_ref: caseRef, case_url: caseUrl, linked_by: by, linked_at: new Date().toISOString() });
@@ -6378,319 +5125,15 @@ route('GET', '/api/config', ALL, () => ({
 
 // The full map of every endpoint is a gift to anyone probing: admins only.
 route('GET', '/api/openapi.json', ADMIN, () => require('./openapi.json'));
-
-// Admin: users
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-function normalizeEmail(raw, { forId } = {}) {
-  if (raw === undefined) return undefined;
-  if (raw === null || raw === '') return null;
-  const email = String(raw).toLowerCase().trim();
-  if (!EMAIL_RE.test(email)) throw httpError(400, 'not a valid email address');
-  if (db.users.some((u) => u.id !== forId && u.email === email)) throw httpError(409, 'that email is already linked to another account');
-  return email;
-}
+/* User accounts, welcome links and subcontractor sign-in links — see routes-users.js. */
+require('./routes-users.js')({ route, httpError, ALL, ADMIN, db, nextId, logEvent, ROLES, EMAIL_RE, PUBLIC_BASE_URL, assertPassword, closeUserSockets, escHtml, hashPassword, mailer, normalizedBranchId, normalizedSiteIds, publicUser, sign, sms, writeNotifyLog });
 
-route('GET', '/api/users', ADMIN, () => db.users.map(publicUser));
-route('POST', '/api/users', ADMIN, ({ body, user }) => {
-  const username = String(body.username || '').toLowerCase().trim();
-  if (!username || !body.password) throw httpError(400, 'username and password required');
-  assertPassword(body.password, username);
-  if (!ROLES.includes(body.role)) throw httpError(400, 'invalid role');
-  if (db.users.some((u) => u.username === username)) throw httpError(409, 'username taken');
-  const email = normalizeEmail(body.email) ?? null;
-  const personnelId = body.personnel_id || null;
-  if (personnelId && db.personnel.some((p) => p.id === personnelId && p.user_id)) throw httpError(409, 'that personnel record already has a login');
-  const clientId = body.client_id || null;
-  if (clientId && !db.clients.some((c) => c.id === clientId)) throw httpError(400, 'client_id must reference an existing client');
-  const u = { id: nextId('users'), username, password_hash: hashPassword(String(body.password)), role: body.role, display_name: body.display_name || username, personnel_id: personnelId, mdt_id: body.mdt_id || null, client_id: clientId, branch_id: normalizedBranchId(body.branch_id), site_ids: normalizedSiteIds(body.site_ids), email, created_at: new Date().toISOString() };
-  db.users.push(u);
-  if (personnelId) { const p = db.personnel.find((x) => x.id === personnelId); if (p) p.user_id = u.id; }
-  logEvent('user.created', `USER ${username} CREATED (${u.role}) BY ${user.username}`, { user_id: u.id, by: user.id });
-  return { __status: 201, __body: { id: u.id, username: u.username, role: u.role } };
-});
-route('PATCH', '/api/users/:id', ADMIN, ({ params, body, user }) => {
-  const u = db.users.find((x) => x.id === Number(params.id));
-  if (!u) throw httpError(404, 'user not found');
-  const roleBefore = u.role;
-  if ('email' in body) u.email = normalizeEmail(body.email, { forId: u.id });
-  if ('display_name' in body) u.display_name = String(body.display_name || '').trim() || u.username;
-  if ('role' in body) {
-    if (!ROLES.includes(body.role)) throw httpError(400, 'invalid role');
-    u.role = body.role;
-  }
-  if ('personnel_id' in body) {
-    const nextPersonnelId = body.personnel_id || null;
-    if (nextPersonnelId && db.personnel.some((p) => p.id === nextPersonnelId && p.user_id && p.user_id !== u.id)) {
-      throw httpError(409, 'that personnel record already has a login');
-    }
-    if (u.personnel_id && u.personnel_id !== nextPersonnelId) {
-      const prev = db.personnel.find((p) => p.id === u.personnel_id);
-      if (prev && prev.user_id === u.id) prev.user_id = null;
-    }
-    if (nextPersonnelId) { const p = db.personnel.find((x) => x.id === nextPersonnelId); if (p) p.user_id = u.id; }
-    u.personnel_id = nextPersonnelId;
-  }
-  if ('mdt_id' in body) u.mdt_id = body.mdt_id || null;
-  if ('client_id' in body) {
-    const nextClientId = body.client_id || null;
-    if (nextClientId && !db.clients.some((c) => c.id === nextClientId)) throw httpError(400, 'client_id must reference an existing client');
-    u.client_id = nextClientId;
-  }
-  if ('branch_id' in body) u.branch_id = normalizedBranchId(body.branch_id);
-  if ('site_ids' in body) u.site_ids = normalizedSiteIds(body.site_ids);
-  if ('password' in body && body.password) {
-    assertPassword(body.password, u.username);
-    u.password_hash = hashPassword(String(body.password));
-    u.password_set_at = Date.now();
-  }
-  // A new role or password takes effect on open screens now, not at their next reconnect.
-  if (u.role !== roleBefore || body.password) closeUserSockets(u.id);
-  // Who changed an account, and any change of role, is what an access review asks.
-  const what = [u.role !== roleBefore ? `ROLE ${roleBefore} → ${u.role}` : '', body.password ? 'PASSWORD RESET' : ''].filter(Boolean).join(', ');
-  logEvent('user.updated', `USER ${u.username} UPDATED BY ${user.username}${what ? ` (${what})` : ''}`, { user_id: u.id, by: user.id, role_before: roleBefore, role: u.role });
-  return publicUser(u);
-});
-route('DELETE', '/api/users/:id', ADMIN, ({ params, user }) => {
-  const u = db.users.find((x) => x.id === Number(params.id));
-  if (!u) throw httpError(404, 'user not found');
-  if (u.id === user.id) throw httpError(400, 'cannot delete the account you are signed in as');
-  if (u.personnel_id) { const p = db.personnel.find((x) => x.id === u.personnel_id); if (p && p.user_id === u.id) p.user_id = null; }
-  db.users = db.users.filter((x) => x.id !== u.id);
-  closeUserSockets(u.id);
-  logEvent('user.deleted', `USER ${u.username} DELETED BY ${user.username}`, { user_id: u.id, by: user.id });
-  return { ok: true };
-});
-/** Staff sign in with Microsoft 365, not a password — there's nothing to
- * "reset" for them the way there is for a CLIENT login (see
- * POST /api/clients/:id/send-password-link), just an explanation of how
- * SSO works and which email it's matched against. Sends by whichever of
- * email/SMS it can: `u.email` for email (the same field SSO matching
- * already uses), the linked personnel record's contact_phone for SMS
- * (respecting sms_opt_out, same as every other SMS in this codebase) —
- * refuses outright only if neither is reachable at all. */
-route('POST', '/api/users/:id/send-welcome-link', ADMIN, async ({ params }) => {
-  const u = db.users.find((x) => x.id === Number(params.id));
-  if (!u) throw httpError(404, 'user not found');
-  const person = u.personnel_id ? db.personnel.find((p) => p.id === u.personnel_id) : null;
-  const email = u.email || (person && person.contact_email) || null;
-  const phone = person && !person.sms_opt_out ? sms.normalizeNumber(person.contact_phone) : null;
-  if (!email && !phone) throw httpError(400, 'this account has no email or phone number on file to send to');
-  const first = (u.display_name || u.username).split(/\s+/)[0];
-  const loginUrl = `${PUBLIC_BASE_URL}/index.html`;
-  const sent = { email: false, sms: false };
-  if (email) {
-    const NAVY = '#0c1624', AMBER = '#f2a93c';
-    const html = `<!doctype html><html><body style="margin:0;padding:0;background:#e2e5ea;font-family:Arial,Helvetica,sans-serif;color:#111827">
-      <div style="max-width:560px;margin:0 auto">
-        <div style="background:${NAVY};padding:30px 32px 26px">
-          <img src="cid:echelon-wordmark" height="24" alt="Echelon" style="display:block;margin:0 0 22px;border:0">
-          <p style="margin:0 0 10px;color:${AMBER};font-size:11px;font-weight:bold;letter-spacing:.14em;text-transform:uppercase">Your account</p>
-          <h1 style="margin:0 0 10px;color:#ffffff;font-size:21px;line-height:1.3">You're set up on CCCS, ${escHtml(first)}.</h1>
-          <p style="margin:0;color:#9fb0c3;font-size:14px;line-height:1.5">Sign in with your work Microsoft 365 account — there's no separate password to remember.</p>
-        </div>
-        <div style="background:#ffffff;padding:28px 32px">
-          <ol style="margin:0 0 20px;padding-left:20px;font-size:14px;line-height:1.8">
-            <li>Go to <a href="${loginUrl}">${PUBLIC_BASE_URL.replace(/^https?:\/\//, '')}</a></li>
-            <li>Choose <strong>Sign in with Microsoft</strong></li>
-            <li>Sign in with your work account${email ? ` (${escHtml(email)})` : ''}</li>
-          </ol>
-          <div style="text-align:center">
-            <a href="${loginUrl}" style="display:inline-block;background:${NAVY};color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:6px;font-size:14px;font-weight:bold">Sign in &rarr;</a>
-          </div>
-        </div>
-        <div style="background:${NAVY};padding:18px 32px">
-          <p style="margin:0;color:#475569;font-size:10.5px;line-height:1.6">Sent automatically by CCCS &mdash; comms.echeloncic.com</p>
-        </div>
-      </div>
-    </body></html>`;
-    const logoFile = path.join(__dirname, 'public', 'assets', 'echelon-wordmark.png');
-    const attachments = fs.existsSync(logoFile)
-      ? [{ name: 'echelon-wordmark.png', contentType: 'image/png', content: fs.readFileSync(logoFile), contentId: 'echelon-wordmark', isInline: true }]
-      : [];
-    const r = await mailer.send(email, 'Your Echelon CCCS account', html, { attachments });
-    writeNotifyLog({ channel: 'EMAIL', personnel_id: person ? person.id : null, to_email: email, body: 'Welcome link sent', provider: r.ok ? 'graph' : 'none', outcome: r.ok ? 'QUEUED' : 'FAILED', error_code: r.ok ? null : r.error });
-    sent.email = Boolean(r.ok);
-  }
-  if (phone) {
-    const body = `Hi ${first}, your CCCS account is ready. Go to ${PUBLIC_BASE_URL.replace(/^https?:\/\//, '')} and choose "Sign in with Microsoft" using your work account. — Echelon`;
-    const r = await sms.send({ to: phone, body, label: u.display_name });
-    writeNotifyLog({ channel: 'SMS', personnel_id: person ? person.id : null, to_number: phone, body, provider: r.dryRun ? 'none' : 'twilio', provider_ref: r.sid || null, outcome: r.ok ? (r.dryRun ? 'ATTEMPTED' : 'QUEUED') : 'FAILED', error_code: r.ok ? null : (r.error || 'send failed') });
-    sent.sms = Boolean(r.ok);
-  }
-  logEvent('user.welcome_link_sent', `WELCOME LINK SENT TO ${u.username} (email: ${sent.email ? 'yes' : 'no'}, sms: ${sent.sms ? 'yes' : 'no'})`, { user_id: u.id });
-  return sent;
-});
+/* Branches: list, add, rename and delete — see routes-branches.js. */
+require('./routes-branches.js')({ route, httpError, ALL, ADMIN, db, nextId, logEvent });
 
-/* Branches — see the comment on BRANCH_SCOPED_ROLES for what this does and
- * doesn't restrict. Read is open to ALL (a name is not sensitive, and every
- * scoped role needs the list for its own branch's label); only ADMIN
- * manages the branches themselves. */
-route('GET', '/api/branches', ALL, () => db.branches);
-route('POST', '/api/branches', ADMIN, ({ body }) => {
-  const name = String(body.name || '').trim();
-  if (!name) throw httpError(400, 'name required');
-  if (db.branches.some((b) => b.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'branch already exists');
-  const b = { id: nextId('branches'), name, created_at: new Date().toISOString() };
-  db.branches.push(b);
-  logEvent('branch.created', `BRANCH ${name} ADDED`);
-  return { __status: 201, __body: b };
-});
-route('PATCH', '/api/branches/:id', ADMIN, ({ params, body }) => {
-  const b = db.branches.find((x) => x.id === Number(params.id));
-  if (!b) throw httpError(404, 'branch not found');
-  if ('name' in body) {
-    const name = String(body.name || '').trim();
-    if (!name) throw httpError(400, 'name required');
-    if (db.branches.some((x) => x.id !== b.id && x.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'branch already exists');
-    b.name = name;
-  }
-  logEvent('branch.updated', `BRANCH ${b.name} UPDATED`, { branch_id: b.id });
-  return b;
-});
-route('DELETE', '/api/branches/:id', ADMIN, ({ params }) => {
-  const b = db.branches.find((x) => x.id === Number(params.id));
-  if (!b) throw httpError(404, 'branch not found');
-  const inUse = db.sites.some((s) => s.branch_id === b.id) || db.personnel.some((p) => p.branch_id === b.id)
-    || db.vehicles.some((v) => v.branch_id === b.id) || db.assets.some((a) => a.branch_id === b.id)
-    || db.users.some((u) => u.branch_id === b.id);
-  if (inUse) throw httpError(409, 'branch is still in use — reassign its sites, personnel, vehicles, assets and accounts first');
-  db.branches = db.branches.filter((x) => x.id !== b.id);
-  logEvent('branch.deleted', `BRANCH ${b.name} DELETED`);
-  return { ok: true };
-});
-
-/* ------------------------------------------------------------------ *
- * Training — a hybrid of the SIA/DBS "record what happened" pattern and
- * actual in-app delivery. A course is either logged externally (a
- * classroom session, a toolbox talk — admin records that it happened) or
- * taken in-app: officer reads `material`, answers a short multiple-choice
- * assessment if the course has one, and a training_records row is created
- * either way. training_records is append-only, like dial_log — the
- * current status is always derived from the most recent one, never
- * mutated in place, so a course's real history survives a retake.
- *
- * No versioning on course edits, unlike form_definitions: a quiz's
- * content changing later doesn't need the audit fidelity a restricted
- * safeguarding report does, so this is a deliberate v1 simplification, not
- * an oversight. A course is retired via `active: false`, never deleted —
- * training_records must always be able to resolve their course_id.
- * ------------------------------------------------------------------ */
-function validQuestions(qs) {
-  if (!Array.isArray(qs) || !qs.length) return false;
-  return qs.every((q) => q && typeof q.text === 'string' && q.text.trim()
-    && Array.isArray(q.options) && q.options.length >= 2 && q.options.every((o) => typeof o === 'string' && o.trim())
-    && Number.isInteger(q.correct_index) && q.correct_index >= 0 && q.correct_index < q.options.length);
-}
-const normalizeQuestions = (qs) => qs.map((q) => ({ id: q.id || crypto.randomUUID(), text: String(q.text).trim(), options: q.options.map((o) => String(o).trim()), correct_index: q.correct_index }));
-/** Strips answers for anyone who isn't managing the course — an officer
- * about to take the assessment must not receive correct_index in the
- * response, any more than an exam paper comes with the mark scheme
- * stapled to it. */
-function publicCourse(c, user) {
-  const isAdmin = user.role === 'SYSTEM_ADMIN';
-  return {
-    id: c.id, name: c.name, category: c.category, description: c.description,
-    validity_months: c.validity_months, has_assessment: c.has_assessment,
-    pass_mark_pct: c.pass_mark_pct, material: c.material, active: c.active,
-    questions: c.has_assessment ? c.questions.map((q) => (isAdmin ? q : { id: q.id, text: q.text, options: q.options })) : [],
-  };
-}
-route('GET', '/api/training-courses', ALL, ({ query, user }) => {
-  const showAll = query.get('all') === '1' && user.role === 'SYSTEM_ADMIN';
-  return db.training_courses.filter((c) => showAll || c.active).map((c) => publicCourse(c, user));
-});
-route('POST', '/api/training-courses', ADMIN, ({ body, user }) => {
-  const name = String(body.name || '').trim();
-  if (!name) throw httpError(400, 'name required');
-  const hasAssessment = Boolean(body.has_assessment);
-  if (hasAssessment && !validQuestions(body.questions)) {
-    throw httpError(400, 'a course with an assessment needs at least one question, each with 2+ options and a valid correct_index');
-  }
-  const c = {
-    id: nextId('training_courses'), name, category: String(body.category || '').trim(),
-    description: String(body.description || '').trim(), material: String(body.material || '').trim(),
-    validity_months: body.validity_months ? Number(body.validity_months) : null,
-    has_assessment: hasAssessment, questions: hasAssessment ? normalizeQuestions(body.questions) : [],
-    pass_mark_pct: hasAssessment ? Number(body.pass_mark_pct || 80) : null,
-    active: true, created_at: new Date().toISOString(),
-  };
-  db.training_courses.push(c);
-  logEvent('training_course.created', `TRAINING COURSE ${name} ADDED`);
-  return { __status: 201, __body: publicCourse(c, user) };
-});
-route('PATCH', '/api/training-courses/:id', ADMIN, ({ params, body, user }) => {
-  const c = db.training_courses.find((x) => x.id === Number(params.id));
-  if (!c) throw httpError(404, 'training course not found');
-  if ('name' in body) { const name = String(body.name || '').trim(); if (!name) throw httpError(400, 'name required'); c.name = name; }
-  if ('category' in body) c.category = String(body.category || '').trim();
-  if ('description' in body) c.description = String(body.description || '').trim();
-  if ('material' in body) c.material = String(body.material || '').trim();
-  if ('validity_months' in body) c.validity_months = body.validity_months ? Number(body.validity_months) : null;
-  if ('has_assessment' in body) c.has_assessment = Boolean(body.has_assessment);
-  if ('questions' in body || 'has_assessment' in body) {
-    if (c.has_assessment) {
-      if (!validQuestions(body.questions || c.questions)) throw httpError(400, 'a course with an assessment needs at least one valid question');
-      c.questions = normalizeQuestions(body.questions || c.questions);
-    } else c.questions = [];
-  }
-  if ('pass_mark_pct' in body) c.pass_mark_pct = c.has_assessment ? Number(body.pass_mark_pct || 80) : null;
-  if ('active' in body) c.active = Boolean(body.active);
-  logEvent('training_course.updated', `TRAINING COURSE ${c.name} UPDATED`, { training_course_id: c.id });
-  return publicCourse(c, user);
-});
-
-/** An officer completing their own course — the in-app half of the hybrid.
- * Scored server-side only: the client never has correct_index to begin
- * with, but this also means a replayed/tampered `passed` claim from the
- * client is simply never consulted. */
-route('POST', '/api/training-courses/:id/complete', ALL, ({ params, body, user }) => {
-  const c = db.training_courses.find((x) => x.id === Number(params.id) && x.active);
-  if (!c) throw httpError(404, 'training course not found');
-  if (!user.personnel_id) throw httpError(403, 'this login has no personnel record to record training against');
-  const p = db.personnel.find((x) => x.id === user.personnel_id);
-  if (!p) throw httpError(403, 'this login has no personnel record to record training against');
-
-  let scorePct = null;
-  if (c.has_assessment) {
-    const answers = Array.isArray(body.answers) ? body.answers : [];
-    if (answers.length !== c.questions.length) throw httpError(400, `expected ${c.questions.length} answers`);
-    const correct = c.questions.filter((q, i) => Number(answers[i]) === q.correct_index).length;
-    scorePct = Math.round((correct / c.questions.length) * 100);
-    if (scorePct < c.pass_mark_pct) throw httpError(400, `score ${scorePct}% is below the ${c.pass_mark_pct}% pass mark — no record created, try again`);
-  }
-  const r = {
-    id: nextId('training_records'), personnel_id: p.id, course_id: c.id, method: 'IN_APP',
-    completed_at: new Date().toISOString(), score_pct: scorePct, recorded_by: null,
-  };
-  db.training_records.push(r);
-  logEvent('training.completed', `${p.name} COMPLETED ${c.name}${scorePct != null ? ` (${scorePct}%)` : ''}`, { personnel_id: p.id, training_course_id: c.id });
-  return { __status: 201, __body: { ...r, training: trainingStatusForPerson(p.id) } };
-});
-
-/** Admin logging a completion that happened outside CCCS — a classroom
- * session, a toolbox talk, a certificate someone brought in. */
-route('POST', '/api/personnel/:id/training-records', ADMIN, ({ params, body, user }) => {
-  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
-  const c = db.training_courses.find((x) => x.id === Number(body.course_id));
-  if (!c) throw httpError(400, 'course_id must reference an existing course');
-  const r = {
-    id: nextId('training_records'), personnel_id: p.id, course_id: c.id, method: 'LOGGED',
-    completed_at: body.completed_at ? new Date(body.completed_at).toISOString() : new Date().toISOString(),
-    score_pct: body.score_pct != null && body.score_pct !== '' ? Number(body.score_pct) : null,
-    recorded_by: user.display_name,
-  };
-  if (isNaN(Date.parse(r.completed_at))) throw httpError(400, 'invalid completed_at');
-  db.training_records.push(r);
-  logEvent('training.logged', `${p.name} — ${c.name} LOGGED BY ${user.username}`, { personnel_id: p.id, training_course_id: c.id });
-  return { __status: 201, __body: { ...r, training: trainingStatusForPerson(p.id) } };
-});
-route('GET', '/api/personnel/:id/training-records', ALL, ({ params, user }) => {
-  const p = findPersonnel(params.id); if (!p) throw httpError(404, 'personnel not found');
-  if (!isControlRole(user.role) && user.personnel_id !== p.id) throw httpError(403, 'not your training record');
-  return db.training_records.filter((r) => r.personnel_id === p.id)
-    .sort((a, b) => (a.completed_at < b.completed_at ? 1 : -1))
-    .map((r) => ({ ...r, course_name: (db.training_courses.find((c) => c.id === r.course_id) || {}).name || 'Unknown course' }));
-});
+/* Training courses and records — see routes-training.js. */
+require('./routes-training.js')({ route, httpError, ALL, ADMIN, db, nextId, logEvent, findPersonnel, isControlRole, trainingStatusForPerson });
 
 /* ------------------------------------------------------------------ *
  * GPS simulation
@@ -6736,6 +5179,8 @@ function start() {
   if (vehicleForms) { logEvent('form.defaults_installed', `${vehicleForms} FORM(S) INSTALLED (FUEL-UP / DEEP CLEAN / INCIDENT / USE OF FORCE)`); store.flushNow(); }
   const severityAdded = forms.ensureIncidentSeverity();
   if (severityAdded) { logEvent('form.defaults_installed', `SEVERITY FIELD ADDED TO ${severityAdded} INCIDENT-TYPE FORM(S)`); store.flushNow(); }
+  const statementsUpgraded = forms.ensureStatementCompliance();
+  if (statementsUpgraded) { logEvent('form.defaults_installed', `${statementsUpgraded} SAFEGUARDING / INCIDENT / USE OF FORCE FORM(S) UPDATED WITH COMPLIANCE FIELDS`); store.flushNow(); }
   // Same additive-and-idempotent shape as forms.installDefaults() — runs
   // once, only while the table is empty, so an admin's own edits (renaming
   // one, adding a sixth) are never overwritten on a later boot.
@@ -6769,6 +5214,10 @@ function start() {
   }
   complianceTick();
   setInterval(complianceTick, COMPLIANCE_TICK_MS).unref?.();
+  // Unfilled shifts: first pass two minutes after start, then every 15 minutes.
+  const unfilledTick = () => openShiftSms.escalationTick().catch((e) => console.warn('[unfilled-shifts] tick failed:', e.message));
+  setTimeout(unfilledTick, 2 * 60000).unref?.();
+  setInterval(unfilledTick, Number(process.env.UNFILLED_SHIFT_TICK_MS || 15 * 60000)).unref?.();
   if (rotaCalendar.enabled) {
     setTimeout(() => rotaCalendar.reconcile(db).catch((e) => console.warn('[rota-calendar] reconcile failed:', e.message)), 30000).unref?.();
     setInterval(rotaCalendarTick, 10 * 60000).unref?.();
@@ -6797,4 +5246,4 @@ function start() {
 }
 
 if (require.main === module) start();
-module.exports = { server, db, seq, store, prf, start, broadcast, seed, backfillLastLogins, forms, attendance, mailer, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };
+module.exports = { server, db, seq, store, prf, start, openShiftSms, broadcast, seed, backfillLastLogins, forms, attendance, mailer, invoiceChasers, rotaCalendar, shiftPatrols, retentionSweep, patrolScheduleTick, shiftRecurrenceTick, monthlyReportTick, sendMonthlyKayleighReport, buildMonthlyOpsReportHtml, weeklyClientReportTick, sendWeeklyClientReports, buildWeeklyClientReportHtml, weeklyShiftsForClient, weeklySharedReportsForClient, weekBounds, resolutionReportRecipients, splitEmailList, RETENTION, hashPassword, verifyPassword, sign, PORT };

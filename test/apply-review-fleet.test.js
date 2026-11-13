@@ -171,7 +171,7 @@ test('a restricted report can only be actioned by an admin who is a named reader
   const dan = app.db.personnel.find((p) => p.name === 'Dan Whitfield');
   const def = app.db.form_definitions.find((d) => d.key === 'safeguarding');
   const filed = await call('POST', '/api/form-submissions', { definition_id: def.id, subject_type: 'SITE', subject_id: 1, values: {
-    concern_about: 'Child', at_risk_group: 'Child (under 18)', observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan'),
+    concern_about: 'Child', at_risk_group: 'Child (under 18)', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan'),
   } }, danT);
   const id = filed.body.id;
   assert.ok(!(await call('GET', '/api/form-submissions?status=OPEN', undefined, adminT)).body.some((s) => s.id === id), 'not in the admin queue without a grant');
@@ -370,7 +370,7 @@ test('submission emails: answers for a standard form, a bare link for a restrict
   const file = (key, values) => handlers['POST /api/form-submissions']({ body: { definition_id: def(key).id, subject_type: 'SITE', subject_id: 1, values }, user });
 
   const t = file('trespass-advisal', { person_description: 'Grey hoodie', advised_at: new Date().toISOString(), narrative: 'Left via gate', officer_signature: sig('Dan Whitfield') });
-  const s = file('safeguarding', { concern_about: 'CANARY-CHILD', at_risk_group: 'Child (under 18)', observed_at: new Date().toISOString(), what_happened: 'CANARY-DISCLOSURE', action_taken: 'x', officer_signature: sig('Dan Whitfield') });
+  const s = file('safeguarding', { concern_about: 'CANARY-CHILD', at_risk_group: 'Child (under 18)', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(), what_happened: 'CANARY-DISCLOSURE', action_taken: 'x', officer_signature: sig('Dan Whitfield') });
   await new Promise((r) => setTimeout(r, 30));
 
   const std = sent.find((m) => m.to === 'control@example.com');

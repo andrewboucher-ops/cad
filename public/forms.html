@@ -22,8 +22,20 @@
   .rp-filters { display: flex; gap: 8px; margin-bottom: 8px; }
   .rp-filters select { flex: 1; }
   .rp-note { font-size: 12px; color: var(--ink-dim); margin: 8px 0 0; }
+  .rp-search { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+  .rp-dhead { display: flex; align-items: center; gap: 8px; }
+  .rp-dhead span { flex: 1; }
+  .rp-close { padding: 4px 12px; font-size: 13px; }
   @media (max-width: 760px) {
     .rp-wrap { grid-template-columns: 1fr; padding: 12px; }
+    .rp-top { flex-wrap: wrap; }
+    .rp-filters { flex-wrap: wrap; }
+    .rp-filters .btn { flex: 1 1 auto; }
+    /* One panel at a time on a phone: the list, or the open report (with
+       Close at the top, and the phone's back button also closing it). */
+    body.rp-viewing #listPanel { display: none; }
+    body:not(.rp-viewing) #detailPanel { display: none; }
+    #detailPanel > header { position: sticky; top: 0; z-index: 3; background: var(--panel); }
   }
 </style>
 </head>
@@ -35,11 +47,13 @@
   <a class="btn" id="back" href="/index.html">Back</a>
 </div>
 <div class="rp-wrap">
-  <section class="panel">
+  <section class="panel" id="listPanel">
     <header id="listTitle">Filed reports</header>
     <div class="body">
+      <input id="fSearch" class="rp-search" type="search" placeholder="Search names, places, references…" autocomplete="off" enterkeyhint="search" aria-label="Search reports">
       <div class="rp-filters" id="statusChips">
         <button class="btn" data-status="OPEN">Open</button>
+        <button class="btn" data-status="INVESTIGATING">Investigating</button>
         <button class="btn" data-status="ACTIONED">Actioned</button>
         <button class="btn" data-status="ALL">All</button>
       </div>
@@ -55,12 +69,12 @@
         </select>
       </div>
       <div id="list"><p class="dim">Loading…</p></div>
-      <p class="rp-note">You see the reports you filed, and any others your role or a named grant entitles you to. Restricted reports you are not named on are not listed — not even as hidden rows.</p>
+      <p class="rp-note">Search looks through every answer in the reports you can open, including people's names and descriptions, as well as references, report types and who filed them. You see the reports you filed, and any others your role or a named grant entitles you to. Restricted reports you are not named on are not listed — not even as hidden rows.</p>
       <p class="rp-note hide" id="adminNote">As an admin you can review every standard report here. Restricted reports (safeguarding, patient care) only appear once you are named as a reader of that form in Admin → Forms — that is a logged decision, not part of the admin role. Actioning a report takes it out of the open queue and tells whoever filed it; the report itself is kept. <a href="/admin.html#forms">Edit the forms themselves</a>.</p>
     </div>
   </section>
-  <section class="panel">
-    <header id="detailTitle">Report</header>
+  <section class="panel" id="detailPanel">
+    <header class="rp-dhead"><span id="detailTitle">Report</span><button class="btn rp-close hide" id="detailClose" aria-label="Close report">✕ Close</button></header>
     <div class="body" id="detail"><p class="dim">Choose a report.</p></div>
   </section>
 </div>
@@ -68,6 +82,7 @@
 <script src="/app.js"></script>
 <script src="/nav.js"></script>
 <script src="/forms-ui.js"></script>
+<script src="/investigation-ui.js"></script>
 <script>
 const { api, el, esc } = CCCS;
 // Every staff role: a safeguarding lead may be an officer. What each person
@@ -89,17 +104,53 @@ let defs = [];
 // report's PDF: instead of a new tab, it called this function with the
 // blob: URL as if it were a submission id, loading "no such endpoint"
 // into the panel. Confirmed live 2026-10-06.
+/* Showing one report (or the filing form). On a phone that replaces the
+ * list, so it is one step in the phone's history: back returns to the list
+ * instead of leaving the page. Close does the same on any screen. */
+let detailEntry = false;
+function showDetail(url) {
+  const wasViewing = document.body.classList.contains('rp-viewing');
+  document.body.classList.add('rp-viewing');
+  el('#detailClose').classList.remove('hide');
+  if (!wasViewing && window.matchMedia('(max-width: 760px)').matches) {
+    try { history.pushState({ rpDetail: true }, '', url); detailEntry = true; } catch { history.replaceState(null, '', url); }
+    window.scrollTo(0, 0);
+  } else history.replaceState(history.state, '', url);
+}
+function hideDetail() {
+  document.body.classList.remove('rp-viewing');
+  el('#detailClose').classList.add('hide');
+  el('#detailTitle').textContent = 'Report';
+  el('#detail').innerHTML = '<p class="dim">Choose a report.</p>';
+}
+function closeDetail() {
+  hideDetail();
+  if (detailEntry && history.state && history.state.rpDetail) { detailEntry = false; history.back(); return; }
+  detailEntry = false;
+  history.replaceState(null, '', location.pathname);
+}
+window.addEventListener('popstate', () => { if (document.body.classList.contains('rp-viewing')) { detailEntry = false; hideDetail(); } });
+el('#detailClose').onclick = closeDetail;
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.body.classList.contains('rp-viewing') && !e.target.closest('input,textarea,select')) closeDetail(); });
+
 async function openReport(id) {
+  showDetail(`?id=${id}`);
   el('#detailTitle').textContent = 'Report';
   el('#detail').innerHTML = '<p class="dim">Loading…</p>';
   let sub;
   try { sub = await api('GET', `/api/form-submissions/${id}`); }
   catch (e) { el('#detail').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
-  el('#detail').innerHTML = '<div id="viewHost"></div><div id="actionHost"></div><div id="shareHost"></div>';
+  el('#detail').innerHTML = '<div id="viewHost"></div><div id="invHost"></div><div id="actionHost"></div><div id="shareHost"></div>';
   CCCSForms.view(el('#viewHost'), sub, { onChanged: () => refresh() });
-  history.replaceState(null, '', `?id=${id}`);
-  if (isAdmin && sub.status === 'OPEN') paintAction(sub);
-  if (isAdmin && sub.status === 'ACTIONED') paintDelete(sub);
+  const investigated = Boolean(sub.investigation && sub.investigation.started_at);
+  if (isAdmin || sub.can_investigate || sub.can_see_trail || investigated) {
+    CCCSInvestigation.render(el('#invHost'), sub, { isAdmin, reload: () => { refresh(); openReport(sub.id); } });
+  }
+  if (investigated && !sub.can_investigate && sub.investigation.restricted_to_investigators) {
+    el('#invHost').innerHTML = `<p class="dim" style="font-size:12.5px;margin-top:10px">An investigation into this report is in progress${sub.investigation.investigator ? `, led by ${esc(sub.investigation.investigator)}` : ''}. Its notes are only visible to the people running it.</p>`;
+  }
+  if (isAdmin && ['OPEN', 'UNDER_INVESTIGATION', 'RETURNED_FOR_CORRECTION'].includes(sub.status)) paintAction(sub, investigated);
+  if (isAdmin && sub.status === 'ACTIONED' && !investigated) paintDelete(sub);
   if (isAdmin) CCCSForms.shareEditor(el('#shareHost'), sub, { onChanged: () => { refresh(); openReport(sub.id); } });
 }
 
@@ -121,22 +172,23 @@ function paintDelete(sub) {
     try {
       await api('DELETE', `/api/form-submissions/${sub.id}`, { reason: el('#dReason').value.trim() });
       el('#detail').innerHTML = `<p class="dim">${esc(sub.reference)} was deleted.</p>`;
-      history.replaceState(null, '', location.pathname); refresh();
+      refresh();
     } catch (e) { el('#dErr').textContent = e.message; }
   };
 }
 
 /** The admin's review: an outcome and feedback. The server records it,
  * takes the report out of the open queue and tells whoever filed it. */
-function paintAction(sub) {
+function paintAction(sub, investigated) {
   el('#actionHost').innerHTML = `
     <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
-      <label>Action this report</label>
+      <label>${investigated ? 'Sign off the investigation and close' : 'Action this report'}</label>
+      ${investigated ? '<p class="dim" style="font-size:12px;margin:4px 0">Needs findings, a root cause, no open actions, and a closing summary below. Your name and the time are recorded as the sign-off.</p>' : ''}
       <div style="display:flex;gap:8px;margin:6px 0">
         <select id="aOutcome" style="flex:1"><option value="APPROVED">Approve</option><option value="REJECTED">Reject</option><option value="NOTED">Note — no further action</option></select>
       </div>
-      <textarea id="aFeedback" rows="3" placeholder="Feedback for ${esc(sub.submitted_by)} (required to approve or reject)" style="width:100%;box-sizing:border-box"></textarea>
-      <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="aGo">Send feedback &amp; close</button></div>
+      <textarea id="aFeedback" rows="3" placeholder="${investigated ? 'Closing summary — what was found and what was done (the officer sees this)' : `Feedback for ${esc(sub.submitted_by)} (required to approve or reject)`}" style="width:100%;box-sizing:border-box"></textarea>
+      <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="aGo">${investigated ? 'Sign off &amp; close' : 'Send feedback &amp; close'}</button></div>
       <p class="dim" style="font-size:12px;margin:6px 0 0">${sub.visibility === 'RESTRICTED'
         ? 'Restricted: the filer is told it was reviewed and reads your feedback on the report itself — it is not sent as a message.'
         : 'The filer gets your feedback as a message and a notification.'}</p>
@@ -151,14 +203,21 @@ function paintAction(sub) {
   };
 }
 
+let refreshSeq = 0, searchTimer = null;
 async function refresh() {
+  const seq = ++refreshSeq;
   CCCS.els('#statusChips [data-status]').forEach((b) => b.classList.toggle('primary', b.dataset.status === statusFilter));
   const q = new URLSearchParams({ limit: '200', status: statusFilter });
+  const search = el('#fSearch').value.trim();
+  if (search) q.set('q', search);
   if (el('#fDef').value) q.set('definition_id', el('#fDef').value);
   if (el('#fSubject').value) q.set('subject_type', el('#fSubject').value);
   try {
     const rows = await api('GET', `/api/form-submissions?${q}`);
-    CCCSForms.list(el('#list'), rows, openReport, statusFilter === 'OPEN' ? 'Nothing waiting for review.' : 'No reports match.');
+    if (seq !== refreshSeq) return; // a newer search or filter has started
+    CCCSForms.list(el('#list'), rows, openReport, search
+      ? `No ${statusFilter === 'ALL' ? '' : `${statusFilter.toLowerCase()} `}reports mention "${search}".${statusFilter === 'ALL' ? '' : ' Try All.'}`
+      : statusFilter === 'OPEN' ? 'Nothing waiting for review.' : 'No reports match.');
   } catch (e) { el('#list').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 CCCS.els('#statusChips [data-status]').forEach((b) => (b.onclick = () => { statusFilter = b.dataset.status; refresh(); }));
@@ -188,7 +247,7 @@ async function subjectsFor(types) {
 }
 
 async function startFiling(preKey, preType, preId) {
-  history.replaceState(null, '', location.pathname);
+  showDetail(location.pathname);
   el('#detailTitle').textContent = 'File a report';
   if (!defs.length) { el('#detail').innerHTML = '<p class="dim">No report forms are available.</p>'; return; }
   const pre = preKey ? defs.find((d) => d.key === preKey) : null;
@@ -216,7 +275,7 @@ async function startFiling(preKey, preType, preId) {
     ['#nDef', '#nSubject', '#nNext'].forEach((q) => (el(q).disabled = true));
     const extra = d.key === 'vehicle-inspection' && subject.type === 'VEHICLE' ? await CCCSForms.vehicleKitExtra(subject.id) : null;
     CCCSForms.fill(el('#nFill'), d, subject, {
-      extra, signerName: me.display_name,
+      extra, signerName: me.display_name, assist: true,
       onCancel: () => startFiling(),
       onDone: async (sub) => { await refresh(); openReport(sub.id); },
     });
@@ -234,6 +293,17 @@ el('#newReport').onclick = () => startFiling();
   defs = (await api('GET', '/api/form-definitions')).filter((d) => !d.subject_types.includes('APPLICATION'));
   el('#fDef').innerHTML += defs.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
   el('#fDef').onchange = refresh; el('#fSubject').onchange = refresh;
+  // A name you're looking for is usually in an old, already-reviewed report,
+  // so starting a search widens the review queue to All (once — pick a
+  // status chip again to narrow it).
+  let searching = false;
+  el('#fSearch').oninput = () => {
+    const now = Boolean(el('#fSearch').value.trim());
+    if (now && !searching) statusFilter = 'ALL';
+    searching = now;
+    clearTimeout(searchTimer); searchTimer = setTimeout(refresh, 300);
+  };
+  el('#fSearch').onkeydown = (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); refresh(); e.target.blur(); } };
   await refresh();
   const qs = new URLSearchParams(location.search);
   // /forms.html?new=vehicle-inspection&subject_type=VEHICLE&subject_id=3 — how

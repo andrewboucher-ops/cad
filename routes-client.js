@@ -115,6 +115,12 @@ module.exports = function registerClientRoutes({
       id: j.id, reference: j.reference, priority: j.priority, status: j.status, incident_type: j.incident_type,
       site_id: j.site_id, site_name: site ? site.name : null,
       created_at: j.created_at, dispatched_at: j.dispatched_at, on_scene_at: j.on_scene_at, completed_at: j.completed_at,
+      closed_at: j.closed_at || null,
+      // Dealt with without anyone attending (POST /api/jobs/:id/not-attended):
+      // the reason, and only the notes control marked for the client —
+      // never who wrote them, never the internal notes.
+      not_attended: Boolean(j.not_attended), not_attended_reason: j.not_attended ? (j.not_attended_reason || '') : null,
+      client_notes: (j.note_entries || []).filter((n) => n.client_visible).map((n) => ({ at: n.at, text: n.text })),
     };
   };
   const clientVisit = (v) => {
@@ -169,6 +175,7 @@ module.exports = function registerClientRoutes({
     const c = {
       id: nextId('clients'), name, contact_email: body.contact_email || '', billing_email: String(body.billing_email || '').trim(), billing_address: String(body.billing_address || '').trim().slice(0, 500), site_ids: siteIds, weekly_report_enabled: body.weekly_report_enabled !== false,
       invoice_grouping: body.invoice_grouping === 'PER_CLIENT' ? 'PER_CLIENT' : 'PER_CONTRACT',
+      invoice_attach_reports: Boolean(body.invoice_attach_reports),
       created_at: new Date().toISOString(),
     };
     db.clients.push(c);
@@ -194,6 +201,8 @@ module.exports = function registerClientRoutes({
     }
     if ('weekly_report_enabled' in body) c.weekly_report_enabled = Boolean(body.weekly_report_enabled);
     if ('invoice_grouping' in body) c.invoice_grouping = body.invoice_grouping === 'PER_CLIENT' ? 'PER_CLIENT' : 'PER_CONTRACT';
+    // Attach the attendance reports for the period to each invoice email.
+    if ('invoice_attach_reports' in body) c.invoice_attach_reports = Boolean(body.invoice_attach_reports);
     logEvent('client.updated', `CLIENT ${c.name} UPDATED`, { client_id: c.id });
     return c;
   });
@@ -602,14 +611,19 @@ module.exports = function registerClientRoutes({
     const jobs = db.jobs.filter((j) => j.site_id === site.id && inRange(j.created_at));
     const visits = db.site_visits.filter((v) => v.site_id === site.id && inRange(v.scheduled_for));
     const incidents = forms.clientVisibleSubmissions([site.id]).filter((s) => inRange(s.occurred_at));
-    const responseMinutes = jobs.filter((j) => j.on_scene_at).map((j) => (Date.parse(j.on_scene_at) - Date.parse(j.created_at)) / 60000);
+    // Arrived before the call was logged means the job was typed in after
+    // the event (before "Already happened" existed) with a later received
+    // time: not a real response time, so it is left out rather than
+    // dragging the average below zero or counting as within the SLA.
+    const responseMinutes = jobs.filter((j) => j.on_scene_at).map((j) => (Date.parse(j.on_scene_at) - Date.parse(j.created_at)) / 60000).filter((m) => Number.isFinite(m) && m >= 0);
     const avgResponseMinutes = responseMinutes.length ? Math.round((responseMinutes.reduce((a, b) => a + b, 0) / responseMinutes.length) * 10) / 10 : null;
     return {
       site: clientSite(site), from: from.toISOString(), to: to.toISOString(),
       jobs: {
-        total: jobs.length, completed: jobs.filter((j) => j.status === 'COMPLETED').length, cancelled: jobs.filter((j) => j.status === 'CANCELLED').length,
+        total: jobs.length, completed: jobs.filter((j) => j.status === 'COMPLETED').length, cancelled: jobs.filter((j) => j.status === 'CANCELLED' && !j.not_attended).length,
+        not_attended: jobs.filter((j) => j.not_attended).length,
         avg_response_minutes: avgResponseMinutes, sla_minutes: site.response_sla_minutes || null,
-        within_sla: site.response_sla_minutes ? responseMinutes.filter((m) => m <= site.response_sla_minutes).length : null,
+        within_sla: site.response_sla_minutes ? responseMinutes.filter((m) => m <= site.response_sla_minutes).length : null, responded: responseMinutes.length,
       },
       visits: {
         total: visits.length, completed: visits.filter((v) => v.status === 'COMPLETED').length,

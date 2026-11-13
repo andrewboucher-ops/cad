@@ -130,6 +130,7 @@
   .stepper span.cur { border-color: var(--accent); color: var(--accent); }
   .gbody label { margin-top: 8px; }
   .gbody input:not([type=checkbox]), .gbody select, .gbody textarea { width: 100%; box-sizing: border-box; }
+  #detailBody input[type=checkbox] { width: auto; padding: 0; flex: none; margin-top: 2px; }
   .armed { background: var(--emergency) !important; color: #fff !important; }
 
   .ext { display: flex; align-items: center; gap: 6px; font-size: 12px; }
@@ -217,6 +218,7 @@ const me = CCCS.getSession().user;
 const JOB_TIME_FIELDS = [['created_at', 'Received'], ['dispatched_at', 'Dispatched'], ['acknowledged_at', 'Accepted'], ['en_route_at', 'En route'], ['on_scene_at', 'Arrived on scene'], ['completed_at', 'Cleared']];
 const JOB_TIME_LABEL = Object.fromEntries(JOB_TIME_FIELDS);
 let timesOpenFor = null;
+let notAttendedOpenFor = null;
 // Where a resent report goes unless control types somewhere else: the
 // site's client contact, else the office inbox to forward from.
 const reportDefaultTo = (j) => ((state.sites.find((x) => x.id === j.site_id) || {}).contact_email || 'info@echeloncic.com');
@@ -559,7 +561,7 @@ function renderDispatch() {
         <span style="display:flex;gap:6px;align-items:center">
           ${it.kind === 'job' ? `<span class="pri pri-${r.priority}">${r.priority}</span>` : ''}
           ${it.kind === 'job' && r.is_medical ? `<span class="pri pri-AMBER" title="Medical incident">MEDICAL</span>` : ''}
-          <span class="status-pill ${busyCls(r.status)}">${jobStatusLabel(r.status)}</span>
+          <span class="status-pill ${busyCls(r.status)}">${it.kind === 'job' && r.not_attended ? 'NOT ATTENDED' : jobStatusLabel(r.status)}</span>
         </span>
       </div>
       <div class="card-sub">
@@ -757,7 +759,7 @@ function renderJob(body) {
       <div><div style="display:flex;gap:8px;align-items:center"><span class="pri pri-${j.priority}">${j.priority}</span>${j.is_medical ? `<span class="pri pri-AMBER" title="Medical incident">MEDICAL</span>` : ''}<h3>${esc(j.incident_type)}</h3></div>
         <div class="dim" style="margin-top:4px;font-size:12.5px">${esc(j.reference)} · ${esc(j.location)}</div></div>
       ${active ? `<div style="text-align:right"><div style="font-size:20px;font-weight:800" id="jElapsed">${fmtElapsed(j.created_at)}</div><div class="dim" style="font-size:10px">SINCE CREATED</div></div>`
-        : `<span class="status-pill ${j.status === 'CANCELLED' ? 'off' : 'on'}">${esc(j.status)}</span>`}
+        : `<span class="status-pill ${j.status === 'CANCELLED' ? 'off' : 'on'}">${j.not_attended ? 'NOT ATTENDED' : esc(j.status)}</span>`}
     </div>
     ${j.status === 'CANCELLED' ? '' : stepper([['DISPATCHED', 'Disp'], ['ACKNOWLEDGED', 'Ack'], ['EN_ROUTE', 'En rt'], ['ON_SCENE', 'Scene'], ['COMPLETED', 'Done']], stageAt, active)}
     <dl class="kv" id="jView">
@@ -806,10 +808,25 @@ function renderJob(body) {
       <div class="btn-row" style="margin-top:4px"><button class="btn" id="jSaveNotes">Save notes</button></div>
     </div>
     <div class="dsec"><div class="t">Notes log${active ? '' : ' — add notes after the job closed'}</div>
-      ${(j.note_entries || []).map((n) => `<div style="font-size:12.5px;margin-bottom:6px"><span class="dim">${new Date(n.at).toLocaleString('en-GB')} · ${esc(n.by_name || '')}${n.closing ? ' · closing note' : ''}</span><div style="white-space:pre-wrap">${esc(n.text)}</div></div>`).join('') || '<p class="dim" style="margin:0 0 6px">No notes added yet.</p>'}
+      ${(j.note_entries || []).map((n) => `<div style="font-size:12.5px;margin-bottom:6px"><span class="dim">${new Date(n.at).toLocaleString('en-GB')} · ${esc(n.by_name || '')}${n.closing ? ' · closing note' : ''}</span>${j.site_id ? ` <button class="btn" data-noteclient="${esc(n.id)}" data-on="${n.client_visible ? 1 : 0}" style="padding:0 6px;font-size:10.5px" title="${n.client_visible ? 'The client sees this note in their portal. Click to hide it.' : 'Only staff see this note. Click to show it to the client in their portal.'}">${n.client_visible ? 'Client sees this ✓' : 'Show to client'}</button>` : ''}<div style="white-space:pre-wrap">${esc(n.text)}</div></div>`).join('') || '<p class="dim" style="margin:0 0 6px">No notes added yet.</p>'}
       <textarea id="jNoteNew" rows="2" placeholder="Add a note (saved with your name and the time)"></textarea>
-      <div class="btn-row" style="margin-top:4px"><button class="btn" id="jAddNote">Add note</button></div>
+      <div class="btn-row" style="margin-top:4px;align-items:center"><button class="btn" id="jAddNote">Add note</button>${j.site_id ? '<label style="display:flex;gap:4px;align-items:center;margin:0;text-transform:none;letter-spacing:0;font-size:12px"><input type="checkbox" id="jNoteClient"> Client can see this note</label>' : ''}</div>
     </div>
+    ${j.not_attended ? `<div class="dsec" style="border:1px solid var(--line);border-radius:8px;padding:8px">
+      <div class="t">Not attended — not charged</div>
+      <div style="font-size:12.5px;white-space:pre-wrap">${esc(j.not_attended_reason || '')}</div>
+      <p class="dim" style="margin:4px 0 0;font-size:12px">Marked by ${esc(j.not_attended_by_name || '')} · ${j.not_attended_at ? new Date(j.not_attended_at).toLocaleString('en-GB') : ''}. ${j.site_id ? 'The client sees the reason and any notes marked "Client sees this".' : 'No site on this job, so no client sees it.'}</p>
+    </div>` : ''}
+    ${!j.not_attended && j.status !== 'COMPLETED' && !j.on_scene_at ? `<div class="dsec">
+      <div class="t">Not attended</div>
+      ${notAttendedOpenFor !== j.id ? `<p class="dim" style="margin:0 0 6px;font-size:12.5px">Dealt with without sending anyone (CCTV check, keyholder confirmed, client cancelled). Closes the job, it's never invoiced, and the client sees the reason.</p>
+        <div class="btn-row"><button class="btn" id="jNAOpen">Mark not attended…</button></div>`
+      : `<label style="font-size:11px">Reason it wasn't attended (the client sees this)</label>
+        <textarea id="jNAReason" rows="2" placeholder="e.g. Remote CCTV check showed no intruders; keyholder confirmed a false alarm"></textarea>
+        <label style="font-size:11px">Note for the client (optional, what we did)</label>
+        <textarea id="jNANote" rows="3" placeholder="e.g. Called the keyholder at 02:14, panel reset remotely, site checked on cameras"></textarea>
+        <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="jNASave">Close as not attended</button><button class="btn" id="jNACancel">Back</button></div>`}
+    </div>` : ''}
     <div class="dsec"><div class="t">Reports</div><div id="jReports"><p class="dim">Loading…</p></div></div>
     ${j.awaiting_close ? `<div class="dsec" style="border:1px solid var(--priority, #d97706);border-radius:8px;padding:8px">
       <div class="t">Needs closing — officer marked it completed</div>
@@ -862,7 +879,21 @@ function renderJob(body) {
   el('#jAddNote').onclick = async () => {
     const text = el('#jNoteNew').value.trim();
     if (!text) return;
-    try { upsert(state.jobs, await api('POST', `/api/jobs/${j.id}/notes`, { text })); renderDetail({ force: true }); } catch (e) { showErr(e); }
+    const client_visible = Boolean(el('#jNoteClient') && el('#jNoteClient').checked);
+    try { upsert(state.jobs, await api('POST', `/api/jobs/${j.id}/notes`, { text, client_visible })); renderDetail({ force: true }); } catch (e) { showErr(e); }
+  };
+  els('[data-noteclient]', body).forEach((b) => (b.onclick = async () => {
+    try { upsert(state.jobs, await api('PATCH', `/api/jobs/${j.id}/notes/${b.dataset.noteclient}`, { client_visible: b.dataset.on !== '1' })); renderDetail({ force: true }); } catch (e) { showErr(e); }
+  }));
+  if (el('#jNAOpen')) el('#jNAOpen').onclick = () => { notAttendedOpenFor = j.id; renderDetail({ force: true }); el('#jNAReason').focus(); };
+  if (el('#jNACancel')) el('#jNACancel').onclick = () => { notAttendedOpenFor = null; renderDetail({ force: true }); };
+  if (el('#jNASave')) el('#jNASave').onclick = async () => {
+    const reason = el('#jNAReason').value.trim();
+    if (reason.length < 3) return showErr(new Error('Give the reason it was not attended.'));
+    try {
+      upsert(state.jobs, await api('POST', `/api/jobs/${j.id}/not-attended`, { reason, client_note: el('#jNANote').value.trim() }));
+      notAttendedOpenFor = null; renderDispatch(); renderDetail({ force: true });
+    } catch (e) { showErr(e); }
   };
   els('[data-contact]', body).forEach((b) => (b.onclick = () => { const p = state.personnel.find((x) => x.name === b.dataset.contact); if (p) select('p', p.id); }));
   if (el('#jCloseBtn')) el('#jCloseBtn').onclick = async () => {
@@ -1233,19 +1264,79 @@ function renderNewJob(body) {
 }
 
 function renderNewVisit(body) {
-  body.innerHTML = `
-    <label style="margin-top:0">Site</label>
-    <select id="vsSite">${state.sites.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
-    <label>Assign now (optional)</label>
-    <select id="vsWho"><option value="">— assign later —</option>${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}${isAvailable(p) ? '' : ' (busy)'}</option>`).join('')}</select>
+  // "One-off for a client": a patrol a client passes on at an address that
+  // isn't one of their sites (AURA's own customers). CCCS makes a one-off
+  // site under that client; the report goes to the client, not billed here.
+  const oneOff = state.newVisitOneOff === true;
+  const whoSel = `<label>Assign now (optional)</label>
+    <select id="vsWho"><option value="">— assign later —</option>${state.personnel.map((p) => `<option value="${p.id}">${esc(p.callsign || p.name)}${isAvailable(p) ? '' : ' (busy)'}</option>`).join('')}</select>`;
+  const tabs = `<div class="btn-row" style="margin-top:0"><button class="btn${oneOff ? '' : ' primary'}" id="vsTabSite">Our site</button><button class="btn${oneOff ? ' primary' : ''}" id="vsTabOne">One-off for a client</button></div>`;
+  if (!oneOff) {
+    body.innerHTML = `${tabs}
+    <label>Site</label>
+    <select id="vsSite">${state.sites.filter((x) => !x.one_off).map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
+    ${whoSel}
     <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="vsGo">Create visit</button><button class="btn" id="vsBack">Cancel</button></div>
     <p class="err" id="detailErr"></p>`;
+  } else {
+    const now = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    body.innerHTML = `${tabs}
+    <p class="dim" style="margin:8px 0 0">For a patrol a client asks for at an address that isn't one of their sites. The report goes to the client and shows in their portal. It isn't put on an invoice.</p>
+    <label>Client</label>
+    <select id="voClient"><option value="">Loading…</option></select>
+    <label>Client's job reference (optional)</label>
+    <input id="voRef" maxlength="60" placeholder="e.g. their callout or job number">
+    <label>End customer / premises name (optional)</label>
+    <input id="voCust" maxlength="120">
+    <label>Address</label>
+    <textarea id="voAddr" rows="2" maxlength="300"></textarea>
+    <label>Postcode</label>
+    <input id="voPc" maxlength="12" style="text-transform:uppercase">
+    <label>When</label>
+    <input id="voWhen" type="datetime-local" value="${now}">
+    <label>Access / instructions for the officer (optional)</label>
+    <textarea id="voAccess" rows="2" maxlength="2000"></textarea>
+    <label>Notes (optional)</label>
+    <textarea id="voNotes" rows="2" maxlength="2000"></textarea>
+    ${whoSel}
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="vsGo">Book visit</button><button class="btn" id="vsBack">Cancel</button></div>
+    <p class="err" id="detailErr"></p>`;
+    api('GET', '/api/clients').then((clients) => {
+      const sel = el('#voClient'); if (!sel) return;
+      const list = (clients || []).filter((c) => c.status !== 'ARCHIVED').sort((a, b) => a.name.localeCompare(b.name));
+      const pick = state.newVisitClient || (list.find((c) => /aura/i.test(c.name)) || {}).id;
+      sel.innerHTML = `<option value="">— choose the client —</option>${list.map((c) => `<option value="${c.id}"${c.id === pick ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}`;
+    }).catch((e) => showErr(e));
+  }
+  el('#vsTabSite').onclick = () => { state.newVisitOneOff = false; renderNewVisit(body); };
+  el('#vsTabOne').onclick = () => { state.newVisitOneOff = true; renderNewVisit(body); };
   el('#vsBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
   el('#vsGo').onclick = async () => {
     try {
-      const v = await api('POST', '/api/site-visits', { site_id: Number(el('#vsSite').value) });
-      if (el('#vsWho').value) await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vsWho').value) });
+      let v, warn = '';
+      if (!oneOff) v = await api('POST', '/api/site-visits', { site_id: Number(el('#vsSite').value) });
+      else {
+        if (!el('#voClient').value) throw new Error('Choose the client this visit is for');
+        const pc = el('#voPc').value.trim();
+        let lat = null, lon = null;
+        // UK postcode → map position via postcodes.io (free, no key), as Admin → Sites does.
+        if (pc) {
+          try { const r = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(pc)}`).then((x) => x.json()); if (r && r.result) { lat = r.result.latitude; lon = r.result.longitude; } } catch { /* no map pin, still bookable */ }
+        }
+        state.newVisitClient = Number(el('#voClient').value);
+        v = await api('POST', '/api/site-visits/one-off', {
+          client_id: Number(el('#voClient').value), client_ref: el('#voRef').value, customer_name: el('#voCust').value,
+          address: el('#voAddr').value, postcode: pc, lat, lon,
+          scheduled_for: el('#voWhen').value ? new Date(el('#voWhen').value).toISOString() : undefined,
+          access_instructions: el('#voAccess').value, notes: el('#voNotes').value,
+        });
+        warn = (v.warnings || []).join('. ');
+        api('GET', '/api/sites').then((sites) => { state.sites = sites; }).catch(() => {});
+      }
+      if (el('#vsWho').value) v = await api('POST', `/api/site-visits/${v.id}/assign`, { personnel: Number(el('#vsWho').value) });
+      delete v.warnings;
       upsert(state.site_visits, v); select('v', v.id, { pan: true });
+      if (warn) setTimeout(() => showErr(new Error(warn)), 0);
     } catch (e) { showErr(e); }
   };
 }

@@ -24,7 +24,9 @@ const CCCSForms = (() => {
     const st = document.createElement('style'); st.id = 'ff-style';
     st.textContent = `
       .ff-stack { display:flex; flex-direction:column; gap:8px; }
-      .ff-stack > label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-dim); margin-top:4px; }
+      .ff-stack > [data-ff-wrap] { display:contents; }
+      .ff-stack > [data-ff-wrap][hidden] { display:none; }
+      .ff-stack > label, .ff-stack > [data-ff-wrap] > label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-dim); margin-top:4px; }
       .ff-stack input:not([type=checkbox]), .ff-stack select, .ff-stack textarea { width:100%; box-sizing:border-box; }
       .ff-field { margin-bottom:6px; }
       .ff-field > span { display:block; font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-dim); }
@@ -135,14 +137,24 @@ const CCCSForms = (() => {
    * (apply.html) has no session and posts elsewhere — and `subject` may then
    * be null. `submitLabel` names the button.
    */
-  function fill(host, def, subject, { signerName = '', onDone, onCancel, submit, submitLabel = 'Submit report', extra = null } = {}) {
+  function fill(host, def, subject, { signerName = '', onDone, onCancel, submit, submitLabel = 'Submit report', extra = null, assist = false } = {}) {
     const pads = {}, photos = {};
+    // "Write it up for me" (report-assist.js): only on forms with text
+    // boxes to fill, and only where a session can call the server.
+    const showAssist = assist && !submit && def.id && def.fields.some((f) => f.type === 'textarea');
     host.innerHTML = `
       <div class="ff-stack">
         ${def.visibility === 'RESTRICTED' ? `<p style="margin:0;padding:8px 10px;border-radius:8px;border:1px solid var(--priority);font-size:12.5px">
           <strong>Restricted report.</strong> Only you and the named people responsible for these reports will be able to read it. It will not appear in the control-room log.</p>` : ''}
         ${subject ? `<p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[subject.type] || subject.type)}: <strong>${esc(subject.label)}</strong></p>` : ''}
-        ${def.fields.map((f) => fieldHtml(f)).join('')}
+        ${showAssist ? `<div data-ff-assist style="padding:10px;border-radius:8px;border:1px solid var(--line, #8884)">
+          <label for="ffAssistNotes" style="margin-top:0">Write it up for me</label>
+          <p class="dim" style="margin:0 0 4px;font-size:12px">Jot down what happened in any order, or use your keyboard's microphone. It fills in the boxes below for you to check and correct.</p>
+          <textarea id="ffAssistNotes" data-ff-assist-notes rows="3" placeholder="e.g. arrived 2215, rear fire door open, no one inside, secured it, rang keyholder 2230"></textarea>
+          <div class="btn-row" style="margin-top:6px"><button type="button" class="btn" data-ff-assist-go>Fill in the form from my notes</button></div>
+          <div data-ff-assist-out style="font-size:12.5px"></div>
+        </div>` : ''}
+        ${def.fields.map((f) => `<div data-ff-wrap="${f.id}"${f.required_if ? ' hidden' : ''}>${fieldHtml(f)}</div>`).join('')}
         ${extra ? extra.html : ''}
         <p class="err" data-ff-err style="min-height:16px;margin:0"></p>
         <div class="btn-row">
@@ -171,6 +183,62 @@ const CCCSForms = (() => {
       if (f.type === 'datetime') host.querySelector(`[data-ff="${f.id}"]`).value = toLocalInput(new Date());
     }
 
+    // A field with required_if shows (and is required) only while its
+    // condition holds — e.g. "Police reference" once "Police informed" is
+    // ticked. The server checks the same rule.
+    const conditionMet = (c) => {
+      const ctl = host.querySelector(`[data-ff="${c.field}"]`);
+      if (!ctl) return false;
+      return c.equals === true ? ctl.checked === true : (c.in || []).includes(ctl.value);
+    };
+    const shown = (f) => !f.required_if || conditionMet(f.required_if);
+    const refresh = () => { for (const f of def.fields) if (f.required_if) host.querySelector(`[data-ff-wrap="${f.id}"]`).hidden = !shown(f); };
+    for (const f of def.fields) {
+      if (!f.required_if) continue;
+      const ctl = host.querySelector(`[data-ff="${f.required_if.field}"]`);
+      if (ctl) ctl.addEventListener('change', refresh);
+    }
+    refresh();
+
+    if (showAssist) {
+      // Fill only boxes that are empty or still hold an earlier draft, so
+      // a second press never wipes what the officer has typed themselves.
+      const drafted = {};
+      const goBtn = host.querySelector('[data-ff-assist-go]'), out = host.querySelector('[data-ff-assist-out]');
+      goBtn.onclick = async () => {
+        const notes = host.querySelector('[data-ff-assist-notes]').value.trim();
+        if (notes.length < 3) { out.innerHTML = '<p class="err" style="margin:6px 0 0">Write a few notes first.</p>'; return; }
+        goBtn.disabled = true; goBtn.textContent = 'Writing…'; out.innerHTML = '';
+        try {
+          let r = await api('POST', '/api/report-assist', { definition_id: def.id, subject_type: subject && subject.type, subject_id: subject && subject.id, notes });
+          // The local AI works in the background; ask every 2s until it's done.
+          const started = Date.now(), draftId = r && r.id;
+          while (r && r.pending) {
+            if (Date.now() - started > 5 * 60 * 1000) throw new Error('The local AI is taking too long. Try again, or write it up yourself.');
+            await new Promise((res) => setTimeout(res, 2000));
+            goBtn.textContent = `Writing… ${Math.round((Date.now() - started) / 1000)}s`;
+            r = await api('GET', `/api/report-assist/drafts/${draftId}`);
+          }
+          const kept = [];
+          for (const [id, val] of Object.entries(r.values || {})) {
+            const ctl = host.querySelector(`[data-ff="${id}"]`); if (!ctl) continue;
+            if (ctl.value.trim() && ctl.value !== drafted[id]) { kept.push(id); continue; }
+            ctl.value = val; drafted[id] = ctl.value;
+            ctl.dispatchEvent(new Event('change'));
+          }
+          const label = (id) => (def.fields.find((f) => f.id === id) || {}).label || id;
+          out.innerHTML = `<p style="margin:8px 0 0"><strong>Draft added below.</strong> ${r.source === 'ai' ? 'Written by the local AI.' : 'Written by the simple template.'}
+              Read every box and correct anything that is wrong or missing before you sign. It is your statement.</p>
+            ${r.note ? `<p class="dim" style="margin:4px 0 0">${esc(r.note)}</p>` : ''}
+            ${r.check && r.check.length ? `<p style="margin:4px 0 0;color:var(--priority)">Check these, they are not in your notes: ${r.check.map(esc).join(', ')}</p>` : ''}
+            ${kept.length ? `<p class="dim" style="margin:4px 0 0">Left as you typed them: ${kept.map((id) => esc(label(id))).join('; ')}</p>` : ''}
+            ${r.missing && r.missing.length ? `<p class="dim" style="margin:4px 0 0">Worth adding:</p><ul style="margin:2px 0 0;padding-left:18px">${r.missing.map((m) => `<li>${esc(m)}</li>`).join('')}</ul>` : ''}
+            <p class="dim" style="margin:4px 0 0">Tick boxes, times and your signature are left for you.</p>`;
+        } catch (e) { out.innerHTML = `<p class="err" style="margin:6px 0 0">${esc(e.message)}</p>`; }
+        finally { goBtn.disabled = false; goBtn.textContent = 'Fill in the form again from my notes'; }
+      };
+    }
+
     const errEl = host.querySelector('[data-ff-err]');
     if (onCancel) host.querySelector('[data-ff-cancel]').onclick = onCancel;
     const submitBtn = host.querySelector('[data-ff-submit]');
@@ -178,6 +246,7 @@ const CCCSForms = (() => {
       errEl.textContent = '';
       const values = {};
       for (const f of def.fields) {
+        if (!shown(f)) continue;
         const input = host.querySelector(`[data-ff="${f.id}"]`);
         switch (f.type) {
           case 'checkbox': values[f.id] = input.checked; break;
@@ -220,7 +289,7 @@ const CCCSForms = (() => {
   }
 
   function fieldHtml(f) {
-    const req = f.required ? ' <span style="color:var(--priority)">*</span>' : '';
+    const req = f.required || f.required_if ? ' <span style="color:var(--priority)">*</span>' : '';
     const label = `<label>${esc(f.label)}${req}</label>${f.help ? `<p class="dim" style="margin:0 0 4px;font-size:12px">${esc(f.help)}</p>` : ''}`;
     switch (f.type) {
       case 'textarea': return `${label}<textarea data-ff="${f.id}" rows="3"></textarea>`;
@@ -229,7 +298,7 @@ const CCCSForms = (() => {
       case 'datetime': return `${label}<input data-ff="${f.id}" type="datetime-local">`;
       case 'select': return `${label}<select data-ff="${f.id}"><option value="">— choose —</option>${f.options.map((o) => `<option>${esc(o)}</option>`).join('')}</select>`;
       case 'severity': return `${label}<select data-ff="${f.id}"><option value="">— choose —</option>${SEVERITIES.map((o) => `<option>${esc(o)}</option>`).join('')}</select>`;
-      case 'checkbox': return `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input data-ff="${f.id}" type="checkbox" style="width:20px;height:20px">${esc(f.label)}${req}</label>`;
+      case 'checkbox': return `<label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:14px"><input data-ff="${f.id}" type="checkbox" style="width:20px;height:20px">${esc(f.label)}${req}</label>${f.help ? `<p class="dim" style="margin:-4px 0 4px 28px;font-size:12px">${esc(f.help)}</p>` : ''}`;
       case 'signature': return `${label}<div data-ff-pad="${f.id}"></div><input data-ff-signer="${f.id}" placeholder="Name of person signing" style="margin-top:6px">`;
       case 'photo': return `${label}<div style="display:flex;gap:8px;align-items:center"><button type="button" class="btn" data-ff-photobtn="${f.id}">Take / choose photo</button><span class="dim" data-ff-photostatus="${f.id}"></span></div><input type="file" accept="image/*" class="hide" data-ff-photo="${f.id}">`;
       default: return `${label}<input data-ff="${f.id}" autocomplete="off">`;
@@ -277,6 +346,9 @@ const CCCSForms = (() => {
         </div>
         <p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[sub.subject_type] || sub.subject_type)} ${esc(sub.subject_label)} · filed by ${esc(sub.submitted_by)} · ${esc(fmt(sub.submitted_at))} · form v${sub.definition_version}</p>
         ${sub.geo ? `<p class="dim" style="margin:0;font-size:12px">Filed near <a href="https://www.openstreetmap.org/?mlat=${sub.geo.lat}&mlon=${sub.geo.lon}#map=17/${sub.geo.lat}/${sub.geo.lon}" target="_blank" rel="noopener">${sub.geo.lat.toFixed(5)}, ${sub.geo.lon.toFixed(5)}</a>${sub.geo.accuracy ? ` (±${sub.geo.accuracy}m)` : ''}</p>` : ''}
+        ${(sub.evidence_links || []).length ? `<div style="border:1px solid var(--line);border-left:4px solid var(--accent, #3b82f6);border-radius:8px;padding:8px 10px">
+          <div style="font-weight:700">Evidential footage held in DEMS</div>
+          ${sub.evidence_links.map((l) => `<div style="font-size:12.5px;margin-top:2px">${/^https?:\/\//i.test(l.case_url || '') ? `<a href="${esc(l.case_url)}" target="_blank" rel="noopener noreferrer">${esc(l.case_ref)}</a>` : esc(l.case_ref)} <span class="dim">linked ${esc(fmt(l.linked_at))}${l.linked_by ? ' by ' + esc(l.linked_by) : ''}</span></div>`).join('')}</div>` : ''}
         ${sub.client_share ? `<p class="dim" style="margin:0;font-size:12px;color:var(--available)">Shared with the client ${esc(fmt(sub.client_share.shared_at))} by ${esc(sub.client_share.shared_by)}</p>` : ''}
         ${sub.status === 'ACTIONED' ? `<div style="border:1px solid var(--line);border-left:4px solid ${OUTCOME_COLOUR[sub.outcome] || 'var(--line)'};border-radius:8px;padding:8px 10px">
           <div style="font-weight:700">${esc(OUTCOME_LABEL[sub.outcome] || sub.outcome)} <span class="dim" style="font-weight:400;font-size:12px">by ${esc(sub.actioned_by)} · ${esc(fmt(sub.actioned_at))}</span></div>
@@ -430,15 +502,20 @@ const CCCSForms = (() => {
   /** A compact list of submission summaries; onOpen(id) when one is clicked. */
   function list(host, rows, onOpen, empty = 'No reports.') {
     host.innerHTML = rows.length ? rows.map((s) => `
-      <div class="row clickable" data-ff-open="${s.id}" style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line-soft);cursor:pointer">
+      <div class="row clickable" data-ff-open="${s.id}" role="button" tabindex="0" style="display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line-soft);cursor:pointer">
         <span class="mono" style="font-size:12px">${esc(s.reference)}</span>
-        <span style="flex:1">${esc(s.definition_name)} <span class="dim">— ${esc(s.subject_label)}</span></span>
+        <span style="flex:1 1 180px;min-width:0">${esc(s.definition_name)} <span class="dim">— ${esc(s.subject_label)}</span></span>
         ${s.severity ? `<span class="pri pri-${SEVERITY_PRI[s.severity] || 'ROUTINE'}" style="font-size:10px">${esc(s.severity)}</span>` : ''}
         ${s.visibility === 'RESTRICTED' ? '<span class="pri pri-RED" style="font-size:10px">R</span>' : ''}
         ${s.status === 'ACTIONED' ? `<span style="font-size:10px;font-weight:700;color:${OUTCOME_COLOUR[s.outcome] || 'inherit'}">${esc(OUTCOME_LABEL[s.outcome] || s.outcome)}</span>` : ''}
+        ${s.status === 'UNDER_INVESTIGATION' || s.status === 'RETURNED_FOR_CORRECTION' ? `<span style="font-size:10px;font-weight:700;color:var(--on-task)" title="${esc(s.investigator ? `Investigator: ${s.investigator}` : '')}">${s.status === 'RETURNED_FOR_CORRECTION' ? 'RETURNED' : 'INVESTIGATING'}${s.open_actions ? ` · ${s.open_actions} action${s.open_actions === 1 ? '' : 's'}` : ''}</span>` : ''}
         <span class="dim" style="font-size:11px">${esc(fmt(s.submitted_at))}</span>
+        ${s.match ? `<span class="dim" style="flex:1 0 100%;font-size:12px;overflow-wrap:anywhere">${esc(s.match.label)}: ${esc(s.match.text)}</span>` : ''}
       </div>`).join('') : `<p class="dim">${esc(empty)}</p>`;
-    host.querySelectorAll('[data-ff-open]').forEach((r) => (r.onclick = () => onOpen(Number(r.dataset.ffOpen))));
+    host.querySelectorAll('[data-ff-open]').forEach((r) => {
+      r.onclick = () => onOpen(Number(r.dataset.ffOpen));
+      r.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(Number(r.dataset.ffOpen)); } };
+    });
   }
 
   /* ---------------- kit on a vehicle ---------------- */

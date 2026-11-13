@@ -37,3 +37,15 @@ test('a window resets after a minute, and an overflow is logged once with its bu
   assert.equal(rl.check({ pathname: '/api/units/12/position', ip: '198.51.100.1' }), true);
   rl.stop();
 });
+
+test('control room PCs and the check call host have their own bucket, apart from anonymous traffic', () => {
+  const { rl } = rig({ user: 3, auth: 2, ip: 3, integration: 4 });
+  fill(rl, { pathname: '/api/client/portal', ip: '203.0.113.5' }, 10);
+  assert.equal(rl.check({ pathname: '/api/client/portal', ip: '203.0.113.5' }), false, 'general bucket is full');
+  assert.equal(rl.check({ pathname: '/api/integrations/workstation/alerts', ip: '203.0.113.5' }), true, 'a PC polling alerts still gets through');
+  assert.equal(rl.bucketFor({ pathname: '/api/integrations/checkcall-host/sync', ip: 'x' }).key, 'integration:x');
+  assert.equal(rl.bucketFor({ pathname: '/api/integrations/aura/callout', ip: 'x' }).key, 'ip:x', 'other integrations are unchanged');
+  fill(rl, { pathname: '/api/integrations/workstation/alerts', ip: '203.0.113.5' }, 4);
+  assert.equal(rl.check({ pathname: '/api/integrations/workstation/alerts', ip: '203.0.113.5' }), false, 'and it has a cap of its own');
+  rl.stop();
+});

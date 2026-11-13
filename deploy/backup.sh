@@ -10,8 +10,19 @@
 #   BACKUP_DIR            where archives go            (/var/backups/cccs)
 #   BACKUP_KEEP           how many archives to keep    (14)
 #   BACKUP_KEY_FILE       passphrase file, root only   (/etc/cccs/backup.key)
-#   BACKUP_RCLONE_REMOTE  e.g. onedrive:cccs-backups   (unset = stays on this box)
-#   BACKUP_REMOTE_KEEP_DAYS  delete remote copies older than this (90; 0 = keep all)
+#   BACKUP_ONEDRIVE_USER  copy each archive to this person's OneDrive, through
+#                         the Microsoft app CCCS already uses (deploy/offsite-copy.js;
+#                         BACKUP_ONEDRIVE_FOLDER, BACKUP_REMOTE_KEEP)
+#   BACKUP_RCLONE_REMOTE  or: an rclone remote, e.g. nas:cccs-backups
+#                         (copies older than BACKUP_REMOTE_KEEP_DAYS, 90, are removed; 0 keeps all)
+#   BACKUP_PING_URL       optional: a Healthchecks.io-style URL told about every
+#                         run (…/fail on failure), so a backup that stops
+#                         happening at all is noticed off this server too
+# Neither remote set = the backup stays on this box, and says so.
+#
+# The outcome of each run is written to last-backup.json in BACKUP_DIR, which
+# cccs-watchdog (deploy/watchdog.js) reads to text/email when backups stop
+# or stop leaving the server.
 #
 # Restore:
 #   openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass file:/etc/cccs/backup.key \
@@ -34,13 +45,34 @@ KEEP=$(cfg BACKUP_KEEP 14)
 KEY_FILE=$(cfg BACKUP_KEY_FILE /etc/cccs/backup.key)
 REMOTE=$(cfg BACKUP_RCLONE_REMOTE "")
 REMOTE_KEEP_DAYS=$(cfg BACKUP_REMOTE_KEEP_DAYS 90)
+ONEDRIVE_USER=$(cfg BACKUP_ONEDRIVE_USER "")
+PING_URL=$(cfg BACKUP_PING_URL "")
+CCCS_LIB="${CCCS_LIB:-/usr/local/lib/cccs}"
 DATA_DIR="$(dirname "$DATA_FILE")"
 STAMP=$(date +%Y%m%d-%H%M%S)
 ENC_ARGS=(-aes-256-cbc -pbkdf2 -iter 200000 -salt)
 
 mkdir -p "$DEST"; chmod 700 "$DEST"
 WORK=$(mktemp -d "$DEST/.work-XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+OUT="" OFFSITE="none" OFFSITE_ERROR=""
+# Every exit, good or bad, records what happened for the watchdog (and the
+# optional ping URL) — a failure nobody hears about is how a backup quietly
+# stops working for months.
+finish() {
+  local code=$?
+  rm -rf "$WORK"
+  STATUS_CODE=$code OUT_FILE="$OUT" OFFSITE="$OFFSITE" OFFSITE_ERROR="$OFFSITE_ERROR" node -e '
+    const e = process.env;
+    require("fs").writeFileSync(process.argv[1], JSON.stringify({
+      at: new Date().toISOString(), ok: e.STATUS_CODE === "0", exit_code: Number(e.STATUS_CODE),
+      file: e.OUT_FILE || null, offsite: e.OFFSITE, offsite_error: e.OFFSITE_ERROR || null,
+    }, null, 1));' "$DEST/last-backup.json" 2>/dev/null || true
+  if [ -n "$PING_URL" ]; then
+    if [ "$code" = 0 ]; then curl -fsS -m 15 --retry 3 -o /dev/null "$PING_URL" || true
+    else curl -fsS -m 15 --retry 3 -o /dev/null "${PING_URL%/}/fail" || true; fi
+  fi
+}
+trap finish EXIT
 
 # Make room first: keep the newest KEEP-1 so this one makes KEEP.
 { ls -1t "$DEST"/cccs-*.tar.gz* 2>/dev/null || true; } | tail -n "+$KEEP" | xargs -r rm -f
@@ -88,18 +120,31 @@ echo "Backed up to $OUT ($(du -h "$OUT" | cut -f1))"
 
 # A backup on the same disk as the database is a second copy of the same
 # failure, not a backup.
-if [ -n "$REMOTE" ]; then
-  if command -v rclone >/dev/null; then
-    rclone copy "$OUT" "$REMOTE" && echo "Copied off this server to $REMOTE"
+if [ -n "$ONEDRIVE_USER" ]; then
+  if log=$(ENV_FILE="$ENV_FILE" node "$CCCS_LIB/offsite-copy.js" "$OUT" 2>&1); then
+    OFFSITE="onedrive"; echo "$log"
+  else
+    OFFSITE="failed"; OFFSITE_ERROR=$(tail -1 <<<"$log"); echo "$log" >&2
+    echo "WARNING: the backup is only on this server tonight." >&2
+    exit 2
+  fi
+elif [ -n "$REMOTE" ]; then
+  if ! command -v rclone >/dev/null; then
+    OFFSITE="failed"; OFFSITE_ERROR="BACKUP_RCLONE_REMOTE is set but rclone is not installed"
+    echo "WARNING: $OFFSITE_ERROR — NOT copied off this server." >&2
+    exit 2
+  elif rclone copy "$OUT" "$REMOTE"; then
+    OFFSITE="rclone"; echo "Copied off this server to $REMOTE"
     # Old copies hold records that may since have been disposed of at the end
     # of their retention period, so they don't stay off-site for ever either.
     if [ "$REMOTE_KEEP_DAYS" -gt 0 ] 2>/dev/null; then
       rclone delete --min-age "${REMOTE_KEEP_DAYS}d" --include 'cccs-*.tar.gz*' "$REMOTE" && echo "Removed remote copies older than $REMOTE_KEEP_DAYS days"
     fi
   else
-    echo "WARNING: BACKUP_RCLONE_REMOTE is set but rclone is not installed — NOT copied off this server." >&2
+    OFFSITE="failed"; OFFSITE_ERROR="rclone copy to $REMOTE failed"
+    echo "WARNING: $OFFSITE_ERROR — NOT copied off this server." >&2
     exit 2
   fi
 else
-  echo "WARNING: BACKUP_RCLONE_REMOTE not set — this backup is only on this server." >&2
+  echo "WARNING: no off-server copy is set up (BACKUP_ONEDRIVE_USER or BACKUP_RCLONE_REMOTE) — this backup is only on this server." >&2
 fi

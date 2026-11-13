@@ -724,7 +724,7 @@ function paintPersonnel() {
   const status = el('#pnStatus').value;
   let rows = allPersonnel.slice().sort((a, b) => a.name.localeCompare(b.name));
   if (status) rows = rows.filter((p) => p.employment_status === status);
-  if (q) rows = rows.filter((p) => p.name.toLowerCase().includes(q) || (p.employee_no || '').toLowerCase().includes(q));
+  if (q) rows = rows.filter((p) => p.name.toLowerCase().includes(q) || (p.employee_no || '').toLowerCase().includes(q) || (p.company || '').toLowerCase().includes(q));
   el('#pnTableWrap').innerHTML = rows.length ? `
     <table class="log-table">
       <thead><tr><th>Name</th><th style="width:100px">Rank</th><th style="width:100px">Callsign</th><th style="width:110px">Status</th><th style="width:70px">Login</th><th style="width:120px">Compliance</th><th style="width:70px"></th></tr></thead>
@@ -742,7 +742,7 @@ function paintPersonnel() {
         <td>${esc(p.name)}</td>
         <td class="dim">${esc(p.rank || '—')}</td>
         <td class="dim">${esc(p.callsign || '—')}</td>
-        <td class="dim">${esc(EMPLOYMENT_LABEL[p.employment_status] || p.employment_status)}</td>
+        <td class="dim">${esc(EMPLOYMENT_LABEL[p.employment_status] || p.employment_status)}${p.external_sub ? `<div style="font-size:11px">Subcontractor${p.company ? ` · ${esc(p.company)}` : ''} · no file</div>` : ''}</td>
         <td class="dim">${p.has_login ? 'Yes' : 'No'}</td>
         <td>${flags.length ? `<span class="err">${esc(flags.join(', '))}</span>` : '<span class="dim">—</span>'}</td>
         <td><button class="btn danger" data-delpersonnel="${p.id}" style="padding:4px 10px;font-size:11px">Delete</button></td>
@@ -850,6 +850,17 @@ function personnelForm(p) {
   const isNew = !p;
   return `
     <form class="stack" id="pnForm">
+      ${!isNew && p.external_sub ? `<div style="border:1px solid var(--line);border-radius:6px;padding:10px;background:var(--panel-2)">
+        <strong>Subcontractor with no personnel file</strong>
+        <p class="dim" style="margin:4px 0 8px;font-size:12px">Added from the rota with just the details needed to put them on a shift. They have no staff number and are left out of onboarding, BS 7858 screening, payroll and leave. With an officer app sign-in they see only their own shifts and their own record. Their shifts, timesheets, invoices and incident reports work as normal.</p>
+        <label>Company</label>
+        <input id="npnCompany" autocomplete="off" value="${esc(p.company || '')}">
+        <div class="btn-row" style="margin-top:8px">
+          <button type="button" class="btn" id="pnSubLogin">${p.has_login ? 'Resend officer app sign-in link' : 'Send officer app sign-in link'}</button>
+          <button type="button" class="btn" id="pnPromote">Give them a full personnel file</button>
+        </div>
+        <p class="dim" id="pnSubLoginMsg" style="margin:6px 0 0;font-size:12px;word-break:break-all"></p>
+      </div>` : ''}
       <label>Name</label>
       <input id="npnName" autocomplete="off" value="${isNew ? '' : esc(p.name)}">
       <label>Staff number — <span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">leave blank and the next number is given automatically</span></label>
@@ -1128,6 +1139,25 @@ function personnelModal(p) {
         </span>
       </div>`;
     el('#pnCancel').onclick = closeModal;
+    if (el('#pnSubLogin')) el('#pnSubLogin').onclick = async () => {
+      const msg = el('#pnSubLoginMsg'); msg.textContent = 'Sending…';
+      try {
+        const r = await api('POST', `/api/subcontractors/${p.id}/login`, { contact_phone: el('#npnPhone').value.trim(), contact_email: el('#npnEmail').value.trim() });
+        const how = [r.sms ? 'text' : '', r.email ? 'email' : ''].filter(Boolean).join(' and ');
+        const why = [r.sms_problem ? `No text: ${r.sms_problem}.` : '', r.email_problem && !r.email ? `No email: ${r.email_problem}.` : ''].filter(Boolean).join(' ');
+        msg.innerHTML = `${how ? `Sent by ${esc(how)}. ` : ''}Username: <strong>${esc(r.username)}</strong>.${why ? `<br>${esc(why)}` : ''}${how ? '' : '<br>Copy the link and send it to them yourself (WhatsApp, text from your phone, email):'}
+          <div style="display:flex;gap:6px;margin-top:6px"><input id="pnSubLink" readonly value="${esc(r.link)}" style="flex:1;font-size:11px"><button type="button" class="btn" id="pnSubCopy" style="padding:4px 10px;font-size:11px">Copy link</button></div>`;
+        el('#pnSubCopy').onclick = async () => {
+          try { await navigator.clipboard.writeText(r.link); } catch { el('#pnSubLink').select(); document.execCommand('copy'); }
+          el('#pnSubCopy').textContent = 'Copied';
+        };
+      } catch (e) { msg.textContent = e.message; }
+    };
+    if (el('#pnPromote')) el('#pnPromote').onclick = async () => {
+      if (!confirm(`Give ${p.name} a full personnel file? They'll get a staff number and appear on the onboarding and screening lists like any other member of staff.`)) return;
+      try { await api('PATCH', `/api/personnel/${p.id}`, { external_sub: false }); await load(); showTab('personnel'); personnelModal(allPersonnel.find((x) => x.id === p.id)); }
+      catch (e) { el('#pnError').textContent = e.message; }
+    };
     if (el('#pnFile')) el('#pnFile').onclick = () => personnelFileModal(p);
     if (el('#pnScreening')) el('#pnScreening').onclick = () => screeningModal(p);
     // UK GDPR Article 15: reply within a month. Downloads one JSON file.
@@ -1237,6 +1267,7 @@ function personnelModal(p) {
       if (!name) { el('#pnError').textContent = 'name is required'; return; }
       const empType = el('#npnEmpType').value;
       const body = {
+        ...(el('#npnCompany') ? { company: el('#npnCompany').value.trim() } : {}),
         name, employee_no: el('#npnEmpNo').value.trim() || null, rank: el('#npnRank').value.trim(),
         // Omitted entirely when blank (not sent as null): a new record's
         // POST→PATCH save round-trip would otherwise have the follow-up
@@ -2007,7 +2038,7 @@ function renderSiteReport(r) {
     <div style="display:flex;gap:12px;margin-bottom:16px">
       ${tile('Alarm jobs', r.jobs.total, `${r.jobs.completed} completed${r.jobs.cancelled ? `, ${r.jobs.cancelled} cancelled` : ''}`)}
       ${tile('Avg response', r.jobs.avg_response_minutes != null ? `${r.jobs.avg_response_minutes} min` : '—',
-        r.jobs.sla_minutes ? `SLA ${r.jobs.sla_minutes} min — ${r.jobs.within_sla}/${r.jobs.total} within` : 'no SLA set on this site')}
+        r.jobs.sla_minutes ? `SLA ${r.jobs.sla_minutes} min — ${r.jobs.within_sla}/${r.jobs.responded ?? r.jobs.total} attended within` : 'no SLA set on this site')}
       ${tile('Patrol visits', r.visits.total, `${r.visits.completed} completed${r.visits.missed ? `, ${r.visits.missed} missed` : ''}`)}
     </div>
     <div class="t" style="margin-bottom:6px">Incident reports (${r.incidents.length})</div>
@@ -2080,7 +2111,7 @@ function formFieldEditor(fields) {
           <button type="button" class="btn danger" data-ffx="${i}" style="padding:4px 8px;font-size:11px">✕</button>
         </span>
         ${r.type === 'select' ? `<input data-ffo="${i}" placeholder="Options, comma separated" value="${esc(r.options || '')}" style="grid-column:1 / -1">` : ''}
-        <span class="dim mono" style="grid-column:1 / -1;font-size:11px">id: ${esc(r.id || slug(r.label || '') || '—')}</span>
+        <span class="dim mono" style="grid-column:1 / -1;font-size:11px">id: ${esc(r.id || slug(r.label || '') || '—')}${r.required_if ? ` · shown and required only when ${esc(r.required_if.field)} ${r.required_if.equals === true ? 'is ticked' : `is ${esc((r.required_if.in || []).join(' / '))}`}` : ''}${r.alert && r.type === 'checkbox' ? ' · alerts control when ticked' : ''}</span>
       </div>`).join('') || '<p class="dim">No fields yet.</p>';
     els('#formFieldRows [data-ffl]').forEach((i) => i.addEventListener('input', () => { rows[+i.dataset.ffl].label = i.value; }));
     els('#formFieldRows [data-ffl]').forEach((i) => i.addEventListener('change', render));
@@ -2096,6 +2127,11 @@ function formFieldEditor(fields) {
     get: () => rows.filter((r) => (r.label || '').trim()).map((r) => {
       const out = { id: r.id || slug(r.label), label: r.label.trim(), type: r.type, required: Boolean(r.required) };
       if (r.help) out.help = r.help;
+      // Kept as they were: the editor has no controls for these, and the
+      // server drops a condition whose controlling field has gone.
+      if (r.required_if) out.required_if = r.required_if;
+      if (r.alert && r.type === 'checkbox') out.alert = true;
+      if (r.past_only && r.type === 'datetime') out.past_only = true;
       if (r.type === 'select') out.options = String(r.options || '').split(',').map((o) => o.trim()).filter(Boolean);
       return out;
     }),
@@ -2523,6 +2559,10 @@ function clientForm(c) {
         <option value="PER_CONTRACT" ${isNew || c.invoice_grouping !== 'PER_CLIENT' ? 'selected' : ''}>One invoice per contract (default)</option>
         <option value="PER_CLIENT" ${!isNew && c.invoice_grouping === 'PER_CLIENT' ? 'selected' : ''}>One combined invoice per client</option>
       </select>
+      <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-weight:400">
+        <input type="checkbox" id="nclAttachReports" style="width:auto" ${!isNew && c.invoice_attach_reports ? 'checked' : ''}>
+        Attach the attendance reports for the period to each invoice email
+      </label>
       <label>Sites this client can see</label>
       <div id="nclSites" style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:10px">
         ${allSites.map((s) => `<label style="display:flex;align-items:center;gap:8px;font-size:13px;text-transform:none;letter-spacing:0;font-weight:400">
@@ -2555,7 +2595,7 @@ function clientModal(c) {
       const name = el('#nclName').value.trim();
       if (!name) { el('#clError').textContent = 'name is required'; return; }
       const site_ids = els('#nclSites [data-siteid]:checked').map((cb) => Number(cb.dataset.siteid));
-      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), weekly_report_enabled: el('#nclWeekly').checked, invoice_grouping: el('#nclInvoiceGrouping').value, site_ids };
+      const body = { name, contact_email: el('#nclEmail').value.trim(), billing_email: el('#nclBillEmail').value.trim(), billing_address: el('#nclBillAddr').value.trim(), weekly_report_enabled: el('#nclWeekly').checked, invoice_grouping: el('#nclInvoiceGrouping').value, invoice_attach_reports: el('#nclAttachReports').checked, site_ids };
       try {
         if (c) await api('PATCH', `/api/clients/${c.id}`, body);
         else await api('POST', '/api/clients', body);

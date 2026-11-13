@@ -9,6 +9,9 @@ SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 KEY_FILE="${BACKUP_KEY_FILE:-/etc/cccs/backup.key}"
 
 install -m 755 "$SRC_DIR/deploy/backup.sh" /usr/local/bin/cccs-backup
+# The OneDrive copy step backup.sh runs when BACKUP_ONEDRIVE_USER is set.
+install -d -m 755 /usr/local/lib/cccs
+install -m 644 "$SRC_DIR/deploy/offsite-copy.js" /usr/local/lib/cccs/offsite-copy.js
 
 if [ ! -f "$KEY_FILE" ]; then
   mkdir -p "$(dirname "$KEY_FILE")"

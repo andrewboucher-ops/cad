@@ -74,6 +74,7 @@ module.exports = function registerAttendance({
   createEmergencyJob, forwardEmergencyToAura = () => {}, ami, tts = require('./tts.js').createTts(),
   hashPassword = null, verifyPassword = null,
 }) {
+  const { occurredAt } = require('./offline-time.js');
   /* ---- geofence ---- */
   function distanceM(a, b) {
     const R = 6371000, rad = (d) => (d * Math.PI) / 180;
@@ -138,21 +139,24 @@ module.exports = function registerAttendance({
   };
   const nameOf = (a) => { const p = db.personnel.find((x) => x.id === a.personnel_id); return p ? p.name : 'PERSON'; };
 
-  route('POST', '/api/shift-assignments/:id/break-start', ALL, ({ params, user }) => {
+  // Breaks pressed with no signal are recorded at the phone's time
+  // (offline-time.js), bounded by when they clocked in / the last break.
+  route('POST', '/api/shift-assignments/:id/break-start', ALL, ({ params, user, req }) => {
     const a = findAssignment(params.id); assertAssignmentAccess(a, user);
     const s = findShift(a.shift_id);
     if (!a.clocked_in_at || a.clocked_out_at) throw httpError(409, 'not clocked in');
     if (!Array.isArray(a.breaks)) a.breaks = [];
     if (a.breaks.some((b) => !b.end)) throw httpError(409, 'already on a break');
-    a.breaks.push({ start: new Date().toISOString(), end: null });
+    const last = a.breaks.reduce((m, b) => (b.end && b.end > m ? b.end : m), a.clocked_in_at);
+    a.breaks.push({ start: occurredAt(req, last) || new Date().toISOString(), end: null });
     return done(a, s, 'shift.break_started', `${nameOf(a)} STARTED A BREAK`);
   });
-  route('POST', '/api/shift-assignments/:id/break-end', ALL, ({ params, user }) => {
+  route('POST', '/api/shift-assignments/:id/break-end', ALL, ({ params, user, req }) => {
     const a = findAssignment(params.id); assertAssignmentAccess(a, user);
     const s = findShift(a.shift_id);
     const b = (a.breaks || []).find((x) => !x.end);
     if (!b) throw httpError(409, 'not on a break');
-    b.end = new Date().toISOString();
+    b.end = occurredAt(req, b.start) || new Date().toISOString();
     return done(a, s, 'shift.break_ended', `${nameOf(a)} ENDED THEIR BREAK`);
   });
   route('GET', '/api/shift-assignments/:id/hours', ALL, ({ params, user }) => {

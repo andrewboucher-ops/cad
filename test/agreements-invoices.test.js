@@ -23,7 +23,7 @@ process.env.GOCARDLESS_WEBHOOK_SECRET = 'test-gc-webhook-secret';
 process.env.GOCARDLESS_API_BASE = GCBASE;
 
 /* ---- a fake Xero: just the endpoints xero.js uses ---- */
-const X = { tokens: [], contacts: [], invoices: [], calls: [], emailed: [] };
+const X = { tokens: [], contacts: [], invoices: [], bills: [], calls: [], emailed: [] };
 const fake = http.createServer((req, res) => {
   let raw = '';
   req.on('data', (c) => (raw += c));
@@ -60,6 +60,12 @@ const fake = http.createServer((req, res) => {
     if (u.pathname === '/api.xro/2.0/Invoices' && req.method === 'GET') {
       const where = u.searchParams.get('where') || '';
       const sw = where.match(/InvoiceNumber\.StartsWith\("(.*)"\)/);
+      if (/Type=="ACCPAY"/.test(where)) {
+        const statuses = (u.searchParams.get('Statuses') || '').split(',').filter(Boolean);
+        const page = Number(u.searchParams.get('page') || 1);
+        const list = X.bills.filter((b) => b.AmountDue > 0 && (!statuses.length || statuses.includes(b.Status)));
+        return send(200, { Invoices: list.slice((page - 1) * 100, page * 100) });
+      }
       if (where) {
         const list = X.invoices.filter((i) => !sw || String(i.InvoiceNumber).startsWith(sw[1]));
         if (u.searchParams.get('order') === 'InvoiceNumber DESC') list.sort((a, b) => (a.InvoiceNumber < b.InvoiceNumber ? 1 : -1));
@@ -265,6 +271,21 @@ test('invoices come from the signed contract and the hours worked at its site', 
   assert.equal(again.body.made.length, 0);
   assert.match(again.body.skipped[0].reason, /already invoiced/);
 
+  // An additional invoice for the same, already invoiced period: an empty
+  // draft that takes manual lines, and does not block anything else.
+  assert.equal((await call('POST', '/api/invoices/generate', { from: '2026-08-01', to: '2026-08-31', additional: true }, finT)).status, 400, 'needs a site or a contract');
+  const ex = await call('POST', '/api/invoices/generate', { from: '2026-08-01', to: '2026-08-31', contract_id: inv.contract_id, additional: true }, finT);
+  assert.equal(ex.status, 200, JSON.stringify(ex.body));
+  assert.equal(ex.body.made.length, 1);
+  const xi = ex.body.made[0];
+  assert.equal(xi.additional, true);
+  assert.equal(xi.lines.length, 0, 'nothing from the contract');
+  const ed = await call('PATCH', `/api/invoices/${xi.id}`, { lines: [{ description: 'Extra key holding call-out', quantity: 1, unit_amount: 75 }] }, finT);
+  assert.equal(ed.status, 200, JSON.stringify(ed.body));
+  assert.equal(ed.body.lines[0].kind, 'MANUAL');
+  assert.equal(ed.body.subtotal, 75);
+  await call('POST', `/api/invoices/${xi.id}/void`, {}, adminT);
+
   const sept = await call('POST', '/api/invoices/generate', { from: '2026-09-01', to: '2026-09-30' }, adminT);
   assert.equal(sept.body.made.length, 1);
   assert.ok(!sept.body.made[0].lines.some((l) => l.kind === 'ONE_OFF'), 'the one-off is charged once only');
@@ -405,8 +426,12 @@ test('a draft is checked and edited, approved, sent to Xero, and its payment rea
   assert.equal(st.tenant_name, 'Echelon Test Ltd');
   assert.equal(JSON.stringify(st).includes('rt-'), false, 'tokens never leave the server');
 
+  // An old error stays on the banner only until Xero next works.
+  Object.assign(app.db.ui_settings.find((r) => r.key === 'xero'), { last_error: 'Invoice not of valid status for modification', last_error_at: '2026-11-01T10:00:00.000Z' });
+  assert.equal((await call('GET', '/api/xero/status', undefined, finT)).body.last_error_at, '2026-11-01T10:00:00.000Z');
   const sent = await call('POST', `/api/invoices/${inv.id}/xero`, {}, finT);
   assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal((await call('GET', '/api/xero/status', undefined, finT)).body.last_error, null, 'cleared once a call works');
   assert.equal(sent.body.status, 'IN_XERO');
   assert.equal(sent.body.xero.number, 'INV-0001');
   const x = X.invoices[0];
@@ -838,6 +863,16 @@ test('switching a client to PER_CLIENT combines every running contract into one 
   assert.deepEqual([...inv.contract_ids].sort((a, b) => a - b), [gc1.id, gc2.id].sort((a, b) => a - b));
   const siteNames = [...new Set(inv.lines.map((l) => l.site_name))].sort();
   assert.deepEqual(siteNames, ['Grouping Site One', 'Grouping Site Two'].sort());
+
+  // A line added by hand has no site, but is in the total, so the PDF must print it.
+  const lines = inv.lines.map((l) => ({ id: l.id, description: l.description, quantity: l.quantity, unit_amount: l.unit_amount }))
+    .concat([{ description: 'Replacement radio', quantity: 1, unit_amount: 250 }]);
+  const ed = await call('PATCH', `/api/invoices/${inv.id}`, { lines }, adminT);
+  assert.equal(ed.status, 200, JSON.stringify(ed.body));
+  const pdf = await call('GET', `/api/invoices/${inv.id}/pdf`, undefined, adminT, true);
+  const text = Buffer.from(await pdf.arrayBuffer()).toString('latin1');
+  assert.ok(text.includes('Replacement radio'), 'the added line is printed');
+  assert.ok(text.includes('Other charges'));
 });
 
 test('a PER_CLIENT consolidation still skips a contract that already clashes, and bills the rest', async () => {
@@ -1002,4 +1037,118 @@ test('an Alarm Response line bills the jobs attended at the site by the hour or 
   const pdf = await call('GET', `/api/invoices/${inv.id}/pdf`, undefined, adminT, true);
   assert.equal(pdf.status, 200);
   assert.equal(Buffer.from(await pdf.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+});
+
+test('a client who asks for them gets the attendance reports for the period attached to the invoice email', async () => {
+  await call('PUT', '/api/invoices/settings', { send_via: 'CCCS' }, adminT);
+  const site = (await call('POST', '/api/sites', { name: 'Reports Site' }, adminT)).body;
+  const cl = (await call('POST', '/api/clients', { name: 'Reports Ltd', contact_email: 'reports@example.test', site_ids: [site.id] }, adminT)).body;
+  assert.equal(cl.invoice_attach_reports, false, 'off unless asked for');
+  const c = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: site.id, start_date: '2026-03-01', lines: [
+    { description: 'Keyholding', kind: 'FIXED_PERIOD', rate: 50 },
+  ] }, adminT)).body;
+  await call('POST', `/api/agreements/${c.id}/mark-signed`, { name: 'Test' }, adminT);
+  const officer = app.db.personnel[0];
+  const mk = async (on, off) => {
+    const r = await call('POST', '/api/jobs', { site: site.id, incident_type: 'ALARM', retrospective: true, reason: 'radio only', description: 'Alarm activation, building checked',
+      created_at: on, on_scene_at: on, completed_at: off, resources: [officer.id] }, adminT);
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    const j = app.db.jobs.find((x) => x.id === r.body.id); j.status = 'COMPLETED';
+    return j;
+  };
+  const a = await mk('2026-03-05T22:00:00Z', '2026-03-05T22:40:00Z');
+  const b = await mk('2026-03-09T03:00:00Z', '2026-03-09T03:30:00Z');
+  const outside = await mk('2026-04-02T03:00:00Z', '2026-04-02T03:30:00Z');
+
+  const send = async () => {
+    const inv = (await call('POST', '/api/invoices/generate', { from: '2026-03-01', to: '2026-03-31', contract_id: c.id }, adminT)).body.made[0];
+    const reports = await call('GET', `/api/invoices/${inv.id}/reports.pdf`, undefined, finT, true);
+    assert.equal(reports.status, 200);
+    assert.equal(Buffer.from(await reports.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+    const before = mails.length;
+    const ap = (await call('POST', `/api/invoices/${inv.id}/approve`, {}, adminT)).body;
+    await settle();
+    return { inv: ap, m: mails.slice(before).find((x) => x.subject.includes(ap.number)) };
+  };
+  // Off: just the invoice.
+  let r = await send();
+  assert.equal(r.m.attachments.length, 1);
+  await call('POST', `/api/invoices/${r.inv.id}/void`, { reason: 'test' }, adminT);
+
+  assert.equal((await call('PATCH', `/api/clients/${cl.id}`, { invoice_attach_reports: true }, adminT)).body.invoice_attach_reports, true);
+  r = await send();
+  assert.equal(r.m.attachments.length, 2, 'the invoice and the reports');
+  assert.ok(isPdf(r.m.attachments[1]));
+  assert.equal(r.m.attachments[1].name, `${r.inv.number}-attendance-reports.pdf`);
+  assert.match(r.m.html, /2 attendances in this period are attached/);
+  const text = r.m.attachments[1].content.toString('latin1');
+  assert.ok(text.includes(a.reference) && text.includes(b.reference), 'both March attendances');
+  assert.ok(!text.includes(`(${outside.reference})`) && !text.includes(`- ${outside.reference}`), 'not April\'s');
+  assert.ok(app.db.invoices.find((i) => i.id === r.inv.id).history.some((h) => /with 2 attendance reports/.test(h.what)));
+});
+
+test('clock times at the site that no line bills are named in the checks, not dropped silently', async () => {
+  const guard = { id: 9101, key: 'STATIC_GUARD_T', name: 'Static Guard', active: true };
+  const other = { id: 9102, key: 'MOBILE_T', name: 'Mobile Patrol', active: true };
+  let adHocType = app.db.shift_types.find((t) => t.key === 'AD_HOC');
+  if (!adHocType) app.db.shift_types.push(adHocType = { id: 9103, key: 'AD_HOC', name: 'Ad hoc', active: false });
+  app.db.shift_types.push(guard, other);
+  const site = (await call('POST', '/api/sites', { name: 'Unbilled Checks Park' }, adminT)).body;
+  await call('POST', '/api/clients', { name: 'Unbilled Checks Ltd', contact_email: 'u@example.test', site_ids: [site.id] }, adminT);
+  const c = (await call('POST', '/api/agreements', { kind: 'CONTRACT', site_id: site.id, start_date: '2026-03-01', lines: [
+    { description: 'Static Guards on Site', kind: 'HOURLY', rate: 24.3, shift_type_id: guard.id },
+  ] }, adminT)).body;
+  await call('POST', `/api/agreements/${c.id}/mark-signed`, { name: 'Test' }, adminT);
+  const pid = app.db.personnel[0].id;
+  const add = (day, extra) => {
+    const id = app.seq.shifts = (app.seq.shifts || 0) + 1;
+    app.db.shifts.push({ id, site_id: site.id, shift_type_id: guard.id, status: 'PUBLISHED', starts_at: `2026-03-${day}T08:00:00.000Z`, ends_at: `2026-03-${day}T12:00:00.000Z`, break_minutes: 0, ...extra });
+    const aid = app.seq.shift_assignments = (app.seq.shift_assignments || 0) + 1;
+    app.db.shift_assignments.push({ id: aid, shift_id: id, personnel_id: pid, status: 'CONFIRMED', clocked_in_at: `2026-03-${day}T08:00:00Z`, clocked_out_at: `2026-03-${day}T12:00:00Z`, breaks: [] });
+  };
+  add('02', {});
+  add('03', { ad_hoc: true, shift_type_id: adHocType.id });
+  add('04', { status: 'DRAFT' });
+  add('05', { shift_type_id: other.id });
+
+  const g = await call('POST', '/api/invoices/generate', { from: '2026-03-01', to: '2026-03-08', contract_id: c.id }, adminT);
+  assert.equal(g.status, 200, JSON.stringify(g.body));
+  const inv = g.body.made[0];
+  assert.equal(inv.lines[0].quantity, 4, 'only the published static guard shift bills');
+  const checks = JSON.stringify(inv.checks);
+  assert.ok(inv.checks.some((x) => /on 2026-03-03: clocked hours not billed — clocked in ad hoc.*Move to rota/.test(x)), checks);
+  assert.ok(inv.checks.some((x) => /on 2026-03-04: clocked hours not billed — the rota shift is still a draft/.test(x)), checks);
+  assert.ok(inv.checks.some((x) => /on 2026-03-05: clocked hours not billed — the contract has no hourly line for Mobile Patrol/.test(x)), checks);
+  assert.ok(!inv.checks.some((x) => /2026-03-02/.test(x)), checks);
+});
+
+test('bills to pay: unpaid supplier bills from Xero, overdue first, for admins only', async () => {
+  const day = (n) => { const d = new Date(Date.now() + n * 86400000); return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(d); };
+  const bill = (o) => ({ Type: 'ACCPAY', InvoiceID: `bill-${X.bills.length + 1}`, Contact: { Name: o.who }, InvoiceNumber: o.num || '', Reference: '', Status: o.status || 'AUTHORISED', DateString: `${day(-40)}T00:00:00`, DueDateString: o.due === null ? undefined : `${o.due}T00:00:00`, AmountDue: o.due_amt, Total: o.due_amt, CurrencyCode: 'GBP' });
+  X.bills.push(
+    bill({ who: 'Culligan', num: 'CUL-881', due: day(-21), due_amt: 84.5 }),
+    bill({ who: 'BP Fuel Cards', num: 'BP-1', due: day(-3), due_amt: 612.4 }),
+    bill({ who: 'Later Ltd', due: day(30), due_amt: 50 }),
+    bill({ who: 'Soon Ltd', due: day(2), due_amt: 100 }),
+    bill({ who: 'Inbox Draft Co', status: 'DRAFT', due: null, due_amt: 40 }),
+    bill({ who: 'Paid Ltd', due: day(-5), due_amt: 0 }),
+  );
+  X.bills.push({ ...bill({ who: 'Voided', due: day(-9), due_amt: 10 }), Status: 'VOIDED' });
+  assert.equal((await call('GET', '/api/xero/bills', undefined, dispT)).status, 403, 'dispatchers do not see money');
+  const r = await call('GET', '/api/xero/bills', undefined, adminT);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.bills.map((b) => b.supplier), ['Culligan', 'BP Fuel Cards', 'Soon Ltd', 'Inbox Draft Co', 'Later Ltd'], 'overdue oldest first; paid and voided left out');
+  assert.equal(r.body.bills[0].days_overdue, 21);
+  assert.equal(r.body.bills[0].state, 'OVERDUE');
+  assert.equal(r.body.bills[3].state, 'NOT_APPROVED');
+  assert.equal(r.body.bills[4].state, 'LATER');
+  assert.deepEqual(r.body.totals.overdue, { count: 2, amount: 696.9 });
+  assert.deepEqual(r.body.totals.due_soon, { count: 1, amount: 100 });
+  assert.equal(r.body.totals.not_approved.count, 1);
+  assert.match(r.body.bills[0].xero_url, /^https:\/\/go\.xero\.com\/AccountsPayable\/View\.aspx\?InvoiceID=bill-1$/);
+
+  // Cached: a new bill shows on the next refresh, not on every page load.
+  X.bills.push(bill({ who: 'New Supplier', due: day(-1), due_amt: 5 }));
+  assert.equal((await call('GET', '/api/xero/bills', undefined, finT)).body.bills.length, 5);
+  assert.equal((await call('GET', '/api/xero/bills?refresh=1', undefined, finT)).body.bills.length, 6);
 });

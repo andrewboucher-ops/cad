@@ -137,7 +137,7 @@ test('a restricted report never reaches anyone without a grant — by any route,
     const filed = await call('POST', '/api/form-submissions', {
       definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: job.id,
       values: {
-        concern_about: `Child, approx 12 — ${CANARY}`, at_risk_group: 'Child (under 18)', observed_at: new Date().toISOString(),
+        concern_about: `Child, approx 12 — ${CANARY}`, at_risk_group: 'Child (under 18)', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(),
         what_happened: `Disclosed ${CANARY}`, action_taken: 'Stayed with child, called 999', officer_signature: sig('Dan Whitfield'),
       },
     }, danT);
@@ -187,7 +187,7 @@ test('a named grant lets exactly that person read it; revoking it closes it agai
   const d = def('safeguarding');
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: d.id, subject_type: 'SITE', subject_id: 1,
-    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
+    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
   }, danT);
   const id = filed.body.id;
   const sup = app.db.users.find((u) => u.username === 'supervisor');
@@ -316,7 +316,7 @@ test('a site service report aggregates alarm response against SLA, patrol visits
   const restricted = await call('POST', '/api/form-submissions', {
     definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: siteJob.id,
     values: {
-      concern_about: 'A member of the public', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      concern_about: 'A member of the public', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(),
       what_happened: 'Confidential detail that must not leak into any aggregate report.',
       action_taken: 'Safeguarding lead notified.', officer_signature: sig('Dan Whitfield'),
     },
@@ -352,19 +352,19 @@ test('the incident report requires a severity, rejects a bad one, and a HIGH/CRI
 
   const missing = await call('POST', '/api/form-submissions', {
     definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date().toISOString(), incident_type: 'Other', description: 'No severity given.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date().toISOString(), incident_type: 'Other', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'No severity given.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   assert.equal(missing.status, 400, 'severity is required');
 
   const bad = await call('POST', '/api/form-submissions', {
     definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date().toISOString(), severity: 'APOCALYPTIC', incident_type: 'Other', description: 'Bad severity.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date().toISOString(), severity: 'APOCALYPTIC', incident_type: 'Other', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Bad severity.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   assert.equal(bad.status, 400);
 
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: incidentDef.id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date().toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', description: 'Smoke reported in plant room.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date().toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Smoke reported in plant room.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   assert.equal(filed.status, 201, JSON.stringify(filed.body));
   assert.equal(filed.body.values.severity, 'CRITICAL');
@@ -410,7 +410,7 @@ test('a brand-styled PDF can be built for a report exactly like an invoice or co
   const restricted = await call('POST', '/api/form-submissions', {
     definition_id: def('safeguarding').id, subject_type: 'JOB', subject_id: job.id,
     values: {
-      concern_about: 'someone', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(),
+      concern_about: 'someone', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(),
       what_happened: 'detail', action_taken: 'notified', officer_signature: sig('Dan Whitfield'),
     },
   }, danT);
@@ -424,7 +424,7 @@ test('a HIGH/CRITICAL report still open after the reminder window pushes once mo
   const filedAt = Date.now();
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'HIGH', incident_type: 'Fire or alarm', description: 'Reminder test.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'HIGH', incident_type: 'Fire or alarm', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Reminder test.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   assert.equal(filed.status, 201, JSON.stringify(filed.body));
   const raw = () => app.db.form_submissions.find((s) => s.id === filed.body.id);
@@ -443,7 +443,7 @@ test('a HIGH/CRITICAL report still open after the reminder window pushes once mo
   // Actioned before the window closes: no reminder, ever.
   const second = await call('POST', '/api/form-submissions', {
     definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
-    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', description: 'Reminder test 2 — actioned promptly.', officer_signature: sig('Dan Whitfield') },
+    values: { occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL', incident_type: 'Fire or alarm', location: 'Main gate', immediate_action: 'Reported to control.', statement_true: true, description: 'Reminder test 2 — actioned promptly.', officer_signature: sig('Dan Whitfield') },
   }, danT);
   await call('POST', `/api/form-submissions/${second.body.id}/action`, { outcome: 'NOTED' }, adminT);
   app.forms.severityEscalationTick(filedAt + 20 * 60000);
@@ -456,7 +456,7 @@ test('a RESTRICTED HIGH/CRITICAL report reminds its named readers only, content-
     definition_id: def('use-of-force').id, subject_type: 'JOB', subject_id: job.id,
     values: {
       occurred_at: new Date(filedAt).toISOString(), severity: 'CRITICAL',
-      reason: 'Self-defence', force_type: 'Physical restraint or control',
+      reason: 'Self-defence', force_type: 'Physical restraint or control', location: 'Main gate', officer_sia_licence: '1234567890123456', threat: 'Swung a punch.', de_escalation: 'Talked, warned, backed off.', why_proportionate: 'Minimum hold until he calmed.', aftercare: 'Checked breathing, sat him down.', statement_true: true, 
       narrative: 'Confidential restricted narrative that must never appear in a broadcastable log line.',
       officer_signature: sig('Dan Whitfield'),
     },
@@ -476,7 +476,7 @@ function fileIncidentReport(token) {
   return call('POST', '/api/form-submissions', {
     definition_id: def('incident-report').id, subject_type: 'JOB', subject_id: job.id,
     values: {
-      occurred_at: new Date().toISOString(), severity: 'LOW', incident_type: 'Suspicious activity',
+      occurred_at: new Date().toISOString(), severity: 'LOW', incident_type: 'Suspicious activity', location: 'Fence line', immediate_action: 'Reported to control.', statement_true: true,
       description: 'Someone was seen near the fence line.', officer_signature: sig('Dan Whitfield'),
     },
   }, token);
@@ -509,7 +509,12 @@ test('a report can be claimed for investigation, worked on, and closed without e
 
   // Closed straight from UNDER_INVESTIGATION — the pre-existing /action
   // route, now also reachable from here, not just OPEN.
-  const closed = await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT);
+  // An investigation is signed off, not just noted: it needs a root cause
+  // and a closing summary first.
+  assert.equal((await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT)).status, 409, 'no root cause yet');
+  await call('PATCH', `/api/form-submissions/${id}/investigation`, { root_cause: 'Passer-by, no intent to enter.' }, adminT);
+  assert.equal((await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT)).status, 400, 'no closing summary');
+  const closed = await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED', feedback: 'No further action.' }, adminT);
   assert.equal(closed.status, 200, JSON.stringify(closed.body));
   assert.equal(closed.body.status, 'ACTIONED');
   assert.equal((await call('POST', `/api/form-submissions/${id}/action`, { outcome: 'NOTED' }, adminT)).status, 409, 'already actioned');
@@ -562,7 +567,7 @@ test('investigation and risk assessment on a RESTRICTED form respect the same gr
   const d = def('safeguarding');
   const filed = await call('POST', '/api/form-submissions', {
     definition_id: d.id, subject_type: 'JOB', subject_id: job.id,
-    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
+    values: { concern_about: 'Adult', at_risk_group: 'Adult at risk', concern_type: 'Not sure', location: 'Main gate', dsl_informed: 'Jo Lead, 14:05', referral_status: 'Left for the safeguarding lead to decide', consent_to_share: 'Not shared outside Echelon', statement_true: true, observed_at: new Date().toISOString(), what_happened: 'x', action_taken: 'x', officer_signature: sig('Dan') },
   }, danT);
   const id = filed.body.id;
 
@@ -582,4 +587,90 @@ test('investigation and risk assessment on a RESTRICTED form respect the same gr
   const edited = await call('PATCH', `/api/form-submissions/${id}`, { reason: 'Added detail', values: { action_taken: 'Site manager informed immediately, adult safeguarding lead notified.' } }, danT);
   assert.equal(edited.status, 200, JSON.stringify(edited.body));
   assert.equal(edited.body.status, 'UNDER_INVESTIGATION');
+});
+
+/* ---------------- search ---------------- */
+test('?q= finds a report by a name written in its answers, every word must match, and never surfaces what the reader cannot open', async () => {
+  const uof = await call('POST', '/api/form-submissions', {
+    definition_id: def('use-of-force').id, subject_type: 'JOB', subject_id: job.id,
+    values: {
+      occurred_at: new Date().toISOString(), severity: 'LOW',
+      reason: 'Self-defence', force_type: 'Physical restraint or control', location: 'Side door', officer_sia_licence: '1234567890123456',
+      threat: 'Zebedee Quillfeather swung at the officer.', de_escalation: 'Warned.', why_proportionate: 'Brief hold.', aftercare: 'Checked over.', statement_true: true,
+      narrative: 'Held briefly.', officer_signature: sig('Dan Whitfield'),
+    },
+  }, danT);
+  assert.equal(uof.status, 201, JSON.stringify(uof.body));
+  const tres = await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'Ömar Quillfeather, 40s', advised_at: new Date().toISOString(), left_site: true, narrative: 'Advised.', officer_signature: sig('Dan Whitfield') },
+  }, danT);
+  assert.equal(tres.status, 201, JSON.stringify(tres.body));
+
+  // The filer finds their own restricted report by the person's name, with where it matched.
+  const mine = await call('GET', '/api/form-submissions?q=zebedee', undefined, danT);
+  assert.deepEqual(mine.body.map((s) => s.id), [uof.body.id]);
+  assert.match(mine.body[0].match.text, /Zebedee Quillfeather/);
+  assert.ok(mine.body[0].match.label);
+  assert.equal(mine.body[0].values, undefined, 'still a summary, not the report');
+
+  // Every word must appear; case and accents don't matter.
+  const both = await call('GET', '/api/form-submissions?q=QUILLFEATHER', undefined, danT);
+  assert.deepEqual(both.body.map((s) => s.id).sort(), [uof.body.id, tres.body.id].sort());
+  assert.deepEqual((await call('GET', '/api/form-submissions?q=omar%20quillfeather', undefined, danT)).body.map((s) => s.id), [tres.body.id]);
+  assert.deepEqual((await call('GET', '/api/form-submissions?q=zebedee%20nobody', undefined, danT)).body, []);
+  // By reference too.
+  assert.deepEqual((await call('GET', `/api/form-submissions?q=${tres.body.reference}`, undefined, danT)).body.map((s) => s.id), [tres.body.id]);
+
+  // Control sees the standard report but not the restricted one it has no grant for.
+  const ctl = await call('GET', '/api/form-submissions?q=quillfeather', undefined, dispT);
+  assert.deepEqual(ctl.body.map((s) => s.id), [tres.body.id]);
+  assert.ok(!ctl.raw.includes('Zebedee'), 'restricted content never appears in a search result');
+  // Another officer sees neither.
+  assert.deepEqual((await call('GET', '/api/form-submissions?q=quillfeather', undefined, ellieT)).body, []);
+});
+
+/* ---------------- DEMS evidence links on a report ---------------- */
+test('DEMS can link a case to a report form, which then shows it; restricted reports are not offered', async () => {
+  process.env.DEMS_SECRET = 'test-dems-secret';
+  const dems = async (method, path, body) => {
+    const res = await fetch(BASE + path, { method, headers: { 'content-type': 'application/json', 'x-dems-secret': 'test-dems-secret' }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: res.status, body: await res.json() };
+  };
+  const filed = (await call('POST', '/api/form-submissions', {
+    definition_id: def('trespass-advisal').id, subject_type: 'JOB', subject_id: job.id,
+    values: { person_description: 'x', advised_at: new Date().toISOString(), narrative: 'x', officer_signature: sig('Dan Whitfield') },
+  }, danT)).body;
+  const found = await dems('GET', `/api/integrations/dems/jobs/${filed.reference.toLowerCase()}`);
+  assert.equal(found.status, 200);
+  assert.equal(found.body.kind, 'form');
+  assert.equal(found.body.incident_type, def('trespass-advisal').name);
+  assert.equal(found.body.values, undefined, 'the report\'s answers are not shared');
+
+  const linked = await dems('POST', '/api/integrations/dems/links', { job_ref: filed.reference, case_ref: 'EV-2026-0007', case_url: 'https://dems.example/cases/7', by: 'Andy' });
+  assert.equal(linked.status, 200);
+  const seen = (await call('GET', `/api/form-submissions/${filed.id}`, undefined, dispT)).body;
+  assert.deepEqual(seen.evidence_links.map((l) => l.case_ref), ['EV-2026-0007']);
+  assert.ok(app.db.form_submissions.find((s) => s.id === filed.id).audit_trail.some((e) => e.action === 'evidence_linked'));
+  await dems('POST', '/api/integrations/dems/links', { job_ref: filed.reference, case_ref: 'EV-2026-0007', linked: false });
+  assert.equal((await call('GET', `/api/form-submissions/${filed.id}`, undefined, dispT)).body.evidence_links.length, 0);
+
+  // A restricted report can be linked, but DEMS learns nothing of its content.
+  const restricted = app.db.form_submissions.find((s) => s.visibility === 'RESTRICTED');
+  assert.ok(restricted, 'an earlier test filed a restricted report');
+  const r = await dems('GET', `/api/integrations/dems/jobs/${restricted.reference}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.restricted, true);
+  assert.equal(r.body.incident_type, 'Restricted report');
+  for (const leak of [restricted.definition_name, restricted.subject_label, restricted.submitted_by_name]) {
+    assert.ok(!JSON.stringify(r.body).includes(leak), `DEMS must not see ${leak}`);
+  }
+  const rl = await dems('POST', '/api/integrations/dems/links', { job_ref: restricted.reference, case_ref: 'EV-2026-0042', by: 'Andy' });
+  assert.equal(rl.status, 200);
+  assert.ok(!JSON.stringify(rl.body).includes(restricted.definition_name));
+  assert.equal((await call('GET', `/api/form-submissions/${restricted.id}`, undefined, dispT)).status, 404, 'still unreadable without a grant');
+  const logged = app.db.audit_logs.filter((e) => e.type === 'form.evidence_linked_restricted').pop();
+  assert.ok(logged && !logged.summary.includes('EV-2026-0042'), 'the global log does not name the case');
+  assert.ok(restricted.evidence_links.some((l) => l.case_ref === 'EV-2026-0042'));
+  delete process.env.DEMS_SECRET;
 });

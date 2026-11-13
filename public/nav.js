@@ -65,6 +65,7 @@
     asset: i('<path d="M3 7l9-4 9 4v10l-9 4-9-4z" stroke-linejoin="round"/><path d="M3 7l9 4 9-4M12 11v10"/>'),
     scan: i('<path d="M4 8V5a1 1 0 011-1h3M16 4h3a1 1 0 011 1v3M20 16v3a1 1 0 01-1 1h-3M8 20H5a1 1 0 01-1-1v-3" stroke-linecap="round"/><path d="M7 12h10" stroke-linecap="round"/>'),
     contract: i('<path d="M6 3h9l4 4v14H6z" stroke-linejoin="round"/><path d="M15 3v4h4M9 12h6M9 16h3" stroke-linecap="round"/><path d="M13 18c1-1.5 2-1.5 2.5 0s1.5 1 2.5-.5" stroke-linecap="round"/>'),
+    receipt: i('<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z" stroke-linejoin="round"/><path d="M12 7v8M14.5 8.5c0-.8-1.1-1.5-2.5-1.5s-2.5.7-2.5 1.5 1.1 1.3 2.5 1.5 2.5.7 2.5 1.5-1.1 1.5-2.5 1.5-2.5-.7-2.5-1.5" stroke-linecap="round"/>'),
     invoice: i('<path d="M6 3h12v18l-2-1.5L14 21l-2-1.5L10 21l-2-1.5L6 21z" stroke-linejoin="round"/><path d="M9 8h6M9 12h6M9 16h3" stroke-linecap="round"/>'),
     rental: i('<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4" stroke-linecap="round"/><path d="M15 17l1.5 1.5L19 15" stroke-linecap="round" stroke-linejoin="round"/>'),
     cylinder: i('<rect x="8" y="6" width="8" height="15" rx="3"/><path d="M10 6V4h4v2M10 3h4" stroke-linecap="round"/>'),

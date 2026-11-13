@@ -96,11 +96,15 @@ module.exports = function registerInvoices({
   const today = () => new Date().toISOString().slice(0, 10);
 
   /* ---- invoice settings (ui_settings key "invoice") ---- */
+  const LATE_PAYMENT_TERMS = 'Payment terms: payment is due by the due date shown. If an invoice is paid late we reserve the right to charge interest at 8% a year above the Bank of England base rate, and fixed-sum compensation for the cost of recovering the debt (£40 to £100 per invoice, depending on its value), under the Late Payment of Commercial Debts (Interest) Act 1998.';
   const DEFAULTS = {
     prefix: 'INV-', next_number: 1, digits: 4, send_via: 'CCCS', // CCCS | XERO | NONE
     bank_name: '', account_name: '', sort_code: '', account_number: '', vat_number: '', company_number: '',
     footer: 'Thank you for your business.', include_timesheet: true,
     copy_to: '', // address(es) BCC'd on every invoice CCCS emails
+    // Printed on every invoice (and statement), so the right to charge for
+    // late payment is on record before it's needed. Blank turns it off.
+    late_payment_terms: LATE_PAYMENT_TERMS,
   };
   function settingsRow() {
     if (!Array.isArray(db.ui_settings)) db.ui_settings = [];
@@ -176,9 +180,18 @@ module.exports = function registerInvoices({
     ]);
     const lineCols = [{ title: 'Description', width: 0.55 }, { title: 'Qty', width: 0.13, align: 'right' }, { title: 'Unit price', width: 0.16, align: 'right' }, { title: 'Amount', width: 0.16, align: 'right' }];
     if (multi) {
+      // A line added by hand on the draft has no site. With one site it
+      // goes in that site's table; otherwise under "Other charges". It
+      // must always be printed, since it's already in the total.
+      const siteless = inv.lines.filter((l) => !l.site_name || !siteNames.includes(l.site_name));
       for (const siteName of siteNames) {
         doc.heading(siteName, 11);
-        doc.table(lineCols, inv.lines.filter((l) => l.site_name === siteName).map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
+        const rows = inv.lines.filter((l) => l.site_name === siteName).concat(siteNames.length === 1 ? siteless : []);
+        doc.table(lineCols, rows.map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
+      }
+      if (siteless.length && siteNames.length !== 1) {
+        doc.heading('Other charges', 11);
+        doc.table(lineCols, siteless.map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
       }
     } else {
       doc.table(lineCols, inv.lines.map((l) => [l.description, String(l.quantity), money(l.unit_amount), money(l.amount)]));
@@ -213,6 +226,7 @@ module.exports = function registerInvoices({
       doc.y = top - rowH - 6;
     }
     if (st.footer) doc.para(st.footer, { size: 9.5, color: grey, gap: 4 });
+    if (st.late_payment_terms && inv.status !== 'PAID') doc.para(st.late_payment_terms, { size: 8.5, color: grey, gap: 4 });
     if (st.company_number) doc.para(`Registered in England and Wales, company number ${st.company_number}.`, { size: 8.5, color: grey });
     const hourly = inv.lines.filter((l) => l.shifts && l.shifts.length);
     if (st.include_timesheet && hourly.length) {
@@ -226,6 +240,74 @@ module.exports = function registerInvoices({
     }
     return doc.toBuffer();
   }
+  /* ---- attendance reports, for clients who want them with the invoice ----
+   * A client with "attach attendance reports" ticked (Admin → Clients) gets
+   * one extra PDF with their invoice email: the report of every completed
+   * job the invoice covers. That is every job billed on one of its lines,
+   * plus any other completed job at one of its sites in its period (a
+   * fixed-price contract bills no jobs, but the client still wants to see
+   * the call-outs it paid for). Not-attended and cancelled jobs have no
+   * report, so they are left out. Text only: photos stay in the portal,
+   * because a dozen photos would take the email past Graph's size limit. */
+  function attendanceJobsFor(inv) {
+    const billed = new Set((inv.lines || []).flatMap((l) => (l.shifts || []).map((x) => x.job_id)).filter(Boolean));
+    const siteIds = new Set((inv.lines || []).map((l) => l.site_id).filter(Boolean));
+    if (inv.site_id) siteIds.add(inv.site_id);
+    const t0 = inv.period_from ? dayStart(inv.period_from) : -Infinity;
+    const t1 = inv.period_to ? dayStart(inv.period_to) + 86400000 : Infinity;
+    return (db.jobs || []).filter((j) => {
+      if (j.status !== 'COMPLETED' || j.not_attended) return false;
+      if (billed.has(j.id)) return true;
+      if (!siteIds.has(j.site_id)) return false;
+      const at = Date.parse(j.on_scene_at || j.created_at);
+      return at >= t0 && at < t1;
+    }).sort((a, b) => Date.parse(a.on_scene_at || a.created_at) - Date.parse(b.on_scene_at || b.created_at));
+  }
+  const ukTime = (iso) => (iso ? new Date(iso).toLocaleString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—');
+  const jobNotes = (j) => [j.notes, ...(j.note_entries || []).map((n) => `[${ukTime(n.at)} ${n.by_name || ''}${n.closing ? ', closing note' : ''}] ${n.text}`)].filter(Boolean).join('\n');
+  function attendanceReportsPdf(inv, jobs = attendanceJobsFor(inv)) {
+    const c = company(), client = clientOf(inv) || {};
+    const grey = [0.35, 0.38, 0.42];
+    const doc = new Doc({ footer: `${c.company_name} — attendance reports for invoice ${inv.number || '(draft)'}` });
+    doc.para(c.company_name, { size: 10, bold: true, color: grey, gap: 2 });
+    doc.para('Attendance reports', { size: 18, bold: true, gap: 2 });
+    doc.para(`For invoice ${inv.number || '(draft)'}${client.name ? `, ${client.name}` : ''}, ${span(inv.period_from, inv.period_to)}`, { size: 10, color: grey, gap: 8 });
+    if (!jobs.length) doc.para('No attendances in this period.', { size: 10 });
+    else {
+      doc.table([{ title: 'Reference', width: 0.2 }, { title: 'Arrived', width: 0.22 }, { title: 'Site', width: 0.3 }, { title: 'Type', width: 0.28 }],
+        jobs.map((j) => { const s = db.sites.find((x) => x.id === j.site_id); return [j.reference, ukTime(j.on_scene_at || j.created_at), s ? s.name : (j.location || '—'), j.incident_type || '—']; }), { size: 8.5 });
+    }
+    jobs.forEach((j) => {
+      doc.newPage();
+      const site = db.sites.find((x) => x.id === j.site_id);
+      const officers = (db.job_assignments || []).filter((a) => a.job_id === j.id)
+        .map((a) => (db.personnel.find((p) => p.id === a.personnel_id) || {}).name).filter(Boolean);
+      doc.para(`Attendance report — ${j.reference}`, { size: 15, bold: true, gap: 2 });
+      doc.para([j.incident_type, j.location].filter(Boolean).join(' · ') || '—', { size: 10, color: grey, gap: 8 });
+      doc.pairs([
+        ['Site', site ? site.name : '—'], ['Priority', j.priority || '—'], ['Officer', officers.join(', ') || '—'],
+        ['Description', j.description || '—'], ['Notes', jobNotes(j) || '—'],
+      ], { size: 9.5, labelWidth: 100 });
+      const timeline = [['Job created', j.created_at], ['Dispatched', j.dispatched_at], ['Acknowledged', j.acknowledged_at], ['En route', j.en_route_at], ['On scene', j.on_scene_at], ['Completed', j.completed_at]].filter(([, t]) => t);
+      doc.heading('Timeline', 11);
+      doc.pairs(timeline.map(([l, t]) => [l, ukTime(t)]), { size: 9.5, labelWidth: 100 });
+      if (j.on_scene_at && j.completed_at) {
+        const mins = Math.max(0, Math.round((Date.parse(j.completed_at) - Date.parse(j.on_scene_at)) / 60000));
+        doc.para(`Time on site: ${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`, { size: 9.5, bold: true, gap: 6 });
+      }
+      const items = j.checklist || [];
+      if (items.length) {
+        doc.heading('Checklist', 11);
+        doc.table([{ title: 'Item', width: 0.42 }, { title: 'Status', width: 0.25 }, { title: 'Notes', width: 0.33 }],
+          items.map((it) => [it.title || '', it.status === 'COMPLETE' ? `Complete${it.completed_at ? ` ${ukTime(it.completed_at)}` : ''}` : 'Not completed', it.notes || '—']), { size: 8.5 });
+      }
+      const photos = (j.media || []).length;
+      if (photos) doc.para(`${photos} photo${photos === 1 ? '' : 's'} taken — they are in the client portal with this report.`, { size: 9, color: grey });
+    });
+    return doc.toBuffer();
+  }
+  const wantsReports = (inv) => Boolean((clientOf(inv) || {}).invoice_attach_reports);
+
   const pdfOut = (inv) => ({ __body: invoicePdf(inv), __headers: { 'content-type': 'application/pdf', 'content-disposition': `inline; filename="${inv.number || 'draft-invoice'}.pdf"`, 'cache-control': 'private, no-store' } });
 
   /* ---- email to the client, PDF attached ---- */
@@ -243,11 +325,18 @@ module.exports = function registerInvoices({
     if (!siteIds.size && inv.site_id) siteIds.add(inv.site_id);
     const cc = [...new Set([...siteIds].map((id) => { const s = db.sites.find((x) => x.id === id); return s ? s.accounts_email : ''; }).filter(Boolean))];
     const pay = st.account_number ? `<p>Please pay by bank transfer to ${st.account_name || c.company_name}, sort code ${st.sort_code}, account ${st.account_number}, quoting <strong>${inv.number}</strong>.</p>` : '';
-    const html = `<p>Hello,</p><p>Please find attached invoice <strong>${inv.number}</strong> for ${inv.site_name}, ${span(inv.period_from, inv.period_to)}: <strong>${money(inv.total)}</strong> including VAT, due by ${longDate(inv.due_date)}.</p>${pay}
+    const baseHtml = `<p>Hello,</p><p>Please find attached invoice <strong>${inv.number}</strong> for ${inv.site_name}, ${span(inv.period_from, inv.period_to)}: <strong>${money(inv.total)}</strong> including VAT, due by ${longDate(inv.due_date)}.</p>${pay}
       <p>Your invoices are also in your client portal: <a href="${publicBaseUrl}/client.html">${publicBaseUrl}/client.html</a></p><p>Kind regards,<br>${c.company_name}</p>`;
     const bcc = st.copy_to || '';
-    Promise.resolve(sendEmail(to, `Invoice ${inv.number} from ${c.company_name}`, html, { cc, bcc, attachments: [{ name: `${inv.number}.pdf`, contentType: 'application/pdf', content: invoicePdf(inv) }] }))
-      .then((r) => { log({ to, cc, bcc, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); if (r && r.ok) inv.history.push({ at: new Date().toISOString(), by, what: `emailed to ${to}${cc.length ? ` (cc ${cc.join(', ')})` : ''}` }); flushNow(); })
+    const attachments = [{ name: `${inv.number}.pdf`, contentType: 'application/pdf', content: invoicePdf(inv) }];
+    // Attendance reports go along when the client asked for them (Admin →
+    // Clients) and there is at least one; an empty reports PDF is noise.
+    const jobs = wantsReports(inv) ? attendanceJobsFor(inv) : [];
+    if (jobs.length) attachments.push({ name: `${inv.number}-attendance-reports.pdf`, contentType: 'application/pdf', content: attendanceReportsPdf(inv, jobs) });
+    const withReports = jobs.length ? `, with ${jobs.length} attendance report${jobs.length === 1 ? '' : 's'}` : '';
+    const html = jobs.length ? baseHtml.replace(`${longDate(inv.due_date)}.</p>`, `${longDate(inv.due_date)}.</p><p>The reports for the ${jobs.length} attendance${jobs.length === 1 ? '' : 's'} in this period are attached as well.</p>`) : baseHtml;
+    Promise.resolve(sendEmail(to, `Invoice ${inv.number} from ${c.company_name}`, html, { cc, bcc, attachments }))
+      .then((r) => { log({ to, cc, bcc, reports: jobs.length, ok: Boolean(r && r.ok), error: r && !r.ok ? String(r.error || '').slice(0, 200) : null }); if (r && r.ok) inv.history.push({ at: new Date().toISOString(), by, what: `emailed to ${to}${cc.length ? ` (cc ${cc.join(', ')})` : ''}${withReports}` }); flushNow(); })
       .catch((e) => log({ to, ok: false, error: e.message }));
   }
 
@@ -303,7 +392,8 @@ module.exports = function registerInvoices({
    * hour or part thereof: arrived to cleared, rounded up to whole hours,
    * at least one. A job is counted once per invoice, so two alarm response
    * lines (or two contracts on the same site) don't bill the same
-   * attendance twice — `taken` carries the ids already used. */
+   * attendance twice — `taken` carries the ids already used.
+   * A job control marked not attended is never billed. */
   const isAlarmResponseType = (id) => {
     const t = id ? (db.shift_types || []).find((x) => x.id === id) : null;
     return Boolean(t && (t.key === 'ALARM_RESPONSE' || /alarm\s*response/i.test(t.name || '')));
@@ -312,10 +402,19 @@ module.exports = function registerInvoices({
     const t0 = dayStart(from), t1 = dayStart(to) + 86400000;
     const rows = [];
     for (const j of db.jobs || []) {
-      if (j.site_id !== contract.site_id || j.status === 'CANCELLED' || taken.has(j.id)) continue;
+      if (j.site_id !== contract.site_id || (j.status === 'CANCELLED' && !j.not_attended) || taken.has(j.id)) continue;
       const at = Date.parse(j.on_scene_at || j.created_at);
       if (!(at >= t0 && at < t1)) continue;
       taken.add(j.id);
+      // Not attended: listed so the client sees the call and why nobody
+      // went, but never charged.
+      if (j.not_attended) {
+        const why = String(j.not_attended_reason || '').trim();
+        const starts = new Date(at).toISOString();
+        rows.push({ job_id: j.id, reference: j.reference, clocked_in_at: null, clocked_out_at: null, break_min: 0, date: starts.slice(0, 10), starts_at: starts, ends_at: starts,
+          person: `Not attended (${j.reference})`, hours: 0, source: `not attended${why ? `: ${why.length > 80 ? `${why.slice(0, 77)}…` : why}` : ''} — not charged`, not_attended: true, pay_override: null });
+        continue;
+      }
       const names = (db.job_assignments || []).filter((a) => a.job_id === j.id)
         .map((a) => (db.personnel.find((p) => p.id === a.personnel_id) || {}).name).filter(Boolean);
       let hours = 0, source;
@@ -328,7 +427,9 @@ module.exports = function registerInvoices({
     return rows;
   }
   const running = (c, from, to) => c.kind === 'CONTRACT' && ['SIGNED', 'ENDED'].includes(c.status) && c.start_date <= to && (!c.end_date || c.end_date >= from);
-  const overlaps = (i, from, to) => i.status !== 'VOID' && i.period_from <= to && i.period_to >= from;
+  // An additional invoice (manual lines only, raised for a period that
+  // was already invoiced) never blocks the period's normal invoice.
+  const overlaps = (i, from, to) => i.status !== 'VOID' && !i.additional && i.period_from <= to && i.period_to >= from;
   function totals(inv) {
     for (const l of inv.lines) l.amount = r2(l.quantity * l.unit_amount);
     inv.subtotal = r2(inv.lines.reduce((n, l) => n + l.amount, 0));
@@ -347,7 +448,7 @@ module.exports = function registerInvoices({
   function linesForContract(c, from, to, taken = newTaken()) {
     const site = db.sites.find((s) => s.id === c.site_id);
     const siteName = site ? site.name : '—';
-    const first = !db.invoices.some((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && i.status !== 'VOID');
+    const first = !db.invoices.some((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && i.status !== 'VOID' && !i.additional);
     const lines = [], checks = [];
     for (const l of c.lines) {
       if (l.kind === 'HOURLY') {
@@ -430,6 +531,35 @@ module.exports = function registerInvoices({
     return { lines, checks };
   }
 
+  /** Clock records at a contract's site in the period that no line
+   * billed — an ad-hoc clock-in, a shift still in draft, a shift type the
+   * contract has no hourly line for — so hours worked never drop off an
+   * invoice silently. Each gets a check saying why and how to fix it. */
+  const billedElsewhere = (s, from, to) => (db.agreements || []).some((c) => running(c, from, to) && c.site_id === s.site_id
+    && (c.lines || []).some((l) => l.kind === 'HOURLY' && (!l.shift_type_id || l.shift_type_id === s.shift_type_id)));
+  function unbilledChecks(contracts, from, to, taken) {
+    const t0 = dayStart(from), t1 = dayStart(to) + 86400000;
+    const sites = new Set(contracts.map((c) => c.site_id));
+    const out = [];
+    for (const a of db.shift_assignments) {
+      if (!a.clocked_in_at || a.status === 'REMOVED' || taken.assignments.has(a.id)) continue;
+      const s = db.shifts.find((x) => x.id === a.shift_id);
+      if (!s || !sites.has(s.site_id) || !(Date.parse(s.starts_at) >= t0 && Date.parse(s.starts_at) < t1)) continue;
+      const p = db.personnel.find((x) => x.id === a.personnel_id);
+      const who = `${p ? p.name : '—'} on ${s.starts_at.slice(0, 10)}`;
+      const type = (db.shift_types || []).find((x) => x.id === s.shift_type_id);
+      let why;
+      if (s.ad_hoc) why = 'clocked in ad hoc, and ad-hoc shifts are not billed. If they were on the rota, use Move to rota in Timeclock → Timesheet, then void this draft and make it again';
+      else if (s.status === 'DRAFT') why = 'the rota shift is still a draft. Publish it, then void this draft and make it again';
+      else if (s.status === 'CANCELLED') why = 'the rota shift is cancelled but has clock times';
+      else if (!['ASSIGNED', 'CONFIRMED'].includes(a.status)) why = `their place on the shift is ${String(a.status || 'unknown').toLowerCase()}, not assigned or confirmed`;
+      else if (billedElsewhere(s, from, to)) continue; // another contract at this site bills it
+      else why = `the contract has no hourly line for ${type ? type.name : 'this shift type'} shifts`;
+      out.push(`${who}: clocked hours not billed — ${why}`);
+    }
+    return out;
+  }
+
   /** Like lines together, so a contract (or a client's contracts) with the
    * same charge entered more than once reads as one line: identical
    * fixed/one-off charges at the same site and price become one line with
@@ -450,19 +580,20 @@ module.exports = function registerInvoices({
     return out;
   }
 
-  function build(c, from, to, user) {
+  function build(c, from, to, user, blank = false) {
     const client = (db.clients || []).find((x) => x.id === c.client_id);
     const site = db.sites.find((s) => s.id === c.site_id);
-    const r = linesForContract(c, from, to);
-    const lines = groupLines(r.lines), checks = r.checks;
+    const taken = newTaken();
+    const r = blank ? { lines: [], checks: [] } : linesForContract(c, from, to, taken);
+    const lines = groupLines(r.lines), checks = blank ? [] : r.checks.concat(unbilledChecks([c], from, to, taken));
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
     const inv = {
       id, reference: `${c.reference}/${String(id).padStart(4, '0')}`, status: 'DRAFT', contract_id: c.id, contract_reference: c.reference, contract_ids: [c.id],
       client_id: c.client_id, client_name: client ? client.name : '—', site_id: c.site_id, site_name: site ? site.name : '—',
       period_from: from, period_to: to, issue_date: issue, due_date: new Date(Date.parse(issue) + (c.payment_terms_days || 30) * 86400000).toISOString().slice(0, 10),
       vat_rate: c.vat_rate, billing_basis: c.billing_basis, lines, checks, notes: '',
-      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: 'generated from the contract' }],
-      xero: null,
+      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: blank ? 'additional invoice started (manual lines only)' : 'generated from the contract' }],
+      xero: null, ...(blank ? { additional: true } : {}),
     };
     totals(inv);
     return inv;
@@ -475,16 +606,19 @@ module.exports = function registerInvoices({
    * across their own contracts, and this mirrors contract_id/
    * contract_reference also defaulting to the first contract for
    * anything that still only knows about a single contract. */
-  function buildForClient(contracts, from, to, user) {
+  function buildForClient(contracts, from, to, user, blank = false) {
     const first = contracts[0];
     const client = (db.clients || []).find((x) => x.id === first.client_id);
     const site = db.sites.find((s) => s.id === first.site_id);
     let lines = [], checks = [];
     const taken = newTaken();
-    for (const c of contracts) {
-      const r = linesForContract(c, from, to, taken);
-      lines = lines.concat(r.lines);
-      checks = checks.concat(r.checks);
+    if (!blank) {
+      for (const c of contracts) {
+        const r = linesForContract(c, from, to, taken);
+        lines = lines.concat(r.lines);
+        checks = checks.concat(r.checks);
+      }
+      checks = checks.concat(unbilledChecks(contracts, from, to, taken));
     }
     lines = groupLines(lines);
     const id = nextId('invoices'), issue = new Date().toISOString().slice(0, 10);
@@ -493,8 +627,8 @@ module.exports = function registerInvoices({
       client_id: first.client_id, client_name: client ? client.name : '—', site_id: first.site_id, site_name: site ? site.name : '—',
       period_from: from, period_to: to, issue_date: issue, due_date: new Date(Date.parse(issue) + (first.payment_terms_days || 30) * 86400000).toISOString().slice(0, 10),
       vat_rate: first.vat_rate, billing_basis: first.billing_basis, lines, checks, notes: '',
-      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: `generated from ${contracts.length} contracts` }],
-      xero: null,
+      created_at: new Date().toISOString(), created_by: user.display_name, history: [{ at: new Date().toISOString(), by: user.display_name, what: blank ? `additional invoice started for ${contracts.length} contracts (manual lines only)` : `generated from ${contracts.length} contracts` }],
+      xero: null, ...(blank ? { additional: true } : {}),
     };
     totals(inv);
     return inv;
@@ -508,8 +642,14 @@ module.exports = function registerInvoices({
       && (!body.site_id || c.site_id === Number(body.site_id)));
     if (body.contract_id && !contracts.length) throw httpError(400, 'that contract is not signed or was not running in this period');
     if (body.site_id && !body.contract_id && !contracts.length) throw httpError(400, 'that site has no signed contract running in this period');
+    // "Additional invoice": an empty draft (no lines from the contract) for
+    // a period that may already be invoiced, to carry manual lines only.
+    // It needs a contract or a site, so it never makes one for everyone.
+    const extra = Boolean(body.additional);
+    if (extra && !body.contract_id && !body.site_id) throw httpError(400, 'an additional invoice needs a site or a contract');
     const made = [], skipped = [];
     const notClashing = (c) => {
+      if (extra) return true;
       const clash = db.invoices.find((i) => (i.contract_ids || [i.contract_id]).includes(c.id) && overlaps(i, from, to));
       if (clash) { skipped.push({ contract: c.reference, reason: `already invoiced (${clash.reference}, ${clash.period_from} to ${clash.period_to})` }); return false; }
       return true;
@@ -530,18 +670,19 @@ module.exports = function registerInvoices({
     }
     for (const c of singly) {
       if (!notClashing(c)) continue;
-      const inv = build(c, from, to, user);
-      if (!inv.lines.length) { skipped.push({ contract: c.reference, reason: 'nothing to charge in this period' }); continue; }
+      const inv = build(c, from, to, user, extra);
+      if (!extra && !inv.lines.length) { skipped.push({ contract: c.reference, reason: 'nothing to charge in this period' }); continue; }
       db.invoices.push(inv); made.push(inv);
     }
     for (const group of byClient.values()) {
       const ok = group.filter(notClashing);
       if (!ok.length) continue;
-      const inv = buildForClient(ok, from, to, user);
-      if (!inv.lines.length) { skipped.push({ contract: ok.map((c) => c.reference).join(', '), reason: 'nothing to charge in this period' }); continue; }
+      const inv = buildForClient(ok, from, to, user, extra);
+      if (!extra && !inv.lines.length) { skipped.push({ contract: ok.map((c) => c.reference).join(', '), reason: 'nothing to charge in this period' }); continue; }
       db.invoices.push(inv); made.push(inv);
     }
-    if (made.length) logEvent('invoice.generated', `${made.length} INVOICE(S) GENERATED FOR ${from} TO ${to} BY ${user.display_name}`, {});
+    if (made.length && extra) logEvent('invoice.generated', `${made.length} ADDITIONAL INVOICE(S) STARTED FOR ${from} TO ${to} BY ${user.display_name}`, {});
+    else if (made.length) logEvent('invoice.generated', `${made.length} INVOICE(S) GENERATED FOR ${from} TO ${to} BY ${user.display_name}`, {});
     flushNow();
     return { made, skipped };
   });
@@ -555,6 +696,7 @@ module.exports = function registerInvoices({
     const str = (k, max = 120) => { if (k in body) st[k] = String(body[k] ?? '').trim().slice(0, max); };
     ['bank_name', 'account_name', 'vat_number', 'company_number'].forEach((k) => str(k));
     str('footer', 500);
+    str('late_payment_terms', 1000);
     if ('sort_code' in body) { const v = String(body.sort_code || '').replace(/\s/g, ''); if (v && !/^\d{2}-?\d{2}-?\d{2}$/.test(v)) throw httpError(400, 'sort code should be 6 digits, e.g. 12-34-56'); st.sort_code = v; }
     if ('account_number' in body) { const v = String(body.account_number || '').replace(/\s/g, ''); if (v && !/^\d{6,10}$/.test(v)) throw httpError(400, 'account number should be 8 digits'); st.account_number = v; }
     if ('prefix' in body) { const v = String(body.prefix ?? '').trim(); if (!/^[A-Za-z0-9/-]{0,12}$/.test(v)) throw httpError(400, 'number prefix: letters, digits, - or / only'); st.prefix = v; }
@@ -571,6 +713,12 @@ module.exports = function registerInvoices({
     return { ...st, company: company() };
   });
   route('GET', '/api/invoices/:id/pdf', MONEY, ({ params }) => pdfOut(findInv(params.id)));
+  // The attendance reports PDF on its own: to check before approving, or to
+  // send by hand when Xero emails the invoice (Xero can't carry it).
+  route('GET', '/api/invoices/:id/reports.pdf', MONEY, ({ params }) => {
+    const inv = findInv(params.id);
+    return { __body: attendanceReportsPdf(inv), __headers: { 'content-type': 'application/pdf', 'content-disposition': `inline; filename="${inv.number || 'draft-invoice'}-attendance-reports.pdf"`, 'cache-control': 'private, no-store' } };
+  });
   route('POST', '/api/invoices/:id/email', MONEY, ({ params, user }) => {
     const inv = findInv(params.id);
     if (!inv.number || inv.status === 'VOID') throw httpError(409, 'approve it first');
@@ -805,6 +953,54 @@ module.exports = function registerInvoices({
     } catch (e) { throw httpError(502, e.message); }
   });
 
+  /* ---- Bills to pay (dashboard) ----
+   * Supplier bills in Xero with money still owing, sorted overdue first,
+   * so a bill sitting unpaid (or unapproved in Xero's bills inbox) is seen
+   * before the supplier stops the account. Read-only. Cached for
+   * XERO_BILLS_CACHE_MIN minutes (default 10) so opening the dashboard
+   * doesn't call Xero every time; ?refresh=1 reads it again now. */
+  const londonToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const dayDiff = (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86400000);
+  let billsCache = null; // { at, bills }
+  route('GET', '/api/xero/bills', MONEY, async ({ query }) => {
+    const st = xero.status();
+    const base = { configured: st.configured, connected: st.connected, tenant_name: st.tenant_name };
+    if (!st.configured || !st.connected) return { ...base, bills: [], totals: null };
+    const maxAge = Number(process.env.XERO_BILLS_CACHE_MIN || 10) * 60000;
+    if (query.get('refresh') === '1' || !billsCache || Date.now() - billsCache.at > maxAge) {
+      try { billsCache = { at: Date.now(), bills: await xero.unpaidBills() }; }
+      catch (e) { return { ...base, error: e.message, bills: [], totals: null }; }
+    }
+    const today = londonToday();
+    const soonDays = 7;
+    const bills = billsCache.bills.map((b) => {
+      const days = b.due_date ? dayDiff(today, b.due_date) : null; // >0 overdue, 0 due today, <0 not yet due
+      const state = b.status !== 'AUTHORISED' ? 'NOT_APPROVED'
+        : days === null ? 'NO_DUE_DATE' : days > 0 ? 'OVERDUE' : -days <= soonDays ? 'DUE_SOON' : 'LATER';
+      return { ...b, days_overdue: days, state, xero_url: `https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${encodeURIComponent(b.id)}` };
+    });
+    // Overdue (oldest first), then due soon, then drafts / awaiting approval
+    // (a bill that came into the inbox but nobody approved — overdue ones
+    // of those still sort as overdue by date), then later.
+    const rank = { OVERDUE: 0, DUE_SOON: 1, NOT_APPROVED: 2, NO_DUE_DATE: 3, LATER: 4 };
+    const overdueish = (b) => b.days_overdue !== null && b.days_overdue > 0;
+    bills.sort((a, b) => {
+      const ra = overdueish(a) ? 0 : rank[a.state], rb = overdueish(b) ? 0 : rank[b.state];
+      if (ra !== rb) return ra - rb;
+      return String(a.due_date || '9999').localeCompare(String(b.due_date || '9999'));
+    });
+    const sum = (list) => ({ count: list.length, amount: r2(list.reduce((n, b) => n + b.amount_due, 0)) });
+    return {
+      ...base, as_of: new Date(billsCache.at).toISOString(), today, soon_days: soonDays, bills,
+      totals: {
+        overdue: sum(bills.filter(overdueish)),
+        due_soon: sum(bills.filter((b) => b.days_overdue !== null && b.days_overdue <= 0 && -b.days_overdue <= soonDays)),
+        not_approved: sum(bills.filter((b) => b.state === 'NOT_APPROVED')),
+        all: sum(bills),
+      },
+    };
+  });
+
   /* ---- Xero connection ---- */
   const states = new Map(); // state → { user, at }
   route('GET', '/api/xero/status', MONEY, () => xero.status());
@@ -837,5 +1033,5 @@ module.exports = function registerInvoices({
     return xero.status();
   });
 
-  return { hoursFor, invoicePdf, syncAll };
+  return { hoursFor, invoicePdf, syncAll, settings: settingsRow, company };
 };
