@@ -112,3 +112,19 @@ test('pertinent negatives on lists and the MPDS code are kept on the record', as
   assert.deepStrictEqual(d.pmhNeg, ['Asthma', 'Diabetes']);
   assert.deepStrictEqual(d.sceneFindingsNeg, ['Weapon present']);
 });
+
+test('MPDS list: only a system admin loads it, crews can read it, and it is parsed from CSV', async () => {
+  const csv = 'Code,Descriptor\n10-D-01,"Example descriptor one"\n9 E 2, Example two\n08-Ω-01,"Example, with comma"\nno code here\n10-D-01,Replaced';
+  const supT = await login('supervisor', 'super123');
+  assert.strictEqual((await call('POST', '/api/prf-admin/mpds', { text: csv }, supT)).status, 403);
+  assert.strictEqual((await call('POST', '/api/prf-admin/mpds', { text: 'nothing' }, adminT)).status, 400);
+  const r = await call('POST', '/api/prf-admin/mpds', { text: csv, version: 'test v1' }, adminT);
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.count, 3);
+  const got = (await call('GET', '/api/prfs/mpds', undefined, danT)).body;
+  assert.strictEqual(got.version, 'test v1');
+  assert.deepStrictEqual(got.codes, [['08-Ω-01', 'Example, with comma'], ['09-E-02', 'Example two'], ['10-D-01', 'Replaced']]);
+  assert.strictEqual((await call('GET', '/api/prf-admin/mpds', undefined, supT)).body.count, 3);
+  assert.strictEqual((await call('DELETE', '/api/prf-admin/mpds', undefined, adminT)).status, 200);
+  assert.deepStrictEqual((await call('GET', '/api/prfs/mpds', undefined, danT)).body.codes, []);
+});

@@ -32,7 +32,7 @@
 
   // An MPDS determinant code: protocol 1-37, level (Ω/O, A-E), number, optional suffix letter.
   function validMpds(x) {
-    const m = /^(\d{1,2})[-\s]?([ΩOABCDE])[-\s]?(\d{1,2})([A-Z])?$/i.exec(String(x).trim());
+    const m = /^(\d{1,2})[-\s]?(Ω|Ω|[OABCDE])[-\s]?(\d{1,2})([A-Z])?$/i.exec(String(x).trim());
     return Boolean(m && +m[1] >= 1 && +m[1] <= 37);
   }
 

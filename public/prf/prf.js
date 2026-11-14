@@ -163,6 +163,44 @@ const SYMPTOMS = {
   Gastrointestinal: ["Nausea", "Vomiting", "Abdominal pain", "Diarrhoea"],
   Musculoskeletal: ["Limb pain", "Back pain", "Neck pain", "Reduced movement"],
 };
+// MPDS determinant list: Echelon's licensed copy, loaded by an admin in PRF
+// admin and fetched from the server. Without it the code is typed by hand.
+const MPDS = new Map();
+function mpdsNorm(x) {
+  const m = /^(\d{1,2})[-\s.]?(Ω|Ω|omega|[OABCDE])[-\s.]?(\d{1,2})([A-Z])?$/i.exec(String(x || "").trim());
+  return m ? `${m[1].padStart(2, "0")}-${/^(Ω|Ω|omega|o)$/i.test(m[2]) ? "Ω" : m[2].toUpperCase()}-${m[3].padStart(2, "0")}${(m[4] || "").toUpperCase()}` : "";
+}
+function mpdsAfter() {
+  if (s.mpdsText) return s.mpdsText;
+  if (!MPDS.size || !s.mpdsCode) return "";
+  return PRFRules.formatHint(s, "mpdsCode") ? "" : "Not on the loaded MPDS list";
+}
+// Set the code, its descriptor and (if blank or from the picker) the protocol.
+function setMpds(code, picked) {
+  const n = mpdsNorm(code);
+  if (picked) s.mpdsCode = n || code;
+  s.mpdsText = (n && MPDS.get(n)) || "";
+  const proto = n && choice.mpds.find((x) => x.startsWith(n.slice(0, 2) + " -"));
+  // Keep the protocol in step with the code's first two digits.
+  if (proto && s.mpds !== proto) {
+    s.mpds = proto;
+    const f = q("#f-mpds");
+    if (f) f.value = proto;
+  }
+  set("mpdsCode", s.mpdsCode);
+  if (picked) render();
+}
+async function loadMpds() {
+  try {
+    const r = await api("GET", "/api/prfs/mpds");
+    MPDS.clear();
+    (r.codes || []).forEach(([c, d]) => MPDS.set(c, d));
+    choice.mpdsCode = (r.codes || []).map(([c, d]) => `${c} · ${d}`);
+    if (typeof rec !== "undefined" && rec && rec.status !== "FINAL") render();
+  } catch {
+    /* no list: the code is typed by hand */
+  }
+}
 // Options that stand alone: picking one clears the rest, and they have no "No ..." state.
 const EXCLUSIVE = ["None", "No known allergies", "Unknown", "Refused to say", "Nothing of note"];
 const EXAM_SYSTEMS = ["Head & face", "Neck", "Chest", "Abdomen", "Pelvis", "Back / spine", "Upper limbs", "Lower limbs", "Neurological", "Skin"];
@@ -183,7 +221,7 @@ const TABS = [
           ["event", "Event Number", "text"],
           ["callType", "Call Type", "pick"],
           ["mpds", "MPDS Protocol", "pick"],
-          ["mpdsCode", "MPDS Determinant Code", "text", { hint: 1 }],
+          ["mpdsCode", "MPDS Determinant Code", "text", { hint: 1, lookup: 1, after: () => mpdsAfter() }],
           ["patientNo", "Patient", "number", { cls: "narrow" }],
           ["patientOf", "Of", "number", { cls: "narrow" }],
           ["precautions", "Special Precautions", "multi", { cls: "full" }],
@@ -550,6 +588,8 @@ function field([key, label, type, o = {}]) {
   if (type === "datetime")
     return `<div class="${c}">${lab}<div class="input-row"><input id="f-${key}" data-key="${key}" type="datetime-local" value="${esc(v(key))}"><button type="button" class="now" data-now="${key}">Now</button></div></div>`;
   const hint = o.hint ? `<small class="hint" data-hint="${key}">${esc(PRFRules.formatHint(s, key))}</small>` : "";
+  if (o.lookup && (choice[key] || []).length)
+    return `<div class="${c}">${lab}<div class="input-row"><input id="f-${key}" data-key="${key}" placeholder=" " value="${esc(v(key))}"><button type="button" data-pick="${key}" aria-label="Look up ${esc(label)}">▾</button></div>${hint}${after}</div>`;
   return `<div class="${c}">${lab}<input id="f-${key}" data-key="${key}" placeholder=" " type="${type}" ${type === "number" ? 'inputmode="decimal" step="any"' : ""} value="${esc(v(key))}">${hint}${after}</div>`;
 }
 const grid = (fields) => `<div class="grid">${fields.map(field).join("")}</div>`;
@@ -842,6 +882,7 @@ function bind() {
       (x.oninput = () => {
         if (x.readOnly) return;
         set(x.dataset.key, x.value);
+        if (x.dataset.key === "mpdsCode") setMpds(x.value, false);
         const h = q(`[data-hint="${x.dataset.key}"]`);
         if (h) h.textContent = PRFRules.formatHint(s, x.dataset.key);
         if (PRFRules.TIME_ORDER.some(([k]) => k === x.dataset.key)) markTimes();
@@ -1211,7 +1252,8 @@ function draw(a) {
   qa("#items button").forEach(
     (x) =>
       (x.onclick = () => {
-        set(pickKey, x.classList.contains("clear") ? "" : x.textContent);
+        if (pickKey === "mpdsCode") setMpds(x.classList.contains("clear") ? "" : x.textContent.split(" · ")[0], true);
+        else set(pickKey, x.classList.contains("clear") ? "" : x.textContent);
         q("#picker").close();
         render();
       }),
@@ -1321,6 +1363,7 @@ if (me.role !== "FIELD_USER") {
   q(".hbtn").href = "/admin.html";
   q(".hbtn").textContent = "Admin console";
 }
+loadMpds();
 async function loadHome() {
   q("#who").textContent = `${MY_NAME} (${me.role.replace("_", " ").toLowerCase()})`;
   q("#scopeWrap").hidden = !READS_ALL;
@@ -1411,6 +1454,7 @@ function recordHtml(r) {
   const val = (k) => {
     const x = d[k],
       neg = Array.isArray(d[k + "Neg"]) && d[k + "Neg"].length ? `${x && x.length ? "; " : ""}denies: ${d[k + "Neg"].join(", ")}` : "";
+    if (k === "mpdsCode" && x && d.mpdsText) return `${x} · ${d.mpdsText}`;
     return Array.isArray(x) || neg ? (x || []).join(", ") + neg : readable(x);
   };
   const sections = TABS.slice(0, 8)
