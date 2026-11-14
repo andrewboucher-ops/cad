@@ -295,6 +295,13 @@ const CHIEF_COMPLAINTS = [
   { code: 'other', label: 'Other / unspecified', priority: 'AMBER' },
 ];
 const complaintLabel = (code) => (CHIEF_COMPLAINTS.find((c) => c.code === code) || {}).label || '';
+// MPDS triage: Echelon's licensed determinant list, loaded on PRF admin.
+// Without it the code is typed by hand and only its format is checked.
+let MPDS_LIST = [];
+const mpdsOptions = () => `<datalist id="mpdsList">${MPDS_LIST.map(([c, d]) => `<option value="${esc(c)}">${esc(c)} · ${esc(d)}</option>`).join('')}</datalist>`;
+const mpdsLabel = (j) => (j.mpds_code ? `${j.mpds_code}${j.mpds_text ? ' · ' + j.mpds_text : ''}` : '');
+const mpdsHint = (v) => { const x = String(v || '').trim().toUpperCase(); const hit = MPDS_LIST.find(([c]) => c === x || c.replace(/-/g, '') === x.replace(/[-\s]/g, '')); return hit ? hit[1] : ''; };
+api('GET', '/api/prfs/mpds').then((r) => { MPDS_LIST = r.codes || []; }).catch(() => {});
 const complaintPriority = (code) => (CHIEF_COMPLAINTS.find((c) => c.code === code) || {}).priority || '';
 const PRIORITIES_LIST = ['RED', 'AMBER', 'GREEN', 'ROUTINE'];
 
@@ -785,12 +792,15 @@ function renderJob(body) {
         <dt>Patient</dt><dd>${esc(j.patient_name || '—')}</dd>
         <dt>DoB</dt><dd>${esc(j.patient_dob || '—')}</dd>
         <dt>Complaint</dt><dd>${esc(complaintLabel(j.chief_complaint) || '—')}</dd>
+        <dt>MPDS</dt><dd>${esc(mpdsLabel(j) || '—')}</dd>
       </dl>
       ${active ? `<div id="jMedEdit" class="hide">
         <label>Patient name</label><input id="eMedName" value="${esc(j.patient_name || '')}">
         <label>Patient date of birth</label><input id="eMedDob" type="date" value="${esc(j.patient_dob || '')}">
         <label>Presenting complaint</label>
         <select id="eMedComplaint"><option value="">— select —</option>${CHIEF_COMPLAINTS.map((c) => `<option value="${c.code}" ${j.chief_complaint === c.code ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select>
+        <label>MPDS determinant</label><input id="eMedMpds" list="mpdsList" value="${esc(j.mpds_code || '')}" autocomplete="off">${mpdsOptions()}
+        <div class="dim" id="eMedMpdsText" style="font-size:12px">${esc(j.mpds_text || '')}</div>
         <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="eMedSave">Save medical info</button><button class="btn" id="eMedCancel">Cancel</button></div>
       </div>
       <button class="btn" id="jMedEditBtn" style="margin-top:6px">Edit medical info</button>` : ''}
@@ -946,8 +956,9 @@ function renderJob(body) {
   if (j.is_medical && active) {
     el('#jMedEditBtn').onclick = () => { el('#jMedView').classList.add('hide'); el('#jMedEditBtn').classList.add('hide'); el('#jMedEdit').classList.remove('hide'); };
     el('#eMedCancel').onclick = () => renderDetail({ force: true });
+    el('#eMedMpds').oninput = () => (el('#eMedMpdsText').textContent = mpdsHint(el('#eMedMpds').value));
     el('#eMedSave').onclick = () => api('PATCH', `/api/jobs/${j.id}`, {
-      patient_name: el('#eMedName').value, patient_dob: el('#eMedDob').value, chief_complaint: el('#eMedComplaint').value,
+      patient_name: el('#eMedName').value, patient_dob: el('#eMedDob').value, chief_complaint: el('#eMedComplaint').value, mpds_code: el('#eMedMpds').value,
     }).then(() => renderDetail({ force: true })).catch(showErr);
   }
   armed(el('#jDone'), 'Confirm completed', async () => {
@@ -1199,6 +1210,8 @@ function renderNewJob(body) {
       <label>Patient date of birth</label><input id="nPatDob" type="date">
       <label>Presenting complaint</label>
       <select id="nComplaint"><option value="">— select —</option>${CHIEF_COMPLAINTS.map((c) => `<option value="${c.code}">${esc(c.label)}</option>`).join('')}</select>
+      <label>MPDS determinant</label><input id="nMpds" list="mpdsList" placeholder="${MPDS_LIST.length ? 'Search, e.g. 10-D-01 or not alert' : 'e.g. 10-D-01'}" autocomplete="off">${mpdsOptions()}
+      <div class="dim" id="nMpdsText" style="font-size:12px"></div>
     </div>
     <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;margin-top:10px">
       <input type="checkbox" id="nRetro"> Already happened — enter it after the event
@@ -1237,6 +1250,7 @@ function renderNewJob(body) {
   };
   el('#nBack').onclick = () => { state.mode = null; renderDetail({ force: true }); };
   el('#nMedical').onchange = () => el('#nMedicalPanel').classList.toggle('hide', !el('#nMedical').checked);
+  el('#nMpds').oninput = () => (el('#nMpdsText').textContent = mpdsHint(el('#nMpds').value));
   el('#nComplaint').onchange = () => { const pr = complaintPriority(el('#nComplaint').value); if (pr) el('#nPri').value = pr; };
   el('#nGo').onclick = async () => {
     try {
@@ -1251,7 +1265,7 @@ function renderNewJob(body) {
       const job = await api('POST', '/api/jobs', {
         incident_type: el('#nType').value, priority: el('#nPri').value, location: el('#nLoc').value, site: el('#nSite').value || undefined,
         description: el('#nDesc').value, caller: el('#nCaller').value, what3words: el('#nW3w').value.replace(/^\/+/, '').trim() || undefined,
-        is_medical: el('#nMedical').checked, patient_name: el('#nPatName').value, patient_dob: el('#nPatDob').value, chief_complaint: el('#nComplaint').value,
+        is_medical: el('#nMedical').checked, patient_name: el('#nPatName').value, patient_dob: el('#nPatDob').value, chief_complaint: el('#nComplaint').value, mpds_code: el('#nMpds').value,
         ...retroFields,
       });
       if (retro) { upsert(state.jobs, job); state.dispFilter = 'closed'; select('j', job.id, { pan: true }); return; }

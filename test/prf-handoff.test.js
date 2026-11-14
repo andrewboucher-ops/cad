@@ -27,7 +27,7 @@ before(async () => {
   [dispT, danT, ellieT, supT] = await Promise.all([login('dispatcher', 'dispatch123'), login('dwhitfield', 'field123'), login('emarsh', 'field123'), login('supervisor', 'super123')]);
   const dan = app.db.personnel.find((p) => p.name === 'Dan Whitfield');
   const j = await call('POST', '/api/jobs', { location: 'Gate B, Riverside Stadium', incident_type: 'Medical', priority: 'AMBER', caller: 'Steward Jones', description: 'Male collapsed near gate B',
-    is_medical: true, patient_name: 'Sam Example', patient_dob: '1988-04-12', chief_complaint: 'faint_dizzy' }, dispT);
+    is_medical: true, patient_name: 'Sam Example', patient_dob: '1988-04-12', chief_complaint: 'faint_dizzy', mpds_code: '31a1' }, dispT);
   assert.ok(j.status < 300, JSON.stringify(j.body));
   job = j.body;
   await call('POST', `/api/jobs/${job.id}/assign`, { resources: [String(dan.id)] }, dispT);
@@ -42,6 +42,8 @@ test('a PRF from a medical job takes control\'s patient details, without treatin
   assert.strictEqual(r.data.chief, 'Collapse / faint');
   assert.match(r.data.sceneNotes, /Reported by: Steward Jones/);
   assert.strictEqual(r.data.events, 'Male collapsed near gate B');
+  assert.strictEqual(r.data.mpdsCode, '31-A-01', 'control\'s MPDS triage comes across, normalised');
+  assert.match(r.data.sceneNotes, /MPDS triage: 31-A-01/);
 });
 
 test('Create full PRF from a first aid report copies its answers, and a second press opens the same PRF', async () => {
@@ -88,4 +90,19 @@ test('a PRF started without a job can be linked later, and control sees that a P
   assert.ok(list.body.some((x) => x.pcr === p.pcr));
   assert.ok(!JSON.stringify(list.body).includes('Kim'), 'no patient details for control');
   assert.strictEqual((await call('GET', `/api/prfs/${p.pcr}`, undefined, dispT)).status, 403);
+});
+
+test('control triage the MPDS code on the job: format checked, and checked against the list once one is loaded', async () => {
+  const adminT = await login('admin', 'admin123');
+  const mk = (code) => call('POST', '/api/jobs', { location: 'Gate C', incident_type: 'Medical', is_medical: true, mpds_code: code }, dispT);
+  assert.strictEqual((await mk('chest pain')).status, 400);
+  await call('POST', '/api/prf-admin/mpds', { text: '10-D-01,Example descriptor' }, adminT);
+  const ok = await mk('10d1');
+  assert.strictEqual(ok.body.mpds_code, '10-D-01');
+  assert.strictEqual(ok.body.mpds_text, 'Example descriptor');
+  assert.strictEqual((await mk('10-D-02')).status, 400, 'not on the loaded list');
+  const ed = await call('PATCH', `/api/jobs/${ok.body.id}`, { mpds_code: '' }, dispT);
+  assert.strictEqual(ed.body.mpds_code, '');
+  assert.strictEqual((await call('GET', '/api/prfs/mpds', undefined, dispT)).status, 200, 'dispatchers can read the list');
+  await call('DELETE', '/api/prf-admin/mpds', undefined, adminT);
 });

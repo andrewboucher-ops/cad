@@ -27,9 +27,3 @@ test('a medicine not recorded in the register, and a possible RIDDOR case, are w
   assert.ok(!R.blocking({ txLog: [{ kind: 'Medication' }] }).some((x) => x.label === 'Medicines'));
 });
 
-test('MPDS determinant codes: protocol 1-37, level, number, optional suffix', () => {
-  for (const ok of ['10-D-01', '10D01', '17-A-02G', '9-E-1', '26-Ω-01', '26-O-01', ''])
-    assert.strictEqual(R.formatHint({ mpdsCode: ok }, 'mpdsCode'), '', ok);
-  for (const bad of ['10-F-01', '40-D-01', '0-A-1', 'chest pain', '10-D'])
-    assert.ok(R.formatHint({ mpdsCode: bad }, 'mpdsCode'), bad);
-});

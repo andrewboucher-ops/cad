@@ -364,6 +364,11 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     if (job.chief_complaint) f.chief = CAD_CHIEF[job.chief_complaint] || 'Other';
     const notes = [];
     if (job.chief_complaint) notes.push(`Reported to control as: ${complaintLabel(job.chief_complaint) || job.chief_complaint}`);
+    if (job.mpds_code) {
+      f.mpdsCode = job.mpds_code;
+      if (job.mpds_text) f.mpdsText = job.mpds_text;
+      notes.push(`MPDS triage: ${job.mpds_code}${job.mpds_text ? ' ' + job.mpds_text : ''}`);
+    }
     if (job.caller) notes.push(`Reported by: ${job.caller}`);
     if (notes.length) f.sceneNotes = notes.join('\n');
     if (job.description) f.events = String(job.description).slice(0, 2000);
@@ -427,10 +432,21 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
 
   /* ---- MPDS determinant list (licensed; loaded by an admin) ---- */
   const mpdsRow = () => (db.ui_settings || []).find((x) => x.key === 'prf_mpds');
-  route('GET', '/api/prfs/mpds', WRITE_ROLES, () => {
+  // Control triage the full code on the job; the PRF shows the card name.
+  route('GET', '/api/prfs/mpds', ['DISPATCHER', ...WRITE_ROLES], () => {
     const r = mpdsRow();
     return r ? { version: r.settings.version || '', codes: r.settings.codes || [] } : { version: '', codes: [] };
   });
+  /** A job's MPDS code, checked against the loaded list (or just its format if none is loaded). */
+  function mpdsFor(code) {
+    if (!String(code || '').trim()) return { code: '', text: '' };
+    const n = normMpds(code);
+    if (!n) throw httpError(400, 'MPDS code should look like 10-D-01');
+    const list = ((mpdsRow() || {}).settings || {}).codes || [];
+    const hit = list.find(([c]) => c === n);
+    if (list.length && !hit) throw httpError(400, `${n} is not on the loaded MPDS list`);
+    return { code: n, text: hit ? hit[1] : '' };
+  }
   route('GET', '/api/prf-admin/mpds', READ_ALL_ROLES, () => {
     const r = mpdsRow(), x = (r && r.settings) || {};
     return { count: (x.codes || []).length, version: x.version || '', loaded_at: x.loaded_at || null, loaded_by: x.loaded_by || null, sample: (x.codes || []).slice(0, 8) };
@@ -797,5 +813,5 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     retention: { adult_years: RETAIN_ADULT_YEARS, child_until_age: RETAIN_CHILD_UNTIL_AGE },
   }));
 
-  return { verifyChain, retainUntil, parseMpds, flushEdits: () => [...pending.keys()].forEach(flushEdits), WRITE_ROLES, READ_ALL_ROLES };
+  return { verifyChain, retainUntil, parseMpds, mpdsFor, flushEdits: () => [...pending.keys()].forEach(flushEdits), WRITE_ROLES, READ_ALL_ROLES };
 };
