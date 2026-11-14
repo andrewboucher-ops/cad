@@ -114,6 +114,7 @@ module.exports = function registerStores({
   const ginCode = (l) => `GIN-${pad(l.id)}`;
   const itemCode = (a) => `ITM-${pad(a.id)}`;
   const today = () => new Date().toISOString().slice(0, 10);
+  const soon = () => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
   const lc = (x) => String(x || '').toLowerCase();
   const codesOf = (x) => (Array.isArray(x.barcodes) ? x.barcodes : []);
   const hasCode = (x, code) => {
@@ -145,12 +146,12 @@ module.exports = function registerStores({
     if (own) {
       const kind = own[1].toUpperCase(), id = Number(own[2]);
       if (kind === 'ITM') { const a = db.assets.find((x) => x.id === id && x.is_stock_tracked); if (a) return itemView(a, user, null, code); }
-      else { const l = activeLocation(id); if (l) return { kind: kind === 'GIN' ? 'receive' : 'location', code, location: describeLocation(l) }; }
+      else { const l = activeLocation(id); if (l) return locationView(l, kind === 'GIN' ? 'receive' : 'location', code); }
     }
     const p = findPerson(code);
     if (p) return personView(p, code);
     const loc = db.stock_locations.find((l) => l.active !== false && hasCode(l, code));
-    if (loc) return { kind: 'location', code, location: describeLocation(loc) };
+    if (loc) return locationView(loc, 'location', code);
     const asset = db.assets.find((a) => !a.is_stock_tracked && ((a.tag && lc(a.tag) === lc(code)) || hasCode(a, code)))
       || db.assets.find((a) => !a.is_stock_tracked && a.serial_no && lc(a.serial_no) === lc(code));
     if (asset) return assetView(asset, code);
@@ -163,6 +164,21 @@ module.exports = function registerStores({
     return { kind: 'unknown', code, gs1 };
   }
 
+  /** A location and what is in it now — shown when its label is scanned. */
+  function locationView(l, kind, code) {
+    const t = today(), s30 = soon();
+    const contents = [];
+    for (const a of db.assets.filter((x) => x.is_stock_tracked)) {
+      const bs = batches(a.id).filter((b) => b.location_id === l.id);
+      const q = bs.reduce((n, b) => n + b.qty, 0);
+      if (!q) continue;
+      const next = bs.map((b) => b.expiry_date).filter(Boolean).sort()[0] || null;
+      contents.push({ item_id: a.id, item: label(a), unit: a.unit || '', qty: q, next_expiry: next, expired: Boolean(next && next < t), expiring: Boolean(next && next >= t && next <= s30) });
+    }
+    contents.sort((x, y) => Number(y.expired) - Number(x.expired) || Number(y.expiring) - Number(x.expiring) || x.item.localeCompare(y.item));
+    const assets = db.assets.filter((a) => !a.is_stock_tracked && a.location_id === l.id && a.status === 'IN_STORE').map((a) => ({ id: a.id, tag: a.tag, description: a.description }));
+    return { kind, code, location: { ...describeLocation(l), contents, assets } };
+  }
   function itemView(a, user, gs1, code) {
     findItem(a.id, user); // branch visibility
     const levels = levelsByLocation(a.id);
@@ -174,7 +190,9 @@ module.exports = function registerStores({
         id: a.id, label: label(a), unit: a.unit || '', category: a.category, code: itemCode(a), barcodes: codesOf(a),
         total: Object.values(levels).reduce((n, v) => n + v, 0),
         levels: Object.entries(levels).filter(([, n]) => n > 0).map(([id, n]) => ({ location_id: Number(id), location_name: locName(id), qty: n })),
-        batches: batches(a.id).map((b) => ({ ...b, location_name: locName(b.location_id), expired: Boolean(b.expiry_date && b.expiry_date < t) })),
+        batches: batches(a.id).map((b) => ({ ...b, location_name: locName(b.location_id), expired: Boolean(b.expiry_date && b.expiry_date < t), expiring: Boolean(b.expiry_date && b.expiry_date >= t && b.expiry_date <= soon()) })),
+        reorder_level: a.low_stock_threshold != null ? a.low_stock_threshold : null,
+        pack_codes: db.stock_batch_codes.filter((c) => c.item_id === a.id).length,
       },
     };
   }
@@ -187,7 +205,8 @@ module.exports = function registerStores({
       asset: {
         id: a.id, tag: a.tag, description: a.description, status: a.status, condition: a.condition || null, serial_no: a.serial_no || '',
         location_id: l ? l.id : null, location_name: l ? l.name : null, barcodes: codesOf(a),
-        checkout: co ? { id: co.id, personnel_id: co.personnel_id, personnel_name: p ? p.name : null, checked_out_at: co.checked_out_at, expected_return_at: co.expected_return_at || null } : null,
+        checkout: co ? { id: co.id, personnel_id: co.personnel_id, personnel_name: p ? p.name : null, checked_out_at: co.checked_out_at, expected_return_at: co.expected_return_at || null, overdue: Boolean(co.expected_return_at && Date.parse(co.expected_return_at) < Date.now()) } : null,
+        next_check_due_at: a.next_check_due_at || null, pat_next_due_at: a.pat_required ? (a.pat_next_due_at || null) : null,
       },
     };
   }
@@ -207,7 +226,7 @@ module.exports = function registerStores({
     const n = Number(id);
     if (kind === 'item') { const a = db.assets.find((x) => x.id === n && x.is_stock_tracked); if (a) return itemView(a, user, null, itemCode(a)); }
     if (kind === 'asset') { const a = db.assets.find((x) => x.id === n && !x.is_stock_tracked); if (a) return assetView(a, a.tag || `asset #${a.id}`); }
-    if (kind === 'location' || kind === 'receive') { const l = activeLocation(n); if (l) return { kind, code: kind === 'receive' ? ginCode(l) : locCode(l), location: describeLocation(l) }; }
+    if (kind === 'location' || kind === 'receive') { const l = activeLocation(n); if (l) return locationView(l, kind, kind === 'receive' ? ginCode(l) : locCode(l)); }
     if (kind === 'person') { const p = db.personnel.find((x) => x.id === n); if (p) return personView(p, p.employee_no || p.name); }
     throw httpError(404, 'not found');
   }
@@ -362,6 +381,41 @@ module.exports = function registerStores({
     people: db.personnel.filter((p) => (p.employment_status || 'ACTIVE') !== 'TERMINATED').map((p) => ({ id: p.id, name: p.name, employee_no: p.employee_no || null })).sort((x, y) => x.name.localeCompare(y.name)),
     can_link: user.role === 'SYSTEM_ADMIN',
   }));
+
+  /** The page's header: today's work and what needs attention. */
+  R('GET', '/api/stores/summary', ({ user }) => {
+    const t = today(), s30 = soon();
+    const items = db.assets.filter((a) => a.is_stock_tracked && a.status !== 'RETIRED').filter((a) => { try { findItem(a.id, user); return true; } catch { return false; } });
+    const expiring = [], low = [];
+    for (const a of items) {
+      const bs = batches(a.id);
+      const total = bs.reduce((n, b) => n + b.qty, 0);
+      for (const b of bs) if (b.expiry_date && b.expiry_date <= s30) {
+        const l = db.stock_locations.find((x) => x.id === b.location_id);
+        expiring.push({ item_id: a.id, item: label(a), qty: b.qty, unit: a.unit || '', batch_no: b.batch_no, expiry_date: b.expiry_date, expired: b.expiry_date < t, location: l ? l.name : '?' });
+      }
+      if (a.low_stock_threshold != null && total <= a.low_stock_threshold) low.push({ item_id: a.id, item: label(a), total, reorder_level: a.low_stock_threshold, unit: a.unit || '' });
+    }
+    const out = db.asset_checkouts.filter((c) => !c.returned_at).map((c) => {
+      const a = db.assets.find((x) => x.id === c.asset_id), p = db.personnel.find((x) => x.id === c.personnel_id);
+      return { asset_id: c.asset_id, tag: a ? a.tag : null, description: a ? a.description : '(deleted)', person: p ? p.name : null, since: c.checked_out_at, due: c.expected_return_at || null, overdue: Boolean(c.expected_return_at && Date.parse(c.expected_return_at) < Date.now()) };
+    });
+    const day = (iso) => String(iso || '').slice(0, 10) === t;
+    const mv = db.stock_movements.filter((m) => day(m.recorded_at));
+    return {
+      today: {
+        received: mv.filter((m) => m.reason === 'RESTOCK').length,
+        moved: mv.filter((m) => m.reason === 'TRANSFER_IN').length,
+        issued: mv.filter((m) => m.reason === 'ISSUED').length,
+        signed_out: db.asset_checkouts.filter((c) => day(c.checked_out_at)).length,
+        signed_in: db.asset_checkouts.filter((c) => day(c.returned_at)).length,
+      },
+      expired: expiring.filter((x) => x.expired).sort((x, y) => x.expiry_date.localeCompare(y.expiry_date)),
+      expiring: expiring.filter((x) => !x.expired).sort((x, y) => x.expiry_date.localeCompare(y.expiry_date)),
+      low: low.sort((x, y) => x.item.localeCompare(y.item)),
+      assets_out: out.sort((x, y) => Number(y.overdue) - Number(x.overdue) || String(x.since).localeCompare(String(y.since))),
+    };
+  });
 
   /** The last things done: stock moves (from any page) and asset sign-outs. */
   R('GET', '/api/stores/activity', ({ query }) => {
