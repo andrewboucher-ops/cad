@@ -2390,6 +2390,35 @@ route('GET', '/api/assets/:id/checkouts', ALL, ({ params }) => {
     .sort((x, y) => Date.parse(y.checked_out_at) - Date.parse(x.checked_out_at))
     .map(publicAssetCheckout);
 });
+/** Signs an asset out to a person (the desk, the officer app, and the
+ * stores scanning page all come through here). */
+function checkoutAsset(a, personnelId, user, body = {}) {
+  if (db.asset_checkouts.some((c) => c.asset_id === a.id && !c.returned_at)) throw httpError(409, 'asset is already checked out — return it first');
+  if (['LOST', 'RETIRED', 'IN_REPAIR', 'ON_HIRE'].includes(a.status)) throw httpError(409, `this asset is ${a.status.replace('_', ' ').toLowerCase()} — it cannot be issued`);
+  const co = {
+    id: nextId('asset_checkouts'), asset_id: a.id, personnel_id: personnelId,
+    checked_out_at: new Date().toISOString(), checked_out_by: user.id,
+    returned_at: null, returned_by: null, notes: body.notes || '',
+    expected_return_at: body.expected_return_at && !isNaN(Date.parse(body.expected_return_at)) ? new Date(body.expected_return_at).toISOString() : null,
+    condition_out: ASSET_CONDITIONS.includes(body.condition) ? body.condition : (a.condition || null),
+  };
+  if (body.via) co.via = body.via;
+  db.asset_checkouts.push(co);
+  a.assigned_to = personnelId; a.status = 'IN_USE';
+  const p = db.personnel.find((x) => x.id === personnelId);
+  logEvent('asset.checked_out', `ASSET ${a.tag || a.description} CHECKED OUT TO ${p ? p.name : personnelId}${body.via ? ` (${body.via})` : ''}`, { asset_id: a.id, checkout_id: co.id });
+  return co;
+}
+/** Signs an asset back in. The caller checks who may do it. */
+function returnAsset(a, co, user, body = {}) {
+  co.returned_at = new Date().toISOString(); co.returned_by = user.id;
+  if (body && ASSET_CONDITIONS.includes(body.condition)) { co.condition_in = body.condition; a.condition = body.condition; }
+  if (body && body.notes) co.return_notes = String(body.notes).slice(0, 500);
+  if (body && body.via) co.returned_via = body.via;
+  a.assigned_to = null; a.status = body && body.condition === 'DAMAGED' ? 'IN_REPAIR' : 'IN_STORE'; a.last_checked_at = new Date().toISOString();
+  logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED${body && body.via ? ` (${body.via})` : ''}`, { asset_id: a.id, checkout_id: co.id });
+  return co;
+}
 route('POST', '/api/assets/:id/checkout', ALL, ({ params, body, user }) => {
   const a = db.assets.find((x) => x.id === Number(params.id)); if (!a) throw httpError(404, 'asset not found');
   if (db.asset_checkouts.some((c) => c.asset_id === a.id && !c.returned_at)) throw httpError(409, 'asset is already checked out — return it first');
@@ -2402,18 +2431,7 @@ route('POST', '/api/assets/:id/checkout', ALL, ({ params, body, user }) => {
     if (!p) throw httpError(400, 'personnel_id required');
     personnelId = p.id;
   }
-  const co = {
-    id: nextId('asset_checkouts'), asset_id: a.id, personnel_id: personnelId,
-    checked_out_at: new Date().toISOString(), checked_out_by: user.id,
-    returned_at: null, returned_by: null, notes: body.notes || '',
-    expected_return_at: body.expected_return_at && !isNaN(Date.parse(body.expected_return_at)) ? new Date(body.expected_return_at).toISOString() : null,
-    condition_out: ASSET_CONDITIONS.includes(body.condition) ? body.condition : (a.condition || null),
-  };
-  if (['LOST', 'RETIRED', 'IN_REPAIR', 'ON_HIRE'].includes(a.status)) throw httpError(409, `this asset is ${a.status.replace('_', ' ').toLowerCase()} — it cannot be issued`);
-  db.asset_checkouts.push(co);
-  a.assigned_to = personnelId; a.status = 'IN_USE';
-  const p = db.personnel.find((x) => x.id === personnelId);
-  logEvent('asset.checked_out', `ASSET ${a.tag || a.description} CHECKED OUT TO ${p ? p.name : personnelId}`, { asset_id: a.id, checkout_id: co.id });
+  checkoutAsset(a, personnelId, user, { notes: body.notes, expected_return_at: body.expected_return_at, condition: body.condition });
   return { __status: 201, __body: publicAsset(a) };
 });
 route('POST', '/api/assets/:id/return', ALL, ({ params, body, user }) => {
@@ -2421,11 +2439,7 @@ route('POST', '/api/assets/:id/return', ALL, ({ params, body, user }) => {
   const co = db.asset_checkouts.find((c) => c.asset_id === a.id && !c.returned_at);
   if (!co) throw httpError(409, 'asset is not currently checked out');
   if (!isControlRole(user.role) && user.personnel_id !== co.personnel_id) throw httpError(403, 'not your checkout');
-  co.returned_at = new Date().toISOString(); co.returned_by = user.id;
-  if (body && ASSET_CONDITIONS.includes(body.condition)) { co.condition_in = body.condition; a.condition = body.condition; }
-  if (body && body.notes) co.return_notes = String(body.notes).slice(0, 500);
-  a.assigned_to = null; a.status = body && body.condition === 'DAMAGED' ? 'IN_REPAIR' : 'IN_STORE'; a.last_checked_at = new Date().toISOString();
-  logEvent('asset.returned', `ASSET ${a.tag || a.description} RETURNED`, { asset_id: a.id, checkout_id: co.id });
+  returnAsset(a, co, user, body ? { condition: body.condition, notes: body.notes } : {});
   return publicAsset(a);
 });
 route('GET', '/api/personnel', ALL, ({ user }) => {
@@ -4649,6 +4663,12 @@ require('./routes-expenses.js')({ route, httpError, ADMIN, FINANCE, db, nextId, 
 // Which roles see which section of the menus — see ui-sections.js.
 const sections = require('./ui-sections.js')({ route, httpError, ADMIN, db, logEvent, flushNow: () => store.flushNow() });
 require('./routes-mobile.js')({ route, httpError, db, sections, visibleToUser });
+
+// The store room's scan-two-codes page — see routes-stores.js.
+require('./routes-stores.js')({
+  route, httpError, CONTROL, ADMIN, db, nextId, logEvent, sections, stock: inventory.stock, publicAsset, checkoutAsset, returnAsset,
+  flushNow: () => store.flushNow(),
+});
 
 // Configurable forms. Registrar pattern — see routes-forms.js for why.
 const forms = require('./routes-forms.js')({

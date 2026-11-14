@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — stores labels</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .k-body { width: min(1100px, 100%); margin: 0 auto; }
+  .pick input { width: 16px; height: 16px; flex: none; margin: 0; }
+  .pick { columns: 3 260px; column-gap: 18px; margin: 6px 0 14px; }
+  .pick label {  font-size: 14px; font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--ink); margin: 0; display: flex; gap: 8px; align-items: center; break-inside: avoid; padding: 3px 0; font-size: 13.5px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .card h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); display: flex; gap: 10px; align-items: center; }
+  .card h3 button { font-size: 11px; padding: 2px 8px; text-transform: none; letter-spacing: 0; }
+  /* Avery L7160 / standard 21-up A4: 63.5 × 38.1 mm, 3 across, 7 down. */
+  .sheet { display: grid; grid-template-columns: repeat(3, 63.5mm); grid-auto-rows: 38.1mm; column-gap: 2.5mm; background: #fff; color: #000; padding: 15.1mm 7.2mm; width: 210mm; box-sizing: border-box; margin: 0 auto; }
+  .lab { display: flex; gap: 2.5mm; align-items: center; padding: 2mm 3mm; box-sizing: border-box; overflow: hidden; font-family: Inter, Arial, sans-serif; }
+  .lab .qr svg { width: 28mm; height: 28mm; display: block; }
+  .lab .t { min-width: 0; }
+  .lab .k { font-size: 6.5pt; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .lab .name { font-size: 10pt; font-weight: 700; line-height: 1.15; margin: 1mm 0; overflow-wrap: anywhere; }
+  .lab .code { font-family: 'JetBrains Mono', monospace; font-size: 7.5pt; }
+  .lab.gin .k { background: #000; color: #fff; padding: .5mm 1.5mm; display: inline-block; }
+  .preview { overflow-x: auto; background: var(--panel-2); padding: 12px; border-radius: 12px; }
+  @media print {
+    @page { size: A4; margin: 0; }
+    body { background: #fff !important; }
+    body > *:not(#printArea) { display: none !important; }
+    #printArea { display: block !important; }
+    .preview { padding: 0; background: none; }
+    .sheet { page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>Stores labels</h1>
+  <a class="btn" href="/stores.html">Back to stores</a>
+  <button class="btn primary" id="print">Print</button>
+</div>
+<div class="k-body">
+  <p class="dim">Tick what to print. Sheets are laid out for 21-to-a-page A4 labels (63.5 × 38.1 mm, e.g. Avery L7160) — print at 100% / "actual size". Every label is a QR code, which your 2D scanner and a phone camera both read.</p>
+  <div class="card"><h3>Locations <button class="btn" data-all="loc">all</button></h3><p class="dim" style="font-size:12.5px;margin:0">Stick on a bag, box, shelf or vehicle locker. Scan an item then this label to <strong>move stock here</strong>, or to put an asset away here.</p><div class="pick" id="loc"></div></div>
+  <div class="card"><h3>Goods in <button class="btn" data-all="gin">all</button></h3><p class="dim" style="font-size:12.5px;margin:0">One for the store room's delivery point. Scan an item then this label to <strong>receive a delivery</strong> (batch and expiry are asked for).</p><div class="pick" id="gin"></div></div>
+  <div class="card"><h3>Stock items (drawer labels) <button class="btn" data-all="itm">all</button></h3><p class="dim" style="font-size:12.5px;margin:0">For drawers and bins. Not needed where the pack's own barcode is already linked to the item.</p><div class="pick" id="itm"></div></div>
+  <div class="card"><h3>Assets <button class="btn" data-all="ast">all</button></h3><p class="dim" style="font-size:12.5px;margin:0">The asset's tag as a QR code, for kit that has no tag label yet.</p><div class="pick" id="ast"></div></div>
+  <div class="preview" id="out"></div>
+</div>
+<div id="printArea" style="display:none"></div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<!-- qrcode-generator 1.4.4 (MIT), shipped with the app -->
+<script src="/vendor/qrcode-generator.js"></script>
+<script>
+'use strict';
+const { api, el, els, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const KIND = { STORE: 'Store', CUPBOARD: 'Cupboard', BAG: 'Bag', VEHICLE: 'Vehicle', SITE: 'Site', OTHER: 'Location' };
+let labels = { loc: [], gin: [], itm: [], ast: [] };
+
+const qr = (text) => { const q = qrcode(0, 'M'); q.addData(text); q.make(); return q.createSvgTag({ cellSize: 4, margin: 0, scalable: true }); };
+function pick(id, rows) {
+  labels[id] = rows;
+  el(`#${id}`).innerHTML = rows.length ? rows.map((r, i) => `<label><input type="checkbox" data-g="${id}" data-i="${i}" ${r.on ? 'checked' : ''}> ${esc(r.name)} <span class="dim mono" style="font-size:11.5px">${esc(r.code)}</span></label>`).join('') : '<span class="dim">None yet.</span>';
+}
+function draw() {
+  const chosen = [];
+  els('[data-g]').forEach((c) => { if (c.checked) chosen.push(labels[c.dataset.g][Number(c.dataset.i)]); });
+  if (!chosen.length) { el('#out').innerHTML = '<p class="dim" style="padding:8px">Nothing ticked.</p>'; el('#printArea').innerHTML = ''; return; }
+  const pages = [];
+  for (let i = 0; i < chosen.length; i += 21) pages.push(chosen.slice(i, i + 21));
+  const html = pages.map((p) => `<div class="sheet">${p.map((l) => `<div class="lab ${l.cls || ''}"><div class="qr">${qr(l.code)}</div><div class="t"><div class="k">${esc(l.kind)}</div><div class="name">${esc(l.name)}</div><div class="code">${esc(l.code)}</div></div></div>`).join('')}</div>`).join('');
+  el('#out').innerHTML = html; el('#printArea').innerHTML = `<div class="preview">${html}</div>`;
+}
+document.addEventListener('change', (e) => { if (e.target.dataset.g) draw(); });
+els('[data-all]').forEach((b) => (b.onclick = () => {
+  const boxes = els(`[data-g="${b.dataset.all}"]`); const on = boxes.some((c) => !c.checked);
+  boxes.forEach((c) => (c.checked = on)); draw();
+}));
+el('#print').onclick = () => window.print();
+
+(async () => {
+  let c;
+  try { c = await api('GET', '/api/stores/catalogue'); } catch (e) { el('#out').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const want = new URLSearchParams(location.search);
+  pick('loc', c.locations.map((l) => ({ code: l.code, name: l.name, kind: KIND[l.kind] || 'Location', on: want.get('loc') === String(l.id) })));
+  pick('gin', c.locations.filter((l) => l.kind === 'STORE' || l.is_main).map((l) => ({ code: l.goods_in_code, name: l.name, kind: 'Goods in', cls: 'gin', on: false })));
+  pick('itm', c.items.map((i) => ({ code: i.code, name: i.label, kind: 'Stock item', on: want.get('item') === String(i.id) })));
+  pick('ast', c.assets.filter((a) => a.tag).map((a) => ({ code: a.tag, name: `${a.tag} — ${a.description}`, kind: 'Asset', on: false })));
+  draw();
+})();
+</script>
+</body>
+</html>

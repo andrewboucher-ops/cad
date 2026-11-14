@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script src="/theme-init.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCCS — stores</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/console.css">
+<style>
+  .k-body { width: min(1240px, 100%); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
+  @media (max-width: 960px) { .k-body { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .card h3 { margin: 0 0 10px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); }
+  .steps { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .slot { border: 2px dashed var(--line); border-radius: 12px; padding: 14px; min-height: 112px; }
+  .slot.filled { border-style: solid; border-color: var(--accent); background: var(--panel-2); }
+  .slot.waiting { border-color: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { border-color: var(--line); } }
+  .slot .n { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-dim); }
+  .slot .what { font-size: 18px; font-weight: 700; margin-top: 6px; }
+  .slot .sub { color: var(--ink-dim); font-size: 13px; margin-top: 4px; }
+  .slot .kind { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px; border-radius: 20px; background: var(--accent-dim); color: #fff; margin-top: 6px; }
+  .hint { font-size: 15px; margin: 0 0 6px; }
+  .act h2 { margin: 0 0 12px; font-size: 20px; }
+  .act .k-form { margin-bottom: 10px; }
+  .act .go { padding: 12px 22px; font-size: 16px; }
+  .batches { display: grid; gap: 6px; margin: 4px 0 10px; }
+  .act label.batch { font-size: 14px; font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--ink); margin: 0; display: flex; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; cursor: pointer; }
+  .act label.batch.on { border-color: var(--accent); background: var(--panel-2); }
+  .batch .exp { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .batch.expired .exp { color: var(--emergency); }
+  .tick { font-size: 14px; font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--ink); margin: 0; display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+  .act .tick input, .act label.batch input { width: 18px; height: 18px; flex: none; margin: 0; }
+  .done { border-left: 4px solid var(--available); }
+  .bad { border-left: 4px solid var(--emergency); }
+  .feed { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  .feed li { padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+  .feed .when { color: var(--ink-dim); font-size: 11.5px; }
+  .feed .via { font-size: 10px; font-weight: 700; color: var(--accent); margin-left: 4px; }
+  .levels { font-size: 13px; color: var(--ink-dim); margin-top: 6px; }
+  .mono { font-family: var(--mono); }
+  .scanner-ok { color: var(--available); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="k-top">
+  <h1>Stores</h1>
+  <span class="dim" id="scanState"></span>
+  <a class="btn" href="/stores-labels.html">Print labels</a>
+  <a class="btn" href="/stock.html" id="stockLink">Stock</a>
+</div>
+<div class="k-body">
+  <div>
+    <div class="steps">
+      <div class="slot" id="slot1"></div>
+      <div class="slot" id="slot2"></div>
+    </div>
+    <div id="panel"></div>
+    <div class="card"><h3>Type or camera</h3><div id="manual"></div>
+      <p class="dim" style="font-size:12.5px;margin:10px 0 0">A USB scanner works anywhere on this page — no need to click in the box. <strong>Esc</strong> starts again.</p></div>
+  </div>
+  <div class="card"><h3>Recent activity</h3><ul class="feed" id="feed"><li class="dim">Loading…</li></ul></div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/nav.js"></script>
+<script src="/kit-ui.js"></script>
+<script>
+'use strict';
+/* The store room: scan the THING (stock barcode, drawer label, asset tag),
+ * then WHERE / WHO (location QR, goods-in code, staff ID card) — or the
+ * other way round. The pair decides the job; the form confirms quantity,
+ * batch and expiry. Rules and ledger: routes-stores.js. */
+const { api, el, esc } = CCCS;
+if (!CCCS.requireAuth(['DISPATCHER', 'SUPERVISOR', 'SYSTEM_ADMIN'])) throw new Error('auth');
+const { options, date, when, words } = KIT;
+const isAdmin = CCCS.getSession().user.role === 'SYSTEM_ADMIN';
+if (!isAdmin) el('#stockLink').remove();
+const CONDITIONS = ['GOOD', 'NEW', 'FAIR', 'POOR', 'DAMAGED'];
+const THINGS = ['item', 'asset'], TARGETS = ['location', 'receive', 'person'];
+let thing = null, target = null, catalogue = null, busy = false, onGo = null;
+
+/* ---------------- reading codes ----------------
+ * A USB / Bluetooth scanner is a keyboard that types very fast and ends
+ * with Enter. Keys arriving under 50 ms apart are a scan wherever the
+ * focus is: the typed characters are taken back out of whatever field had
+ * focus (its value is restored) and the code is handled here. Ctrl+]
+ * is the GS separator inside GS1 pack codes. The manual box below takes a
+ * typed code with Enter, and has the camera button. */
+const manual = KIT.scanner(el('#manual'), (code) => handle(code), { placeholder: 'Type a code and press Enter' });
+const manualInput = el('#manual [data-scan-in]');
+let buf = '', lastKey = 0, snapEl = null, snapVal = null;
+document.addEventListener('keydown', (e) => {
+  const now = performance.now();
+  const gap = now - lastKey;
+  if (e.key === 'Enter') {
+    const code = buf; const fast = gap < 80 && code.length >= 4;
+    buf = '';
+    if (!fast) return;
+    if (document.activeElement === manualInput) { manualInput.value = ''; }
+    else if (snapEl && snapVal != null) { snapEl.value = snapVal; }
+    e.preventDefault(); e.stopPropagation();
+    handle(code);
+    return;
+  }
+  if (e.key === 'Escape') { reset(); return; }
+  let ch = null;
+  if (e.ctrlKey && (e.key === ']' || e.code === 'BracketRight')) { ch = '\x1d'; e.preventDefault(); }
+  else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) ch = e.key;
+  if (ch == null) return;
+  if (gap > 50) { buf = ''; const a = document.activeElement; snapEl = a && 'value' in a ? a : null; snapVal = snapEl ? snapEl.value : null; }
+  buf += ch; lastKey = now;
+}, true);
+
+async function handle(raw) {
+  const code = String(raw || '').trim();
+  if (!code || busy) return;
+  el('#scanState').innerHTML = `<span class="scanner-ok">Read</span> <span class="mono">${esc(code.replace(/\x1d/g, '·').slice(0, 40))}</span>`;
+  let r;
+  try { r = await api('GET', `/api/stores/resolve?code=${encodeURIComponent(code)}`); }
+  catch (e) { return message(e.message, true); }
+  if (navigator.vibrate) navigator.vibrate(40);
+  if (r.kind === 'person') el('#scanState').innerHTML = '<span class="scanner-ok">Read</span> staff ID card';
+  if (r.kind === 'unknown') return unknown(r);
+  if (THINGS.includes(r.kind)) {
+    // A second thing replaces the first unless a target is already waiting.
+    thing = r;
+  } else if (TARGETS.includes(r.kind)) {
+    target = r;
+  }
+  render();
+}
+
+function reset() { thing = null; target = null; onGo = null; render(); manual.focus(); }
+
+/* ---------------- the two slots ---------------- */
+function describe(r) {
+  if (!r) return null;
+  if (r.kind === 'item') return { kind: 'Stock', what: r.item.label, sub: `${r.item.total} ${r.item.unit || ''} in stock${r.gs1 && (r.gs1.batch || r.gs1.expiry) ? ` · pack: ${[r.gs1.batch && 'batch ' + r.gs1.batch, r.gs1.expiry && 'exp ' + date(r.gs1.expiry)].filter(Boolean).join(', ')}` : ''}` };
+  if (r.kind === 'asset') return { kind: 'Asset', what: `${r.asset.tag ? r.asset.tag + ' — ' : ''}${r.asset.description}`, sub: r.asset.checkout ? `Signed out to ${r.asset.checkout.personnel_name} since ${when(r.asset.checkout.checked_out_at)}` : `${words(r.asset.status)}${r.asset.location_name ? ' · ' + r.asset.location_name : ''}` };
+  if (r.kind === 'person') return { kind: 'Staff card', what: r.person.name, sub: [r.person.employee_no, r.person.rank, !r.person.employed && 'LEFT'].filter(Boolean).join(' · ') + (r.person.assets_out.length ? ` · holds ${r.person.assets_out.length} asset${r.person.assets_out.length === 1 ? '' : 's'}` : '') };
+  if (r.kind === 'location') return { kind: 'Location', what: r.location.name, sub: [words(r.location.kind), r.location.in_vehicle && 'in ' + r.location.in_vehicle, r.location.site_name].filter(Boolean).join(' · ') };
+  if (r.kind === 'receive') return { kind: 'Goods in', what: r.location.name, sub: 'Receive a delivery here' };
+}
+function slot(n, r, waitingText) {
+  const d = describe(r), s = el(`#slot${n}`);
+  s.className = `slot ${d ? 'filled' : 'waiting'}`;
+  s.innerHTML = d ? `<div class="n">${n === 1 ? 'Item' : 'Where / who'}</div><div class="what">${esc(d.what)}</div><div class="sub">${esc(d.sub)}</div><span class="kind">${esc(d.kind)}</span>`
+    : `<div class="n">${n === 1 ? 'Item' : 'Where / who'}</div><div class="what" style="color:var(--ink-dim)">${esc(waitingText)}</div>`;
+}
+
+function render() {
+  slot(1, thing, 'Scan an item, drawer label or asset tag');
+  slot(2, target, thing ? nextPrompt(thing) : 'then a location, goods-in code or staff ID card');
+  if (!thing && target) return panel(`<p class="hint">${target.kind === 'person' ? `<strong>${esc(target.person.name)}</strong> — now scan the item or asset.` : `Now scan what is going ${target.kind === 'receive' ? 'into goods in' : 'there'}.`}</p>${target.kind === 'person' && target.person.assets_out.length ? holds(target.person) : ''}`);
+  if (thing && !target) return panel(thingAlone(thing));
+  if (!thing) { onGo = null; return panel(''); }
+  form();
+}
+function nextPrompt(t) {
+  if (t.kind === 'item') return 'Scan a location (move), goods-in (receive) or a staff card (issue)';
+  return t.asset.checkout ? 'Scan a location to sign it back in, or a staff card to hand it over' : 'Scan a staff ID card to sign it out, or a location to put it away';
+}
+function holds(p) {
+  return `<p class="dim" style="margin:6px 0 4px">Has signed out:</p><ul class="feed">${p.assets_out.map((a) => `<li>${esc(a.tag || '')} ${esc(a.description)} <span class="when">since ${esc(when(a.checked_out_at))}</span></li>`).join('')}</ul>`;
+}
+function thingAlone(t) {
+  if (t.kind === 'item') {
+    const lv = t.item.levels.length ? t.item.levels.map((l) => `${esc(l.location_name)}: <strong>${l.qty}</strong>`).join(' · ') : 'none in stock';
+    return `<p class="levels">${lv}</p>`;
+  }
+  const a = t.asset;
+  if (a.checkout) return `<div class="btn-row"><button class="btn primary go" id="quickIn">Sign it back in now</button></div>`;
+  return '';
+}
+function panel(html, cls = '') {
+  el('#panel').innerHTML = html ? `<div class="card act ${cls}">${html}</div>` : '';
+  const q = el('#quickIn'); if (q) q.onclick = () => run(() => api('POST', '/api/stores/asset-in', { asset_id: thing.asset.id, condition: 'GOOD' }));
+}
+function message(text, bad) {
+  el('#panel').innerHTML = `<div class="card ${bad ? 'bad' : 'done'}"><strong style="font-size:15px">${esc(text)}</strong>${bad ? '' : '<div class="dim" style="margin-top:4px">Scan the next item.</div>'}</div>`;
+}
+
+/* ---------------- the job the pair makes ---------------- */
+function form() {
+  const t = thing, g = target;
+  if (t.kind === 'item' && g.kind === 'receive') return receiveForm(t, g);
+  if (t.kind === 'item' && g.kind === 'location') return takeForm(t, g, 'move');
+  if (t.kind === 'item' && g.kind === 'person') return takeForm(t, g, 'issue');
+  if (t.kind === 'asset' && g.kind === 'person') return assetOutForm(t, g);
+  if (t.kind === 'asset') return assetInForm(t, g);
+}
+const today = () => new Date().toISOString().slice(0, 10);
+
+function receiveForm(t, g) {
+  const p = t.gs1 || {};
+  panel(`<h2>Receive ${esc(t.item.label)} into ${esc(g.location.name)}</h2>
+    <div class="k-form">
+      <div><label>Quantity</label><input id="fQty" inputmode="numeric" value="1" autocomplete="off"></div>
+      <div><label>Batch / lot number</label><input id="fBatch" value="${esc(p.batch || '')}" autocomplete="off"></div>
+      <div><label>Expiry date</label><input id="fExp" type="date" value="${esc(p.expiry || '')}"></div>
+      <div><label>Supplier</label><input id="fSup" autocomplete="off"></div>
+      <div><label>Delivery note / PO</label><input id="fRef" autocomplete="off"></div>
+      <div><label>Note</label><input id="fNote" autocomplete="off"></div>
+    </div>
+    <label class="tick"><input type="checkbox" id="fNoBatch"> This item has no batch number or expiry date</label>
+    ${p.batch || p.expiry ? '<p class="dim" style="font-size:12.5px">Batch and expiry read from the pack — check them against the box.</p>' : ''}
+    ${foot('Receive')}`);
+  wireGo(() => api('POST', '/api/stores/receive', {
+    item_id: t.item.id, location_id: g.location.id, quantity: num('#fQty'), batch_no: el('#fBatch').value.trim(), expiry_date: el('#fExp').value || null,
+    no_batch: el('#fNoBatch').checked, supplier: el('#fSup').value.trim(), reference: el('#fRef').value.trim(), note: el('#fNote').value.trim(),
+  }), '#fQty');
+}
+
+/** Move to a location, or issue to a person: both take stock out of one
+ * place, from a batch the person confirms. */
+function takeForm(t, g, mode) {
+  const to = mode === 'move' ? g.location : null;
+  const sources = t.item.levels.filter((l) => !to || l.location_id !== to.id);
+  const title = mode === 'move' ? `Move ${esc(t.item.label)} to ${esc(to.name)}` : `Issue ${esc(t.item.label)} to ${esc(g.person.name)}`;
+  if (!sources.length) {
+    return panel(`<h2>${title}</h2><p class="err">There are none in stock${to ? ' anywhere else' : ''}. Scan the goods-in code to receive some first.</p>${foot(null)}`);
+  }
+  const main = catalogue && catalogue.locations.find((l) => l.is_main);
+  // Where it comes from: where the pack's batch is, else the main store, else where there's most.
+  const gb = t.gs1 && t.gs1.batch;
+  const withBatch = gb && t.item.batches.find((b) => b.batch_no === gb && sources.some((s) => s.location_id === b.location_id));
+  let from = (withBatch && withBatch.location_id) || (main && sources.some((s) => s.location_id === main.id) ? main.id : sources.slice().sort((a, b) => b.qty - a.qty)[0].location_id);
+  panel(`<h2>${title}</h2>
+    <div class="k-form">
+      <div><label>Quantity</label><input id="fQty" inputmode="numeric" value="1" autocomplete="off"></div>
+      <div><label>Taking it from</label><select id="fFrom">${options(sources.map((s) => [s.location_id, `${s.location_name} (${s.qty})`]), from)}</select></div>
+      <div class="full"><label>Batch / expiry</label><div class="batches" id="fBatches"></div></div>
+      <div class="full"><label>Note</label><input id="fNote" autocomplete="off"></div>
+    </div>
+    <div id="fTicks"></div>
+    ${foot(mode === 'move' ? 'Move' : 'Issue')}`);
+  let pick = null;
+  const drawBatches = () => {
+    from = Number(el('#fFrom').value);
+    const list = t.item.batches.filter((b) => b.location_id === from);
+    const tracked = list.filter((b) => b.batch_no || b.expiry_date);
+    if (!tracked.length) { pick = null; el('#fBatches').innerHTML = '<span class="dim">No batch or expiry recorded here.</span>'; el('#fTicks').innerHTML = ''; return; }
+    if (!pick || pick.location_id !== from) pick = (gb && list.find((b) => b.batch_no === gb)) || list[0];
+    el('#fBatches').innerHTML = list.map((b, i) => `<label class="batch ${b === pick ? 'on' : ''} ${b.expired ? 'expired' : ''}" data-i="${i}">
+        <input type="radio" name="fb" ${b === pick ? 'checked' : ''}>
+        <span class="exp">${b.expiry_date ? 'Exp ' + esc(date(b.expiry_date)) : 'No expiry'}</span>
+        <span>${b.batch_no ? 'Batch <span class="mono">' + esc(b.batch_no) + '</span>' : 'No batch'}</span>
+        <span class="dim" style="margin-left:auto">${b.qty} here</span>${b.expired ? ' <span class="pill bad">Expired</span>' : ''}</label>`).join('');
+    el('#fBatches').querySelectorAll('.batch').forEach((x) => (x.onclick = () => { pick = list[Number(x.dataset.i)]; drawBatches(); }));
+    // The expiry check: ticked already when the pack's own code named this batch.
+    const scanned = Boolean(gb && pick.batch_no === gb);
+    el('#fTicks').innerHTML = `${pick.expiry_date ? `<label class="tick"><input type="checkbox" id="fChecked" ${scanned ? 'checked' : ''}> I have checked the pack: ${pick.batch_no ? 'batch <strong>' + esc(pick.batch_no) + '</strong>, ' : ''}expiry <strong>${esc(date(pick.expiry_date))}</strong></label>` : ''}
+      ${pick.expired ? '<label class="tick"><input type="checkbox" id="fExpired"> It has expired — move it anyway (e.g. to quarantine / disposal)</label>' : ''}`;
+  };
+  el('#fFrom').onchange = () => { pick = null; drawBatches(); };
+  drawBatches();
+  wireGo(() => {
+    if (el('#fChecked') && !el('#fChecked').checked) throw new Error('tick to confirm you have checked the expiry on the pack');
+    const body = { item_id: t.item.id, quantity: num('#fQty'), note: el('#fNote').value.trim(), allow_expired: Boolean(el('#fExpired') && el('#fExpired').checked) };
+    if (pick) { body.batch_no = pick.batch_no || ''; body.expiry_date = pick.expiry_date || ''; } else body.no_batch = true;
+    if (mode === 'move') return api('POST', '/api/stores/move', { ...body, from_location_id: from, to_location_id: to.id });
+    return api('POST', '/api/stores/issue', { ...body, location_id: from, personnel_id: g.person.id });
+  }, '#fQty');
+}
+
+function assetOutForm(t, g) {
+  const a = t.asset, co = a.checkout;
+  if (co && co.personnel_id === g.person.id) {
+    panel(`<h2>${esc(a.tag || a.description)} is already signed out to ${esc(g.person.name)}</h2><p>Scan a location to sign it back in.</p>`);
+    return;
+  }
+  panel(`<h2>Sign ${esc(a.tag || a.description)} out to ${esc(g.person.name)}</h2>
+    ${co ? `<p class="hint">It is signed out to <strong>${esc(co.personnel_name)}</strong> — this hands it over: it is signed back in from them and out to ${esc(g.person.name)}.</p>` : ''}
+    ${!g.person.employed ? '<p class="err">This person has left.</p>' : ''}
+    <div class="k-form">
+      <div><label>Due back (optional)</label><input id="fDue" type="date"></div>
+      <div><label>Condition going out</label><select id="fCond">${options(CONDITIONS.map((c) => [c, words(c)]), a.condition || 'GOOD')}</select></div>
+      <div class="full"><label>Note</label><input id="fNote" placeholder="e.g. with charger" autocomplete="off"></div>
+    </div>${foot(co ? 'Hand over' : 'Sign out')}`);
+  wireGo(() => api('POST', '/api/stores/asset-out', { asset_id: a.id, personnel_id: g.person.id, handover: Boolean(co), expected_return_at: el('#fDue').value || null, condition: el('#fCond').value, note: el('#fNote').value.trim() }));
+}
+
+function assetInForm(t, g) {
+  const a = t.asset, co = a.checkout;
+  panel(`<h2>${co ? `Sign ${esc(a.tag || a.description)} back in` : `Put ${esc(a.tag || a.description)} away`} — ${esc(g.location.name)}</h2>
+    ${co ? `<p class="hint">From <strong>${esc(co.personnel_name)}</strong>, out since ${esc(when(co.checked_out_at))}.</p>` : ''}
+    <div class="k-form">
+      ${co ? `<div><label>Condition coming back</label><select id="fCond">${options(CONDITIONS.map((c) => [c, words(c)]), a.condition || 'GOOD')}</select></div>` : ''}
+      <div class="${co ? '' : 'full'}"><label>Note</label><input id="fNote" autocomplete="off"></div>
+    </div>${foot(co ? 'Sign in' : 'Put away')}`);
+  wireGo(() => api('POST', '/api/stores/asset-in', { asset_id: a.id, location_id: g.location.id, condition: el('#fCond') ? el('#fCond').value : undefined, note: el('#fNote').value.trim() }));
+}
+
+/* ---------------- unknown codes ---------------- */
+function unknown(r) {
+  const g = r.gs1;
+  const kinds = [['item', 'a stock item'], ['asset', 'an asset'], ['location', 'a location']].filter(([k]) => !g || k === 'item');
+  const list = (k) => (k === 'item' ? catalogue.items.map((x) => [x.id, x.label]) : k === 'asset' ? catalogue.assets.map((x) => [x.id, `${x.tag ? x.tag + ' — ' : ''}${x.description}`]) : catalogue.locations.map((x) => [x.id, x.name]));
+  const linkable = catalogue && catalogue.can_link;
+  el('#panel').innerHTML = `<div class="card act bad"><h2>Not recognised</h2>
+    <p class="mono" style="word-break:break-all">${esc(r.code.replace(/\x1d/g, '·'))}</p>
+    ${g ? `<p class="dim">A product barcode: GTIN <span class="mono">${esc(g.gtin)}</span>${g.batch ? `, batch ${esc(g.batch)}` : ''}${g.expiry ? `, expiry ${esc(date(g.expiry))}` : ''}.</p>` : ''}
+    ${linkable ? `<p style="margin-top:12px"><strong>Link this code</strong> so it works from now on${g ? ' (every batch of this product)' : ''}:</p>
+      <div class="k-form"><div><label>It is</label><select id="lKind">${options(kinds, 'item')}</select></div>
+      <div><label>Which one</label><select id="lId"></select></div></div>
+      <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="lGo">Link code</button><button class="btn" id="lCancel">Cancel</button></div><p class="err" id="lErr"></p>`
+      : '<p class="dim">Ask an admin to link it to an item, asset or location on this page.</p>'}</div>`;
+  if (!linkable) return;
+  const fill = () => { el('#lId').innerHTML = options(list(el('#lKind').value), '', '— choose —'); };
+  el('#lKind').onchange = fill; fill();
+  el('#lCancel').onclick = () => render();
+  el('#lGo').onclick = async () => {
+    el('#lErr').textContent = '';
+    try {
+      if (!el('#lId').value) throw new Error('choose which one');
+      await api('POST', '/api/stores/codes', { code: r.code, kind: el('#lKind').value, id: Number(el('#lId').value) });
+      await loadCatalogue();
+      handle(r.code);
+    } catch (e) { el('#lErr').textContent = e.message; }
+  };
+}
+
+/* ---------------- shared bits ---------------- */
+function foot(label) {
+  return `<p class="err" id="fErr" style="min-height:16px;margin:8px 0 0"></p>
+    <div class="btn-row" style="gap:8px">${label ? `<button class="btn primary go" id="fGo">${esc(label)} <span class="dim" style="color:inherit;opacity:.7;font-size:12px">Enter</span></button>` : ''}<button class="btn" id="fCancel">Start again <span class="dim" style="font-size:12px">Esc</span></button></div>`;
+}
+function num(sel) { const n = Number(el(sel).value); if (!Number.isFinite(n) || n <= 0) throw new Error('enter a quantity'); return n; }
+function wireGo(action, focusSel) {
+  el('#fCancel').onclick = reset;
+  const go = el('#fGo'); if (!go) return;
+  onGo = () => run(action);
+  go.onclick = onGo;
+  el('#panel').querySelectorAll('input:not([type=checkbox]):not([type=radio])').forEach((i) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); onGo(); } }));
+  const f = focusSel ? el(focusSel) : go;
+  if (f) { f.focus(); if (f.select) f.select(); }
+}
+async function run(action) {
+  if (busy) return;
+  busy = true;
+  const go = el('#fGo'); if (go) go.disabled = true;
+  try {
+    const r = await action();
+    thing = null; target = null; onGo = null; render();
+    message(r.done || 'Done');
+    loadFeed();
+  } catch (e) {
+    const err = el('#fErr');
+    if (err) err.textContent = e.message; else message(e.message, true);
+  } finally { busy = false; if (go) go.disabled = false; }
+}
+// Enter with nothing focused confirms the open form.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || !onGo || e.defaultPrevented) return;
+  const a = document.activeElement;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA' || a.tagName === 'BUTTON')) return;
+  e.preventDefault(); onGo();
+});
+
+/* ---------------- recent activity ---------------- */
+const REASON = { RESTOCK: 'Received', TRANSFER_IN: 'Moved', ISSUED: 'Issued', RETURNED: 'Returned', RETURNED_DISPOSED: 'Returned (written off)', USED_IN_TREATMENT: 'Used', DAMAGED: 'Damaged', EXPIRED: 'Expired', LOST: 'Lost', FOUND: 'Found', AUDIT_CORRECTION: 'Count correction', SIGNED_OUT: 'Signed out', SIGNED_IN: 'Signed in' };
+async function loadFeed() {
+  let rows;
+  try { rows = await api('GET', '/api/stores/activity?limit=40'); } catch (e) { el('#feed').innerHTML = `<li class="err">${esc(e.message)}</li>`; return; }
+  rows = rows.filter((r) => r.reason !== 'TRANSFER_OUT');
+  el('#feed').innerHTML = rows.length ? rows.map((r) => {
+    const q = r.kind === 'stock' ? `${Math.abs(r.qty)} × ` : '';
+    const where = r.reason === 'TRANSFER_IN' ? `${r.from ? esc(r.from) + ' → ' : ''}${esc(r.location)}` : r.person ? esc(r.person) : r.location ? esc(r.location) : '';
+    const b = [r.batch_no && 'batch ' + r.batch_no, r.expiry_date && 'exp ' + date(r.expiry_date)].filter(Boolean).join(', ');
+    return `<li><strong>${esc(REASON[r.reason] || words(r.reason))}</strong> ${q}${esc(r.item)}${where ? ` — ${where}` : ''}${b ? `<div class="dim" style="font-size:12px">${esc(b)}</div>` : ''}
+      <div class="when">${esc(when(r.at))}${r.by ? ' · ' + esc(r.by) : ''}${r.via === 'STORES' ? '<span class="via">SCAN</span>' : ''}</div></li>`;
+  }).join('') : '<li class="dim">Nothing yet.</li>';
+}
+async function loadCatalogue() { catalogue = await api('GET', '/api/stores/catalogue').catch(() => null); }
+
+(async () => {
+  try { await loadCatalogue(); }
+  catch {}
+  if (!catalogue) { el('#panel').innerHTML = '<div class="card bad">The Stores page is not turned on for your role — an admin can give it to you in Admin → Menu &amp; sections.</div>'; return; }
+  render(); loadFeed(); manual.focus();
+})();
+setInterval(loadFeed, 60000);
+</script>
+</body>
+</html>

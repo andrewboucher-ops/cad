@@ -124,7 +124,7 @@ const KIT = (() => {
       video.srcObject = stream; await video.play(); box.classList.remove('hide'); running = true;
       let detect;
       if ('BarcodeDetector' in window) {
-        const d = new BarcodeDetector({ formats: ['qr_code', 'code_128', 'code_39', 'ean_13'] });
+        const d = new BarcodeDetector({ formats: ['qr_code', 'data_matrix', 'code_128', 'code_39', 'ean_13', 'ean_8', 'upc_a'] });
         detect = async () => { const r = await d.detect(video); return r[0] && r[0].rawValue; };
       } else {
         if (!window.jsQR) await new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = '/vendor/jsQR.js'; sc.onload = ok; sc.onerror = () => bad(new Error('could not load the QR reader')); document.head.appendChild(sc); }).catch((e) => { msg.textContent = e.message; });

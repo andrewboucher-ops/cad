@@ -694,5 +694,11 @@ module.exports = function registerInventoryRoutes({
     useInTreatment, findItem, describeLocation, label, publicMovement,
     levels: (itemId) => batches(itemId),
   };
-  return { mainStore, firstDueDates, vehicleKit, prfSupplies };
+  return {
+    mainStore, firstDueDates, vehicleKit, prfSupplies,
+    // The stores scanning page (routes-stores.js) books the same ledger
+    // rows through these, so the rules above (never below zero, batches
+    // used first-expiry-first, a batch number keeps one expiry) hold there too.
+    stock: { findItem, findAsset, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person },
+  };
 };

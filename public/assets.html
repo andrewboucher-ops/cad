@@ -229,7 +229,7 @@ const ACTIONS = {
     }));
   },
   history(a) {
-    const LABEL = { CHECKED_OUT: 'Checked out', RETURNED: 'Returned', INSPECTED: 'Inspected', FAILED_INSPECTION: 'Failed inspection', PAT_PASSED: 'PAT passed', PAT_FAILED: 'PAT failed', HIRED_OUT: 'Hired out', HIRE_RETURNED: 'Back from hire', SENT_FOR_REPAIR: 'Sent for repair', REPORTED_LOST: 'Reported lost', FOUND: 'Found', BACK_IN_STORE: 'Back in store', RETIRED: 'Retired' };
+    const LABEL = { CHECKED_OUT: 'Checked out', RETURNED: 'Returned', INSPECTED: 'Inspected', FAILED_INSPECTION: 'Failed inspection', PAT_PASSED: 'PAT passed', PAT_FAILED: 'PAT failed', HIRED_OUT: 'Hired out', HIRE_RETURNED: 'Back from hire', SENT_FOR_REPAIR: 'Sent for repair', REPORTED_LOST: 'Reported lost', FOUND: 'Found', BACK_IN_STORE: 'Back in store', MOVED: 'Moved', RETIRED: 'Retired' };
     modal(`History — ${name(a)}`, `<dl class="k-form" style="margin:0 0 10px">
         <div><label>Purchased</label>${esc(date(a.purchase_date))}${a.purchase_cost != null ? ` · ${money(a.purchase_cost)}` : ''}${a.supplier ? ` · ${esc(a.supplier)}` : ''}</div>
         <div><label>Warranty</label>${a.warranty_expires_at ? `until ${esc(date(a.warranty_expires_at))}` : '—'}</div>

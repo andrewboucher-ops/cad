@@ -59,6 +59,10 @@ const SECTIONS = [
   // Stock & assets
   // Assets, stock and rentals are admin-only; signing kit in and out to
   // staff is the control desk's job.
+  // Stores: the store room's scan-two-codes page. The control roles may be
+  // given it; only admins have it until then. Its routes check this list
+  // themselves (routes-stores.js), so hiding it really takes it away.
+  { key: 'stores', label: 'Stores', group: 'Stock & assets', icon: 'scan', desktop: '/stores.html', mobile: '/stores.html', allowed: CONTROL, default: ['SYSTEM_ADMIN'] },
   { key: 'signout', label: 'Sign in / out', group: 'Stock & assets', icon: 'scan', desktop: '/signout.html', mobile: '/signout.html', allowed: CONTROL, default: CONTROL },
   { key: 'rentals', label: 'Rentals', group: 'Stock & assets', icon: 'rental', desktop: '/rentals.html', mobile: '/rentals.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
   { key: 'assets', label: 'Assets', group: 'Stock & assets', icon: 'asset', desktop: '/assets.html', mobile: '/assets.html', allowed: ['SYSTEM_ADMIN'], default: ['SYSTEM_ADMIN'] },
