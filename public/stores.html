@@ -207,7 +207,9 @@ const manualInput = el('#search');
 const manual = { focus: () => manualInput.focus() };
 let buf = '', lastKey = 0, snapEl = null, snapVal = null;
 document.addEventListener('keydown', (e) => {
-  const now = performance.now();
+  // When the key was pressed, not when this handler got to run: a busy
+  // page must not split one fast scan into two slow bursts.
+  const now = e.timeStamp || performance.now();
   const gap = now - lastKey;
   if (e.key === 'Enter') {
     const code = buf; const fast = gap < 80 && code.length >= 4;
@@ -282,8 +284,11 @@ async function pickHit(h) {
   try { const r = await api('GET', `/api/stores/resolve?kind=${h.kind}&id=${h.id}`); manualInput.value = ''; drawResults(); use(r); }
   catch (e) { message(e.message, true); }
 }
-manualInput.addEventListener('input', drawResults);
+let searchT = null;
+manualInput.addEventListener('input', () => { clearTimeout(searchT); searchT = setTimeout(drawResults, 150); });
 manualInput.addEventListener('keydown', (e) => {
+  // Results still waiting to be drawn are drawn now, so keys act on what was typed.
+  if (searchT && ['ArrowDown', 'ArrowUp', 'Enter'].includes(e.key)) { clearTimeout(searchT); searchT = null; drawResults(); }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault(); if (!hits.length) return;
     selHit = (selHit + (e.key === 'ArrowDown' ? 1 : hits.length - 1)) % hits.length;
@@ -380,8 +385,8 @@ function detail(r) {
   const l = r.location, recv = r.kind === 'receive';
   const c = l.contents || [], bad = c.filter((x) => x.expired).length, warn = c.filter((x) => x.expiring).length;
   return `<div class="who"><div class="badge">${icon(recv ? 'receive' : 'location')}</div><div class="t"><div class="what">${esc(l.name)}</div><div class="sub">${recv ? 'Goods in — deliveries are booked in here' : esc([words(l.kind), l.in_vehicle && 'in ' + l.in_vehicle, l.site_name].filter(Boolean).join(' · '))}</div></div></div>
-    <div class="facts"><span class="fact">${plural(c.length, 'stock line')}</span>${(l.assets || []).length ? `<span class="fact">${plural(l.assets.length, 'asset')}</span>` : ''}
-      ${bad ? `<span class="fact bad">${bad} expired</span>` : ''}${warn ? `<span class="fact warn">${warn} expiring in 30 days</span>` : ''}</div>
+    ${recv ? '' : `<div class="facts"><span class="fact">${plural(c.length, 'stock line')}</span>${(l.assets || []).length ? `<span class="fact">${plural(l.assets.length, 'asset')}</span>` : ''}
+      ${bad ? `<span class="fact bad">${bad} expired</span>` : ''}${warn ? `<span class="fact warn">${warn} expiring in 30 days</span>` : ''}</div>`}
     ${!recv && c.length ? `<div class="lv">${c.slice(0, 4).map((x) => `<div class="r" style="grid-template-columns:minmax(0,1fr) auto 34px"><span class="nm">${esc(x.item)}</span><span class="more" style="${x.expired ? 'color:var(--emergency)' : x.expiring ? 'color:var(--busy)' : ''}">${x.next_expiry ? esc(date(x.next_expiry)) : ''}</span><span class="q">${x.qty}</span></div>`).join('')}
       ${c.length > 4 ? `<div class="more">+ ${plural(c.length - 4, 'more line')}</div>` : ''}</div>` : ''}`;
 }
