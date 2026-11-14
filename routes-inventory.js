@@ -197,7 +197,7 @@ module.exports = function registerInventoryRoutes({
     if (/^(LOC|GIN|ITM)-\d+$/i.test(code)) return 'a stores label';
     return null;
   }
-  function linkBatchCode(item, raw, batch_no, expiry_date, user, { taken = codeTaken } = {}) {
+  function linkBatchCode(item, raw, batch_no, expiry_date, user, { taken = codeTaken, checkOnly = false } = {}) {
     const code = String(raw || '').replace(/[\r\n\t]/g, '').trim().slice(0, 200);
     if (!code) return null;
     if (!batch_no && !expiry_date) throw httpError(400, 'a pack barcode needs the batch number or expiry date it belongs to');
@@ -211,11 +211,21 @@ module.exports = function registerInventoryRoutes({
     }
     const t = taken(code);
     if (t) throw httpError(409, `that barcode is already ${t}`);
+    if (checkOnly) return null;
     const c = { code, item_id: item.id, batch_no: batch_no || null, expiry_date: expiry_date || null, created_at: new Date().toISOString(), created_by: user.display_name };
     db.stock_batch_codes.push(c);
     logEvent('stock.batch_code', `PACK BARCODE ${code} LINKED TO ${label(item)}${batch_no ? ` BATCH ${batch_no}` : ''}${expiry_date ? ` EXP ${expiry_date}` : ''} BY ${user.username}`, { asset_id: item.id });
     return c;
   }
+  /** pack_codes: [..] and/or pack_code (one, or several separated by
+   * commas / new lines), de-duplicated. */
+  const packCodes = (body) => {
+    const list = [].concat(Array.isArray(body.pack_codes) ? body.pack_codes : [], body.pack_code ? String(body.pack_code).split(/[\n,]+/) : []);
+    const seen = new Set(), out = [];
+    for (const raw of list) { const c = String(raw || '').replace(/[\r\n\t]/g, '').trim(); if (c && !seen.has(c.toLowerCase())) { seen.add(c.toLowerCase()); out.push(c); } }
+    if (out.length > 20) throw httpError(400, 'at most 20 pack barcodes at once');
+    return out;
+  };
   const findBatchCode = (code) => db.stock_batch_codes.find((c) => c.code.toLowerCase() === String(code || '').trim().toLowerCase()) || null;
 
   /* ================================================================== *
@@ -436,8 +446,12 @@ module.exports = function registerInventoryRoutes({
     const known = batch && db.stock_movements.find((m) => m.asset_id === item.id && m.batch_no === batch && m.expiry_date);
     if (known && expiry && known.expiry_date !== expiry) throw httpError(409, `batch ${batch} is already on record expiring ${known.expiry_date}`);
     const finalExpiry = expiry || (known ? known.expiry_date : '');
-    if (body.pack_code) linkBatchCode(item, body.pack_code, batch, finalExpiry, user); // checked before anything is booked
+    // One or more pack barcodes (outer box, inner pack…): all checked
+    // before anything is booked or saved.
+    const packs = packCodes(body);
+    for (const c of packs) linkBatchCode(item, c, batch, finalExpiry, user, { checkOnly: true });
     const [m] = addStock(item, n, 'RESTOCK', { location, user, note: body.note, batch_no: batch, expiry_date: finalExpiry, supplier: String(body.supplier || item.supplier || '').slice(0, 120), reference: String(body.reference || '').slice(0, 80), unit_cost: unitCost });
+    for (const c of packs) linkBatchCode(item, c, batch, finalExpiry, user);
     if (unitCost != null) item.unit_cost = unitCost;
     logEvent('stock.received', `RECEIVED ${n} × ${label(item)}${batch ? ` BATCH ${batch}` : ''} INTO ${location.name}`, { asset_id: item.id, stock_movement_id: m.id });
     flushNow();
@@ -740,6 +754,6 @@ module.exports = function registerInventoryRoutes({
     // The stores scanning page (routes-stores.js) books the same ledger
     // rows through these, so the rules above (never below zero, batches
     // used first-expiry-first, a batch number keeps one expiry) hold there too.
-    stock: { findItem, findAsset, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person, linkBatchCode, findBatchCode },
+    stock: { findItem, findAsset, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person, linkBatchCode, findBatchCode, packCodes },
   };
 };

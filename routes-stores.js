@@ -102,7 +102,7 @@ const gtinKey = (code) => (/^\d{8,14}$/.test(code) ? code.padStart(14, '0') : nu
 module.exports = function registerStores({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, sections, stock, publicAsset, checkoutAsset, returnAsset, flushNow = () => {},
 }) {
-  const { findItem, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person, linkBatchCode, findBatchCode } = stock;
+  const { findItem, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person, linkBatchCode, findBatchCode, packCodes } = stock;
 
   const guard = (user) => {
     if (!sections.canSee('stores', user.role)) throw httpError(403, 'the Stores page is not turned on for your role (Admin → Menu & sections)');
@@ -202,7 +202,16 @@ module.exports = function registerStores({
     };
   }
 
-  R('GET', '/api/stores/resolve', ({ query, user }) => resolve(query.get('code'), user));
+  /** By code (a scan or typed code), or by kind + id (picked from a search). */
+  function byPick(kind, id, user) {
+    const n = Number(id);
+    if (kind === 'item') { const a = db.assets.find((x) => x.id === n && x.is_stock_tracked); if (a) return itemView(a, user, null, itemCode(a)); }
+    if (kind === 'asset') { const a = db.assets.find((x) => x.id === n && !x.is_stock_tracked); if (a) return assetView(a, a.tag || `asset #${a.id}`); }
+    if (kind === 'location' || kind === 'receive') { const l = activeLocation(n); if (l) return { kind, code: kind === 'receive' ? ginCode(l) : locCode(l), location: describeLocation(l) }; }
+    if (kind === 'person') { const p = db.personnel.find((x) => x.id === n); if (p) return personView(p, p.employee_no || p.name); }
+    throw httpError(404, 'not found');
+  }
+  R('GET', '/api/stores/resolve', ({ query, user }) => (query.get('kind') ? byPick(query.get('kind'), query.get('id'), user) : resolve(query.get('code'), user)));
 
   /* ---------------- the actions ---------------- */
   const itemFor = (body, user) => findItem(body.item_id, user);
@@ -235,21 +244,21 @@ module.exports = function registerStores({
     const finalExpiry = expiry || (known ? known.expiry_date : '');
     // The pack's own barcode for this batch, if one was scanned in. A GS1
     // code needs no saving: it carries its batch and expiry itself.
-    let packCode = null;
-    if (body.pack_code && !parseGs1(body.pack_code)) {
-      packCode = linkBatchCode(item, clean(body.pack_code), batch, finalExpiry, user, { taken: (c) => {
-        const r = resolve(c, user);
-        if (r.kind === 'unknown') return null;
-        return r.kind === 'item' ? `the product barcode of ${r.item.label} — it is the same on every batch, so it can't name one` : r.kind === 'asset' ? `asset ${r.asset.tag || r.asset.description}` : r.kind === 'person' ? 'a staff ID card' : `location ${r.location.name}`;
-      } });
-    }
+    const taken = (c) => {
+      const r = resolve(c, user);
+      if (r.kind === 'unknown') return null;
+      return r.kind === 'item' ? `the product barcode of ${r.item.label} — it is the same on every batch, so it can't name one` : r.kind === 'asset' ? `asset ${r.asset.tag || r.asset.description}` : r.kind === 'person' ? 'a staff ID card' : `location ${r.location.name}`;
+    };
+    const packs = packCodes(body).map(clean).filter((c) => c && !parseGs1(c));
+    for (const c of packs) linkBatchCode(item, c, batch, finalExpiry, user, { taken, checkOnly: true });
+    const linked = packs.map((c) => linkBatchCode(item, c, batch, finalExpiry, user, { taken }));
     const [m] = addStock(item, n, 'RESTOCK', {
       location, user, note: note(body), batch_no: batch, expiry_date: finalExpiry,
       supplier: String(body.supplier || item.supplier || '').slice(0, 120), reference: String(body.reference || '').slice(0, 80), unit_cost: null, via: VIA,
     });
     logEvent('stock.received', `RECEIVED ${n} × ${label(item)}${batch ? ` BATCH ${batch}` : ''}${m.expiry_date ? ` EXP ${m.expiry_date}` : ''} INTO ${location.name} (STORES SCAN BY ${user.username})`, { asset_id: item.id, stock_movement_id: m.id });
     flushNow();
-    return { __status: 201, __body: { done: `Received ${unitText(item, n)} of ${label(item)} into ${location.name}${packCode ? ' — pack barcode saved for this batch' : ''}`, movements: [publicMovement(m)] } };
+    return { __status: 201, __body: { done: `Received ${unitText(item, n)} of ${label(item)} into ${location.name}${linked.length ? ` — ${linked.length === 1 ? 'pack barcode' : `${linked.length} pack barcodes`} saved for this batch` : ''}`, movements: [publicMovement(m)] } };
   });
 
   R('POST', '/api/stores/move', ({ body, user }) => {
@@ -350,6 +359,7 @@ module.exports = function registerStores({
       .map((a) => ({ id: a.id, tag: a.tag, description: a.description, barcodes: codesOf(a) })).sort((x, y) => String(x.tag || x.description).localeCompare(String(y.tag || y.description))),
     locations: db.stock_locations.filter((l) => l.active !== false).map((l) => ({ ...describeLocation(l), code: locCode(l), goods_in_code: ginCode(l), barcodes: codesOf(l) }))
       .sort((x, y) => Number(Boolean(y.is_main)) - Number(Boolean(x.is_main)) || x.name.localeCompare(y.name)),
+    people: db.personnel.filter((p) => (p.employment_status || 'ACTIVE') !== 'TERMINATED').map((p) => ({ id: p.id, name: p.name, employee_no: p.employee_no || null })).sort((x, y) => x.name.localeCompare(y.name)),
     can_link: user.role === 'SYSTEM_ADMIN',
   }));
 

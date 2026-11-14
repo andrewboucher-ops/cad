@@ -46,6 +46,14 @@
   .feed .via { font-size: 10px; font-weight: 700; color: var(--accent); margin-left: 4px; }
   .levels { font-size: 13px; color: var(--ink-dim); margin-top: 6px; }
   .mono { font-family: var(--mono); }
+  .results { display: grid; gap: 4px; margin-top: 8px; }
+  .res { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); text-align: left; font: inherit; cursor: pointer; width: 100%; }
+  .res:hover, .res.sel { border-color: var(--accent); background: var(--panel-2); }
+  .res .k { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); width: 74px; flex: none; }
+  .res .sub { color: var(--ink-dim); font-size: 12px; margin-left: auto; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .chip-x { display: inline-flex; gap: 6px; align-items: center; font-family: var(--mono); font-size: 12.5px; padding: 3px 4px 3px 10px; border-radius: 20px; background: var(--panel-2); border: 1px solid var(--line); }
+  .chip-x button { border: 0; background: none; color: var(--ink-dim); cursor: pointer; font-size: 14px; padding: 0 6px; }
   .scanner-ok { color: var(--available); font-weight: 600; }
 </style>
 </head>
@@ -63,8 +71,10 @@
       <div class="slot" id="slot2"></div>
     </div>
     <div id="panel"></div>
-    <div class="card"><h3>Type or camera</h3><div id="manual"></div>
-      <p class="dim" style="font-size:12.5px;margin:10px 0 0">A USB scanner works anywhere on this page — no need to click in the box. <strong>Esc</strong> starts again.</p></div>
+    <div class="card"><h3>No barcode? Search</h3>
+      <input id="search" placeholder="Search item, location, asset or person — or type a code and press Enter" autocomplete="off" style="width:100%;font-size:16px">
+      <div id="results" class="results"></div>
+      <p class="dim" style="font-size:12.5px;margin:10px 0 0">The scanner works anywhere on this page — no need to click in the box. <strong>Esc</strong> starts again.</p></div>
   </div>
   <div class="card"><h3>Recent activity</h3><ul class="feed" id="feed"><li class="dim">Loading…</li></ul></div>
 </div>
@@ -94,10 +104,11 @@ let pendingPack = null;
  * with Enter. Keys arriving under 50 ms apart are a scan wherever the
  * focus is: the typed characters are taken back out of whatever field had
  * focus (its value is restored) and the code is handled here. Ctrl+]
- * is the GS separator inside GS1 pack codes. The manual box below takes a
- * typed code with Enter, and has the camera button. */
-const manual = KIT.scanner(el('#manual'), (code) => handle(code), { placeholder: 'Type a code and press Enter' });
-const manualInput = el('#manual [data-scan-in]');
+ * is the GS separator inside GS1 pack codes. The search box below finds
+ * an item, location, asset or person by name when there is nothing to
+ * scan, and takes a typed code with Enter. */
+const manualInput = el('#search');
+const manual = { focus: () => manualInput.focus() };
 let buf = '', lastKey = 0, snapEl = null, snapVal = null;
 document.addEventListener('keydown', (e) => {
   const now = performance.now();
@@ -109,8 +120,8 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault(); e.stopPropagation();
     // A box that asks for a barcode (the pack barcode on Receive) takes the
     // scan as its value instead of it starting a new pair.
-    if (snapEl && snapEl.dataset && 'capture' in snapEl.dataset) { snapEl.value = code; snapEl.dispatchEvent(new Event('input')); return; }
-    if (document.activeElement === manualInput) { manualInput.value = ''; }
+    if (snapEl && snapEl.dataset && 'capture' in snapEl.dataset) { snapEl.value = code; snapEl.dispatchEvent(new CustomEvent('scanned', { detail: code })); return; }
+    if (document.activeElement === manualInput) { manualInput.value = ''; drawResults(); }
     else if (snapEl && snapVal != null) { snapEl.value = snapVal; }
     handle(code);
     return;
@@ -132,6 +143,10 @@ async function handle(raw) {
   try { r = await api('GET', `/api/stores/resolve?code=${encodeURIComponent(code)}`); }
   catch (e) { return message(e.message, true); }
   if (navigator.vibrate) navigator.vibrate(40);
+  use(r);
+}
+/** Put a resolved code (scanned, typed or picked from the search) in its slot. */
+function use(r) {
   if (r.kind === 'person') el('#scanState').innerHTML = '<span class="scanner-ok">Read</span> staff ID card';
   if (r.kind === 'unknown') return unknown(r);
   if (THINGS.includes(r.kind)) {
@@ -142,6 +157,48 @@ async function handle(raw) {
   }
   render();
 }
+
+/* ---------------- search: the backup when there is no barcode ---------------- */
+let hits = [], selHit = 0;
+function searchHits(q) {
+  q = q.trim().toLowerCase();
+  if (q.length < 2 || !catalogue) return [];
+  const has = (...xs) => xs.some((x) => x && String(x).toLowerCase().includes(q));
+  const out = [];
+  for (const i of catalogue.items) if (has(i.label, i.code)) out.push({ kind: 'item', id: i.id, k: 'Stock', name: i.label, sub: i.code });
+  for (const l of catalogue.locations) if (has(l.name, l.code)) {
+    out.push({ kind: 'location', id: l.id, k: 'Location', name: l.name, sub: l.code });
+    if (l.kind === 'STORE' || l.is_main) out.push({ kind: 'receive', id: l.id, k: 'Goods in', name: l.name, sub: 'receive a delivery' });
+  }
+  for (const a of catalogue.assets) if (has(a.tag, a.description)) out.push({ kind: 'asset', id: a.id, k: 'Asset', name: `${a.tag ? a.tag + ' — ' : ''}${a.description}`, sub: '' });
+  for (const p of catalogue.people || []) if (has(p.name, p.employee_no)) out.push({ kind: 'person', id: p.id, k: 'Person', name: p.name, sub: p.employee_no || '' });
+  // Names starting with the text first.
+  return out.sort((x, y) => Number(!x.name.toLowerCase().startsWith(q)) - Number(!y.name.toLowerCase().startsWith(q))).slice(0, 12);
+}
+function drawResults() {
+  hits = searchHits(manualInput.value); selHit = 0;
+  el('#results').innerHTML = hits.map((h, i) => `<button type="button" class="res ${i === selHit ? 'sel' : ''}" data-h="${i}"><span class="k">${esc(h.k)}</span><span>${esc(h.name)}</span><span class="sub">${esc(h.sub)}</span></button>`).join('')
+    || (manualInput.value.trim().length >= 2 ? '<p class="dim" style="margin:4px 0 0;font-size:13px">Nothing by that name — press Enter to look it up as a code.</p>' : '');
+  el('#results').querySelectorAll('[data-h]').forEach((b) => (b.onclick = () => pickHit(hits[Number(b.dataset.h)])));
+}
+async function pickHit(h) {
+  if (!h || busy) return;
+  try { const r = await api('GET', `/api/stores/resolve?kind=${h.kind}&id=${h.id}`); manualInput.value = ''; drawResults(); use(r); }
+  catch (e) { message(e.message, true); }
+}
+manualInput.addEventListener('input', drawResults);
+manualInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault(); if (!hits.length) return;
+    selHit = (selHit + (e.key === 'ArrowDown' ? 1 : hits.length - 1)) % hits.length;
+    el('#results').querySelectorAll('.res').forEach((b, i) => b.classList.toggle('sel', i === selHit));
+  } else if (e.key === 'Enter') {
+    // Typed slowly (a scan is caught above): a match is picked, anything else is looked up as a code.
+    e.preventDefault();
+    if (hits.length) pickHit(hits[selHit]);
+    else { const c = manualInput.value.trim(); manualInput.value = ''; drawResults(); handle(c); }
+  }
+});
 
 function reset() { thing = null; target = null; onGo = null; pendingPack = null; render(); manual.focus(); }
 
@@ -214,8 +271,9 @@ function receiveForm(t, g) {
       <div><label>Supplier</label><input id="fSup" autocomplete="off"></div>
       <div><label>Delivery note / PO</label><input id="fRef" autocomplete="off"></div>
       <div><label>Note</label><input id="fNote" autocomplete="off"></div>
-      ${p.gtin || p.pack_code ? '' : `<div class="full"><label>Pack barcode for this batch (optional)</label><input id="fPack" data-capture value="${esc(pendingPack || '')}" placeholder="Click here and scan the barcode on the pack" autocomplete="off">
-        <div class="dim" style="font-size:12px;margin-top:4px">Saved with this batch and expiry: scanning that barcode later picks this item <em>and</em> this batch.</div></div>`}
+      ${p.gtin || p.pack_code ? '' : `<div class="full"><label>Pack barcodes for this batch (optional)</label><input id="fPack" data-capture placeholder="Click here and scan — scan as many as the pack has (box, inner pack…)" autocomplete="off">
+        <div class="chips" id="fPacks"></div>
+        <div class="dim" style="font-size:12px;margin-top:4px">Saved with this batch and expiry: scanning any of them later picks this item <em>and</em> this batch.</div></div>`}
     </div>
     <label class="tick"><input type="checkbox" id="fNoBatch"> This item has no batch number or expiry date</label>
     ${p.pack_code ? '<p class="dim" style="font-size:12.5px">That pack barcode is already saved for this batch — batch and expiry filled in.</p>' : p.batch || p.expiry ? '<p class="dim" style="font-size:12.5px">Batch and expiry read from the pack — check them against the box.</p>' : ''}
@@ -223,8 +281,20 @@ function receiveForm(t, g) {
   wireGo(() => api('POST', '/api/stores/receive', {
     item_id: t.item.id, location_id: g.location.id, quantity: num('#fQty'), batch_no: el('#fBatch').value.trim(), expiry_date: el('#fExp').value || null,
     no_batch: el('#fNoBatch').checked, supplier: el('#fSup').value.trim(), reference: el('#fRef').value.trim(), note: el('#fNote').value.trim(),
-    pack_code: el('#fPack') ? el('#fPack').value.trim() : '',
+    pack_codes: el('#fPack') ? [...packs, el('#fPack').value.trim()].filter(Boolean) : [],
   }), '#fQty');
+  // The pack barcode list: each scan (or typed code + Enter) adds one.
+  const packs = pendingPack ? [pendingPack] : [];
+  const drawPacks = () => {
+    el('#fPacks').innerHTML = packs.map((c, i) => `<span class="chip-x">${esc(c)}<button type="button" data-rm="${i}" title="Remove">×</button></span>`).join('');
+    el('#fPacks').querySelectorAll('[data-rm]').forEach((b) => (b.onclick = () => { packs.splice(Number(b.dataset.rm), 1); drawPacks(); }));
+  };
+  const addPack = (c) => { c = String(c || '').trim(); if (c && !packs.some((x) => x.toLowerCase() === c.toLowerCase())) packs.push(c); el('#fPack').value = ''; drawPacks(); };
+  if (el('#fPack')) {
+    el('#fPack').addEventListener('scanned', (e) => addPack(e.detail));
+    el('#fPack').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); addPack(el('#fPack').value); } });
+    drawPacks();
+  }
 }
 
 /** Move to a location, or issue to a person: both take stock out of one
@@ -366,7 +436,7 @@ function wireGo(action, focusSel) {
   const go = el('#fGo'); if (!go) return;
   onGo = () => run(action);
   go.onclick = onGo;
-  el('#panel').querySelectorAll('input:not([type=checkbox]):not([type=radio])').forEach((i) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); onGo(); } }));
+  el('#panel').querySelectorAll('input:not([type=checkbox]):not([type=radio]):not([data-capture])').forEach((i) => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); onGo(); } }));
   const f = focusSel ? el(focusSel) : go;
   if (f) { f.focus(); if (f.select) f.select(); }
 }

@@ -156,3 +156,25 @@ test('a pack barcode scanned in on receipt names that batch from then on', async
   assert.equal((await call('POST', `/api/stock/${dressing.id}/receive`, { quantity: 2, location_id: main.id, batch_no: 'ST2', pack_code: 'STOCKPAGE-ST1' }, adminT)).status, 409);
   assert.equal(app.db.stock_movements.length, before, 'nothing booked when the code is refused');
 });
+
+test('several pack barcodes on one delivery, all checked first; search picks by id', async () => {
+  let r = await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 2, batch_no: 'MB1', expiry_date: '2029-06-30', pack_codes: ['BOX-MB1', 'INNER-MB1', 'box-mb1'] }, adminT);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.match(r.body.done, /2 pack barcodes saved/);
+  assert.equal((await scan('INNER-MB1')).body.gs1.batch, 'MB1');
+  assert.equal((await scan('BOX-MB1')).body.gs1.batch, 'MB1');
+  const before = app.db.stock_batch_codes.length;
+  r = await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 1, batch_no: 'MB2', pack_codes: ['FRESH-MB2', 'RAD-07'] }, adminT);
+  assert.equal(r.status, 409, 'one bad code refuses the lot');
+  assert.equal(app.db.stock_batch_codes.length, before, 'and none of them are saved');
+  r = await call('POST', `/api/stock/${dressing.id}/receive`, { quantity: 1, location_id: main.id, batch_no: 'MB3', pack_code: 'SP-A, SP-B' }, adminT);
+  assert.equal(r.status, 201);
+  assert.equal((await scan('SP-B')).body.gs1.batch, 'MB3');
+
+  r = await call('GET', `/api/stores/resolve?kind=location&id=${bag.id}`, undefined, adminT);
+  assert.equal(r.body.location.id, bag.id);
+  r = await call('GET', `/api/stores/resolve?kind=person&id=${dan.id}`, undefined, adminT);
+  assert.equal(r.body.person.id, dan.id);
+  const cat = (await call('GET', '/api/stores/catalogue', undefined, adminT)).body;
+  assert.ok(cat.people.some((p) => p.id === dan.id), 'people are searchable');
+});
