@@ -687,5 +687,11 @@ module.exports = function registerInventoryRoutes({
     if (a.check_interval_days && !a.next_check_due_at) a.next_check_due_at = addDays(a.check_interval_days);
   }
 
-  return { mainStore, firstDueDates, vehicleKit };
+  return {
+    mainStore, firstDueDates, vehicleKit,
+    // The stores scanning page (routes-stores.js) books the same ledger
+    // rows through these, so the rules above (never below zero, batches
+    // used first-expiry-first, a batch number keeps one expiry) hold there too.
+    stock: { findItem, findAsset, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person },
+  };
 };
