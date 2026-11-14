@@ -133,6 +133,9 @@ prune_predeploy() {
       while read -r f; do rm -f "$BACKUP_DIR/$f"; done
   done
 }
+# Full, unencrypted copies of patient and staff data: root only.
+run chmod 600 "$APP_BACKUP"
+[ -f "$DB_BACKUP" ] && run chmod 600 "$DB_BACKUP"
 run prune_predeploy
 echo "   code     → $APP_BACKUP"
 

@@ -39,19 +39,9 @@ const CCCSForms = (() => {
   const SUBJECT_LABEL = { JOB: 'Job', SITE_VISIT: 'Patrol visit', SITE: 'Site', PERSONNEL: 'Person', VEHICLE: 'Vehicle' };
   const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
   const SEVERITY_PRI = { LOW: 'ROUTINE', MEDIUM: 'GREEN', HIGH: 'AMBER', CRITICAL: 'RED' };
-  // Labels only, for the "Create full PRF" deep link below — mirrors
-  // server.js's complaint-list.js codes. Not the real MPDS/AMPDS
-  // protocol (licensed IP) — see that file's own note.
-  const CHIEF_COMPLAINT_LABELS = {
-    cardiac: 'Chest pain / cardiac symptoms', breathing: 'Breathing difficulty / shortness of breath', unresponsive: 'Unconscious / unresponsive',
-    bleeding_severe: 'Severe bleeding / haemorrhage', anaphylaxis: 'Anaphylaxis / severe allergic reaction', seizure: 'Seizure / fitting',
-    stroke: 'Stroke symptoms (face / arm / speech)', choking: 'Choking', major_trauma: 'Major trauma / fall from height',
-    burns_major: 'Burns — significant', fracture: 'Fracture / suspected broken bone', head_injury: 'Head injury',
-    abdo_pain: 'Abdominal pain — severe', diabetic: 'Diabetic emergency', intoxication: 'Alcohol / drug intoxication',
-    mental_health: 'Mental health crisis / self-harm', allergic_mild: 'Allergic reaction — mild', bleeding_minor: 'Minor bleeding / laceration',
-    sprain_strain: 'Sprain / strain', burns_minor: 'Burns — minor', nausea_vomiting: 'Nausea / vomiting',
-    headache: 'Headache — non-severe', faint_dizzy: 'Fainting / dizziness — recovered', other: 'Other / unspecified',
-  };
+  // Roles that write PRFs (prf.js) — dispatchers review reports but don't.
+  const PRF_ROLES = ['FIELD_USER', 'SUPERVISOR', 'SYSTEM_ADMIN'];
+
 
   /** Best-effort device location, never blocking a submission on it: resolves
    * null on denial, timeout, or a browser with no geolocation at all. Short
@@ -351,7 +341,7 @@ const CCCSForms = (() => {
           <span class="mono" style="font-weight:700">${esc(sub.reference)}</span>
           <span>${esc(sub.definition_name)}</span>
           ${sub.visibility === 'RESTRICTED' ? '<span class="pri pri-RED">RESTRICTED</span>' : ''}
-          ${sub.definition_key === 'patient-care' ? '<button type="button" class="btn" style="padding:2px 10px;font-size:11px;margin-left:auto" data-ff-prf>Create full PRF</button>' : ''}
+          ${sub.definition_key === 'patient-care' && PRF_ROLES.includes((CCCS.getSession().user || {}).role) ? '<button type="button" class="btn" style="padding:2px 10px;font-size:11px;margin-left:auto" data-ff-prf>Create full PRF</button>' : ''}
           <button type="button" class="btn" style="padding:2px 10px;font-size:11px;${sub.definition_key === 'patient-care' ? '' : 'margin-left:auto'}" data-ff-pdf>PDF</button>
         </div>
         <p class="dim" style="margin:0;font-size:12.5px">${esc(SUBJECT_LABEL[sub.subject_type] || sub.subject_type)} ${esc(sub.subject_label)} · filed by ${esc(sub.submitted_by)} · ${esc(fmt(sub.submitted_at))} · form v${sub.definition_version}</p>
@@ -383,49 +373,16 @@ const CCCSForms = (() => {
       } catch (e) { alert(e.message); }
       pdfBtn.disabled = false; pdfBtn.textContent = was;
     };
-    // A full PRF is a separate system — a pure deep link, no CCCS-side
-    // record of the link itself (see the plan: the new system owns that
-    // linkage via its own source_ref, keyed on this report's reference,
-    // so re-pressing the button there opens the same PRF rather than
-    // starting a duplicate). Hidden entirely if an admin hasn't set the
-    // new system's URL yet, rather than erroring.
+    // A full PRF is started inside CCCS (prf.js) from this report: its
+    // answers, and the job's medical fields if it was filed against a job,
+    // come across. The PRF keeps this report's reference, so pressing the
+    // button again opens the same PRF rather than starting another.
     const prfBtn = host.querySelector('[data-ff-prf]');
     if (prfBtn) prfBtn.onclick = async () => {
       prfBtn.disabled = true; const was = prfBtn.textContent; prfBtn.textContent = '…';
       try {
-        const { base_url } = await fetch('/api/settings/prf-link', { headers: { authorization: `Bearer ${CCCS.getSession().token}` } }).then((r) => r.json());
-        if (!base_url) { alert('The full PRF system\'s address has not been set up yet — ask an admin to set it in Admin → Forms.'); return; }
-        const params = new URLSearchParams({
-          source_ref: sub.reference,
-          site: sub.subject_label || '',
-          time: sub.values.occurred_at || sub.submitted_at || '',
-          done_by: sub.submitted_by || '',
-        });
-        // Best-effort: this report may have been filed against a CCCS
-        // job — pull its description/caller and (if control flagged it
-        // medical and filled them in) patient name/DoB/complaint across
-        // too. Never the caller as a patient name — they're often the
-        // person who reported it, not the casualty; that goes in as
-        // "Reported by" context instead (see routes-prfs.js's POST
-        // /api/prfs on the PRF side, which keeps that distinction).
-        if (sub.subject_type === 'JOB') {
-          try {
-            const jobs = await api('GET', '/api/jobs');
-            const job = Array.isArray(jobs) ? jobs.find((j) => j.id === sub.subject_id) : null;
-            if (job) {
-              const notes = [job.description, job.notes].filter(Boolean).join('\n');
-              if (notes) params.set('notes', notes);
-              if (job.caller) params.set('reported_by', job.caller);
-              if (job.reference) params.set('cad_number', job.reference);
-              if (job.is_medical) {
-                if (job.patient_name) params.set('patient_name', job.patient_name);
-                if (job.patient_dob) params.set('patient_dob', job.patient_dob);
-                if (job.chief_complaint) params.set('chief_complaint', CHIEF_COMPLAINT_LABELS[job.chief_complaint] || job.chief_complaint);
-              }
-            }
-          } catch { /* best-effort — the PRF still opens fine without this */ }
-        }
-        window.open(`${base_url}/prf/new?${params}`, '_blank');
+        const r = await api('POST', '/api/prfs', { from_submission: sub.id });
+        location.href = `/prf.html?pcr=${encodeURIComponent(r.pcr)}`;
       } catch (e) { alert(e.message); }
       prfBtn.disabled = false; prfBtn.textContent = was;
     };
