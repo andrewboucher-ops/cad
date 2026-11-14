@@ -14,6 +14,7 @@
 #                         the Microsoft app CCCS already uses (deploy/offsite-copy.js;
 #                         BACKUP_ONEDRIVE_FOLDER, BACKUP_REMOTE_KEEP)
 #   BACKUP_RCLONE_REMOTE  or: an rclone remote, e.g. nas:cccs-backups
+#                         (copies older than BACKUP_REMOTE_KEEP_DAYS, 90, are removed; 0 keeps all)
 #   BACKUP_PING_URL       optional: a Healthchecks.io-style URL told about every
 #                         run (…/fail on failure), so a backup that stops
 #                         happening at all is noticed off this server too
@@ -43,6 +44,7 @@ DEST=$(cfg BACKUP_DIR /var/backups/cccs)
 KEEP=$(cfg BACKUP_KEEP 14)
 KEY_FILE=$(cfg BACKUP_KEY_FILE /etc/cccs/backup.key)
 REMOTE=$(cfg BACKUP_RCLONE_REMOTE "")
+REMOTE_KEEP_DAYS=$(cfg BACKUP_REMOTE_KEEP_DAYS 90)
 ONEDRIVE_USER=$(cfg BACKUP_ONEDRIVE_USER "")
 PING_URL=$(cfg BACKUP_PING_URL "")
 CCCS_LIB="${CCCS_LIB:-/usr/local/lib/cccs}"
@@ -133,6 +135,11 @@ elif [ -n "$REMOTE" ]; then
     exit 2
   elif rclone copy "$OUT" "$REMOTE"; then
     OFFSITE="rclone"; echo "Copied off this server to $REMOTE"
+    # Old copies hold records that may since have been disposed of at the end
+    # of their retention period, so they don't stay off-site for ever either.
+    if [ "$REMOTE_KEEP_DAYS" -gt 0 ] 2>/dev/null; then
+      rclone delete --min-age "${REMOTE_KEEP_DAYS}d" --include 'cccs-*.tar.gz*' "$REMOTE" && echo "Removed remote copies older than $REMOTE_KEEP_DAYS days"
+    fi
   else
     OFFSITE="failed"; OFFSITE_ERROR="rclone copy to $REMOTE failed"
     echo "WARNING: $OFFSITE_ERROR — NOT copied off this server." >&2

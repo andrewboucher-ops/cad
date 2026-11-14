@@ -287,8 +287,10 @@ module.exports = function registerMedicationRoutes({ route, httpError, CONTROL, 
     return { __status: 201, __body: rows };
   });
 
-  route('POST', '/api/medication/:id/administer', STAFF, ({ params, body, user }) => {
-    const m = findMed(params.id);
+  /** One administration to a patient: the CD register entry, with the
+   * same rules whichever front door it came through (this page, the PRF
+   * inside CCCS, or the separate PRF system's backend). */
+  function administer(m, body, user, extra = {}) {
     const n = qty(body.quantity), l = findLoc(body.location_id, 'location it came from');
     const patient = str(body.patient_name, 80), ref = str(body.patient_ref, 60), dose = str(body.dose_given, 60);
     if (m.controlled && !patient) throw httpError(400, "a controlled drug administration needs the patient's name");
@@ -296,9 +298,12 @@ module.exports = function registerMedicationRoutes({ route, httpError, CONTROL, 
     if (!dose) throw httpError(400, 'enter the dose given');
     const w = wit(m, body, user);
     const rows = record(m, take(m, l.id, n, { batch_no: body.batch_no, expiry_date: body.expiry_date }).map((r) => ({ ...r, type: 'ADMINISTERED' })), user,
-      { patient_name: patient, patient_ref: ref, dose_given: dose, dose_wasted: str(body.dose_wasted, 60), route: str(body.route, 30), authority: str(body.authority, 80), note: str(body.note, 300), ...w });
-    entryLog(m, 'ADMINISTERED', rows, user);
-    return { __status: 201, __body: rows };
+      { patient_name: patient, patient_ref: ref, dose_given: dose, dose_wasted: str(body.dose_wasted, 60), route: str(body.route, 30), authority: str(body.authority, 80), note: str(body.note, 300), ...extra, ...w });
+    entryLog(m, 'ADMINISTERED', rows, user, extra.source ? ` (VIA ${extra.source})` : '');
+    return rows;
+  }
+  route('POST', '/api/medication/:id/administer', STAFF, ({ params, body, user }) => {
+    return { __status: 201, __body: administer(findMed(params.id), body, user) };
   });
 
   /** The same administration, called by the separate PRF system's own
@@ -405,5 +410,7 @@ module.exports = function registerMedicationRoutes({ route, httpError, CONTROL, 
     return { __status: 201, __body: rows };
   });
 
-  return { FORMS, SCHEDULES };
+  // Used by prf.js so a medicine given on a PRF lands in this register.
+  const prfSupplies = { administer, findMed, label, levels: (medId) => batches(medId) };
+  return { FORMS, SCHEDULES, prfSupplies };
 };
