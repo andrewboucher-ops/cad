@@ -17,17 +17,45 @@ const READS_ALL = ["SUPERVISOR", "SYSTEM_ADMIN"].includes(me.role);
  * ------------------------------------------------------------------ */
 const choice = {
   callType: ["Medical", "Trauma", "Event Medical / First Aid", "Inter-hospital Transfer", "Standby", "Public Assist", "Other"],
+  // MPDS chief complaint protocols (the published protocol titles). The full
+  // determinant code from the ambulance service goes in mpdsCode, e.g. 10-D-01.
   mpds: [
-    "01 - Abdominal Pain",
+    "01 - Abdominal Pain / Problems",
+    "02 - Allergies (Reactions) / Envenomations (Stings, Bites)",
+    "03 - Animal Bites / Attacks",
+    "04 - Assault / Sexual Assault / Stun Gun",
+    "05 - Back Pain (Non-Traumatic or Non-Recent Trauma)",
     "06 - Breathing Problems",
-    "09 - Cardiac / Respiratory Arrest",
-    "10 - Chest Pain",
-    "12 - Convulsions / Fitting",
+    "07 - Burns (Scalds) / Explosion (Blast)",
+    "08 - Carbon Monoxide / Inhalation / HAZMAT / CBRN",
+    "09 - Cardiac or Respiratory Arrest / Death",
+    "10 - Chest Pain / Chest Discomfort (Non-Traumatic)",
+    "11 - Choking",
+    "12 - Convulsions / Seizures",
+    "13 - Diabetic Problems",
+    "14 - Drowning / Near Drowning / Diving / SCUBA Accident",
+    "15 - Electrocution / Lightning",
+    "16 - Eye Problems / Injuries",
     "17 - Falls",
-    "23 - Overdose / Poisoning",
-    "26 - Sick Person",
-    "29 - Traffic Incident",
-    "32 - Unknown Problem",
+    "18 - Headache",
+    "19 - Heart Problems / A.I.C.D.",
+    "20 - Heat / Cold Exposure",
+    "21 - Haemorrhage / Lacerations",
+    "22 - Inaccessible Incident / Other Entrapments (Non-Traffic)",
+    "23 - Overdose / Poisoning (Ingestion)",
+    "24 - Pregnancy / Childbirth / Miscarriage",
+    "25 - Psychiatric / Abnormal Behaviour / Suicide Attempt",
+    "26 - Sick Person (Specific Diagnosis)",
+    "27 - Stab / Gunshot / Penetrating Trauma",
+    "28 - Stroke (CVA) / Transient Ischaemic Attack (TIA)",
+    "29 - Traffic / Transportation Incidents",
+    "30 - Traumatic Injuries (Specific)",
+    "31 - Unconscious / Fainting (Near)",
+    "32 - Unknown Problem (Person Down)",
+    "33 - Transfer / Interfacility / Palliative Care",
+    "34 - Automatic Crash Notification",
+    "35 - Healthcare Professional Admission",
+    "36 - Pandemic / Epidemic / Outbreak",
   ],
   precautions: ["None", "Infection risk", "Violence / aggression", "Hazardous materials", "Crowd / public order", "Dog / animal", "Working at height"],
   locationType: ["Event venue", "Public place", "Street / road", "Licensed premises", "Workplace", "Home", "Sports ground", "Other"],
@@ -135,6 +163,8 @@ const SYMPTOMS = {
   Gastrointestinal: ["Nausea", "Vomiting", "Abdominal pain", "Diarrhoea"],
   Musculoskeletal: ["Limb pain", "Back pain", "Neck pain", "Reduced movement"],
 };
+// Options that stand alone: picking one clears the rest, and they have no "No ..." state.
+const EXCLUSIVE = ["None", "No known allergies", "Unknown", "Refused to say", "Nothing of note"];
 const EXAM_SYSTEMS = ["Head & face", "Neck", "Chest", "Abdomen", "Pelvis", "Back / spine", "Upper limbs", "Lower limbs", "Neurological", "Skin"];
 
 /* ------------------------------------------------------------------ *
@@ -152,7 +182,8 @@ const TABS = [
         fields: [
           ["event", "Event Number", "text"],
           ["callType", "Call Type", "pick"],
-          ["mpds", "MPDS Determinant", "pick"],
+          ["mpds", "MPDS Protocol", "pick"],
+          ["mpdsCode", "MPDS Determinant Code", "text", { hint: 1 }],
           ["patientNo", "Patient", "number", { cls: "narrow" }],
           ["patientOf", "Of", "number", { cls: "narrow" }],
           ["precautions", "Special Precautions", "multi", { cls: "full" }],
@@ -245,7 +276,7 @@ const TABS = [
           ["statement", "Patient's Own Words", "area", { cls: "full" }],
         ],
       },
-      { name: "Scene Findings", fields: [["sceneFindings", "Scene Findings", "multi", { cls: "full" }]] },
+      { name: "Scene Findings", fields: [["sceneFindings", "Scene Findings", "multi", { cls: "full", neg: 1 }]] },
     ],
   },
   {
@@ -268,7 +299,7 @@ const TABS = [
       {
         name: "Allergies & Meds",
         fields: [
-          ["allergies", "Allergies", "multi", { cls: "full" }],
+          ["allergies", "Allergies", "multi", { cls: "full", neg: 1 }],
           ["allergyNotes", "Allergy Details", "text", { cls: "full" }],
           ["medsStatus", "Medication Status", "pick"],
           ["meds", "Current Medications", "area", { cls: "full" }],
@@ -277,7 +308,7 @@ const TABS = [
       {
         name: "Past History",
         fields: [
-          ["pmh", "Past Medical History", "multi", { cls: "full" }],
+          ["pmh", "Past Medical History", "multi", { cls: "full", neg: 1 }],
           ["history", "History Details", "area", { cls: "full" }],
           ["social", "Social / Family", "area", { cls: "wide" }],
           ["alerts", "Alerts (e.g. DNACPR, care plan)", "text", { cls: "wide" }],
@@ -505,8 +536,15 @@ function field([key, label, type, o = {}]) {
   if (type === "pick")
     return `<div class="${c}">${lab}<div class="input-row"><input id="f-${key}" data-key="${key}" placeholder=" " value="${esc(v(key))}" readonly data-open-pick="${key}"><button type="button" data-pick="${key}" aria-label="Choose ${esc(label)}">▾</button></div></div>`;
   if (type === "multi") {
-    const sel = s[key] || [];
-    return `<div class="${c}">${lab}<div class="chips">${choice[key].map((x) => `<button type="button" class="chip ${sel.includes(x) ? "on" : ""}" data-multi="${key}" data-val="${esc(x)}">${esc(x)}</button>`).join("")}</div></div>`;
+    const sel = s[key] || [],
+      neg = o.neg ? s[key + "Neg"] || [] : [];
+    const tip = o.neg ? `<small class="aside">Tap once for present, twice for a pertinent negative (asked and absent), again to clear.</small>` : "";
+    return `<div class="${c}">${lab}<div class="chips">${choice[key]
+      .map((x) => {
+        const st = sel.includes(x) ? "on" : neg.includes(x) ? "neg" : "";
+        return `<button type="button" class="chip${o.neg && !EXCLUSIVE.includes(x) ? " tri" : ""} ${st}" data-multi="${key}" data-val="${esc(x)}"${o.neg ? " data-neg" : ""}>${st === "neg" ? "No " : ""}${esc(x)}</button>`;
+      })
+      .join("")}</div>${tip}</div>`;
   }
   if (type === "area") return `<div class="${c}">${lab}<textarea id="f-${key}" data-key="${key}" placeholder=" ">${esc(v(key))}</textarea></div>`;
   if (type === "datetime")
@@ -824,11 +862,17 @@ function bind() {
       (b.onclick = () => {
         const k = b.dataset.multi,
           val = b.dataset.val;
-        let a = (s[k] || []).slice();
-        const exclusive = ["None", "No known allergies", "Unknown", "Refused to say", "Nothing of note"];
-        if (a.includes(val)) a = a.filter((x) => x !== val);
-        else a = exclusive.includes(val) ? [val] : a.filter((x) => !exclusive.includes(x)).concat(val);
+        let a = (s[k] || []).slice(),
+          n = (s[k + "Neg"] || []).slice();
+        const tri = "neg" in b.dataset && !EXCLUSIVE.includes(val);
+        // Present -> pertinent negative -> clear, like the symptoms.
+        if (a.includes(val)) {
+          a = a.filter((x) => x !== val);
+          if (tri) n.push(val);
+        } else if (n.includes(val)) n = n.filter((x) => x !== val);
+        else a = EXCLUSIVE.includes(val) ? [val] : a.filter((x) => !EXCLUSIVE.includes(x)).concat(val);
         set(k, a);
+        if ("neg" in b.dataset) set(k + "Neg", n);
         render();
       }),
   );
@@ -1365,8 +1409,9 @@ let shown = null;
 function recordHtml(r) {
   const d = r.data || {};
   const val = (k) => {
-    const x = d[k];
-    return Array.isArray(x) ? x.join(", ") : readable(x);
+    const x = d[k],
+      neg = Array.isArray(d[k + "Neg"]) && d[k + "Neg"].length ? `${x && x.length ? "; " : ""}denies: ${d[k + "Neg"].join(", ")}` : "";
+    return Array.isArray(x) || neg ? (x || []).join(", ") + neg : readable(x);
   };
   const sections = TABS.slice(0, 8)
     .map((t) => {

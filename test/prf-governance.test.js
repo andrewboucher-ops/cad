@@ -103,3 +103,12 @@ test('the privacy notice details are public', async () => {
   assert.strictEqual(r.body.email, 'privacy@example.org');
   assert.deepStrictEqual(r.body.retention, { adult_years: 8, child_until_age: 25 });
 });
+
+test('pertinent negatives on lists and the MPDS code are kept on the record', async () => {
+  const pcr = await draft({ mpds: '10 - Chest Pain / Chest Discomfort (Non-Traumatic)', mpdsCode: '10-D-01', allergies: ['Latex'], allergiesNeg: ['Penicillin'], pmhNeg: ['Asthma', 'Diabetes'], sceneFindingsNeg: ['Weapon present'] });
+  const d = (await call('GET', `/api/prfs/${pcr}`, undefined, danT)).body.data;
+  assert.strictEqual(d.mpdsCode, '10-D-01');
+  assert.deepStrictEqual(d.allergiesNeg, ['Penicillin']);
+  assert.deepStrictEqual(d.pmhNeg, ['Asthma', 'Diabetes']);
+  assert.deepStrictEqual(d.sceneFindingsNeg, ['Weapon present']);
+});

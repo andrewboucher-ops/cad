@@ -802,11 +802,16 @@ button.now {
   border-color: var(--blue);
   color: #fff;
 }
+/* Pertinent negative: asked and absent. Reads "No X", so no strike-through. */
 .chip.neg {
-  background: #eef2f5;
+  background: #fdf0f0;
+  border-color: #b3261e;
   border-style: dashed;
-  color: #4d6170;
-  text-decoration: line-through;
+  color: #8c1d18;
+}
+.chip.neg::before {
+  content: "\2715\00a0";
+  font-weight: bold;
 }
 .sys {
   margin-bottom: 12px;

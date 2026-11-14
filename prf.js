@@ -84,7 +84,7 @@ const MAX_VITAL_SETS = 50;
 // can't become a place to stash arbitrary data.
 const FIELDS = [
   // Incident
-  'event', 'callReceived', 'ageApprox', 'callType', 'mpds', 'patientNo', 'patientOf', 'callsign', 'vehicle', 'crew',
+  'event', 'callReceived', 'ageApprox', 'callType', 'mpds', 'mpdsCode', 'patientNo', 'patientOf', 'callsign', 'vehicle', 'crew',
   'address', 'address2', 'roomLocation', 'municipality', 'incidentPostcode', 'locationType', 'sceneNotes',
   'destination', 'destinationType', 'destinationReason', 'responseMode', 'transportMode', 'transportPriority',
   'dispatch', 'enRoute', 'scene', 'contact', 'depart', 'arrive', 'transfer', 'available',
@@ -101,7 +101,8 @@ const FIELDS = [
   'impression', 'narrative', 'concerns', 'monitoring', 'unableToSign',
   'riddor', 'consentBy', 'mcaImpairment', 'mcaUnderstand', 'mcaRetain', 'mcaWeigh', 'mcaCommunicate', 'bestInterests',
 ];
-const LIST_FIELDS = ['precautions', 'sceneFindings', 'allergies', 'pmh'];
+// The *Neg lists are pertinent negatives: asked about and absent.
+const LIST_FIELDS = ['precautions', 'sceneFindings', 'sceneFindingsNeg', 'allergies', 'allergiesNeg', 'pmh', 'pmhNeg'];
 const VITAL_KEYS = ['time', 'hr', 'rr', 'sys', 'dia', 'spo2', 'o2', 'acvpu', 'gcs', 'temp', 'doneBy'];
 const TX_KEYS = ['time', 'kind', 'name', 'dose', 'route', 'doneBy', 'success', 'response', 'complications', 'error'];
 const ENTRY_ID = /^[A-Za-z0-9_-]{1,24}$/;
