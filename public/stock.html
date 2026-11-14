@@ -343,12 +343,16 @@ const ACTIONS = {
       <div><label>Supplier</label><input id="rSup" value="${esc((i && i.supplier) || '')}"></div>
       <div><label>Batch / lot number (optional)</label><input id="rBatch" autocomplete="off"></div>
       <div><label>Expiry date (optional)</label><input id="rExp" type="date"></div>
+      <div class="full"><label>Pack barcodes for this batch (optional)</label><input id="rPack" autocomplete="off" placeholder="Click here and scan — several are fine (box, inner pack…)">
+        <div class="dim" style="font-size:12px;margin-top:4px">Saved with this batch and expiry, so scanning it on the Stores page picks this batch.</div></div>
       <div class="full"><label>Delivery note / PO reference</label><input id="rRef"></div>
       <div class="full"><label>Note</label><input id="rNote"></div></div>${foot('Receive')}`, (root) => {
+      // Each scan ends with Enter: that starts the next code, so several can go in.
+      root.querySelector('#rPack').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); const x = e.target; if (x.value.trim() && !/,\s*$/.test(x.value)) x.value = x.value.trim() + ', '; } });
       root.querySelector('#rItem').onchange = () => { const x = data.items.find((y) => y.id === Number(v(root, '#rItem'))); if (x) { root.querySelector('#rCost').value = x.unit_cost ?? ''; root.querySelector('#rSup').value = x.supplier || ''; } };
       wire(root, async () => {
         if (!v(root, '#rItem')) throw new Error('choose an item');
-        await api('POST', `/api/stock/${v(root, '#rItem')}/receive`, { quantity: Number(v(root, '#rQty')), location_id: Number(v(root, '#rLoc')), unit_cost: numOrNull(v(root, '#rCost')), supplier: v(root, '#rSup'), reference: v(root, '#rRef'), note: v(root, '#rNote'), batch_no: v(root, '#rBatch'), expiry_date: v(root, '#rExp') || null });
+        await api('POST', `/api/stock/${v(root, '#rItem')}/receive`, { quantity: Number(v(root, '#rQty')), location_id: Number(v(root, '#rLoc')), unit_cost: numOrNull(v(root, '#rCost')), supplier: v(root, '#rSup'), reference: v(root, '#rRef'), note: v(root, '#rNote'), batch_no: v(root, '#rBatch'), expiry_date: v(root, '#rExp') || null, pack_code: v(root, '#rPack') });
         await done('Received.');
       });
     });

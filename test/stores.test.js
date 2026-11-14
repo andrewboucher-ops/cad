@@ -133,3 +133,48 @@ test('the desk and officer check-out routes still work after the shared helpers'
   assert.equal(r.status, 201);
   assert.equal((await call('POST', `/api/assets/${radio.id}/return`, { condition: 'GOOD' }, adminT)).status, 200);
 });
+
+test('a pack barcode scanned in on receipt names that batch from then on', async () => {
+  let r = await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 6, batch_no: 'PK7', expiry_date: '2028-03-31', pack_code: 'PACK-PK7-XYZ' }, adminT);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.match(r.body.done, /pack barcode saved/);
+  r = await scan('pack-pk7-xyz');
+  assert.equal(r.body.kind, 'item'); assert.equal(r.body.item.id, dressing.id);
+  assert.deepEqual([r.body.gs1.batch, r.body.gs1.expiry], ['PK7', '2028-03-31'], 'the batch comes with it');
+  // Receiving more of the same batch with the same code is fine; the same code on another batch is the product barcode.
+  assert.equal((await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 1, batch_no: 'PK7', expiry_date: '2028-03-31', pack_code: 'PACK-PK7-XYZ' }, adminT)).status, 201);
+  r = await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 1, batch_no: 'PK8', expiry_date: '2028-04-30', pack_code: 'PACK-PK7-XYZ' }, adminT);
+  assert.equal(r.status, 409); assert.match(r.body.error, /product's barcode/);
+  assert.equal((await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 1, batch_no: 'PK9', pack_code: 'RAD-07' }, adminT)).status, 409, 'not an asset tag');
+  assert.equal((await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 1, batch_no: 'PK9', pack_code: '5012345678900' }, adminT)).status, 409, 'not the product barcode');
+  assert.equal((await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 1, no_batch: true, pack_code: 'NEWCODE-1' }, adminT)).status, 400, 'a pack code needs a batch or expiry');
+  // The Stock page's receive takes it too.
+  r = await call('POST', `/api/stock/${dressing.id}/receive`, { quantity: 2, location_id: main.id, batch_no: 'ST1', expiry_date: '2029-01-31', pack_code: 'STOCKPAGE-ST1' }, adminT);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal((await scan('STOCKPAGE-ST1')).body.gs1.batch, 'ST1');
+  const before = app.db.stock_movements.length;
+  assert.equal((await call('POST', `/api/stock/${dressing.id}/receive`, { quantity: 2, location_id: main.id, batch_no: 'ST2', pack_code: 'STOCKPAGE-ST1' }, adminT)).status, 409);
+  assert.equal(app.db.stock_movements.length, before, 'nothing booked when the code is refused');
+});
+
+test('several pack barcodes on one delivery, all checked first; search picks by id', async () => {
+  let r = await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 2, batch_no: 'MB1', expiry_date: '2029-06-30', pack_codes: ['BOX-MB1', 'INNER-MB1', 'box-mb1'] }, adminT);
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.match(r.body.done, /2 pack barcodes saved/);
+  assert.equal((await scan('INNER-MB1')).body.gs1.batch, 'MB1');
+  assert.equal((await scan('BOX-MB1')).body.gs1.batch, 'MB1');
+  const before = app.db.stock_batch_codes.length;
+  r = await call('POST', '/api/stores/receive', { item_id: dressing.id, location_id: main.id, quantity: 1, batch_no: 'MB2', pack_codes: ['FRESH-MB2', 'RAD-07'] }, adminT);
+  assert.equal(r.status, 409, 'one bad code refuses the lot');
+  assert.equal(app.db.stock_batch_codes.length, before, 'and none of them are saved');
+  r = await call('POST', `/api/stock/${dressing.id}/receive`, { quantity: 1, location_id: main.id, batch_no: 'MB3', pack_code: 'SP-A, SP-B' }, adminT);
+  assert.equal(r.status, 201);
+  assert.equal((await scan('SP-B')).body.gs1.batch, 'MB3');
+
+  r = await call('GET', `/api/stores/resolve?kind=location&id=${bag.id}`, undefined, adminT);
+  assert.equal(r.body.location.id, bag.id);
+  r = await call('GET', `/api/stores/resolve?kind=person&id=${dan.id}`, undefined, adminT);
+  assert.equal(r.body.person.id, dan.id);
+  const cat = (await call('GET', '/api/stores/catalogue', undefined, adminT)).body;
+  assert.ok(cat.people.some((p) => p.id === dan.id), 'people are searchable');
+});

@@ -64,7 +64,7 @@ const TABLES = [
   // Admin's choice of which roles see which menu section (ui-sections.js).
   'ui_settings',
   // Stock & asset management (routes-inventory.js).
-  'stock_locations', 'stock_subcategories', 'asset_events', 'stocktakes',
+  'stock_locations', 'stock_batch_codes', 'stock_subcategories', 'asset_events', 'stocktakes',
   // Medical gas cylinders and their history (routes-cylinders.js).
   'gas_cylinders', 'cylinder_events',
   // Medication and the controlled drugs register (routes-medication.js) —

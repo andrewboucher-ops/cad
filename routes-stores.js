@@ -24,6 +24,8 @@
  *   any code an admin has linked to an item, asset or location from this
  *     page (stored in its `barcodes` list) — e.g. the maker's barcode on a
  *     box of dressings, or a QR already stuck on a bag;
+ *   a pack barcode saved for one batch when it was received (the batch
+ *     and expiry come with it — routes-inventory.js linkBatchCode);
  *   a GS1 code (the DataMatrix / GS1-128 on medical packs): matched by its
  *     GTIN, and its batch (10) and expiry (17) fill in the form.
  *
@@ -100,7 +102,7 @@ const gtinKey = (code) => (/^\d{8,14}$/.test(code) ? code.padStart(14, '0') : nu
 module.exports = function registerStores({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, sections, stock, publicAsset, checkoutAsset, returnAsset, flushNow = () => {},
 }) {
-  const { findItem, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person } = stock;
+  const { findItem, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person, linkBatchCode, findBatchCode, packCodes } = stock;
 
   const guard = (user) => {
     if (!sections.canSee('stores', user.role)) throw httpError(403, 'the Stores page is not turned on for your role (Admin → Menu & sections)');
@@ -112,6 +114,7 @@ module.exports = function registerStores({
   const ginCode = (l) => `GIN-${pad(l.id)}`;
   const itemCode = (a) => `ITM-${pad(a.id)}`;
   const today = () => new Date().toISOString().slice(0, 10);
+  const soon = () => new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
   const lc = (x) => String(x || '').toLowerCase();
   const codesOf = (x) => (Array.isArray(x.barcodes) ? x.barcodes : []);
   const hasCode = (x, code) => {
@@ -143,21 +146,39 @@ module.exports = function registerStores({
     if (own) {
       const kind = own[1].toUpperCase(), id = Number(own[2]);
       if (kind === 'ITM') { const a = db.assets.find((x) => x.id === id && x.is_stock_tracked); if (a) return itemView(a, user, null, code); }
-      else { const l = activeLocation(id); if (l) return { kind: kind === 'GIN' ? 'receive' : 'location', code, location: describeLocation(l) }; }
+      else { const l = activeLocation(id); if (l) return locationView(l, kind === 'GIN' ? 'receive' : 'location', code); }
     }
     const p = findPerson(code);
     if (p) return personView(p, code);
     const loc = db.stock_locations.find((l) => l.active !== false && hasCode(l, code));
-    if (loc) return { kind: 'location', code, location: describeLocation(loc) };
+    if (loc) return locationView(loc, 'location', code);
     const asset = db.assets.find((a) => !a.is_stock_tracked && ((a.tag && lc(a.tag) === lc(code)) || hasCode(a, code)))
       || db.assets.find((a) => !a.is_stock_tracked && a.serial_no && lc(a.serial_no) === lc(code));
     if (asset) return assetView(asset, code);
+    // A pack barcode saved against one batch when it was received.
+    const bc = findBatchCode(code);
+    if (bc) { const a = db.assets.find((x) => x.id === bc.item_id && x.is_stock_tracked); if (a) return itemView(a, user, { gtin: null, batch: bc.batch_no, expiry: bc.expiry_date, pack_code: true }, code); }
     const gs1 = parseGs1(code);
     const item = db.assets.find((a) => a.is_stock_tracked && a.status !== 'RETIRED' && (hasCode(a, code) || (gs1 && hasCode(a, gs1.gtin)) || (a.sku && lc(a.sku) === lc(code))));
     if (item) return itemView(item, user, gs1, code);
     return { kind: 'unknown', code, gs1 };
   }
 
+  /** A location and what is in it now — shown when its label is scanned. */
+  function locationView(l, kind, code) {
+    const t = today(), s30 = soon();
+    const contents = [];
+    for (const a of db.assets.filter((x) => x.is_stock_tracked)) {
+      const bs = batches(a.id).filter((b) => b.location_id === l.id);
+      const q = bs.reduce((n, b) => n + b.qty, 0);
+      if (!q) continue;
+      const next = bs.map((b) => b.expiry_date).filter(Boolean).sort()[0] || null;
+      contents.push({ item_id: a.id, item: label(a), unit: a.unit || '', qty: q, next_expiry: next, expired: Boolean(next && next < t), expiring: Boolean(next && next >= t && next <= s30) });
+    }
+    contents.sort((x, y) => Number(y.expired) - Number(x.expired) || Number(y.expiring) - Number(x.expiring) || x.item.localeCompare(y.item));
+    const assets = db.assets.filter((a) => !a.is_stock_tracked && a.location_id === l.id && a.status === 'IN_STORE').map((a) => ({ id: a.id, tag: a.tag, description: a.description }));
+    return { kind, code, location: { ...describeLocation(l), contents, assets } };
+  }
   function itemView(a, user, gs1, code) {
     findItem(a.id, user); // branch visibility
     const levels = levelsByLocation(a.id);
@@ -169,7 +190,9 @@ module.exports = function registerStores({
         id: a.id, label: label(a), unit: a.unit || '', category: a.category, code: itemCode(a), barcodes: codesOf(a),
         total: Object.values(levels).reduce((n, v) => n + v, 0),
         levels: Object.entries(levels).filter(([, n]) => n > 0).map(([id, n]) => ({ location_id: Number(id), location_name: locName(id), qty: n })),
-        batches: batches(a.id).map((b) => ({ ...b, location_name: locName(b.location_id), expired: Boolean(b.expiry_date && b.expiry_date < t) })),
+        batches: batches(a.id).map((b) => ({ ...b, location_name: locName(b.location_id), expired: Boolean(b.expiry_date && b.expiry_date < t), expiring: Boolean(b.expiry_date && b.expiry_date >= t && b.expiry_date <= soon()) })),
+        reorder_level: a.low_stock_threshold != null ? a.low_stock_threshold : null,
+        pack_codes: db.stock_batch_codes.filter((c) => c.item_id === a.id).length,
       },
     };
   }
@@ -182,7 +205,8 @@ module.exports = function registerStores({
       asset: {
         id: a.id, tag: a.tag, description: a.description, status: a.status, condition: a.condition || null, serial_no: a.serial_no || '',
         location_id: l ? l.id : null, location_name: l ? l.name : null, barcodes: codesOf(a),
-        checkout: co ? { id: co.id, personnel_id: co.personnel_id, personnel_name: p ? p.name : null, checked_out_at: co.checked_out_at, expected_return_at: co.expected_return_at || null } : null,
+        checkout: co ? { id: co.id, personnel_id: co.personnel_id, personnel_name: p ? p.name : null, checked_out_at: co.checked_out_at, expected_return_at: co.expected_return_at || null, overdue: Boolean(co.expected_return_at && Date.parse(co.expected_return_at) < Date.now()) } : null,
+        next_check_due_at: a.next_check_due_at || null, pat_next_due_at: a.pat_required ? (a.pat_next_due_at || null) : null,
       },
     };
   }
@@ -197,7 +221,16 @@ module.exports = function registerStores({
     };
   }
 
-  R('GET', '/api/stores/resolve', ({ query, user }) => resolve(query.get('code'), user));
+  /** By code (a scan or typed code), or by kind + id (picked from a search). */
+  function byPick(kind, id, user) {
+    const n = Number(id);
+    if (kind === 'item') { const a = db.assets.find((x) => x.id === n && x.is_stock_tracked); if (a) return itemView(a, user, null, itemCode(a)); }
+    if (kind === 'asset') { const a = db.assets.find((x) => x.id === n && !x.is_stock_tracked); if (a) return assetView(a, a.tag || `asset #${a.id}`); }
+    if (kind === 'location' || kind === 'receive') { const l = activeLocation(n); if (l) return locationView(l, kind, kind === 'receive' ? ginCode(l) : locCode(l)); }
+    if (kind === 'person') { const p = db.personnel.find((x) => x.id === n); if (p) return personView(p, p.employee_no || p.name); }
+    throw httpError(404, 'not found');
+  }
+  R('GET', '/api/stores/resolve', ({ query, user }) => (query.get('kind') ? byPick(query.get('kind'), query.get('id'), user) : resolve(query.get('code'), user)));
 
   /* ---------------- the actions ---------------- */
   const itemFor = (body, user) => findItem(body.item_id, user);
@@ -227,13 +260,24 @@ module.exports = function registerStores({
     if (!batch && !expiry && !body.no_batch) throw httpError(400, 'enter the batch number and/or expiry date (or tick "no batch or expiry")');
     const known = batch && db.stock_movements.find((m) => m.asset_id === item.id && m.batch_no === batch && m.expiry_date);
     if (known && expiry && known.expiry_date !== expiry) throw httpError(409, `batch ${batch} is already on record expiring ${known.expiry_date} — check the pack`);
+    const finalExpiry = expiry || (known ? known.expiry_date : '');
+    // The pack's own barcode for this batch, if one was scanned in. A GS1
+    // code needs no saving: it carries its batch and expiry itself.
+    const taken = (c) => {
+      const r = resolve(c, user);
+      if (r.kind === 'unknown') return null;
+      return r.kind === 'item' ? `the product barcode of ${r.item.label} — it is the same on every batch, so it can't name one` : r.kind === 'asset' ? `asset ${r.asset.tag || r.asset.description}` : r.kind === 'person' ? 'a staff ID card' : `location ${r.location.name}`;
+    };
+    const packs = packCodes(body).map(clean).filter((c) => c && !parseGs1(c));
+    for (const c of packs) linkBatchCode(item, c, batch, finalExpiry, user, { taken, checkOnly: true });
+    const linked = packs.map((c) => linkBatchCode(item, c, batch, finalExpiry, user, { taken }));
     const [m] = addStock(item, n, 'RESTOCK', {
-      location, user, note: note(body), batch_no: batch, expiry_date: expiry || (known ? known.expiry_date : ''),
+      location, user, note: note(body), batch_no: batch, expiry_date: finalExpiry,
       supplier: String(body.supplier || item.supplier || '').slice(0, 120), reference: String(body.reference || '').slice(0, 80), unit_cost: null, via: VIA,
     });
     logEvent('stock.received', `RECEIVED ${n} × ${label(item)}${batch ? ` BATCH ${batch}` : ''}${m.expiry_date ? ` EXP ${m.expiry_date}` : ''} INTO ${location.name} (STORES SCAN BY ${user.username})`, { asset_id: item.id, stock_movement_id: m.id });
     flushNow();
-    return { __status: 201, __body: { done: `Received ${unitText(item, n)} of ${label(item)} into ${location.name}`, movements: [publicMovement(m)] } };
+    return { __status: 201, __body: { done: `Received ${unitText(item, n)} of ${label(item)} into ${location.name}${linked.length ? ` — ${linked.length === 1 ? 'pack barcode' : `${linked.length} pack barcodes`} saved for this batch` : ''}`, movements: [publicMovement(m)] } };
   });
 
   R('POST', '/api/stores/move', ({ body, user }) => {
@@ -334,8 +378,44 @@ module.exports = function registerStores({
       .map((a) => ({ id: a.id, tag: a.tag, description: a.description, barcodes: codesOf(a) })).sort((x, y) => String(x.tag || x.description).localeCompare(String(y.tag || y.description))),
     locations: db.stock_locations.filter((l) => l.active !== false).map((l) => ({ ...describeLocation(l), code: locCode(l), goods_in_code: ginCode(l), barcodes: codesOf(l) }))
       .sort((x, y) => Number(Boolean(y.is_main)) - Number(Boolean(x.is_main)) || x.name.localeCompare(y.name)),
+    people: db.personnel.filter((p) => (p.employment_status || 'ACTIVE') !== 'TERMINATED').map((p) => ({ id: p.id, name: p.name, employee_no: p.employee_no || null })).sort((x, y) => x.name.localeCompare(y.name)),
     can_link: user.role === 'SYSTEM_ADMIN',
   }));
+
+  /** The page's header: today's work and what needs attention. */
+  R('GET', '/api/stores/summary', ({ user }) => {
+    const t = today(), s30 = soon();
+    const items = db.assets.filter((a) => a.is_stock_tracked && a.status !== 'RETIRED').filter((a) => { try { findItem(a.id, user); return true; } catch { return false; } });
+    const expiring = [], low = [];
+    for (const a of items) {
+      const bs = batches(a.id);
+      const total = bs.reduce((n, b) => n + b.qty, 0);
+      for (const b of bs) if (b.expiry_date && b.expiry_date <= s30) {
+        const l = db.stock_locations.find((x) => x.id === b.location_id);
+        expiring.push({ item_id: a.id, item: label(a), qty: b.qty, unit: a.unit || '', batch_no: b.batch_no, expiry_date: b.expiry_date, expired: b.expiry_date < t, location: l ? l.name : '?' });
+      }
+      if (a.low_stock_threshold != null && total <= a.low_stock_threshold) low.push({ item_id: a.id, item: label(a), total, reorder_level: a.low_stock_threshold, unit: a.unit || '' });
+    }
+    const out = db.asset_checkouts.filter((c) => !c.returned_at).map((c) => {
+      const a = db.assets.find((x) => x.id === c.asset_id), p = db.personnel.find((x) => x.id === c.personnel_id);
+      return { asset_id: c.asset_id, tag: a ? a.tag : null, description: a ? a.description : '(deleted)', person: p ? p.name : null, since: c.checked_out_at, due: c.expected_return_at || null, overdue: Boolean(c.expected_return_at && Date.parse(c.expected_return_at) < Date.now()) };
+    });
+    const day = (iso) => String(iso || '').slice(0, 10) === t;
+    const mv = db.stock_movements.filter((m) => day(m.recorded_at));
+    return {
+      today: {
+        received: mv.filter((m) => m.reason === 'RESTOCK').length,
+        moved: mv.filter((m) => m.reason === 'TRANSFER_IN').length,
+        issued: mv.filter((m) => m.reason === 'ISSUED').length,
+        signed_out: db.asset_checkouts.filter((c) => day(c.checked_out_at)).length,
+        signed_in: db.asset_checkouts.filter((c) => day(c.returned_at)).length,
+      },
+      expired: expiring.filter((x) => x.expired).sort((x, y) => x.expiry_date.localeCompare(y.expiry_date)),
+      expiring: expiring.filter((x) => !x.expired).sort((x, y) => x.expiry_date.localeCompare(y.expiry_date)),
+      low: low.sort((x, y) => x.item.localeCompare(y.item)),
+      assets_out: out.sort((x, y) => Number(y.overdue) - Number(x.overdue) || String(x.since).localeCompare(String(y.since))),
+    };
+  });
 
   /** The last things done: stock moves (from any page) and asset sign-outs. */
   R('GET', '/api/stores/activity', ({ query }) => {

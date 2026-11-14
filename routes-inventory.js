@@ -64,7 +64,7 @@ module.exports = function registerInventoryRoutes({
   publicAsset, stockLevel, recordStockMovement, ASSET_STATUSES, ASSET_CATEGORIES = [], flushNow = () => {},
   prfIntegrationSecret = '',
 }) {
-  for (const t of ['stock_locations', 'stock_subcategories', 'asset_events', 'stocktakes', 'stock_movements', 'assets', 'asset_checkouts']) if (!Array.isArray(db[t])) db[t] = [];
+  for (const t of ['stock_batch_codes', 'stock_locations', 'stock_subcategories', 'asset_events', 'stocktakes', 'stock_movements', 'assets', 'asset_checkouts']) if (!Array.isArray(db[t])) db[t] = [];
   const secretOk = (given) => {
     if (!prfIntegrationSecret || typeof given !== 'string') return false;
     const a = Buffer.from(given), b = Buffer.from(prfIntegrationSecret);
@@ -178,6 +178,55 @@ module.exports = function registerInventoryRoutes({
     }
     return out;
   }
+
+
+  /* ---- batch-specific pack barcodes ----
+   * Some packs carry a barcode that changes with every batch (not the GS1
+   * kind, which already carries the batch). When stock is received the
+   * pack's code can be scanned in: it is kept against that item, batch and
+   * expiry, so scanning it later (stores.html) picks the item AND the
+   * batch. A code means one batch only: if the same code turns up on a
+   * second batch it is the product's barcode, not a batch one. */
+  function codeTaken(code) {
+    const k = code.toLowerCase();
+    const has = (x) => Array.isArray(x.barcodes) && x.barcodes.some((c) => String(c).toLowerCase() === k);
+    const a = db.assets.find((x) => (x.tag && x.tag.toLowerCase() === k) || (x.sku && x.sku.toLowerCase() === k) || has(x));
+    if (a) return a.is_stock_tracked ? `the product barcode of ${label(a)} — it is the same on every batch, so it can't name one` : `asset ${a.tag || a.description}`;
+    const l = db.stock_locations.find(has);
+    if (l) return `location ${l.name}`;
+    if (/^(LOC|GIN|ITM)-\d+$/i.test(code)) return 'a stores label';
+    return null;
+  }
+  function linkBatchCode(item, raw, batch_no, expiry_date, user, { taken = codeTaken, checkOnly = false } = {}) {
+    const code = String(raw || '').replace(/[\r\n\t]/g, '').trim().slice(0, 200);
+    if (!code) return null;
+    if (!batch_no && !expiry_date) throw httpError(400, 'a pack barcode needs the batch number or expiry date it belongs to');
+    const same = db.stock_batch_codes.find((c) => c.code.toLowerCase() === code.toLowerCase());
+    if (same) {
+      if (same.item_id === item.id && (same.batch_no || '') === (batch_no || '') && (same.expiry_date || '') === (expiry_date || '')) return same;
+      const other = db.assets.find((x) => x.id === same.item_id);
+      throw httpError(409, same.item_id === item.id
+        ? `that barcode is already on batch ${same.batch_no || '(none)'}${same.expiry_date ? ` expiring ${same.expiry_date}` : ''} — it looks like the product's barcode rather than a batch one; link it to the item on the Stores page instead`
+        : `that barcode already belongs to ${other ? label(other) : 'another item'}`);
+    }
+    const t = taken(code);
+    if (t) throw httpError(409, `that barcode is already ${t}`);
+    if (checkOnly) return null;
+    const c = { code, item_id: item.id, batch_no: batch_no || null, expiry_date: expiry_date || null, created_at: new Date().toISOString(), created_by: user.display_name };
+    db.stock_batch_codes.push(c);
+    logEvent('stock.batch_code', `PACK BARCODE ${code} LINKED TO ${label(item)}${batch_no ? ` BATCH ${batch_no}` : ''}${expiry_date ? ` EXP ${expiry_date}` : ''} BY ${user.username}`, { asset_id: item.id });
+    return c;
+  }
+  /** pack_codes: [..] and/or pack_code (one, or several separated by
+   * commas / new lines), de-duplicated. */
+  const packCodes = (body) => {
+    const list = [].concat(Array.isArray(body.pack_codes) ? body.pack_codes : [], body.pack_code ? String(body.pack_code).split(/[\n,]+/) : []);
+    const seen = new Set(), out = [];
+    for (const raw of list) { const c = String(raw || '').replace(/[\r\n\t]/g, '').trim(); if (c && !seen.has(c.toLowerCase())) { seen.add(c.toLowerCase()); out.push(c); } }
+    if (out.length > 20) throw httpError(400, 'at most 20 pack barcodes at once');
+    return out;
+  };
+  const findBatchCode = (code) => db.stock_batch_codes.find((c) => c.code.toLowerCase() === String(code || '').trim().toLowerCase()) || null;
 
   /* ================================================================== *
    * Stock
@@ -396,7 +445,13 @@ module.exports = function registerInventoryRoutes({
     // The same batch number always carries the same expiry.
     const known = batch && db.stock_movements.find((m) => m.asset_id === item.id && m.batch_no === batch && m.expiry_date);
     if (known && expiry && known.expiry_date !== expiry) throw httpError(409, `batch ${batch} is already on record expiring ${known.expiry_date}`);
-    const [m] = addStock(item, n, 'RESTOCK', { location, user, note: body.note, batch_no: batch, expiry_date: expiry || (known ? known.expiry_date : ''), supplier: String(body.supplier || item.supplier || '').slice(0, 120), reference: String(body.reference || '').slice(0, 80), unit_cost: unitCost });
+    const finalExpiry = expiry || (known ? known.expiry_date : '');
+    // One or more pack barcodes (outer box, inner pack…): all checked
+    // before anything is booked or saved.
+    const packs = packCodes(body);
+    for (const c of packs) linkBatchCode(item, c, batch, finalExpiry, user, { checkOnly: true });
+    const [m] = addStock(item, n, 'RESTOCK', { location, user, note: body.note, batch_no: batch, expiry_date: finalExpiry, supplier: String(body.supplier || item.supplier || '').slice(0, 120), reference: String(body.reference || '').slice(0, 80), unit_cost: unitCost });
+    for (const c of packs) linkBatchCode(item, c, batch, finalExpiry, user);
     if (unitCost != null) item.unit_cost = unitCost;
     logEvent('stock.received', `RECEIVED ${n} × ${label(item)}${batch ? ` BATCH ${batch}` : ''} INTO ${location.name}`, { asset_id: item.id, stock_movement_id: m.id });
     flushNow();
@@ -699,6 +754,6 @@ module.exports = function registerInventoryRoutes({
     // The stores scanning page (routes-stores.js) books the same ledger
     // rows through these, so the rules above (never below zero, batches
     // used first-expiry-first, a batch number keeps one expiry) hold there too.
-    stock: { findItem, findAsset, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person },
+    stock: { findItem, findAsset, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person, linkBatchCode, findBatchCode, packCodes },
   };
 };
