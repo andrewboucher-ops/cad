@@ -86,6 +86,8 @@ if (!isAdmin) el('#stockLink').remove();
 const CONDITIONS = ['GOOD', 'NEW', 'FAIR', 'POOR', 'DAMAGED'];
 const THINGS = ['item', 'asset'], TARGETS = ['location', 'receive', 'person'];
 let thing = null, target = null, catalogue = null, busy = false, onGo = null;
+// A batch-specific pack barcode waiting to be saved with the delivery it came on.
+let pendingPack = null;
 
 /* ---------------- reading codes ----------------
  * A USB / Bluetooth scanner is a keyboard that types very fast and ends
@@ -104,9 +106,12 @@ document.addEventListener('keydown', (e) => {
     const code = buf; const fast = gap < 80 && code.length >= 4;
     buf = '';
     if (!fast) return;
+    e.preventDefault(); e.stopPropagation();
+    // A box that asks for a barcode (the pack barcode on Receive) takes the
+    // scan as its value instead of it starting a new pair.
+    if (snapEl && snapEl.dataset && 'capture' in snapEl.dataset) { snapEl.value = code; snapEl.dispatchEvent(new Event('input')); return; }
     if (document.activeElement === manualInput) { manualInput.value = ''; }
     else if (snapEl && snapVal != null) { snapEl.value = snapVal; }
-    e.preventDefault(); e.stopPropagation();
     handle(code);
     return;
   }
@@ -131,14 +136,14 @@ async function handle(raw) {
   if (r.kind === 'unknown') return unknown(r);
   if (THINGS.includes(r.kind)) {
     // A second thing replaces the first unless a target is already waiting.
-    thing = r;
+    thing = r; pendingPack = null;
   } else if (TARGETS.includes(r.kind)) {
     target = r;
   }
   render();
 }
 
-function reset() { thing = null; target = null; onGo = null; render(); manual.focus(); }
+function reset() { thing = null; target = null; onGo = null; pendingPack = null; render(); manual.focus(); }
 
 /* ---------------- the two slots ---------------- */
 function describe(r) {
@@ -209,13 +214,16 @@ function receiveForm(t, g) {
       <div><label>Supplier</label><input id="fSup" autocomplete="off"></div>
       <div><label>Delivery note / PO</label><input id="fRef" autocomplete="off"></div>
       <div><label>Note</label><input id="fNote" autocomplete="off"></div>
+      ${p.gtin || p.pack_code ? '' : `<div class="full"><label>Pack barcode for this batch (optional)</label><input id="fPack" data-capture value="${esc(pendingPack || '')}" placeholder="Click here and scan the barcode on the pack" autocomplete="off">
+        <div class="dim" style="font-size:12px;margin-top:4px">Saved with this batch and expiry: scanning that barcode later picks this item <em>and</em> this batch.</div></div>`}
     </div>
     <label class="tick"><input type="checkbox" id="fNoBatch"> This item has no batch number or expiry date</label>
-    ${p.batch || p.expiry ? '<p class="dim" style="font-size:12.5px">Batch and expiry read from the pack — check them against the box.</p>' : ''}
+    ${p.pack_code ? '<p class="dim" style="font-size:12.5px">That pack barcode is already saved for this batch — batch and expiry filled in.</p>' : p.batch || p.expiry ? '<p class="dim" style="font-size:12.5px">Batch and expiry read from the pack — check them against the box.</p>' : ''}
     ${foot('Receive')}`);
   wireGo(() => api('POST', '/api/stores/receive', {
     item_id: t.item.id, location_id: g.location.id, quantity: num('#fQty'), batch_no: el('#fBatch').value.trim(), expiry_date: el('#fExp').value || null,
     no_batch: el('#fNoBatch').checked, supplier: el('#fSup').value.trim(), reference: el('#fRef').value.trim(), note: el('#fNote').value.trim(),
+    pack_code: el('#fPack') ? el('#fPack').value.trim() : '',
   }), '#fQty');
 }
 
@@ -230,8 +238,10 @@ function takeForm(t, g, mode) {
   }
   const main = catalogue && catalogue.locations.find((l) => l.is_main);
   // Where it comes from: where the pack's batch is, else the main store, else where there's most.
-  const gb = t.gs1 && t.gs1.batch;
-  const withBatch = gb && t.item.batches.find((b) => b.batch_no === gb && sources.some((s) => s.location_id === b.location_id));
+  // The batch the scanned pack names (GS1 code or a saved pack barcode).
+  const pk = t.gs1 && (t.gs1.batch || t.gs1.expiry) ? t.gs1 : null;
+  const isPack = (b) => Boolean(pk && (b.batch_no || null) === (pk.batch || null) && (!pk.expiry || b.expiry_date === pk.expiry));
+  const withBatch = pk && t.item.batches.find((b) => isPack(b) && sources.some((s) => s.location_id === b.location_id));
   let from = (withBatch && withBatch.location_id) || (main && sources.some((s) => s.location_id === main.id) ? main.id : sources.slice().sort((a, b) => b.qty - a.qty)[0].location_id);
   panel(`<h2>${title}</h2>
     <div class="k-form">
@@ -248,7 +258,7 @@ function takeForm(t, g, mode) {
     const list = t.item.batches.filter((b) => b.location_id === from);
     const tracked = list.filter((b) => b.batch_no || b.expiry_date);
     if (!tracked.length) { pick = null; el('#fBatches').innerHTML = '<span class="dim">No batch or expiry recorded here.</span>'; el('#fTicks').innerHTML = ''; return; }
-    if (!pick || pick.location_id !== from) pick = (gb && list.find((b) => b.batch_no === gb)) || list[0];
+    if (!pick || pick.location_id !== from) pick = list.find(isPack) || list[0];
     el('#fBatches').innerHTML = list.map((b, i) => `<label class="batch ${b === pick ? 'on' : ''} ${b.expired ? 'expired' : ''}" data-i="${i}">
         <input type="radio" name="fb" ${b === pick ? 'checked' : ''}>
         <span class="exp">${b.expiry_date ? 'Exp ' + esc(date(b.expiry_date)) : 'No expiry'}</span>
@@ -256,7 +266,7 @@ function takeForm(t, g, mode) {
         <span class="dim" style="margin-left:auto">${b.qty} here</span>${b.expired ? ' <span class="pill bad">Expired</span>' : ''}</label>`).join('');
     el('#fBatches').querySelectorAll('.batch').forEach((x) => (x.onclick = () => { pick = list[Number(x.dataset.i)]; drawBatches(); }));
     // The expiry check: ticked already when the pack's own code named this batch.
-    const scanned = Boolean(gb && pick.batch_no === gb);
+    const scanned = isPack(pick);
     el('#fTicks').innerHTML = `${pick.expiry_date ? `<label class="tick"><input type="checkbox" id="fChecked" ${scanned ? 'checked' : ''}> I have checked the pack: ${pick.batch_no ? 'batch <strong>' + esc(pick.batch_no) + '</strong>, ' : ''}expiry <strong>${esc(date(pick.expiry_date))}</strong></label>` : ''}
       ${pick.expired ? '<label class="tick"><input type="checkbox" id="fExpired"> It has expired — move it anyway (e.g. to quarantine / disposal)</label>' : ''}`;
   };
@@ -308,11 +318,28 @@ function unknown(r) {
   el('#panel').innerHTML = `<div class="card act bad"><h2>Not recognised</h2>
     <p class="mono" style="word-break:break-all">${esc(r.code.replace(/\x1d/g, '·'))}</p>
     ${g ? `<p class="dim">A product barcode: GTIN <span class="mono">${esc(g.gtin)}</span>${g.batch ? `, batch ${esc(g.batch)}` : ''}${g.expiry ? `, expiry ${esc(date(g.expiry))}` : ''}.</p>` : ''}
-    ${linkable ? `<p style="margin-top:12px"><strong>Link this code</strong> so it works from now on${g ? ' (every batch of this product)' : ''}:</p>
+    ${g ? '' : `<p style="margin-top:12px"><strong>A new batch of a stock item?</strong> Choose the item to receive it — this barcode is saved with the batch.</p>
+      <div class="k-form"><div class="full"><label>Item</label><select id="nItem">${options(catalogue ? catalogue.items.map((x) => [x.id, x.label]) : [], '', '— choose —')}</select></div></div>
+      <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="nGo">Receive it</button></div><p class="err" id="nErr"></p>`}
+    ${linkable ? `<p style="margin-top:12px"><strong>Or link this code</strong> so it works from now on${g ? ' (every batch of this product)' : ''}:</p>
       <div class="k-form"><div><label>It is</label><select id="lKind">${options(kinds, 'item')}</select></div>
       <div><label>Which one</label><select id="lId"></select></div></div>
       <div class="btn-row" style="margin-top:6px"><button class="btn primary" id="lGo">Link code</button><button class="btn" id="lCancel">Cancel</button></div><p class="err" id="lErr"></p>`
       : '<p class="dim">Ask an admin to link it to an item, asset or location on this page.</p>'}</div>`;
+  if (el('#nGo')) el('#nGo').onclick = async () => {
+    el('#nErr').textContent = '';
+    try {
+      const it = catalogue.items.find((x) => x.id === Number(el('#nItem').value));
+      if (!it) throw new Error('choose the item');
+      thing = await api('GET', `/api/stores/resolve?code=${encodeURIComponent(it.code)}`);
+      if (!target || target.kind !== 'receive') {
+        const main = catalogue.locations.find((l) => l.is_main);
+        target = await api('GET', `/api/stores/resolve?code=${encodeURIComponent(main.goods_in_code)}`);
+      }
+      pendingPack = r.code;
+      render();
+    } catch (e) { el('#nErr').textContent = e.message; }
+  };
   if (!linkable) return;
   const fill = () => { el('#lId').innerHTML = options(list(el('#lKind').value), '', '— choose —'); };
   el('#lKind').onchange = fill; fill();
@@ -349,7 +376,7 @@ async function run(action) {
   const go = el('#fGo'); if (go) go.disabled = true;
   try {
     const r = await action();
-    thing = null; target = null; onGo = null; render();
+    thing = null; target = null; onGo = null; pendingPack = null; render();
     message(r.done || 'Done');
     loadFeed();
   } catch (e) {

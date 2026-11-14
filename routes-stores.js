@@ -24,6 +24,8 @@
  *   any code an admin has linked to an item, asset or location from this
  *     page (stored in its `barcodes` list) — e.g. the maker's barcode on a
  *     box of dressings, or a QR already stuck on a bag;
+ *   a pack barcode saved for one batch when it was received (the batch
+ *     and expiry come with it — routes-inventory.js linkBatchCode);
  *   a GS1 code (the DataMatrix / GS1-128 on medical packs): matched by its
  *     GTIN, and its batch (10) and expiry (17) fill in the form.
  *
@@ -100,7 +102,7 @@ const gtinKey = (code) => (/^\d{8,14}$/.test(code) ? code.padStart(14, '0') : nu
 module.exports = function registerStores({
   route, httpError, CONTROL, ADMIN, db, nextId, logEvent, sections, stock, publicAsset, checkoutAsset, returnAsset, flushNow = () => {},
 }) {
-  const { findItem, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person } = stock;
+  const { findItem, findLocation, takeStock, addStock, batches, levelsByLocation, cleanBatch, cleanExpiry, publicMovement, describeLocation, label, unitText, qty, person, linkBatchCode, findBatchCode } = stock;
 
   const guard = (user) => {
     if (!sections.canSee('stores', user.role)) throw httpError(403, 'the Stores page is not turned on for your role (Admin → Menu & sections)');
@@ -152,6 +154,9 @@ module.exports = function registerStores({
     const asset = db.assets.find((a) => !a.is_stock_tracked && ((a.tag && lc(a.tag) === lc(code)) || hasCode(a, code)))
       || db.assets.find((a) => !a.is_stock_tracked && a.serial_no && lc(a.serial_no) === lc(code));
     if (asset) return assetView(asset, code);
+    // A pack barcode saved against one batch when it was received.
+    const bc = findBatchCode(code);
+    if (bc) { const a = db.assets.find((x) => x.id === bc.item_id && x.is_stock_tracked); if (a) return itemView(a, user, { gtin: null, batch: bc.batch_no, expiry: bc.expiry_date, pack_code: true }, code); }
     const gs1 = parseGs1(code);
     const item = db.assets.find((a) => a.is_stock_tracked && a.status !== 'RETIRED' && (hasCode(a, code) || (gs1 && hasCode(a, gs1.gtin)) || (a.sku && lc(a.sku) === lc(code))));
     if (item) return itemView(item, user, gs1, code);
@@ -227,13 +232,24 @@ module.exports = function registerStores({
     if (!batch && !expiry && !body.no_batch) throw httpError(400, 'enter the batch number and/or expiry date (or tick "no batch or expiry")');
     const known = batch && db.stock_movements.find((m) => m.asset_id === item.id && m.batch_no === batch && m.expiry_date);
     if (known && expiry && known.expiry_date !== expiry) throw httpError(409, `batch ${batch} is already on record expiring ${known.expiry_date} — check the pack`);
+    const finalExpiry = expiry || (known ? known.expiry_date : '');
+    // The pack's own barcode for this batch, if one was scanned in. A GS1
+    // code needs no saving: it carries its batch and expiry itself.
+    let packCode = null;
+    if (body.pack_code && !parseGs1(body.pack_code)) {
+      packCode = linkBatchCode(item, clean(body.pack_code), batch, finalExpiry, user, { taken: (c) => {
+        const r = resolve(c, user);
+        if (r.kind === 'unknown') return null;
+        return r.kind === 'item' ? `the product barcode of ${r.item.label} — it is the same on every batch, so it can't name one` : r.kind === 'asset' ? `asset ${r.asset.tag || r.asset.description}` : r.kind === 'person' ? 'a staff ID card' : `location ${r.location.name}`;
+      } });
+    }
     const [m] = addStock(item, n, 'RESTOCK', {
-      location, user, note: note(body), batch_no: batch, expiry_date: expiry || (known ? known.expiry_date : ''),
+      location, user, note: note(body), batch_no: batch, expiry_date: finalExpiry,
       supplier: String(body.supplier || item.supplier || '').slice(0, 120), reference: String(body.reference || '').slice(0, 80), unit_cost: null, via: VIA,
     });
     logEvent('stock.received', `RECEIVED ${n} × ${label(item)}${batch ? ` BATCH ${batch}` : ''}${m.expiry_date ? ` EXP ${m.expiry_date}` : ''} INTO ${location.name} (STORES SCAN BY ${user.username})`, { asset_id: item.id, stock_movement_id: m.id });
     flushNow();
-    return { __status: 201, __body: { done: `Received ${unitText(item, n)} of ${label(item)} into ${location.name}`, movements: [publicMovement(m)] } };
+    return { __status: 201, __body: { done: `Received ${unitText(item, n)} of ${label(item)} into ${location.name}${packCode ? ' — pack barcode saved for this batch' : ''}`, movements: [publicMovement(m)] } };
   });
 
   R('POST', '/api/stores/move', ({ body, user }) => {
