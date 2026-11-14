@@ -2847,6 +2847,9 @@ route('POST', '/api/jobs', CONTROL, ({ body, user }) => {
     patient_dob: String(body.patient_dob || '').slice(0, 20),
     chief_complaint: chiefComplaint,
   };
+  // Full MPDS triage is done here, on the job; the PRF shows the card name.
+  const mpds = prf.mpdsFor(body.mpds_code);
+  j.mpds_code = mpds.code; j.mpds_text = mpds.text;
   if (body.retrospective) return createRetrospectiveJob(j, body, user);
   db.jobs.push(j);
   broadcast('job.created', publicJob(j));
@@ -3730,13 +3733,17 @@ route('PATCH', '/api/jobs/:id', ALL, ({ params, body, user }) => {
     j.is_medical = Boolean(body.is_medical);
   }
   const MEDICAL_FIELDS = { patient_name: 200, patient_dob: 20 };
-  if (Object.keys(MEDICAL_FIELDS).some((f) => body[f] !== undefined) || body.chief_complaint !== undefined) {
+  if (Object.keys(MEDICAL_FIELDS).some((f) => body[f] !== undefined) || body.chief_complaint !== undefined || body.mpds_code !== undefined) {
     if (!isControlRole(user.role)) throw httpError(403, 'only control can edit incident details');
     for (const [f, max] of Object.entries(MEDICAL_FIELDS)) if (body[f] !== undefined) j[f] = String(body[f]).slice(0, max);
     if (body.chief_complaint !== undefined) {
       const cc = String(body.chief_complaint || '');
       if (cc && !CHIEF_COMPLAINT_CODES.includes(cc)) throw httpError(400, 'invalid chief_complaint');
       j.chief_complaint = cc;
+    }
+    if (body.mpds_code !== undefined) {
+      const m = prf.mpdsFor(body.mpds_code);
+      j.mpds_code = m.code; j.mpds_text = m.text;
     }
   }
   if (body.priority !== undefined) {

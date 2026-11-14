@@ -84,7 +84,7 @@ const MAX_VITAL_SETS = 50;
 // can't become a place to stash arbitrary data.
 const FIELDS = [
   // Incident
-  'event', 'callReceived', 'ageApprox', 'callType', 'mpds', 'patientNo', 'patientOf', 'callsign', 'vehicle', 'crew',
+  'event', 'callReceived', 'ageApprox', 'callType', 'mpds', 'mpdsCode', 'mpdsText', 'patientNo', 'patientOf', 'callsign', 'vehicle', 'crew',
   'address', 'address2', 'roomLocation', 'municipality', 'incidentPostcode', 'locationType', 'sceneNotes',
   'destination', 'destinationType', 'destinationReason', 'responseMode', 'transportMode', 'transportPriority',
   'dispatch', 'enRoute', 'scene', 'contact', 'depart', 'arrive', 'transfer', 'available',
@@ -101,7 +101,38 @@ const FIELDS = [
   'impression', 'narrative', 'concerns', 'monitoring', 'unableToSign',
   'riddor', 'consentBy', 'mcaImpairment', 'mcaUnderstand', 'mcaRetain', 'mcaWeigh', 'mcaCommunicate', 'bestInterests',
 ];
-const LIST_FIELDS = ['precautions', 'sceneFindings', 'allergies', 'pmh'];
+// The *Neg lists are pertinent negatives: asked about and absent.
+const LIST_FIELDS = ['precautions', 'sceneFindings', 'sceneFindingsNeg', 'allergies', 'allergiesNeg', 'pmh', 'pmhNeg'];
+// MPDS determinant list. It is Priority Dispatch copyright, so it is never in
+// the code: an admin loads Echelon's licensed list, and it is kept in the
+// database (ui_settings 'prf_mpds') and only served to signed-in PRF users.
+const MPDS_MAX = 5000;
+const MPDS_LINE = /(?:^|[^0-9A-Za-z])(\d{1,2})\s*[-\s.]?\s*(Ω|Ω|Omega|[OoAaBbCcDdEe])\s*[-\s.]?\s*(\d{1,2})([A-Z])?(?![0-9A-Za-z])/;
+function normMpds(code) {
+  const m = MPDS_LINE.exec(' ' + String(code || '').trim());
+  if (!m || +m[1] < 1 || +m[1] > 40) return null;
+  const lvl = /^(Ω|Ω|omega|o)$/i.test(m[2]) ? 'Ω' : m[2].toUpperCase();
+  return `${m[1].padStart(2, '0')}-${lvl}-${m[3].padStart(2, '0')}${m[4] || ''}`;
+}
+/** Lines of "code, descriptor" (CSV, tab-separated or pasted text) to [[code, descriptor]]. */
+function parseMpds(text) {
+  const out = new Map();
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const m = MPDS_LINE.exec(' ' + raw);
+    if (!m) continue;
+    const code = normMpds(m[0]);
+    if (!code) continue;
+    const desc = (' ' + raw).slice(m.index + m[0].length).replace(/^[\s,;:\t|"'·–—-]+/, '').replace(/["'\s,;]+$/, '').replace(/""/g, '"').trim().slice(0, 240);
+    out.set(code, desc);
+    if (out.size >= MPDS_MAX) break;
+  }
+  // Card order: by protocol, then most to least urgent (E, D, C, B, A, Ω), then number.
+  const rank = (c) => [+c.slice(0, 2), 'EDCBAΩ'.indexOf(c[3]), parseInt(c.slice(5), 10), c.slice(7)];
+  return [...out.entries()].sort((a, b) => {
+    const x = rank(a[0]), y = rank(b[0]);
+    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2] || x[3].localeCompare(y[3]);
+  });
+}
 const VITAL_KEYS = ['time', 'hr', 'rr', 'sys', 'dia', 'spo2', 'o2', 'acvpu', 'gcs', 'temp', 'doneBy'];
 const TX_KEYS = ['time', 'kind', 'name', 'dose', 'route', 'doneBy', 'success', 'response', 'complications', 'error'];
 const ENTRY_ID = /^[A-Za-z0-9_-]{1,24}$/;
@@ -333,6 +364,11 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     if (job.chief_complaint) f.chief = CAD_CHIEF[job.chief_complaint] || 'Other';
     const notes = [];
     if (job.chief_complaint) notes.push(`Reported to control as: ${complaintLabel(job.chief_complaint) || job.chief_complaint}`);
+    if (job.mpds_code) {
+      f.mpdsCode = job.mpds_code;
+      if (job.mpds_text) f.mpdsText = job.mpds_text;
+      notes.push(`MPDS triage: ${job.mpds_code}${job.mpds_text ? ' ' + job.mpds_text : ''}`);
+    }
     if (job.caller) notes.push(`Reported by: ${job.caller}`);
     if (notes.length) f.sceneNotes = notes.join('\n');
     if (job.description) f.events = String(job.description).slice(0, 2000);
@@ -392,6 +428,45 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
       items: stock ? db.assets.filter((a) => a.is_stock_tracked && a.status !== 'RETIRED').filter((a) => { try { stock.findItem(a.id, user); return true; } catch { return false; } })
         .map((a) => ({ id: a.id, label: stock.label(a), unit: a.unit || '', category: a.category || null, levels: levels(stock.levels(a.id)) })) : [],
     };
+  });
+
+  /* ---- MPDS determinant list (licensed; loaded by an admin) ---- */
+  const mpdsRow = () => (db.ui_settings || []).find((x) => x.key === 'prf_mpds');
+  // Control triage the full code on the job; the PRF shows the card name.
+  route('GET', '/api/prfs/mpds', ['DISPATCHER', ...WRITE_ROLES], () => {
+    const r = mpdsRow();
+    return r ? { version: r.settings.version || '', codes: r.settings.codes || [] } : { version: '', codes: [] };
+  });
+  /** A job's MPDS code, checked against the loaded list (or just its format if none is loaded). */
+  function mpdsFor(code) {
+    if (!String(code || '').trim()) return { code: '', text: '' };
+    const n = normMpds(code);
+    if (!n) throw httpError(400, 'MPDS code should look like 10-D-01');
+    const list = ((mpdsRow() || {}).settings || {}).codes || [];
+    const hit = list.find(([c]) => c === n);
+    if (list.length && !hit) throw httpError(400, `${n} is not on the loaded MPDS list`);
+    return { code: n, text: hit ? hit[1] : '' };
+  }
+  route('GET', '/api/prf-admin/mpds', READ_ALL_ROLES, () => {
+    const r = mpdsRow(), x = (r && r.settings) || {};
+    return { count: (x.codes || []).length, version: x.version || '', loaded_at: x.loaded_at || null, loaded_by: x.loaded_by || null, sample: (x.codes || []).slice(0, 8) };
+  });
+  route('POST', '/api/prf-admin/mpds', ['SYSTEM_ADMIN'], ({ body, user, req }) => {
+    const codes = parseMpds(body && body.text);
+    if (!codes.length) throw httpError(400, 'No MPDS codes found. Each line needs a code such as 10-D-01 and its descriptor.');
+    if (!Array.isArray(db.ui_settings)) db.ui_settings = [];
+    let r = mpdsRow();
+    if (!r) { r = { key: 'prf_mpds', settings: {} }; db.ui_settings.push(r); }
+    r.settings = { codes, version: short(body.version || '', 80), loaded_at: new Date().toISOString(), loaded_by: user.username };
+    audit(user, 'mpds.loaded', null, { codes: codes.length, version: r.settings.version }, req);
+    durable();
+    return { count: codes.length, version: r.settings.version, sample: codes.slice(0, 8) };
+  });
+  route('DELETE', '/api/prf-admin/mpds', ['SYSTEM_ADMIN'], ({ user, req }) => {
+    db.ui_settings = (db.ui_settings || []).filter((x) => x.key !== 'prf_mpds');
+    audit(user, 'mpds.removed', null, {}, req);
+    durable();
+    return { ok: true };
   });
 
   route('GET', '/api/prfs', WRITE_ROLES, ({ query, user }) => {
@@ -738,5 +813,5 @@ module.exports = function registerPrf({ route, db, nextId, httpError, logEvent, 
     retention: { adult_years: RETAIN_ADULT_YEARS, child_until_age: RETAIN_CHILD_UNTIL_AGE },
   }));
 
-  return { verifyChain, retainUntil, flushEdits: () => [...pending.keys()].forEach(flushEdits), WRITE_ROLES, READ_ALL_ROLES };
+  return { verifyChain, retainUntil, parseMpds, mpdsFor, flushEdits: () => [...pending.keys()].forEach(flushEdits), WRITE_ROLES, READ_ALL_ROLES };
 };

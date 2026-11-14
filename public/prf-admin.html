@@ -37,6 +37,7 @@
     <button class="chip" data-view="stale">Unfinished drafts</button>
     <button class="chip" data-view="supplies">Stock used</button>
     <button class="chip" data-view="due">Retention</button>
+    <button class="chip" data-view="mpds">MPDS list</button>
     <button class="chip" data-view="audit">Audit trail</button>
   </div>
   <div class="bar" id="filters">
@@ -106,10 +107,11 @@ function filteredPrfs() {
 async function paint() {
   if (!data) return;
   paintTiles();
-  el('#filters').style.display = view === 'audit' || view === 'due' ? 'none' : '';
+  el('#filters').style.display = ['audit', 'due', 'mpds'].includes(view) ? 'none' : '';
   if (view === 'prfs' || view === 'stale') return paintPrfs();
   if (view === 'supplies') return paintSupplies();
   if (view === 'due') return paintDue();
+  if (view === 'mpds') return paintMpds();
   return paintAudit();
 }
 function paintPrfs() {
@@ -151,6 +153,30 @@ function ask({ title, text, confirm = null, reasonLabel, reason = '', go }) {
     try { await go(el('#dlgReason').value.trim(), el('#dlgConfirm').value.trim()); d.close(); await load(); } catch (e) { el('#dlgErr').textContent = e.message; }
   };
   d.showModal();
+}
+async function paintMpds() {
+  let m;
+  try { m = await api('GET', '/api/prf-admin/mpds'); } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const admin = (CCCS.getSession() || { user: {} }).user.role === 'SYSTEM_ADMIN';
+  el('#main').innerHTML = `
+    <p>${m.count ? `<strong>${m.count}</strong> determinant codes loaded${m.version ? ` (${esc(m.version)})` : ''}, by ${esc(m.loaded_by)} on ${esc(when(m.loaded_at))}.` : 'No MPDS list loaded. Crews type the determinant code by hand.'}</p>
+    ${m.sample.length ? `<table class="k" style="font-size:12.5px"><tbody>${m.sample.map(([c, d]) => `<tr><td><strong>${esc(c)}</strong></td><td>${esc(d)}</td></tr>`).join('')}</tbody></table><p class="dim" style="font-size:12px">First ${m.sample.length} shown.</p>` : ''}
+    <p class="dim" style="font-size:12.5px">The MPDS determinant list is Priority Dispatch copyright. Load Echelon's licensed copy here: it is kept on this server and only shown to staff signed in to the PRF. It is never put in the code.</p>
+    ${admin ? `<h3 style="margin-top:16px">Load the list</h3>
+    <p class="dim" style="font-size:12.5px">A CSV or text file with one code per line and its descriptor, e.g. <code>10-D-01, Not alert</code>. Header rows and lines without a code are skipped. Loading replaces the current list.</p>
+    <p><input type="file" id="mpdsFile" accept=".csv,.txt,.tsv,text/plain,text/csv"> <input id="mpdsVer" placeholder="Version, e.g. MPDS v13.3 UK" style="width:220px"></p>
+    <p><button class="btn primary" id="mpdsLoad">Load list</button> ${m.count ? '<button class="btn" id="mpdsClear">Remove list</button>' : ''} <span id="mpdsMsg" class="dim"></span></p>` : '<p class="dim">Only a system admin can load or replace the list.</p>'}`;
+  if (!admin) return;
+  el('#mpdsLoad').onclick = async () => {
+    const f = el('#mpdsFile').files[0];
+    if (!f) return (el('#mpdsMsg').textContent = 'Choose a file first.');
+    try {
+      const r = await api('POST', '/api/prf-admin/mpds', { text: await f.text(), version: el('#mpdsVer').value.trim() });
+      el('#mpdsMsg').textContent = `Loaded ${r.count} codes.`;
+      paintMpds();
+    } catch (e) { el('#mpdsMsg').textContent = e.message; }
+  };
+  if (el('#mpdsClear')) el('#mpdsClear').onclick = () => ask({ title: 'Remove the MPDS list', text: 'Crews will type determinant codes by hand until a list is loaded again. Codes already on PRFs are kept.', reasonLabel: 'Reason', reason: 'Replacing with a new version', go: () => api('DELETE', '/api/prf-admin/mpds') });
 }
 async function paintAudit() {
   try { audit = await api('GET', '/api/prf-audit?limit=500'); } catch (e) { el('#main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }

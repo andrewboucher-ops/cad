@@ -26,3 +26,4 @@ test('a medicine not recorded in the register, and a possible RIDDOR case, are w
   assert.ok(c.some((x) => x.level === 'warning' && x.label === 'RIDDOR'));
   assert.ok(!R.blocking({ txLog: [{ kind: 'Medication' }] }).some((x) => x.label === 'Medicines'));
 });
+
